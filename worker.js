@@ -213,7 +213,7 @@ async function ensureSchema(env) {
 }
 
 async function setup(request, env, url) {
-  if (!env.WEBHOOK_SECRET || request.headers.get("authorization") !== `Bearer ${env.WEBHOOK_SECRET}`) return json({ error: "Forbidden" }, 403);
+  if (!env.BOT_TOKEN || !env.WEBHOOK_SECRET || request.headers.get("authorization") !== `Bearer ${env.BOT_TOKEN}`) return json({ error: "Forbidden" }, 403);
   try {
     await ensureSchema(env);
   } catch (error) {
