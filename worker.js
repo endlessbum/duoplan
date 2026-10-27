@@ -137,8 +137,10 @@ async function ensureUser(env, tgUser, requestedTimeZone) {
 }
 
 async function membership(env, userId) {
-  return env.DB.prepare(`SELECT p.*,pm.role,pm.tg_id FROM pair_members pm JOIN pairs p ON p.id=pm.pair_id
-    WHERE pm.tg_id=? LIMIT 1`).bind(userId).first();
+  return env.DB.prepare(`SELECT p.*,pm.role,pm.tg_id,
+    (SELECT display_name FROM users WHERE tg_id=p.user_a) AS owner_name,
+    (SELECT display_name FROM users WHERE tg_id=p.user_b) AS partner_name
+    FROM pair_members pm JOIN pairs p ON p.id=pm.pair_id WHERE pm.tg_id=? LIMIT 1`).bind(userId).first();
 }
 
 async function createPair(env, user) {
@@ -262,8 +264,8 @@ async function state(env, userId) {
     pair: {
       id: pair.id,
       code: pair.user_b ? null : pair.code,
-      name1: pair.name1,
-      name2: pair.name2,
+      name1: pair.owner_name || pair.name1,
+      name2: pair.partner_name || pair.name2,
       user_b: pair.user_b,
       role: pair.role,
       started_at: pair.started_at,

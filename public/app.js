@@ -308,6 +308,15 @@ function textarea(name, label, placeholder, value = "", max = 2000) {
   return `<label class="field"><span>${esc(label)}</span><textarea name="${esc(name)}" maxlength="${max}" placeholder="${esc(placeholder)}" required>${esc(value)}</textarea><small class="field-count">До ${max} символов</small></label>`;
 }
 
+function closeDialog() {
+  if (dialogBusy) return;
+  const dirty = [...form.elements].some(element => element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+    ? element.value.trim() && element.type !== "checkbox"
+    : false);
+  if (dirty && !confirm("Закрыть без сохранения? Введённый текст будет потерян.")) return;
+  dialog.close();
+}
+
 function showForm(action, title, description, fields, submitLabel = "Сохранить", id = null) {
   pendingAction = action;
   pendingId = id;
@@ -411,7 +420,7 @@ document.addEventListener("click", async event => {
   if (action === "show-join") { openAdd("join"); return; }
   if (action === "quick-add") { showTypeDialog(); return; }
   if (action === "close-type") { typeDialog.close(); return; }
-  if (action === "close-dialog") { if (!dialogBusy) dialog.close(); return; }
+  if (action === "close-dialog") { closeDialog(); return; }
   if (action === "reload") { if (tg?.reload) tg.reload(); else location.reload(); return; }
   if (action === "create-pair") {
     button.disabled = true;
@@ -459,7 +468,8 @@ document.addEventListener("click", async event => {
 });
 
 dialog.addEventListener("cancel", event => {
-  if (dialogBusy) event.preventDefault();
+  event.preventDefault();
+  closeDialog();
 });
 
 async function init() {
