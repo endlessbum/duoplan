@@ -227,9 +227,9 @@ export default {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/health") return json({ ok: true, service: "duoplan", database: Boolean(env.DB) });
+      if (url.pathname === "/api/setup" && request.method === "POST") return await setup(request, env, url);
       if (url.pathname.startsWith("/api/")) return await api(request, env, url);
       if (url.pathname === "/telegram/webhook" && request.method === "POST") return await webhook(request, env, url);
-      if (url.pathname === "/setup" && request.method === "POST") return await setup(request, env, url);
       return env.ASSETS.fetch(request);
     } catch (error) {
       console.error(error);
