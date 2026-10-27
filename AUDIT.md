@@ -255,7 +255,7 @@
 
 ## Статус исправлений
 
-Ревизия исправлений: `86976da`.
+Ревизия исправлений: `f8f45f3`.
 
 ### Закрыто полностью
 
@@ -283,4 +283,5 @@
 - Python concurrent join: 20/20 — один победитель.
 - Python double daily: 3/3 — ровно 10 XP.
 - `/`, `/app`, `/setup` — 200; `/api/state` без подписи — 401; `/health` — 200.
+- Production Worker активен: версия `2026.10.28`, `/api/setup` выполнен, D1 обновлена, webhook и Mini App menu button установлены без ошибок доставки.
 - CSP и security headers присутствуют; `_headers` распознан локальным Workers runtime.
