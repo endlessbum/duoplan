@@ -248,15 +248,15 @@ async function state(env, userId) {
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily] = await Promise.all([
-    env.DB.prepare("SELECT id,title,status,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC LIMIT 100").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,status,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT 30").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,day,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day LIMIT 100").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,status,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,status,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT 100").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,day,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day").bind(pair.id).all(),
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
-      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT 100`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC`).bind(pair.id).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.created_at,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT 100`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC`).bind(pair.id).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.created_at,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT 30`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT 100`).bind(pair.id).all(),
     dailyFor(env, pair.id, pair.timezone)
   ]);
   return {
