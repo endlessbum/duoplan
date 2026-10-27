@@ -213,7 +213,11 @@ async function ensureSchema(env) {
 }
 
 async function setup(request, env, url) {
-  if (!env.BOT_TOKEN || !env.WEBHOOK_SECRET) return json({ error: "В Cloudflare не заданы BOT_TOKEN и/или WEBHOOK_SECRET. Добавьте их в Settings → Variables and Secrets." }, 503);
+  const missing = ["BOT_TOKEN", "WEBHOOK_SECRET"].filter(key => !env[key]);
+  if (missing.length) return json({
+    error: `Cloudflare Worker не видит: ${missing.join(", ")}. Добавьте отсутствующие ключи в Settings → Variables and Secrets именно этого Worker, затем нажмите Deploy.`,
+    missing
+  }, 503);
   try {
     await ensureSchema(env);
   } catch (error) {
@@ -238,7 +242,13 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") return json({ ok: true, service: "duoplan", database: Boolean(env.DB) });
+      if (url.pathname === "/health") return json({
+        ok: true,
+        service: "duoplan",
+        database: Boolean(env.DB),
+        bot_token: Boolean(env.BOT_TOKEN),
+        webhook_secret: Boolean(env.WEBHOOK_SECRET)
+      });
       if (url.pathname === "/api/setup" && request.method === "POST") return await setup(request, env, url);
       if (url.pathname.startsWith("/api/")) return await api(request, env, url);
       if (url.pathname === "/telegram/webhook" && request.method === "POST") return await webhook(request, env, url);
