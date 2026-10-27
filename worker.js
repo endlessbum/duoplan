@@ -195,8 +195,26 @@ async function webhook(request, env, url) {
   return json({ ok: true });
 }
 
+async function ensureSchema(env) {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
+    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,recurs INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,done_by INTEGER,done_at INTEGER,PRIMARY KEY (pair_id,day))`,
+    `CREATE INDEX IF NOT EXISTS idx_tasks_pair ON tasks(pair_id,status)`,
+    `CREATE INDEX IF NOT EXISTS idx_dates_pair ON dates(pair_id,day)`,
+    `CREATE INDEX IF NOT EXISTS idx_memories_pair ON memories(pair_id,created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_wishes_pair ON wishes(pair_id,done)`
+  ];
+  await env.DB.batch(statements.map(sql => env.DB.prepare(sql)));
+}
+
 async function setup(request, env, url) {
-  if (request.headers.get("authorization") !== `Bearer ${env.WEBHOOK_SECRET}`) return json({ error: "Forbidden" }, 403);
+  if (!env.WEBHOOK_SECRET || request.headers.get("authorization") !== `Bearer ${env.WEBHOOK_SECRET}`) return json({ error: "Forbidden" }, 403);
+  await ensureSchema(env);
   const webhookUrl = `${url.origin}/telegram/webhook`;
   await telegram(env, "setWebhook", { url: webhookUrl, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message"], drop_pending_updates: false });
   await telegram(env, "setMyCommands", { commands: [{ command: "menu", description: "Наше пространство" }, { command: "help", description: "Как работает DuoPlan" }] });
