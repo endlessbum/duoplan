@@ -1,12 +1,14 @@
 """Конфигурация бота: читается из переменных окружения и файла ``.env`` рядом с проектом.
 
-Секретов в коде нет — токен и список админов берутся только из окружения.
+Секретов в коде нет — токен берётся только из окружения.
 Формат ``.env``: строки ``KEY=value``, ``#`` — комментарий, кавычки опциональны.
+Комментарий после значения в кавычках тоже поддерживается: ``TZ="Europe/Moscow" # зона``.
 Уже выставленные переменные окружения приоритетнее значений из файла.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from dataclasses import field
@@ -19,6 +21,9 @@ from zoneinfo import ZoneInfoNotFoundError
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 DEFAULT_TZ = "Europe/Moscow"
+DEFAULT_FSM_TTL = 7 * 24 * 60 * 60
+
+log = logging.getLogger(__name__)
 
 
 def parse_env_file(text: str) -> dict[str, str]:
@@ -35,10 +40,16 @@ def parse_env_file(text: str) -> dict[str, str]:
         if not key:
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
+        if value[:1] in {"'", '"'}:
+            quote = value[0]
+            end = value.find(quote, 1)
+            # Значение в кавычках: всё после закрывающей кавычки — комментарий.
+            value = value[1:end] if end != -1 else value[1:]
         else:
-            value = value.split(" #", 1)[0].strip()
+            for marker in (" #", "\t#"):
+                if marker in value:
+                    value = value.split(marker, 1)[0]
+            value = value.strip()
         values[key] = value
     return values
 
@@ -52,22 +63,44 @@ def parse_admin_ids(raw: str) -> frozenset[int]:
     return frozenset(ids)
 
 
+def resolve_timezone(name: str) -> tuple[tzinfo, str]:
+    """Вернуть (зона, фактическое имя). Невалидное имя не подменяется молча."""
+    for candidate in (name, DEFAULT_TZ):
+        if not candidate:
+            continue
+        try:
+            return ZoneInfo(candidate), candidate
+        except (ZoneInfoNotFoundError, ValueError):
+            log.warning("Неизвестный часовой пояс %r, пробую %r", candidate, DEFAULT_TZ)
+    log.warning("Часовой пояс недоступен, использую UTC")
+    return timezone.utc, "UTC"
+
+
 def load_timezone(name: str) -> tzinfo:
+    """Совместимый со старым кодом вызов: только зона."""
+    return resolve_timezone(name)[0]
+
+
+def _parse_ttl(raw: str) -> int:
     try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        return timezone.utc
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_FSM_TTL
 
 
 @dataclass(slots=True)
 class Settings:
     bot_token: str
+    # ADMIN_* и BOT_NAME оставлены в публичном API Settings: их читают внешние
+    # скрипты, даже если сам бот пока не использует админ-команды.
     admin_ids: frozenset[int]
     admin_chat_id: int | None
     db_path: Path
     bot_name: str
     tz_name: str
     tz: tzinfo = field(default=timezone.utc)
+    # Добавлено в конец, чтобы не сдвигать позиционные аргументы старого API.
+    fsm_ttl: int = DEFAULT_FSM_TTL
 
     @property
     def is_configured(self) -> bool:
@@ -96,7 +129,7 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
     if not db_path.is_absolute():
         db_path = PROJECT_ROOT / db_path
 
-    tz_name = get("TZ", DEFAULT_TZ) or DEFAULT_TZ
+    tz, tz_name = resolve_timezone(get("TZ", DEFAULT_TZ) or DEFAULT_TZ)
     return Settings(
         bot_token=get("BOT_TOKEN"),
         admin_ids=parse_admin_ids(get("ADMIN_IDS")),
@@ -104,5 +137,6 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         db_path=db_path,
         bot_name=get("BOT_NAME", "DuoPlan") or "DuoPlan",
         tz_name=tz_name,
-        tz=load_timezone(tz_name),
+        fsm_ttl=_parse_ttl(get("FSM_TTL", str(DEFAULT_FSM_TTL))),
+        tz=tz,
     )

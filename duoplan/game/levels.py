@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+
 def xp_needed(level: int) -> int:
-    """Сколько XP нужно, чтобы достичь ``level``."""
+    """Суммарный XP, при котором уровень ``level`` сменяется на ``level + 1``.
+
+    Математика прежняя: порог растёт квадратично, ``100 * level ** 2``.
+    То есть 100 XP — это уже второй уровень, 400 XP — третий.
+    """
     return 100 * max(1, int(level)) ** 2
 
 
@@ -15,7 +20,13 @@ def level_for(xp: int) -> tuple[int, int, int]:
 
 
 def title_for(level: int) -> tuple[str, str]:
-    return LEVEL_TITLES[min(max(1, level), len(LEVEL_TITLES)) - 1]
+    """Звание для уровня. Уровни выше таблицы не теряются, а идут по кругу."""
+    value = max(1, int(level))
+    if value <= len(LEVEL_TITLES):
+        return LEVEL_TITLES[value - 1]
+    title, symbol = LEVEL_TITLES[(value - 1) % len(LEVEL_TITLES)]
+    cycle = (value - 1) // len(LEVEL_TITLES) + 1
+    return f"{title} · круг {cycle}", symbol
 
 
 LEVEL_TITLES: tuple[tuple[str, str], ...] = (

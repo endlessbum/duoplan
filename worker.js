@@ -8,14 +8,77 @@ const DAILY_ACTIONS = [
   "Устройте мини-свидание: чай, прогулка или любимый фильм."
 ];
 
-const json = (data, status = 200) => new Response(JSON.stringify(data), {
+const APP_VERSION = "2026.10.28";
+const DEFAULT_TZ = "Europe/Moscow";
+
+class HttpError extends Error {
+  constructor(status, message, code = "REQUEST_ERROR") {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(data), {
   status,
-  headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
+  headers: {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    ...extra
+  }
 });
 const now = () => Math.floor(Date.now() / 1000);
-const today = () => new Date().toISOString().slice(0, 10);
-const clean = (value, max = 500) => String(value || "").trim().slice(0, max);
-const displayName = user => clean(user.first_name || user.username || "Без имени", 80);
+const positiveId = value => Number.isSafeInteger(Number(value)) && Number(value) > 0;
+const clean = value => String(value ?? "").trim();
+const displayName = user => {
+  const name = clean(user.first_name) || clean(user.username) || "Без имени";
+  return Array.from(name).slice(0, 80).join("");
+};
+
+function textField(body, key, max, label) {
+  const value = clean(body?.[key]);
+  if (!value) throw new HttpError(400, `Заполните поле «${label}»`, "VALIDATION_ERROR");
+  if (Array.from(value).length > max) throw new HttpError(400, `«${label}»: не больше ${max} символов`, "VALIDATION_ERROR");
+  return value;
+}
+
+function validTimeZone(value) {
+  if (!value || typeof value !== "string" || value.length > 64) return null;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function localDay(timeZone = DEFAULT_TZ) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: validTimeZone(timeZone) || DEFAULT_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function validDate(value) {
+  const day = clean(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const parsed = new Date(`${day}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day;
+}
+
+function safeEqual(left, right) {
+  const a = new TextEncoder().encode(String(left ?? ""));
+  const b = new TextEncoder().encode(String(right ?? ""));
+  if (!a.length || a.length !== b.length) return false;
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
+  return difference === 0;
+}
 
 async function hmac(keyData, data) {
   const key = await crypto.subtle.importKey("raw", typeof keyData === "string" ? new TextEncoder().encode(keyData) : keyData,
@@ -33,55 +96,130 @@ async function telegramUser(initData, token) {
   const received = params.get("hash");
   const authDate = Number(params.get("auth_date"));
   if (!received || !Number.isFinite(authDate)) return null;
-  if (Math.abs(now() - authDate) > 86400) return null;
+  if (authDate > now() + 300 || now() - authDate > 86400) return null;
   params.delete("hash");
-  const check = [...params.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("\n");
+  const check = [...params.entries()]
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
   const secret = await hmac("WebAppData", token);
   const expected = hex(await hmac(secret, check));
-  if (expected.length !== received.length) return null;
-  let difference = 0;
-  for (let i = 0; i < expected.length; i++) difference |= expected.charCodeAt(i) ^ received.charCodeAt(i);
-  if (difference) return null;
-  try { return JSON.parse(params.get("user") || "null"); } catch { return null; }
+  if (!safeEqual(expected, received)) return null;
+  try {
+    const user = JSON.parse(params.get("user") || "null");
+    return positiveId(user?.id) ? user : null;
+  } catch {
+    return null;
+  }
 }
 
-async function ensureUser(env, tgUser) {
+async function rateLimit(env, key, limit, windowSeconds = 60) {
+  const bucket = Math.floor(now() / windowSeconds);
+  const bucketKey = `${key}:${bucket}`;
+  await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count) VALUES(?,1)
+    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1`).bind(bucketKey).run();
+  const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?").bind(bucketKey).first();
+  if (bucket % 10 === 0) {
+    await env.DB.prepare("DELETE FROM rate_limits WHERE bucket_key<?").bind(`${key}:${bucket - 20}`).run();
+  }
+  if ((row?.count || 0) > limit) throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
+}
+
+async function ensureUser(env, tgUser, requestedTimeZone) {
   const timestamp = now();
-  await env.DB.prepare(`INSERT INTO users(tg_id,username,display_name,created_at,updated_at) VALUES(?,?,?,?,?)
-    ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,updated_at=excluded.updated_at`)
-    .bind(tgUser.id, tgUser.username || null, displayName(tgUser), timestamp, timestamp).run();
+  const existing = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
+  const timezone = validTimeZone(requestedTimeZone) || existing?.timezone || DEFAULT_TZ;
+  await env.DB.prepare(`INSERT INTO users(tg_id,username,display_name,timezone,created_at,updated_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,
+      timezone=excluded.timezone,updated_at=excluded.updated_at`)
+    .bind(tgUser.id, tgUser.username || null, displayName(tgUser), timezone, timestamp, timestamp).run();
   return env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
 }
 
 async function membership(env, userId) {
-  return env.DB.prepare("SELECT p.* FROM pairs p JOIN users u ON u.pair_id=p.id WHERE u.tg_id=?").bind(userId).first();
+  return env.DB.prepare(`SELECT p.*,pm.role,pm.tg_id FROM pair_members pm JOIN pairs p ON p.id=pm.pair_id
+    WHERE pm.tg_id=? LIMIT 1`).bind(userId).first();
 }
 
 async function createPair(env, user) {
   const existing = await membership(env, user.tg_id);
   if (existing) return existing;
-  const code = hex(crypto.getRandomValues(new Uint8Array(4))).toUpperCase();
   const timestamp = now();
-  await env.DB.prepare(`INSERT INTO pairs(code,name1,user_a,started_at,created_at,updated_at) VALUES(?,?,?,?,?,?)`)
-    .bind(code, user.display_name, user.tg_id, today(), timestamp, timestamp).run();
-  const pair = await env.DB.prepare("SELECT * FROM pairs WHERE code=?").bind(code).first();
-  await env.DB.prepare("UPDATE users SET pair_id=?,role='a',updated_at=? WHERE tg_id=?").bind(pair.id, timestamp, user.tg_id).run();
-  return pair;
+  const timezone = user.timezone || DEFAULT_TZ;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const code = hex(crypto.getRandomValues(new Uint8Array(4))).toUpperCase();
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO pairs(code,name1,user_a,started_at,timezone,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?)`).bind(code, user.display_name, user.tg_id, localDay(timezone), timezone, timestamp, timestamp),
+        env.DB.prepare(`INSERT INTO pair_members(tg_id,pair_id,role,joined_at)
+          SELECT ?,id,'a',? FROM pairs WHERE code=?`).bind(user.tg_id, timestamp, code),
+        env.DB.prepare(`UPDATE users SET pair_id=(SELECT id FROM pairs WHERE code=?),role='a',updated_at=? WHERE tg_id=?`)
+          .bind(code, timestamp, user.tg_id)
+      ]);
+      return membership(env, user.tg_id);
+    } catch (error) {
+      const raced = await membership(env, user.tg_id);
+      if (raced) return raced;
+      if (attempt === 2) throw error;
+    }
+  }
+  throw new HttpError(500, "Не удалось создать пространство", "PAIR_CREATE_FAILED");
 }
 
 async function joinPair(env, user, rawCode) {
-  const code = clean(rawCode, 16).toUpperCase();
+  const code = clean(rawCode).toUpperCase().slice(0, 16);
+  if (!/^[A-F0-9]{8}$/.test(code)) throw new HttpError(400, "Код должен состоять из 8 символов", "INVALID_CODE");
+  if (await membership(env, user.tg_id)) throw new HttpError(409, "Вы уже состоите в пространстве", "ALREADY_PAIRED");
   const pair = await env.DB.prepare("SELECT * FROM pairs WHERE code=?").bind(code).first();
-  if (!pair || pair.user_b || pair.user_a === user.tg_id || await membership(env, user.tg_id)) return null;
-  const result = await env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,updated_at=? WHERE id=? AND user_b=0")
-    .bind(user.tg_id, user.display_name, now(), pair.id).run();
-  if (!result.meta.changes) return null;
-  await env.DB.prepare("UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?").bind(pair.id, now(), user.tg_id).run();
+  if (!pair) throw new HttpError(404, "Код не найден", "CODE_NOT_FOUND");
+  if (pair.user_a === user.tg_id) throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
+  if (pair.user_b) throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
+  const timestamp = now();
+  try {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,updated_at=? WHERE id=? AND user_b=0")
+        .bind(user.tg_id, user.display_name, timestamp, pair.id),
+      env.DB.prepare("INSERT INTO pair_members(tg_id,pair_id,role,joined_at) VALUES(?,?,'b',?)")
+        .bind(user.tg_id, pair.id, timestamp),
+      env.DB.prepare("UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?")
+        .bind(pair.id, timestamp, user.tg_id)
+    ]);
+  } catch {
+    throw new HttpError(409, "Не удалось войти: пространство уже занято", "JOIN_CONFLICT");
+  }
   return membership(env, user.tg_id);
 }
 
-async function dailyFor(env, pairId) {
-  const day = today();
+async function leavePair(env, member) {
+  const partnerId = member.role === "a" ? member.user_b : member.user_a;
+  const timestamp = now();
+  const operations = [];
+  if (!partnerId) {
+    operations.push(
+      env.DB.prepare("DELETE FROM pair_members WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM pairs WHERE id=?").bind(member.id)
+    );
+  } else if (member.role === "a") {
+    operations.push(
+      env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id),
+      env.DB.prepare(`UPDATE pairs SET user_a=user_b,name1=(SELECT display_name FROM users WHERE tg_id=?),
+        user_b=0,name2='',updated_at=? WHERE id=?`).bind(partnerId, timestamp, member.id),
+      env.DB.prepare("UPDATE pair_members SET role='a' WHERE tg_id=? AND pair_id=?").bind(partnerId, member.id),
+      env.DB.prepare("UPDATE users SET role='a',updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
+    );
+  } else {
+    operations.push(
+      env.DB.prepare("UPDATE pairs SET user_b=0,name2='',updated_at=? WHERE id=?").bind(timestamp, member.id),
+      env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id)
+    );
+  }
+  operations.push(env.DB.prepare("UPDATE users SET pair_id=NULL,role='a',updated_at=? WHERE tg_id=?").bind(timestamp, member.tg_id));
+  await env.DB.batch(operations);
+}
+
+async function dailyFor(env, pairId, timeZone) {
+  const day = localDay(timeZone);
   let row = await env.DB.prepare("SELECT * FROM daily_rolls WHERE pair_id=? AND day=?").bind(pairId, day).first();
   if (!row) {
     let seed = 0;
@@ -90,172 +228,399 @@ async function dailyFor(env, pairId) {
     await env.DB.prepare("INSERT OR IGNORE INTO daily_rolls(pair_id,day,daily_value) VALUES(?,?,?)").bind(pairId, day, action).run();
     row = await env.DB.prepare("SELECT * FROM daily_rolls WHERE pair_id=? AND day=?").bind(pairId, day).first();
   }
-  return { day, action: row.daily_value, done: Boolean(row.done_by) };
+  return { day, action: row.daily_value, done: Boolean(row.done_by), doneBy: row.done_by || null };
 }
 
-async function state(env, user) {
-  const pair = await membership(env, user.tg_id);
-  if (!pair) return { user, pair: null };
-  const [tasks, dates, memories, wishes, daily] = await Promise.all([
-    env.DB.prepare("SELECT * FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC LIMIT 50").bind(pair.id).all(),
-    env.DB.prepare("SELECT * FROM dates WHERE pair_id=? ORDER BY day LIMIT 50").bind(pair.id).all(),
-    env.DB.prepare(`SELECT m.*,u.display_name FROM memories m LEFT JOIN users u ON u.tg_id=m.author_id
-      WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT 50`).bind(pair.id).all(),
-    env.DB.prepare(`SELECT w.*,u.display_name FROM wishes w LEFT JOIN users u ON u.tg_id=w.owner_id
-      WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT 50`).bind(pair.id).all(),
-    dailyFor(env, pair.id)
+function publicUser(user) {
+  return {
+    display_name: user.display_name,
+    points: user.points,
+    streak: user.streak,
+    best_streak: user.best_streak,
+    timezone: user.timezone
+  };
+}
+
+async function state(env, userId) {
+  const user = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(userId).first();
+  const pair = await membership(env, userId);
+  if (!pair) return { user: publicUser(user), pair: null };
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily] = await Promise.all([
+    env.DB.prepare("SELECT id,title,status,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC LIMIT 100").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,status,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT 30").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,day,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day LIMIT 100").bind(pair.id).all(),
+    env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT 100`).bind(pair.id).all(),
+    env.DB.prepare(`SELECT w.id,w.body,w.created_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT 100`).bind(pair.id).all(),
+    env.DB.prepare(`SELECT w.id,w.body,w.created_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT 30`).bind(pair.id).all(),
+    dailyFor(env, pair.id, pair.timezone)
   ]);
-  return { user, pair, tasks: tasks.results, dates: dates.results, memories: memories.results, wishes: wishes.results, daily };
+  return {
+    user: publicUser(user),
+    pair: {
+      id: pair.id,
+      code: pair.user_b ? null : pair.code,
+      name1: pair.name1,
+      name2: pair.name2,
+      user_b: pair.user_b,
+      role: pair.role,
+      started_at: pair.started_at,
+      together_pts: pair.together_pts,
+      timezone: pair.timezone
+    },
+    tasks: tasks.results,
+    completedTasks: completedTasks.results,
+    dates: dates.results,
+    memories: memories.results,
+    wishes: wishes.results,
+    completedWishes: completedWishes.results,
+    daily
+  };
+}
+
+async function readJson(request) {
+  try {
+    const body = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("not object");
+    return body;
+  } catch {
+    throw new HttpError(400, "Некорректный запрос", "INVALID_JSON");
+  }
+}
+
+async function itemRoute(env, pair, user, method, pathname, body) {
+  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes)\/(\d+)(?:\/(done|reopen))?$/);
+  if (!match) return false;
+  const [, type, rawId, action] = match;
+  const id = Number(rawId);
+  if (!positiveId(id)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
+  const table = { tasks: "tasks", dates: "dates", memories: "memories", wishes: "wishes" }[type];
+  if (method === "DELETE") {
+    const result = await env.DB.prepare(`DELETE FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).run();
+    if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+    return true;
+  }
+  if (method === "PATCH") {
+    const fields = [];
+    const values = [];
+    if (type === "tasks") {
+      fields.push("title=?");
+      values.push(textField(body, "title", 180, "План"));
+    } else if (type === "dates") {
+      fields.push("title=?");
+      values.push(textField(body, "title", 120, "Название"));
+      if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
+      fields.push("day=?", "recurs=?");
+      values.push(clean(body.day), body.recurs === false ? 0 : 1);
+    } else if (type === "memories") {
+      fields.push("body=?");
+      values.push(textField(body, "body", 2000, "Воспоминание"));
+    } else {
+      fields.push("body=?");
+      values.push(textField(body, "body", 300, "Желание"));
+    }
+    const result = await env.DB.prepare(`UPDATE ${table} SET ${fields.join(",")} WHERE id=? AND pair_id=?`)
+      .bind(...values, id, pair.id).run();
+    if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+    return true;
+  }
+  if (method === "POST" && action) {
+    if (!["tasks", "wishes"].includes(type)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+    let result;
+    if (type === "tasks") {
+      result = action === "done"
+        ? await env.DB.prepare("UPDATE tasks SET status='done',completed_by=?,completed_at=? WHERE id=? AND pair_id=? AND status='open'")
+          .bind(user.tg_id, now(), id, pair.id).run()
+        : await env.DB.prepare("UPDATE tasks SET status='open',completed_by=NULL,completed_at=NULL WHERE id=? AND pair_id=? AND status='done'")
+          .bind(id, pair.id).run();
+    } else {
+      result = action === "done"
+        ? await env.DB.prepare("UPDATE wishes SET done=1 WHERE id=? AND pair_id=? AND done=0").bind(id, pair.id).run()
+        : await env.DB.prepare("UPDATE wishes SET done=0 WHERE id=? AND pair_id=? AND done=1").bind(id, pair.id).run();
+    }
+    if (!result.meta.changes) throw new HttpError(409, "Запись уже в этом состоянии", "NO_CHANGE");
+    return true;
+  }
+  throw new HttpError(405, "Метод не поддерживается", "METHOD_NOT_ALLOWED");
 }
 
 async function api(request, env, url) {
-  if (!env.DB) return json({ error: "База данных ещё не подключена" }, 503);
-  const tgUser = await telegramUser(request.headers.get("x-telegram-init-data"), env.BOT_TOKEN);
-  if (!tgUser?.id) return json({ error: "Откройте приложение через Telegram" }, 401);
-  const user = await ensureUser(env, tgUser);
-  if (request.method === "GET" && url.pathname === "/api/state") return json(await state(env, user));
-  if (request.method !== "POST") return json({ error: "Метод не поддерживается" }, 405);
-  const body = await request.json().catch(() => ({}));
+  if (!env.DB) throw new HttpError(503, "База данных ещё не подключена", "DB_UNAVAILABLE");
+  const initData = request.headers.get("x-telegram-init-data");
+  const tgUser = await telegramUser(initData, env.BOT_TOKEN);
+  if (!tgUser) throw new HttpError(401, "Сессия Telegram истекла. Откройте приложение заново.", "AUTH_EXPIRED");
+  const timezone = validTimeZone(request.headers.get("x-timezone"));
+  const user = await ensureUser(env, tgUser, timezone);
+  await rateLimit(env, `u:${tgUser.id}`, 240, 60);
 
-  if (url.pathname === "/api/pair/create") return json(await state(env, (await createPair(env, user), user)));
-  if (url.pathname === "/api/pair/join") {
-    const pair = await joinPair(env, user, body.code);
-    return pair ? json(await state(env, user)) : json({ error: "Код недоступен или пространство уже занято" }, 400);
+  if (request.method === "GET" && url.pathname === "/api/state") return json(await state(env, user.tg_id));
+
+  const body = ["POST", "PATCH"].includes(request.method) ? await readJson(request) : {};
+  if (request.method === "POST" && url.pathname === "/api/pair/create") {
+    await createPair(env, user);
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/pair/join") {
+    await joinPair(env, user, body.code);
+    return json(await state(env, user.tg_id));
   }
 
   const pair = await membership(env, user.tg_id);
-  if (!pair) return json({ error: "Сначала создайте или соедините пространство" }, 400);
-  let match;
-  if (url.pathname === "/api/tasks") {
-    const title = clean(body.title, 180);
-    if (!title) return json({ error: "Введите план" }, 400);
-    await env.DB.prepare("INSERT INTO tasks(pair_id,title,created_by,created_at) VALUES(?,?,?,?)").bind(pair.id, title, user.tg_id, now()).run();
-  } else if ((match = url.pathname.match(/^\/api\/tasks\/(\d+)\/done$/))) {
-    await env.DB.prepare("UPDATE tasks SET status='done',completed_by=?,completed_at=? WHERE id=? AND pair_id=? AND status='open'")
-      .bind(user.tg_id, now(), Number(match[1]), pair.id).run();
-  } else if (url.pathname === "/api/dates") {
-    const title = clean(body.title, 120), day = clean(body.day, 10);
-    if (!title || !/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T00:00:00Z`))) return json({ error: "Проверьте название и дату" }, 400);
-    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,recurs,created_at) VALUES(?,?,?,1,?)").bind(pair.id, title, day, now()).run();
-  } else if (url.pathname === "/api/memories") {
-    const text = clean(body.body, 2000);
-    if (!text) return json({ error: "Запишите воспоминание" }, 400);
-    await env.DB.prepare("INSERT INTO memories(pair_id,author_id,body,day,created_at) VALUES(?,?,?,?,?)").bind(pair.id, user.tg_id, text, today(), now()).run();
-  } else if (url.pathname === "/api/wishes") {
-    const text = clean(body.body, 300);
-    if (!text) return json({ error: "Введите желание" }, 400);
-    await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,created_at) VALUES(?,?,?,?)").bind(pair.id, user.tg_id, text, now()).run();
-  } else if ((match = url.pathname.match(/^\/api\/wishes\/(\d+)\/done$/))) {
-    await env.DB.prepare("UPDATE wishes SET done=1 WHERE id=? AND pair_id=? AND done=0").bind(Number(match[1]), pair.id).run();
-  } else if (url.pathname === "/api/daily/done") {
-    const daily = await dailyFor(env, pair.id);
-    if (daily.done) return json({ error: "Сегодняшний ритуал уже отмечен" }, 400);
-    const previous = user.last_activity ? Math.floor((Date.parse(today()) - Date.parse(user.last_activity)) / 86400000) : null;
+  if (!pair) throw new HttpError(409, "Сначала создайте или соедините пространство", "NO_PAIR");
+  if (request.method === "POST" && url.pathname === "/api/pair/leave") {
+    await leavePair(env, pair);
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/tasks") {
+    const title = textField(body, "title", 180, "План");
+    await env.DB.prepare("INSERT INTO tasks(pair_id,title,created_by,created_at) VALUES(?,?,?,?)")
+      .bind(pair.id, title, user.tg_id, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/dates") {
+    const title = textField(body, "title", 120, "Название");
+    if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
+    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,recurs,created_at) VALUES(?,?,?,?,?)")
+      .bind(pair.id, title, clean(body.day), body.recurs === false ? 0 : 1, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/memories") {
+    const text = textField(body, "body", 2000, "Воспоминание");
+    await env.DB.prepare("INSERT INTO memories(pair_id,author_id,body,day,created_at) VALUES(?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, text, localDay(pair.timezone), now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/wishes") {
+    const text = textField(body, "body", 300, "Желание");
+    await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,created_at) VALUES(?,?,?,?)")
+      .bind(pair.id, user.tg_id, text, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/daily/done") {
+    const daily = await dailyFor(env, pair.id, pair.timezone);
+    if (daily.done) return json({ ...(await state(env, user.tg_id)), awarded: false });
+    const previous = user.last_activity
+      ? Math.round((Date.parse(localDay(pair.timezone)) - Date.parse(user.last_activity)) / 86400000)
+      : null;
     const streak = previous === 1 ? user.streak + 1 : 1;
-    const completed = await env.DB.prepare("UPDATE daily_rolls SET done_by=?,done_at=? WHERE pair_id=? AND day=? AND done_by IS NULL")
-      .bind(user.tg_id, now(), pair.id, daily.day).run();
-    if (!completed.meta.changes) return json({ error: "Сегодняшний ритуал уже отмечен" }, 400);
-    await env.DB.batch([
-      env.DB.prepare("UPDATE users SET points=points+10,streak=?,best_streak=MAX(best_streak,?),last_activity=?,updated_at=? WHERE tg_id=?").bind(streak, streak, daily.day, now(), user.tg_id),
-      env.DB.prepare("UPDATE pairs SET together_pts=together_pts+10,updated_at=? WHERE id=?").bind(now(), pair.id)
+    const stamp = now();
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE daily_rolls SET done_by=?,done_at=? WHERE pair_id=? AND day=? AND done_by IS NULL")
+        .bind(user.tg_id, stamp, pair.id, daily.day),
+      env.DB.prepare(`UPDATE users SET points=points+10,streak=?,best_streak=MAX(best_streak,?),last_activity=?,updated_at=?
+        WHERE tg_id=? AND EXISTS(SELECT 1 FROM daily_rolls WHERE pair_id=? AND day=? AND done_by=? AND done_at=?)`)
+        .bind(streak, streak, daily.day, stamp, user.tg_id, pair.id, daily.day, user.tg_id, stamp),
+      env.DB.prepare(`UPDATE pairs SET together_pts=together_pts+10,updated_at=?
+        WHERE id=? AND EXISTS(SELECT 1 FROM daily_rolls WHERE pair_id=? AND day=? AND done_by=? AND done_at=?)`)
+        .bind(stamp, pair.id, pair.id, daily.day, user.tg_id, stamp)
     ]);
-  } else return json({ error: "Раздел не найден" }, 404);
-  return json(await state(env, user));
+    return json({ ...(await state(env, user.tg_id)), awarded: results[0].meta.changes > 0 });
+  }
+  if (await itemRoute(env, pair, user, request.method, url.pathname, body)) {
+    return json(await state(env, user.tg_id));
+  }
+  throw new HttpError(404, "Раздел не найден", "NOT_FOUND");
 }
 
-async function telegram(env, method, payload) {
-  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(12000)
-  });
-  const result = await response.json();
-  if (!result.ok) throw new Error(result.description || "Telegram API error");
+async function telegram(env, method, payload, attempt = 0) {
+  let response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(12000)
+    });
+  } catch (error) {
+    if (attempt < 2) {
+      await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+      return telegram(env, method, payload, attempt + 1);
+    }
+    throw error;
+  }
+  const raw = await response.text();
+  let result;
+  try {
+    result = JSON.parse(raw);
+  } catch {
+    throw new Error(`Telegram вернул не JSON (${response.status})`);
+  }
+  if (result.error_code === 429 && attempt < 2) {
+    const wait = Math.min(3000, Math.max(500, Number(result.parameters?.retry_after || 1) * 1000));
+    await new Promise(resolve => setTimeout(resolve, wait));
+    return telegram(env, method, payload, attempt + 1);
+  }
+  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram API ${response.status}`);
   return result.result;
 }
 
-async function openApp(env, chatId, origin, text) {
+function appUrl(env, requestUrl) {
+  return `${(env.APP_ORIGIN || requestUrl.origin).replace(/\/$/, "")}/app`;
+}
+
+async function openApp(env, chatId, requestUrl, text) {
   return telegram(env, "sendMessage", {
-    chat_id: chatId, text,
-    reply_markup: { inline_keyboard: [[{ text: "Открыть наше пространство", web_app: { url: `${origin}/app.html` } }]] }
+    chat_id: chatId,
+    text,
+    reply_markup: { inline_keyboard: [[{ text: "Открыть наше пространство", web_app: { url: appUrl(env, requestUrl) } }]] }
   });
 }
 
 async function webhook(request, env, url) {
-  if (request.headers.get("x-telegram-bot-api-secret-token") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
-  const update = await request.json();
+  if (!env.WEBHOOK_SECRET || !safeEqual(request.headers.get("x-telegram-bot-api-secret-token"), env.WEBHOOK_SECRET)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  let update;
+  try {
+    update = await request.json();
+  } catch {
+    return json({ ok: true });
+  }
+  if (positiveId(update?.update_id)) {
+    const seen = await env.DB.prepare("INSERT OR IGNORE INTO telegram_updates(update_id,received_at) VALUES(?,?)")
+      .bind(update.update_id, now()).run();
+    if (!seen.meta.changes) return json({ ok: true });
+  }
   const message = update.message;
-  if (!message?.text || message.chat?.type !== "private") return json({ ok: true });
-  const user = await ensureUser(env, message.from);
-  const code = message.text.startsWith("/start ") ? message.text.slice(7).trim() : "";
-  if (code) {
-    const joined = await joinPair(env, user, code);
-    await openApp(env, message.chat.id, url.origin, joined ? "Готово — теперь у вас одно пространство на двоих." : "Это приглашение недоступно. Проверьте код у партнёра.");
-  } else {
-    await openApp(env, message.chat.id, url.origin, "Ваши планы, воспоминания и маленькие радости — в одном уютном месте.");
+  if (!message?.text || message.chat?.type !== "private" || !positiveId(message.from?.id)) return json({ ok: true });
+  try {
+    const user = await ensureUser(env, message.from, null);
+    const text = clean(message.text);
+    const code = text.startsWith("/start ") ? text.slice(7).trim() : "";
+    if (code) {
+      let joined = false;
+      try {
+        await joinPair(env, user, code);
+        joined = true;
+      } catch {}
+      await openApp(env, message.chat.id, url, joined
+        ? "Готово — теперь у вас одно пространство на двоих."
+        : "Это приглашение недоступно. Проверьте код у партнёра.");
+    } else if (text.startsWith("/help")) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: "DuoPlan хранит ваши общие планы, даты, воспоминания и желания. Откройте Mini App кнопкой ниже: там можно добавлять, редактировать и завершать записи."
+      });
+      await openApp(env, message.chat.id, url, "Ваше пространство всегда под рукой.");
+    } else {
+      await openApp(env, message.chat.id, url, "Ваши планы, воспоминания и маленькие радости — в одном уютном месте.");
+    }
+  } catch (error) {
+    console.error("webhook delivery failed", error);
   }
   return json({ ok: true });
 }
 
 async function ensureSchema(env) {
   const statements = [
-    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,recurs INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,done_by INTEGER,done_at INTEGER,PRIMARY KEY (pair_id,day))`,
+    `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS telegram_updates (update_id INTEGER PRIMARY KEY,received_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS idx_tasks_pair ON tasks(pair_id,status)`,
     `CREATE INDEX IF NOT EXISTS idx_dates_pair ON dates(pair_id,day)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_pair ON memories(pair_id,created_at)`,
-    `CREATE INDEX IF NOT EXISTS idx_wishes_pair ON wishes(pair_id,done)`
+    `CREATE INDEX IF NOT EXISTS idx_wishes_pair ON wishes(pair_id,done)`,
+    `CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id,role)`
   ];
   await env.DB.batch(statements.map(sql => env.DB.prepare(sql)));
+  for (const [table, column, definition] of [
+    ["users", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
+    ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"]
+  ]) {
+    const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+    if (!info.results.some(row => row.name === column)) {
+      await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+    }
+  }
+  await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
+      SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_a)`),
+    env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
+      SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`)
+  ]);
 }
 
 async function setup(request, env, url) {
   const missing = ["BOT_TOKEN", "WEBHOOK_SECRET"].filter(key => !env[key]);
-  if (missing.length) return json({
-    error: `Cloudflare Worker не видит: ${missing.join(", ")}. Добавьте отсутствующие ключи в Settings → Variables and Secrets именно этого Worker, затем нажмите Deploy.`,
-    missing
-  }, 503);
+  if (missing.length) {
+    return json({ error: `Cloudflare Worker не видит: ${missing.join(", ")}`, missing }, 503);
+  }
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const supplied = request.headers.get("x-setup-token") ||
+    (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  const expected = env.SETUP_TOKEN || env.BOT_TOKEN;
+  if (!safeEqual(supplied, expected)) return json({ error: "Неверный секрет настройки" }, 403, { "www-authenticate": "Bearer" });
+  const origin = request.headers.get("origin");
+  if (origin && origin !== (env.APP_ORIGIN || url.origin)) return json({ error: "Origin не разрешён" }, 403);
   try {
     await ensureSchema(env);
   } catch (error) {
     console.error("D1 setup failed", error);
-    return json({ error: "Не удалось создать таблицы D1. Проверьте привязку базы и повторите." }, 500);
+    return json({ error: "Не удалось обновить таблицы D1" }, 500);
   }
-  const webhookUrl = `${url.origin}/telegram/webhook`;
+  await rateLimit(env, `setup:${ip}`, 5, 600);
+  const base = (env.APP_ORIGIN || url.origin).replace(/\/$/, "");
   try {
-    await telegram(env, "setWebhook", { url: webhookUrl, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message"], drop_pending_updates: false });
+    await telegram(env, "setWebhook", {
+      url: `${base}/telegram/webhook`,
+      secret_token: env.WEBHOOK_SECRET,
+      allowed_updates: ["message"],
+      drop_pending_updates: false
+    });
     await Promise.all([
-      telegram(env, "setMyCommands", { commands: [{ command: "menu", description: "Наше пространство" }, { command: "help", description: "Как работает DuoPlan" }] }),
-      telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${url.origin}/app.html` } } })
+      telegram(env, "setMyCommands", { commands: [
+        { command: "menu", description: "Наше пространство" },
+        { command: "help", description: "Как работает DuoPlan" }
+      ] }),
+      telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${base}/app` } } })
     ]);
+    await env.DB.prepare("INSERT INTO app_meta(key,value) VALUES('setup_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .bind(APP_VERSION).run();
   } catch (error) {
     console.error("Telegram setup failed", error);
-    return json({ error: "Таблицы готовы, но Telegram не ответил. Проверьте BOT_TOKEN и повторите активацию." }, 502);
+    return json({ error: "Таблицы готовы, но Telegram не ответил. Проверьте BOT_TOKEN." }, 502);
   }
-  return json({ ok: true, webhook_url: webhookUrl, mini_app_url: `${url.origin}/app.html` });
+  return json({ ok: true, webhook_url: `${base}/telegram/webhook`, mini_app_url: `${base}/app`, version: APP_VERSION });
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/health") return json({
-        ok: true,
-        service: "duoplan",
-        database: Boolean(env.DB),
-        bot_token: Boolean(env.BOT_TOKEN),
-        webhook_secret: Boolean(env.WEBHOOK_SECRET)
-      });
+      if (url.pathname === "/health") {
+        let database = false;
+        try {
+          await env.DB.prepare("SELECT 1").first();
+          database = true;
+        } catch {}
+        return json({
+          ok: database,
+          service: "duoplan",
+          version: APP_VERSION,
+          database,
+          bot_token: Boolean(env.BOT_TOKEN),
+          webhook_secret: Boolean(env.WEBHOOK_SECRET)
+        }, database ? 200 : 503);
+      }
       if (url.pathname === "/api/setup" && request.method === "POST") return await setup(request, env, url);
       if (url.pathname.startsWith("/api/")) return await api(request, env, url);
       if (url.pathname === "/telegram/webhook" && request.method === "POST") return await webhook(request, env, url);
       return env.ASSETS.fetch(request);
     } catch (error) {
+      if (error instanceof HttpError) return json({ error: error.message, code: error.code }, error.status);
       console.error(error);
-      return json({ error: "Не получилось выполнить запрос. Попробуйте ещё раз." }, 500);
+      return json({ error: "Не получилось выполнить запрос. Попробуйте ещё раз.", code: "INTERNAL_ERROR" }, 500);
     }
   }
 };

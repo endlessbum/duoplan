@@ -1,27 +1,25 @@
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Настройка DuoPlan</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;padding:20px;box-sizing:border-box;background:#f7f3ed;color:#292524;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(440px,100%);padding:32px;border:1px solid #e9e1d9;border-radius:24px;background:#fffdf9;box-shadow:0 20px 60px #4b362e12}h1{margin:0 0 10px;font:32px Georgia,serif}p{color:#746d68;line-height:1.55}button{width:100%;margin-top:14px;padding:14px;border:0;border-radius:12px;background:#b85464;color:#fff;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.6}#result{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}</style></head>
-<body><main class="card"><h1>Активация DuoPlan</h1><p id="intro">Проверяем защищённые настройки Cloudflare, создаём таблицы и включаем Telegram webhook.</p><button id="start">Активировать</button><p id="result" role="status"></p></main>
-<script>
-const button = document.querySelector("#start");
-const result = document.querySelector("#result");
-button.addEventListener("click", async () => {
-  button.disabled = true;
-  result.textContent = "Настраиваем…";
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 40000);
-  try {
-    const response = await fetch("/api/setup", { method: "POST", signal: controller.signal });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Ошибка настройки");
-    result.textContent = "Готово. База создана, webhook и кнопка Mini App активированы.\n\nТеперь откройте @duoplanbot в Telegram.";
-    button.hidden = true;
-    document.querySelector("#intro").textContent = "DuoPlan подключён к Telegram.";
-  } catch (error) {
-    result.textContent = error.name === "AbortError" ? "Сервер не ответил за 40 секунд. Повторите попытку." : error.message;
-  } finally {
-    clearTimeout(timeout);
-    button.disabled = false;
-  }
-});
-</script></body></html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Настройка DuoPlan</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/setup.css">
+  <script src="/setup.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <h1>Активация DuoPlan</h1>
+    <p id="intro">Введите BOT_TOKEN из локального файла <code>.env</code>. Он нужен только для защищённой активации и нигде не сохраняется.</p>
+    <form id="setup">
+      <label for="secret">Секрет настройки</label>
+      <input id="secret" type="password" autocomplete="off" required>
+      <button id="start" type="submit">Активировать</button>
+    </form>
+    <p id="result" role="status"></p>
+    <a id="bot-link" class="hidden" href="https://t.me/duoplanbot">Открыть @duoplanbot</a>
+  </main>
+</body>
+</html>

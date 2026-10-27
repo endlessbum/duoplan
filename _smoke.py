@@ -1,6 +1,7 @@
+import pathlib
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from duoplan.config import load_settings, parse_admin_ids, parse_env_file  # noqa: E402
 

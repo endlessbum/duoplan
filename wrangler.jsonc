@@ -4,8 +4,13 @@
   "main": "worker.js",
   "compatibility_date": "2026-10-23",
   "observability": { "enabled": true },
+  "vars": {
+    "APP_ORIGIN": "https://duoplan.stacheight.workers.dev"
+  },
   "assets": {
     "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
     "not_found_handling": "404-page"
   },
   "d1_databases": [

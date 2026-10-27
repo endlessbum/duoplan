@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f7f3ed">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <meta name="description" content="DuoPlan — тёплое пространство для пары в Telegram: общие планы, значимые даты, дневник двоих, желания и маленькие ежедневные ритуалы.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="ru_RU">
@@ -31,7 +32,7 @@
       margin: 0;
       color: var(--ink);
       background: var(--paper);
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
     }
@@ -130,7 +131,7 @@
     @media (max-width: 540px) {
       .container { width: min(100% - 28px, 1120px); }
       .header { padding: 18px 0; }
-      .nav-link { display: none; }
+      .nav-link { display: inline-flex; align-items: center; min-height: 40px; font-size: 13px; }
       h1 { font-size: 47px; }
       .hero-copy { font-size: 16px; }
       .feature-grid { grid-template-columns: 1fr; }
@@ -146,7 +147,7 @@
     }
   </style>
 </head>
-<body>
+<body id="top">
   <header class="header">
     <div class="container nav">
       <a class="brand" href="#top" aria-label="DuoPlan — на главную">
@@ -160,7 +161,7 @@
     </div>
   </header>
 
-  <main id="top">
+  <main>
     <section class="hero">
       <div class="container hero-grid">
         <div>

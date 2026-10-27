@@ -4,6 +4,7 @@ from datetime import date
 
 from aiogram import F
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.filters import CommandStart
 from aiogram.filters import StateFilter
@@ -14,20 +15,28 @@ from aiogram.types import CallbackQuery
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.types import Message
 
+from duoplan.config import Settings
 from duoplan.game.levels import level_for
 from duoplan.game.levels import title_for
+from duoplan.services import DATE_TITLE_MAX
 from duoplan.services import DuoPlanService
+from duoplan.services import ValidationError
+from duoplan.services import normalize_code
 from duoplan.ui import GAME_MENU
 from duoplan.ui import HOME_MENU
 from duoplan.ui import MAIN_MENU
 from duoplan.ui import PAIR_MENU
 from duoplan.ui import START_MENU
 from duoplan.ui import button
+from duoplan.ui import pager_row
 from duoplan.ui import section_menu
 
 router = Router()
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
+
+PAGE_SIZE = 8
+PAGE_TEXT_LIMIT = 3900
 
 
 class Form(StatesGroup):
@@ -39,16 +48,65 @@ class Form(StatesGroup):
     wish = State()
 
 
+ALL_FORMS = StateFilter(
+    Form.join_code,
+    Form.task,
+    Form.date_title,
+    Form.date_day,
+    Form.memory,
+    Form.wish,
+)
+
+
+# --------------------------------------------------------------------- утилиты
+
+
 def name_of(user) -> str:
     return user.full_name or user.first_name or "Без имени"
 
 
-async def register(message: Message, service: DuoPlanService) -> None:
-    await service.ensure_user(message.from_user.id, message.from_user.username, name_of(message.from_user))
+async def safe_edit(
+    message: Message | None, text: str, markup: InlineKeyboardMarkup | None = None
+) -> None:
+    """Редактировать сообщение, не падая на «message is not modified»."""
+    if message is None:
+        return
+    try:
+        await message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        raise
 
 
-async def register_callback(call: CallbackQuery, service: DuoPlanService) -> None:
-    await service.ensure_user(call.from_user.id, call.from_user.username, name_of(call.from_user))
+def parse_tail(data: str | None, prefix: str) -> tuple[int, int] | None:
+    """Безопасно разобрать ``prefix:<id>[:<page>]`` из callback_data."""
+    if not data or not data.startswith(prefix):
+        return None
+    parts = data[len(prefix):].split(":")
+    try:
+        values = [int(part) for part in parts]
+    except (TypeError, ValueError):
+        return None
+    if any(value < 0 for value in values):
+        return None
+    if len(values) == 1:
+        return values[0], 0
+    if len(values) == 2:
+        return values[0], values[1]
+    return None
+
+
+async def invite_link(bot, code: str) -> str:
+    try:
+        me = await bot.me()
+    except Exception:  # pragma: no cover - сеть/Telegram
+        return ""
+    username = getattr(me, "username", None)
+    return f"https://t.me/{username}?start={code}" if username else ""
+
+
+# ---------------------------------------------------------------------- тексты
 
 
 def welcome_text() -> str:
@@ -61,60 +119,99 @@ def welcome_text() -> str:
 
 
 def home_text(pair, user) -> str:
-    level, next_xp, missing = level_for(user["points"])
+    points = user["points"] if user is not None else 0
+    streak = user["streak"] if user is not None else 0
+    level, next_xp, missing = level_for(points)
     title, symbol = title_for(level)
     return (
         f"Наше пространство · {pair['name1']} и {pair['name2']}\n\n"
         f"{symbol} Статус: {title}\n"
-        f"Ваши очки: {user['points']} XP · серия {user['streak']} дн.\n"
+        f"Ваши очки: {points} XP · серия {streak} дн.\n"
         f"До уровня {level + 1}: {missing} XP (отметка на {next_xp} XP)\n\n"
         "Что добавим в ваш общий ритм сегодня?"
     )
 
 
+def waiting_text(pair, link: str) -> str:
+    text = (
+        "Ваше пространство готово и ждёт партнёра.\n\n"
+        f"Код для партнёра: {pair['code']}"
+    )
+    if link:
+        text += f"\nИли отправьте ссылку: {link}"
+    return text + "\n\nПосле входа партнёра откройте /menu."
+
+
+# ------------------------------------------------------------------ навигация
+
+
 async def send_home(message: Message, service: DuoPlanService, user_id: int) -> None:
-    pair = await service.pair_for(user_id)
-    if not pair:
+    pair = await service.membership(user_id)
+    if pair is None:
         await message.answer(welcome_text(), reply_markup=START_MENU)
+        return
+    if not pair["user_b"]:
+        # Владелец пустой пары видит своё пространство и код, а не приветствие.
+        await message.answer(
+            waiting_text(pair, await invite_link(message.bot, pair["code"])),
+            reply_markup=PAIR_MENU,
+        )
         return
     user = await service.user(user_id)
     await message.answer(home_text(pair, user), reply_markup=MAIN_MENU)
 
 
 async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
-    if not pair:
-        await call.message.edit_text(welcome_text(), reply_markup=START_MENU)
+    pair = await service.membership(call.from_user.id)
+    if pair is None:
+        await safe_edit(call.message, welcome_text(), START_MENU)
+        return
+    if not pair["user_b"]:
+        await safe_edit(
+            call.message,
+            waiting_text(pair, await invite_link(call.bot, pair["code"])),
+            PAIR_MENU,
+        )
         return
     user = await service.user(call.from_user.id)
-    await call.message.edit_text(home_text(pair, user), reply_markup=MAIN_MENU)
+    await safe_edit(call.message, home_text(pair, user), MAIN_MENU)
+
+
+# -------------------------------------------------------------------- команды
 
 
 @router.message(CommandStart())
 async def start(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     await state.clear()
-    await register(message, service)
     code = message.text.partition(" ")[2].strip() if message.text else ""
     if code:
-        joined = await service.join_pair(message.from_user.id, name_of(message.from_user), code)
-        if joined:
+        member = await service.membership(message.from_user.id)
+        if member is not None:
+            await message.answer(
+                "Вы уже в пространстве. Выйти из пары пока нельзя, "
+                "поэтому новый код не применяю.",
+            )
+        elif await service.join_pair(message.from_user.id, name_of(message.from_user), code):
             await message.answer("Готово — теперь у вас одно пространство на двоих.")
         else:
-            await message.answer("Этот код недоступен. Проверьте его или попросите партнёра прислать приглашение ещё раз.")
+            await message.answer(
+                "Этот код недоступен. Проверьте его или попросите партнёра "
+                "прислать приглашение ещё раз."
+            )
     await send_home(message, service, message.from_user.id)
 
 
 @router.message(Command("menu"))
 async def menu(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     await state.clear()
-    await register(message, service)
     await send_home(message, service, message.from_user.id)
 
 
 @router.message(Command("help"))
-async def help_command(message: Message) -> None:
+async def help_command(message: Message, settings: Settings) -> None:
+    name = settings.bot_name or "DuoPlan"
     await message.answer(
-        "DuoPlan работает в личном чате с ботом.\n\n"
+        f"{name} работает в личном чате с ботом.\n\n"
         "Создайте пространство, передайте партнёру код или ссылку-приглашение. "
         "После соединения вам станут доступны планы, даты, дневник, вишлист и ритуал дня.\n\n"
         "Команды: /menu — главное меню, /cancel — отменить ввод, /help — помощь."
@@ -122,29 +219,40 @@ async def help_command(message: Message) -> None:
 
 
 @router.message(Command("cancel"))
-async def cancel(message: Message, state: FSMContext) -> None:
+async def cancel(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     if await state.get_state() is None:
         await message.answer("Сейчас ничего не вводится.")
         return
     await state.clear()
-    await message.answer("Ввод отменён.", reply_markup=HOME_MENU)
+    pair = await service.membership(message.from_user.id)
+    markup = MAIN_MENU if pair and pair["user_b"] else (PAIR_MENU if pair else START_MENU)
+    await message.answer("Ввод отменён.", reply_markup=markup)
+
+
+# ----------------------------------------------------------------------- пара
 
 
 @router.callback_query(F.data == "pair:create")
 async def create_pair(call: CallbackQuery, service: DuoPlanService) -> None:
-    await register_callback(call, service)
     pair = await service.membership(call.from_user.id)
     if pair and pair["user_b"]:
         await call.answer("Пространство уже настроено")
         await edit_home(call, service)
         return
-    code = pair["code"] if pair else await service.create_pair(call.from_user.id, name_of(call.from_user))
-    me = await call.bot.get_me()
-    await call.message.edit_text(
-        f"Пространство создано. Код для партнёра:\n\n{code}\n\n"
-        f"Или отправьте ссылку: https://t.me/{me.username}?start={code}\n\n"
-        "После входа партнёра откройте /menu.",
-        reply_markup=PAIR_MENU,
+    try:
+        code = pair["code"] if pair else await service.create_pair(
+            call.from_user.id, name_of(call.from_user)
+        )
+    except ValidationError as exc:
+        await call.answer(str(exc))
+        return
+    link = await invite_link(call.bot, code)
+    await safe_edit(
+        call.message,
+        f"Пространство создано. Код для партнёра:\n\n{code}"
+        + (f"\n\nИли отправьте ссылку: {link}" if link else "")
+        + "\n\nПосле входа партнёра откройте /menu.",
+        PAIR_MENU,
     )
     await call.answer()
 
@@ -152,34 +260,57 @@ async def create_pair(call: CallbackQuery, service: DuoPlanService) -> None:
 @router.callback_query(F.data == "pair:invite")
 async def invite(call: CallbackQuery, service: DuoPlanService) -> None:
     pair = await service.membership(call.from_user.id)
-    if not pair:
+    if pair is None:
         await call.answer("Сначала создайте пространство")
         return
-    me = await call.bot.get_me()
-    await call.message.edit_text(
-        f"Код приглашения: {pair['code']}\n\nhttps://t.me/{me.username}?start={pair['code']}",
-        reply_markup=PAIR_MENU,
+    if pair["user_b"]:
+        # Заполненной паре код уже не нужен.
+        await call.answer("Партнёр уже с вами — код не нужен")
+        await edit_home(call, service)
+        return
+    link = await invite_link(call.bot, pair["code"])
+    await safe_edit(
+        call.message,
+        f"Код приглашения: {pair['code']}" + (f"\n\n{link}" if link else ""),
+        PAIR_MENU,
     )
     await call.answer()
 
 
 @router.callback_query(F.data == "pair:join")
-async def join_pair(call: CallbackQuery, state: FSMContext) -> None:
+async def join_pair(call: CallbackQuery, service: DuoPlanService, state: FSMContext) -> None:
+    if await service.membership(call.from_user.id) is not None:
+        await call.answer("Вы уже в пространстве")
+        await edit_home(call, service)
+        return
     await state.set_state(Form.join_code)
-    await call.message.edit_text("Введите код приглашения из восьми символов. Для отмены: /cancel")
+    await safe_edit(call.message, "Введите код приглашения из восьми символов. Для отмены: /cancel")
     await call.answer()
 
 
-@router.message(StateFilter(Form.join_code))
+@router.message(StateFilter(Form.join_code), F.text)
 async def receive_code(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    await register(message, service)
-    joined = await service.join_pair(message.from_user.id, name_of(message.from_user), message.text)
-    await state.clear()
-    if not joined:
-        await message.answer("Не получилось войти по этому коду. Проверьте код и попробуйте ещё раз.", reply_markup=START_MENU)
+    code = normalize_code(message.text)
+    if len(code) < 4:
+        await message.answer("Код слишком короткий. Пришлите код из приглашения или /cancel.")
         return
-    await message.answer("Вы на связи. Пространство теперь общее!")
-    await send_home(message, service, message.from_user.id)
+    if await service.join_pair(message.from_user.id, name_of(message.from_user), code):
+        await state.clear()
+        await message.answer("Вы на связи. Пространство теперь общее!")
+        await send_home(message, service, message.from_user.id)
+        return
+    if await service.membership(message.from_user.id) is not None:
+        await state.clear()
+        await message.answer(
+            "Вы уже участник пространства — второй код не применяю. "
+            "Показать ваше пространство: /menu."
+        )
+        await send_home(message, service, message.from_user.id)
+        return
+    await message.answer(
+        "Не получилось войти по этому коду. Проверьте код и попробуйте ещё раз "
+        "или отправьте /cancel."
+    )
 
 
 @router.callback_query(F.data == "menu:home")
@@ -190,66 +321,192 @@ async def home(call: CallbackQuery, service: DuoPlanService) -> None:
 
 @router.callback_query(F.data == "menu:pair")
 async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
+    pair = await service.membership(call.from_user.id)
     if not pair:
-        await call.answer("Сначала соедините пространство")
+        await call.answer("Сначала создайте пространство")
+        return
+    if not pair["user_b"]:
+        await safe_edit(
+            call.message,
+            waiting_text(pair, await invite_link(call.bot, pair["code"])),
+            PAIR_MENU,
+        )
+        await call.answer()
         return
     user = await service.user(call.from_user.id)
     level, _, _ = level_for(pair["together_pts"])
     title, symbol = title_for(level)
-    await call.message.edit_text(
+    streak = user["streak"] if user is not None else 0
+    await safe_edit(
+        call.message,
         f"{pair['name1']} и {pair['name2']}\n\n"
         f"Вместе в DuoPlan с {pair['started_at']}\n"
         f"Общий запас: {pair['together_pts']} XP\n"
         f"{symbol} Общий уровень: {level} · {title}\n"
-        f"Личная серия: {user['streak']} дн.",
-        reply_markup=HOME_MENU,
+        f"Личная серия: {streak} дн.",
+        HOME_MENU,
     )
     await call.answer()
 
 
-async def tasks_view(call: CallbackQuery, service: DuoPlanService) -> None:
+# ------------------------------------------------------------------- разделы
+
+
+async def _guard_pair(call: CallbackQuery, service: DuoPlanService):
     pair = await service.pair_for(call.from_user.id)
-    rows = await service.tasks(pair["id"])
-    text = "Наши планы\n\n" + ("\n".join(f"• {row['title']}" for row in rows) if rows else "Пока свободно. Добавьте первый общий шаг.")
-    buttons = [[button(f"Готово: {row['title'][:22]}", f"task:done:{row['id']}")] for row in rows[:8]]
-    buttons.extend([[button("Добавить план", "add:tasks")], [button("В наше пространство", "menu:home")]])
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    if pair is None:
+        await safe_edit(call.message, "Сначала соедините пространство.", START_MENU)
+        return None
+    return pair
 
 
-async def dates_view(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
-    rows = await service.dates(pair["id"])
-    text = "Значимые даты\n\n" + ("\n".join(f"{row['day']} · {row['title']}" for row in rows) if rows else "Добавьте дату, которую хочется беречь.")
-    await call.message.edit_text(text, reply_markup=section_menu("dates"))
+async def tasks_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+    pair = await _guard_pair(call, service)
+    if pair is None:
+        return False
+    rows = await service.tasks(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
+    has_next = len(rows) > PAGE_SIZE
+    rows = rows[:PAGE_SIZE]
+
+    if rows:
+        lines = [f"{index + 1 + page * PAGE_SIZE}. {row['title']}" for index, row in enumerate(rows)]
+        text = "Наши планы\n\n" + "\n".join(lines)
+    elif page == 0:
+        text = "Наши планы\n\nПока свободно. Добавьте первый общий шаг."
+    else:
+        text = "Наши планы\n\nНа этой странице планов нет."
+
+    buttons = [
+        [button(f"Готово: {row['title'][:22]}", f"task:done:{row['id']}:{page}")] for row in rows
+    ]
+    buttons.append([button("Добавить план", "add:tasks")])
+    pager = pager_row("tasks", page, page > 0, has_next)
+    if pager:
+        buttons.append(pager)
+    buttons.append([button("В наше пространство", "menu:home")])
+    await safe_edit(call.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    return True
 
 
-async def memories_view(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
-    rows = await service.memories(pair["id"])
-    entries = [f"{row['day']} · {row['display_name'] or 'Один из вас'}\n{row['body']}" for row in rows]
-    text = "Дневник двоих\n\n" + ("\n\n".join(entries) if entries else "Здесь появятся ваши маленькие истории и важные моменты.")
-    await call.message.edit_text(text[:3900], reply_markup=section_menu("memories"))
+async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+    pair = await _guard_pair(call, service)
+    if pair is None:
+        return False
+    rows = await service.dates(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
+    has_next = len(rows) > PAGE_SIZE
+    rows = rows[:PAGE_SIZE]
+
+    if rows:
+        text = "Значимые даты\n\n" + "\n".join(f"{row['day']} · {row['title']}" for row in rows)
+    elif page == 0:
+        text = "Значимые даты\n\nДобавьте дату, которую хочется беречь."
+    else:
+        text = "Значимые даты\n\nНа этой странице дат нет."
+
+    buttons = [[button("Добавить дату", "add:dates")]]
+    pager = pager_row("dates", page, page > 0, has_next)
+    if pager:
+        buttons.append(pager)
+    buttons.append([button("В наше пространство", "menu:home")])
+    await safe_edit(call.message, text[:PAGE_TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=buttons))
+    return True
 
 
-async def wishes_view(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
-    rows = await service.wishes(pair["id"])
-    text = "Вишлист\n\n" + ("\n".join(f"• {row['body']} — {row['display_name']}" for row in rows) if rows else "Добавьте желание — большое или совсем маленькое.")
-    buttons = [[button(f"Исполнено: {row['body'][:19]}", f"wish:done:{row['id']}")] for row in rows[:8]]
-    buttons.extend([[button("Добавить желание", "add:wishes")], [button("В наше пространство", "menu:home")]])
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+async def memories_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+    pair = await _guard_pair(call, service)
+    if pair is None:
+        return False
+    rows = await service.memories(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
+    has_next = len(rows) > PAGE_SIZE
+    rows = rows[:PAGE_SIZE]
+
+    entries = [
+        f"{row['day']} · {row['display_name'] or 'Один из вас'}\n{row['body']}" for row in rows
+    ]
+    if entries:
+        text = "Дневник двоих\n\n" + "\n\n".join(entries)
+    elif page == 0:
+        text = (
+            "Дневник двоих\n\n"
+            "Здесь появятся ваши маленькие истории и важные моменты."
+        )
+    else:
+        text = "Дневник двоих\n\nНа этой странице записей нет."
+
+    buttons = [[button("Добавить запись", "add:memories")]]
+    pager = pager_row("memories", page, page > 0, has_next)
+    if pager:
+        buttons.append(pager)
+    buttons.append([button("В наше пространство", "menu:home")])
+    await safe_edit(
+        call.message, text[:PAGE_TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    return True
+
+
+async def wishes_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+    pair = await _guard_pair(call, service)
+    if pair is None:
+        return False
+    rows = await service.wishes(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
+    has_next = len(rows) > PAGE_SIZE
+    rows = rows[:PAGE_SIZE]
+
+    if rows:
+        text = "Вишлист\n\n" + "\n".join(
+            f"• {row['body']} — {row['display_name'] or 'Один из вас'}" for row in rows
+        )
+    elif page == 0:
+        text = "Вишлист\n\nДобавьте желание — большое или совсем маленькое."
+    else:
+        text = "Вишлист\n\nНа этой странице желаний нет."
+
+    buttons = [
+        [button(f"Исполнено: {row['body'][:19]}", f"wish:done:{row['id']}:{page}")]
+        for row in rows
+    ]
+    buttons.append([button("Добавить желание", "add:wishes")])
+    pager = pager_row("wishes", page, page > 0, has_next)
+    if pager:
+        buttons.append(pager)
+    buttons.append([button("В наше пространство", "menu:home")])
+    await safe_edit(call.message, text[:PAGE_TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=buttons))
+    return True
+
+
+LIST_VIEWS = {
+    "tasks": tasks_view,
+    "dates": dates_view,
+    "memories": memories_view,
+    "wishes": wishes_view,
+}
 
 
 @router.callback_query(F.data.in_({"menu:tasks", "menu:dates", "menu:memories", "menu:wishes"}))
 async def sections(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
-    if not pair:
-        await call.answer("Сначала соедините пространство")
+    handled = await LIST_VIEWS[call.data.split(":", 1)[1]](call, service, 0)
+    await call.answer(None if handled else "Сначала соедините пространство")
+
+
+@router.callback_query(F.data.startswith("list:"))
+async def paginate(call: CallbackQuery, service: DuoPlanService) -> None:
+    parts = (call.data or "").split(":")
+    if len(parts) != 3 or parts[1] not in LIST_VIEWS:
+        await call.answer("Кнопка устарела")
         return
-    views = {"menu:tasks": tasks_view, "menu:dates": dates_view, "menu:memories": memories_view, "menu:wishes": wishes_view}
-    await views[call.data](call, service)
-    await call.answer()
+    try:
+        page = int(parts[2])
+    except ValueError:
+        await call.answer("Кнопка устарела")
+        return
+    if page < 0:
+        await call.answer("Кнопка устарела")
+        return
+    handled = await LIST_VIEWS[parts[1]](call, service, page)
+    await call.answer(None if handled else "Сначала соедините пространство")
+
+
+# --------------------------------------------------------------------- ритуал
 
 
 @router.callback_query(F.data == "menu:game")
@@ -262,7 +519,7 @@ async def game(call: CallbackQuery, service: DuoPlanService) -> None:
     text = f"Ритуал дня · {daily['day']}\n\n{daily['action']}"
     if daily["done"]:
         text += "\n\nСегодняшний ритуал уже отмечен. До завтра!"
-    await call.message.edit_text(text, reply_markup=HOME_MENU if daily["done"] else GAME_MENU)
+    await safe_edit(call.message, text, HOME_MENU if daily["done"] else GAME_MENU)
     await call.answer()
 
 
@@ -273,30 +530,57 @@ async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer("Сначала соедините пространство")
         return
     completed = await service.complete_daily(pair["id"], call.from_user.id)
-    await call.answer("+10 XP · ритуал отмечен" if completed else "Сегодня уже отмечено")
     daily = await service.daily(pair["id"])
-    await call.message.edit_text(
-        f"Ритуал дня · {daily['day']}\n\n{daily['action']}\n\nСегодняшний ритуал отмечен. До завтра!",
-        reply_markup=HOME_MENU,
+    if completed:
+        # Кнопка и текст отражают фактический результат, а не ожидание.
+        await call.answer("+10 XP · ритуал отмечен")
+        tail = "Сегодняшний ритуал отмечен. +10 XP в личную копилку и в общий запас."
+    else:
+        await call.answer("Сегодня уже отмечено")
+        tail = "Сегодняшний ритуал уже отмечен. До завтра!"
+    await safe_edit(
+        call.message,
+        f"Ритуал дня · {daily['day']}\n\n{daily['action']}\n\n{tail}",
+        HOME_MENU,
     )
+
+
+# ------------------------------------------------------------- завершение дел
 
 
 @router.callback_query(F.data.startswith("task:done:"))
 async def task_done(call: CallbackQuery, service: DuoPlanService) -> None:
     pair = await service.pair_for(call.from_user.id)
-    task_id = int(call.data.rsplit(":", 1)[1])
+    if not pair:
+        await call.answer("Сначала соедините пространство")
+        return
+    parsed = parse_tail(call.data, "task:done:")
+    if parsed is None or parsed[0] <= 0:
+        await call.answer("Кнопка устарела")
+        return
+    task_id, page = parsed
     done = await service.complete_task(task_id, pair["id"], call.from_user.id)
     await call.answer("План завершён" if done else "План уже закрыт")
-    await tasks_view(call, service)
+    await tasks_view(call, service, page)
 
 
 @router.callback_query(F.data.startswith("wish:done:"))
 async def wish_done(call: CallbackQuery, service: DuoPlanService) -> None:
     pair = await service.pair_for(call.from_user.id)
-    wish_id = int(call.data.rsplit(":", 1)[1])
+    if not pair:
+        await call.answer("Сначала соедините пространство")
+        return
+    parsed = parse_tail(call.data, "wish:done:")
+    if parsed is None or parsed[0] <= 0:
+        await call.answer("Кнопка устарела")
+        return
+    wish_id, page = parsed
     done = await service.complete_wish(wish_id, pair["id"])
     await call.answer("Желание исполнено" if done else "Желание уже закрыто")
-    await wishes_view(call, service)
+    await wishes_view(call, service, page)
+
+
+# ----------------------------------------------------------------------- ввод
 
 
 @router.callback_query(F.data.in_({"add:tasks", "add:dates", "add:memories", "add:wishes"}))
@@ -312,60 +596,114 @@ async def add_item(call: CallbackQuery, service: DuoPlanService, state: FSMConte
     }
     next_state, prompt = prompts[call.data]
     await state.set_state(next_state)
-    await call.message.edit_text(prompt + "\n\nДля отмены: /cancel")
+    await safe_edit(call.message, prompt + "\n\nДля отмены: /cancel")
     await call.answer()
 
 
-@router.message(StateFilter(Form.task))
+@router.message(StateFilter(Form.task), F.text)
 async def receive_task(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     pair = await service.pair_for(message.from_user.id)
-    await service.add_task(pair["id"], message.text, message.from_user.id)
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return
+    try:
+        await service.add_task(pair["id"], message.text, message.from_user.id)
+    except ValidationError as exc:
+        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
+        return
     await state.clear()
     await message.answer("План добавлен в ваше пространство.", reply_markup=section_menu("tasks"))
 
 
-@router.message(StateFilter(Form.date_title))
+@router.message(StateFilter(Form.date_title), F.text)
 async def receive_date_title(message: Message, state: FSMContext) -> None:
-    await state.update_data(title=message.text.strip())
+    title = (message.text or "").strip()
+    if not title:
+        await message.answer("Название не может быть пустым. Попробуйте ещё раз или /cancel.")
+        return
+    if len(title) > DATE_TITLE_MAX:
+        await message.answer(
+            f"Название длиннее {DATE_TITLE_MAX} символов. Сократите его или /cancel."
+        )
+        return
+    await state.update_data(title=title)
     await state.set_state(Form.date_day)
     await message.answer("Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ.")
 
 
-@router.message(StateFilter(Form.date_day))
+@router.message(StateFilter(Form.date_day), F.text)
 async def receive_date_day(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
     try:
-        parts = [int(part) for part in message.text.strip().split(".")]
+        parts = [int(part) for part in raw.split(".")]
         if len(parts) == 2:
-            parts.append(date.today().year)
+            parts.append(service.local_today().year)
         if len(parts) != 3:
             raise ValueError
         day = date(parts[2], parts[1], parts[0]).isoformat()
     except ValueError:
         await message.answer("Не распознал дату. Попробуйте ещё раз: ДД.ММ или ДД.ММ.ГГГГ.")
         return
+
     data = await state.get_data()
     pair = await service.pair_for(message.from_user.id)
-    await service.add_date(pair["id"], data["title"], day, 1)
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return
+    try:
+        await service.add_date(pair["id"], data.get("title", ""), day, 1)
+    except ValidationError as exc:
+        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
+        return
     await state.clear()
     await message.answer("Дата сохранена.", reply_markup=section_menu("dates"))
 
 
-@router.message(StateFilter(Form.memory))
+@router.message(StateFilter(Form.memory), F.text)
 async def receive_memory(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     pair = await service.pair_for(message.from_user.id)
-    await service.add_memory(pair["id"], message.from_user.id, message.text)
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return
+    try:
+        await service.add_memory(pair["id"], message.from_user.id, message.text)
+    except ValidationError as exc:
+        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
+        return
     await state.clear()
     await message.answer("Момент сохранён в дневнике.", reply_markup=section_menu("memories"))
 
 
-@router.message(StateFilter(Form.wish))
+@router.message(StateFilter(Form.wish), F.text)
 async def receive_wish(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     pair = await service.pair_for(message.from_user.id)
-    await service.add_wish(pair["id"], message.from_user.id, message.text)
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return
+    try:
+        await service.add_wish(pair["id"], message.from_user.id, message.text)
+    except ValidationError as exc:
+        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
+        return
     await state.clear()
     await message.answer("Желание добавлено.", reply_markup=section_menu("wishes"))
 
 
+@router.message(ALL_FORMS)
+async def receive_non_text(message: Message) -> None:
+    """Фото, стикер или голосовое в FSM больше не роняют обработчик."""
+    await message.answer(
+        "Сейчас жду текст сообщением. Отправьте текст или /cancel, чтобы выйти из ввода."
+    )
+
+
 @router.message()
 async def fallback(message: Message) -> None:
-    await message.answer("Откройте пространство через /menu или используйте /cancel, чтобы выйти из текущего ввода.")
+    await message.answer(
+        "Откройте пространство через /menu или используйте /cancel, "
+        "чтобы выйти из текущего ввода."
+    )

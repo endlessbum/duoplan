@@ -22,10 +22,12 @@ START_MENU = InlineKeyboardMarkup(
     ]
 )
 
+# Меню уже созданного пространства: вход по чужому коду запрещён, поэтому
+# вместо «Ввести другой код» — возврат в своё пространство.
 PAIR_MENU = InlineKeyboardMarkup(
     inline_keyboard=[
         [button("Пригласить ещё раз", "pair:invite")],
-        [button("Ввести другой код", "pair:join")],
+        [button("В наше пространство", "menu:home")],
     ]
 )
 
@@ -43,6 +45,15 @@ def section_menu(section: str) -> InlineKeyboardMarkup:
             [button("В наше пространство", "menu:home")],
         ]
     )
+
+
+def pager_row(section: str, page: int, has_prev: bool, has_next: bool) -> list[InlineKeyboardButton]:
+    row: list[InlineKeyboardButton] = []
+    if has_prev:
+        row.append(button("← Назад", f"list:{section}:{max(0, page - 1)}"))
+    if has_next:
+        row.append(button("Дальше →", f"list:{section}:{page + 1}"))
+    return row
 
 
 HOME_MENU = InlineKeyboardMarkup(
