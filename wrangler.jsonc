@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "duoplan",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-23",
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "duoplan",
+      "database_id": "6c5e8724-1652-423f-9fad-b84dda49dfe6",
+      "migrations_dir": "./migrations"
+    }
+  ]
+}
