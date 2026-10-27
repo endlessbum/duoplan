@@ -165,7 +165,7 @@ async function api(request, env, url) {
 
 async function telegram(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload)
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(12000)
   });
   const result = await response.json();
   if (!result.ok) throw new Error(result.description || "Telegram API error");
@@ -214,11 +214,23 @@ async function ensureSchema(env) {
 
 async function setup(request, env, url) {
   if (!env.WEBHOOK_SECRET || request.headers.get("authorization") !== `Bearer ${env.WEBHOOK_SECRET}`) return json({ error: "Forbidden" }, 403);
-  await ensureSchema(env);
+  try {
+    await ensureSchema(env);
+  } catch (error) {
+    console.error("D1 setup failed", error);
+    return json({ error: "Не удалось создать таблицы D1. Проверьте привязку базы и повторите." }, 500);
+  }
   const webhookUrl = `${url.origin}/telegram/webhook`;
-  await telegram(env, "setWebhook", { url: webhookUrl, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message"], drop_pending_updates: false });
-  await telegram(env, "setMyCommands", { commands: [{ command: "menu", description: "Наше пространство" }, { command: "help", description: "Как работает DuoPlan" }] });
-  await telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${url.origin}/app.html` } } });
+  try {
+    await telegram(env, "setWebhook", { url: webhookUrl, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message"], drop_pending_updates: false });
+    await Promise.all([
+      telegram(env, "setMyCommands", { commands: [{ command: "menu", description: "Наше пространство" }, { command: "help", description: "Как работает DuoPlan" }] }),
+      telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${url.origin}/app.html` } } })
+    ]);
+  } catch (error) {
+    console.error("Telegram setup failed", error);
+    return json({ error: "Таблицы готовы, но Telegram не ответил. Проверьте BOT_TOKEN и повторите активацию." }, 502);
+  }
   return json({ ok: true, webhook_url: webhookUrl, mini_app_url: `${url.origin}/app.html` });
 }
 
