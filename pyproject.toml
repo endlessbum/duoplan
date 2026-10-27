@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duoplan-bot"
+version = "1.0.0"
+description = "DuoPlan — тёплый Telegram-бот для пар: дневник двоих, общие планы, значимые даты, вишлист и мягкая игра."
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.31,<4",
+    "aiosqlite>=0.20,<1",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["duoplan*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"
