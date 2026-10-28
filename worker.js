@@ -9,6 +9,7 @@ const DAILY_ACTIONS = [
 ];
 
 const APP_VERSION = "2026.10.28";
+const DB_SCHEMA_VERSION = "2026.10.29";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Схема D1 поднимается один раз на изолят Worker (CREATE IF NOT EXISTS + ADD COLUMN).
@@ -165,15 +166,21 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
     // вызывается позже). Создаём минимальную схему и повторяем попытку,
     // чтобы защита от перебора секретов работала с первого запуска.
     const message = String(error?.message || error).toLowerCase();
-    if (!message.includes("no such table")) throw error;
-    await env.DB.prepare("CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)").run();
-    await insert();
+    if (message.includes("no such table")) {
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)").run();
+      await insert();
+    } else if (message.includes("no column named expires_at")) {
+      await env.DB.prepare("ALTER TABLE rate_limits ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0").run();
+      await insert();
+    } else {
+      throw error;
+    }
   }
   const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?").bind(bucketKey).first();
   if (bucket % 10 === 0) {
     // Удаляем только устаревшие окна того же ключа, сравнивая номер окна численно,
     // а не лексикографически по всей строке bucket_key (иначе затрагиваются другие ключи).
-    await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at > 0 AND expires_at < ?").bind(nowSeconds).run();
+    await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(nowSeconds).run();
   }
   if ((row?.count || 0) > limit) throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
 }
@@ -324,6 +331,19 @@ function timeZoneOffsetMs(timeZone, date) {
 function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
   const tz = timeZone || "UTC";
   const desiredUtc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
+  function localMatches(utcMs) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false
+    }).formatToParts(new Date(utcMs));
+    const get = (type) => parts.find((p) => p.type === type)?.value || "0";
+    return Number(get("year")) === year &&
+      Number(get("month")) === monthIndex + 1 &&
+      Number(get("day")) === day &&
+      Number(get("hour")) === hour &&
+      Number(get("minute")) === minute;
+  }
+  // Обычный случай: итеративно уточняем смещение.
   let utc = desiredUtc;
   for (let i = 0; i < 3; i++) {
     const offset = timeZoneOffsetMs(tz, new Date(utc));
@@ -331,7 +351,12 @@ function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
     if (next === utc) break;
     utc = next;
   }
-  return new Date(utc);
+  if (localMatches(utc)) return new Date(utc);
+  // Несуществующее локальное время (весенний перевод часов):
+  // используем смещение до перехода, сдвигая момент вперёд.
+  const preOffset = timeZoneOffsetMs(tz, new Date(desiredUtc - 2 * 3600000));
+  const shifted = desiredUtc - preOffset;
+  return new Date(shifted);
 }
 
 function taskTargetMs(item, timeZone) {
@@ -694,26 +719,19 @@ async function webhook(request, env, url) {
     const code = text.startsWith("/start ") ? text.slice(7).trim() : "";
     if (code) {
       let joined = false;
-      // Сначала проверяем фактическое членство: повторная доставка /start не должна
-      // ломать уже состоявшееся присоединение.
       const existingMembership = await membership(env, user.tg_id);
       if (existingMembership) {
-        // Повторное приглашение в ту же пару — идемпотентный успех.
-        // Чужой или неверный код не должен выглядеть как успешный вход.
         joined = clean(existingMembership.code).toUpperCase() === code.toUpperCase();
       } else {
         try {
           await joinPair(env, user, code);
           joined = true;
         } catch (error) {
-          if (await membership(env, user.tg_id)) {
-            joined = true;
-          } else if (error instanceof HttpError) {
-            joined = false;
-          } else {
-            // Инфраструктурная ошибка не должна маскироваться под «код недействителен»;
-            // пробрасываем её, чтобы Telegram мог повторить доставку.
-            throw error;
+          const racedMembership = await membership(env, user.tg_id);
+          joined = !!racedMembership && clean(racedMembership.code).toUpperCase() === code.toUpperCase();
+          if (!racedMembership) {
+            if (error instanceof HttpError) joined = false;
+            else throw error;
           }
         }
       }
@@ -747,7 +765,7 @@ async function webhook(request, env, url) {
 async function ensureSchema(env) {
   try {
     const meta = await env.DB.prepare("SELECT value FROM app_meta WHERE key='schema_version'").first();
-    if (meta?.value === APP_VERSION) {
+    if (meta?.value === DB_SCHEMA_VERSION) {
       try {
         await env.DB.batch([
           env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
@@ -806,7 +824,7 @@ async function ensureSchema(env) {
   ]);
   await env.DB.prepare(
     "INSERT INTO app_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-  ).bind(APP_VERSION).run();
+  ).bind(DB_SCHEMA_VERSION).run();
 }
 
 async function setup(request, env, url) {
@@ -845,7 +863,7 @@ async function setup(request, env, url) {
       telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${base}/app` } } })
     ]);
     await env.DB.prepare("INSERT INTO app_meta(key,value) VALUES('setup_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-      .bind(APP_VERSION).run();
+      .bind(DB_SCHEMA_VERSION).run();
   } catch (error) {
     console.error("Telegram setup failed", error);
     return json({ error: "Таблицы готовы, но Telegram не ответил. Проверьте BOT_TOKEN." }, 502);

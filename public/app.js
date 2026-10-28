@@ -257,6 +257,18 @@
   function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
     const tz = timeZone || "UTC";
     const desiredUtc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
+    function localMatches(utcMs) {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hour12: false
+      }).formatToParts(new Date(utcMs));
+      const get = (type) => parts.find((p) => p.type === type)?.value || "0";
+      return Number(get("year")) === year &&
+        Number(get("month")) === monthIndex + 1 &&
+        Number(get("day")) === day &&
+        Number(get("hour")) === hour &&
+        Number(get("minute")) === minute;
+    }
     let utc = desiredUtc;
     for (let i = 0; i < 3; i++) {
       const offset = timeZoneOffsetMs(tz, new Date(utc));
@@ -264,7 +276,10 @@
       if (next === utc) break;
       utc = next;
     }
-    return new Date(utc);
+    if (localMatches(utc)) return new Date(utc);
+    const preOffset = timeZoneOffsetMs(tz, new Date(desiredUtc - 2 * 3600000));
+    const shifted = desiredUtc - preOffset;
+    return new Date(shifted);
   }
 
   function zonedToday(timeZone) {
@@ -693,12 +708,12 @@
         ` : ""}
         <button class="secondary full pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
       </section>
-      <section class="card">
+            ${!pair.user_b ? `      ${!pair.user_b ? `<section class="card">
         <p class="eyebrow">Вход по коду</p>
         <h3>Добавить партнёра по коду</h3>
         <label class="field"><span>Код партнёра (8 символов)</span><input id="join-code-pair" maxlength="8" placeholder="Например, 740C04B5"></label>
         <button class="secondary full" type="button" data-action="join-code" data-input="join-code-pair">Войти по коду партнёра</button>
-      </section>
+      </section>` : ""}` : ""}
     `;
   }
 

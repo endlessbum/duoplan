@@ -41,12 +41,10 @@ Telegram Mini App для пар: общие планы, значимые дат�
 
 Локальная проверка Worker:
 
+Примечание: не запускайте `wrangler d1 migrations apply` на базе, уже инициализированной через `/setup` — схема в production управляется Worker'ом.
+
 ```bash
 wrangler d1 migrations apply duoplan --local
-Note: do not run wrangler d1 migrations apply on a DB already initialized via /setup; production schema is managed by Worker (ensureSchema).
-
-Note: do not run wrangler d1 migrations apply on a DB already initialized via /setup; production schema is managed by Worker (ensureSchema).
-
 wrangler dev --local --port 8788
 ```
 
@@ -61,6 +59,8 @@ wrangler d1 execute duoplan --remote --file data/duoplan-d1-import.sql
 ```
 
 Перед импортом сделайте резервную копию D1: скрипт использует `INSERT OR REPLACE`.
+
+Импорт предназначен для пустой или подготовленной целевой D1: при совпадении ID существующие записи могут быть заменены каскадно. Для объединения с работающей базой сначала проверьте конфликты ID.
 
 ## Python-бот
 
