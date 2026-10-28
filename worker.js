@@ -71,6 +71,28 @@ function validDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day;
 }
 
+// Дата и время у плана необязательны: пустая строка означает «не задано».
+function optionalDay(value) {
+  const day = clean(value);
+  if (!day) return null;
+  if (!validDate(day)) throw new HttpError(400, "Проверьте дату плана", "INVALID_DATE");
+  return day;
+}
+
+function optionalTime(value) {
+  const time = clean(value);
+  if (!time) return null;
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new HttpError(400, "Проверьте время плана", "INVALID_TIME");
+  return time;
+}
+
+function planSchedule(body) {
+  const day = optionalDay(body?.day);
+  const time = optionalTime(body?.time);
+  if (time && !day) throw new HttpError(400, "Выберите дату, чтобы указать время", "INVALID_DATE");
+  return { day, time };
+}
+
 function safeEqual(left, right) {
   const a = new TextEncoder().encode(String(left ?? ""));
   const b = new TextEncoder().encode(String(right ?? ""));
@@ -235,11 +257,13 @@ async function dailyFor(env, pairId, timeZone) {
 
 function publicUser(user) {
   return {
+    tg_id: user.tg_id,
     display_name: user.display_name,
     points: user.points,
     streak: user.streak,
     best_streak: user.best_streak,
-    timezone: user.timezone
+    timezone: user.timezone,
+    gender: user.gender || null
   };
 }
 
@@ -248,16 +272,17 @@ async function state(env, userId) {
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily] = await Promise.all([
-    env.DB.prepare("SELECT id,title,status,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,status,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT 100").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,day,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT 100").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day").bind(pair.id).all(),
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC`).bind(pair.id).all(),
-    env.DB.prepare(`SELECT w.id,w.body,w.created_at,u.display_name FROM wishes w
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC`).bind(pair.id).all(),
-    env.DB.prepare(`SELECT w.id,w.body,w.created_at,u.display_name FROM wishes w
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT 100`).bind(pair.id).all(),
-    dailyFor(env, pair.id, pair.timezone)
+    // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
+    pair.user_b ? dailyFor(env, pair.id, pair.timezone) : null
   ]);
   return {
     user: publicUser(user),
@@ -308,14 +333,15 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     const fields = [];
     const values = [];
     if (type === "tasks") {
-      fields.push("title=?");
-      values.push(textField(body, "title", 180, "План"));
+      const { day, time } = planSchedule(body);
+      fields.push("title=?", "day=?", "time=?");
+      values.push(textField(body, "title", 180, "План"), day, time);
     } else if (type === "dates") {
       fields.push("title=?");
       values.push(textField(body, "title", 120, "Название"));
       if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
-      fields.push("day=?", "recurs=?");
-      values.push(clean(body.day), body.recurs === false ? 0 : 1);
+      fields.push("day=?", "recurs=?", "time=?");
+      values.push(clean(body.day), body.recurs === false ? 0 : 1, optionalTime(body.time));
     } else if (type === "memories") {
       fields.push("body=?");
       values.push(textField(body, "body", 2000, "Воспоминание"));
@@ -377,15 +403,17 @@ async function api(request, env, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/tasks") {
     const title = textField(body, "title", 180, "План");
-    await env.DB.prepare("INSERT INTO tasks(pair_id,title,created_by,created_at) VALUES(?,?,?,?)")
-      .bind(pair.id, title, user.tg_id, now()).run();
+    const { day, time } = planSchedule(body);
+    await env.DB.prepare("INSERT INTO tasks(pair_id,title,day,time,created_by,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(pair.id, title, day, time, user.tg_id, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/dates") {
     const title = textField(body, "title", 120, "Название");
     if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
-    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,recurs,created_at) VALUES(?,?,?,?,?)")
-      .bind(pair.id, title, clean(body.day), body.recurs === false ? 0 : 1, now()).run();
+    const time = optionalTime(body.time);
+    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(pair.id, title, clean(body.day), time, body.recurs === false ? 0 : 1, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
@@ -400,7 +428,14 @@ async function api(request, env, url) {
       .bind(pair.id, user.tg_id, text, now()).run();
     return json(await state(env, user.tg_id));
   }
+  if (request.method === "POST" && url.pathname === "/api/gender") {
+    const gender = clean(body?.gender);
+    if (gender !== "male" && gender !== "female") throw new HttpError(400, "Недопустимый пол", "INVALID_GENDER");
+    await env.DB.prepare("UPDATE users SET gender = ?, updated_at = ? WHERE tg_id = ?").bind(gender, now(), user.tg_id).run();
+    return json(await state(env, user.tg_id));
+  }
   if (request.method === "POST" && url.pathname === "/api/daily/done") {
+    if (!pair.user_b) throw new HttpError(409, "Ритуал дня откроется, когда партнёр присоединится", "PAIR_INCOMPLETE");
     const daily = await dailyFor(env, pair.id, pair.timezone);
     if (daily.done) return json({ ...(await state(env, user.tg_id)), awarded: false });
     const previous = user.last_activity
@@ -466,7 +501,7 @@ async function openApp(env, chatId, requestUrl, text) {
   return telegram(env, "sendMessage", {
     chat_id: chatId,
     text,
-    reply_markup: { inline_keyboard: [[{ text: "Открыть наше пространство", web_app: { url: appUrl(env, requestUrl) } }]] }
+    reply_markup: { inline_keyboard: [[{ text: "Открыть пространство", web_app: { url: appUrl(env, requestUrl) } }]] }
   });
 }
 
@@ -507,7 +542,7 @@ async function webhook(request, env, url) {
       });
       await openApp(env, message.chat.id, url, "Ваше пространство всегда под рукой.");
     } else {
-      await openApp(env, message.chat.id, url, "Ваши планы, воспоминания и маленькие радости — в одном уютном месте.");
+      await openApp(env, message.chat.id, url, "Ваши планы, воспоминания и желания — в одном месте.");
     }
   } catch (error) {
     console.error("webhook delivery failed", error);
@@ -518,10 +553,10 @@ async function webhook(request, env, url) {
 async function ensureSchema(env) {
   const statements = [
     `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
-    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,recurs INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
+    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,done_by INTEGER,done_at INTEGER,PRIMARY KEY (pair_id,day))`,
@@ -538,7 +573,11 @@ async function ensureSchema(env) {
   await env.DB.batch(statements.map(sql => env.DB.prepare(sql)));
   for (const [table, column, definition] of [
     ["users", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
-    ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"]
+    ["users", "gender", "TEXT"],
+    ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
+    ["tasks", "day", "TEXT"],
+    ["tasks", "time", "TEXT"],
+    ["dates", "time", "TEXT"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
     if (!info.results.some(row => row.name === column)) {

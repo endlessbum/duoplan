@@ -11,3 +11,4 @@ tests/__pycache__/
 .dev.vars
 .wrangler/
 node_modules/
+.workbuddy-ai/tmp/

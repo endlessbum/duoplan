@@ -4,9 +4,11 @@ const content = document.querySelector("#content");
 const onboarding = document.querySelector("#onboarding");
 const outside = document.querySelector("#outside");
 const dialog = document.querySelector("#dialog");
-const typeDialog = document.querySelector("#type-dialog");
 const form = document.querySelector("#dialog-form");
 const formError = document.querySelector("#dialog-error");
+const bottomNav = document.querySelector(".bottom-nav");
+const navDrop = document.querySelector(".nav-drop");
+const navItems = [...document.querySelectorAll(".nav-item[data-route]")];
 const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow";
 
 let state = null;
@@ -15,6 +17,9 @@ let pendingAction = null;
 let pendingId = null;
 let dialogBusy = false;
 let toastTimer;
+let dropX = null;
+let dropWidth = null;
+let dropAnimation = null;
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
 const plural = (number, one, few, many) => {
@@ -36,12 +41,6 @@ const formatTimestamp = seconds => {
   return Number.isFinite(date.getTime()) ? shortDate(date) : "недавно";
 };
 
-const icons = {
-  tasks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
-  dates: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4m8-4v4M3 10h18"/></svg>',
-  memories: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/></svg>',
-  wishes: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z"/></svg>'
-};
 const editIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>';
 const trashIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/></svg>';
 const restoreIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
@@ -142,18 +141,107 @@ function showApp() {
   }
 }
 
+const titles = {
+  home: "НАШЕ ПРОСТРАНСТВО",
+  tasks: "Наши планы",
+  dates: "Значимые даты",
+  memories: "Дневник двоих",
+  wishes: "Наши желания",
+  pair: "Наша пара"
+};
+
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Текущий X анимации (в px) — нужен, если пользователь переключает вкладку
+// повторно, пока «капля» ещё летит к предыдущей.
+function dropTranslateX() {
+  try {
+    return new DOMMatrixReadOnly(getComputedStyle(navDrop).transform).m41;
+  } catch {
+    return null;
+  }
+}
+
+function setDropX(x) {
+  navDrop.style.setProperty("--drop-x", `${x}px`);
+}
+
+// Перетекание капли: по пути она вытягивается по горизонтали, на финише
+// слегка пружинит обратно. translate3d — позиция, scale — «жидкость».
+function animateDrop(from, to) {
+  const distance = to - from;
+  const stretch = Math.min(1.16, 1 + Math.abs(distance) / 700);
+  const squash = 2 - stretch;
+  const settleX = 1 - (stretch - 1) * .45;
+  const settleY = 1 + (stretch - 1) * .45;
+  dropAnimation = navDrop.animate([
+    { transform: `translate3d(${from}px,-50%,0) scale(1,1)`, offset: 0 },
+    { transform: `translate3d(${from + distance * .32}px,-50%,0) scale(${stretch},${squash})`, offset: .32 },
+    { transform: `translate3d(${from + distance * .82}px,-50%,0) scale(${1 + (stretch - 1) * .35},${1 - (squash - 1) * .35})`, offset: .78 },
+    { transform: `translate3d(${to}px,-50%,0) scale(${settleX},${settleY})`, offset: .9 },
+    { transform: `translate3d(${to}px,-50%,0) scale(1,1)`, offset: 1 }
+  ], {
+    duration: Math.min(620, 360 + Math.abs(distance) * .35),
+    easing: "cubic-bezier(.3,.72,.24,1)"
+  });
+  dropAnimation.onfinish = () => {
+    dropAnimation = null;
+    // Пока капля летела, бар мог изменить ширину (скроллбар, поворот) —
+    // доводим позицию до актуальной геометрии без второй анимации.
+    positionDrop(navItems.find(button => button.dataset.route === route), false);
+  };
+}
+
+function positionDrop(activeButton, animate = true) {
+  if (!navDrop) return;
+  if (!activeButton) {
+    navDrop.classList.add("is-hidden");
+    dropX = null;
+    dropWidth = null;
+    if (dropAnimation) { dropAnimation.cancel(); dropAnimation = null; }
+    return;
+  }
+  const wasHidden = navDrop.classList.contains("is-hidden");
+  navDrop.classList.remove("is-hidden");
+  const width = navDrop.offsetWidth;
+  const x = activeButton.offsetLeft + (activeButton.offsetWidth - width) / 2;
+  const running = dropAnimation;
+  dropAnimation = null;
+  if (running) {
+    const visualX = dropTranslateX();
+    running.cancel();
+    if (visualX !== null && Number.isFinite(visualX)) dropX = visualX;
+  }
+  const resized = dropWidth !== null && Math.abs(dropWidth - width) > 1;
+  const move = animate && !wasHidden && !resized && !reducedMotion() && dropX !== null && Math.abs(dropX - x) > 1;
+  setDropX(x);
+  if (move) animateDrop(dropX, x);
+  dropX = x;
+  dropWidth = width;
+}
+
 function updateChrome() {
-  const pair = state?.pair;
-  document.querySelector("#pair-name").textContent = pair ? (pair.user_b ? `${pair.name1} и ${pair.name2}` : "Ваше пространство") : "DuoPlan";
+  const title = document.querySelector("#page-title");
+  title.textContent = titles[route] || titles.home;
+  title.classList.toggle("is-home", route === "home");
+  // Кнопка «Назад» в шапке нужна только на «Нашей паре»: остальные вкладки
+  // доступны из нижнего меню, а выше есть системная кнопка Telegram.
+  document.querySelector("#topbar-back").hidden = route !== "pair";
   document.querySelector("#avatar-letter").textContent = Array.from(state?.user?.display_name || "Д")[0]?.toUpperCase() || "Д";
-  document.querySelectorAll(".nav-item[data-route]").forEach(button => {
+  let activeNav = null;
+  navItems.forEach(button => {
     const active = button.dataset.route === route;
     button.classList.toggle("active", active);
-    if (active) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
+    if (active) {
+      button.setAttribute("aria-current", "page");
+      activeNav = button;
+    } else {
+      button.removeAttribute("aria-current");
+    }
   });
+  positionDrop(activeNav);
   try {
-    if (route === "home" || !state?.pair) tg?.BackButton?.hide();
+    if (route === "home" || route === "pair" || !state?.pair) tg?.BackButton?.hide();
     else tg?.BackButton?.show();
   } catch {}
 }
@@ -162,16 +250,54 @@ function empty(title, text, action = "") {
   return `<div class="empty"><div class="empty-art" aria-hidden="true"></div><h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="primary small" data-action="${esc(action)}">Добавить</button>` : ""}</div>`;
 }
 
-function pageHead(title) {
-  return `<div class="page-head"><button class="back-button" data-route="home" aria-label="На главную">←</button><h2 tabindex="-1">${esc(title)}</h2></div>`;
-}
-
 function itemActions(type, id, extra = "") {
   return `<div class="item-actions">${extra}<button class="icon-button" data-edit="${type}" data-id="${id}" aria-label="Редактировать">${editIcon}</button><button class="icon-button danger" data-delete="${type}" data-id="${id}" aria-label="Удалить">${trashIcon}</button></div>`;
 }
 
+// Назначенный момент плана: дата + время, а без времени — конец дня (23:59).
+function planTarget(item) {
+  if (!item.day) return null;
+  const [year, month, date] = String(item.day).split("-").map(Number);
+  if (![year, month, date].every(Number.isFinite)) return null;
+  let hours = 23, minutes = 59;
+  if (item.time) {
+    const [hh, mm] = String(item.time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  const target = new Date(year, month - 1, date, hours, minutes, 0, 0);
+  return Number.isFinite(target.getTime()) ? target : null;
+}
+
+function countdownFromDiff(diff) {
+  if (diff <= 0) return { overdue: true, text: "Время пришло" };
+  const totalMinutes = Math.floor(diff / 60000);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60) % 24;
+  const days = Math.floor(totalMinutes / 1440);
+  // Меньше суток — подробный отсчёт по часам и минутам.
+  if (diff < 86400000) {
+    return { overdue: false, text: `Через ${hours} ${plural(hours, "час", "часа", "часов")} ${minutes} ${plural(minutes, "минуту", "минуты", "минут")}` };
+  }
+  if (days < 60) {
+    return { overdue: false, text: `Через ${days} ${plural(days, "день", "дня", "дней")}` };
+  }
+  const months = Math.floor(days / 30);
+  const restDays = days % 30;
+  return { overdue: false, text: `Через ${months} ${plural(months, "месяц", "месяца", "месяцев")}${restDays ? ` ${restDays} ${plural(restDays, "день", "дня", "дней")}` : ""}` };
+}
+
+function taskCountdown(item, completed) {
+  if (completed || !item.day) return null;
+  const target = planTarget(item);
+  if (!target) return null;
+  return { ...countdownFromDiff(target.getTime() - Date.now()), targetMs: target.getTime() };
+}
+
 function taskItem(item, completed = false) {
-  return `<div class="item"><div class="item-main"><p class="item-title">${esc(item.title)}</p><p class="item-meta">${completed ? `Завершён ${formatTimestamp(item.completed_at)}` : `Добавлен ${formatTimestamp(item.created_at)}`}</p></div><div class="item-actions">${completed ? `<button class="icon-button" data-action="restore-task" data-id="${item.id}" aria-label="Вернуть в планы">${restoreIcon}</button>` : `<button class="icon-button" data-action="done-task" data-id="${item.id}" aria-label="Завершить план">${checkIcon}</button>`}<button class="icon-button" data-edit="tasks" data-id="${item.id}" aria-label="Редактировать">${editIcon}</button><button class="icon-button danger" data-delete="tasks" data-id="${item.id}" aria-label="Удалить">${trashIcon}</button></div></div>`;
+  const countdown = taskCountdown(item, completed);
+  const meta = completed ? `Завершён ${formatTimestamp(item.completed_at)}` : `Добавлен ${formatTimestamp(item.created_at)}`;
+  const chip = countdown ? `<span class="day-chip ${countdown.overdue ? "is-overdue" : "is-countdown"}" data-countdown="${countdown.targetMs}">${countdown.text}</span>` : "";
+  return `<div class="item"><div class="item-main"><p class="item-title">${esc(item.title)}</p><p class="item-meta">${meta}</p></div>${chip}<div class="item-actions">${completed ? `<button class="icon-button" data-action="restore-task" data-id="${item.id}" aria-label="Вернуть в планы">${restoreIcon}</button>` : `<button class="icon-button" data-action="done-task" data-id="${item.id}" aria-label="Завершить план">${checkIcon}</button>`}<button class="icon-button" data-edit="tasks" data-id="${item.id}" aria-label="Редактировать">${editIcon}</button><button class="icon-button danger" data-delete="tasks" data-id="${item.id}" aria-label="Удалить">${trashIcon}</button></div></div>`;
 }
 
 function wishItem(item, completed = false) {
@@ -182,21 +308,33 @@ function memoryItem(item) {
   return `<article class="item memory"><div class="item-main"><span class="memory-date">${formatDate(item.day)} · ${esc(item.display_name || "Один из вас")}</span><p class="item-body">${esc(item.body)}</p></div><div class="item-actions"><button class="icon-button" data-edit="memories" data-id="${item.id}" aria-label="Редактировать">${editIcon}</button><button class="icon-button danger" data-delete="memories" data-id="${item.id}" aria-label="Удалить">${trashIcon}</button></div></article>`;
 }
 
-function annualDate(day, year) {
+function dayTime(day, time, fallbackHour = 12) {
+  const [year, month, date] = String(day).split("-").map(Number);
+  let hours = fallbackHour, minutes = 0;
+  if (time) {
+    const [hh, mm] = String(time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  return new Date(year, month - 1, date, hours, minutes, 0, 0);
+}
+
+function annualDate(day, year, time) {
   const [, month, date] = String(day).split("-").map(Number);
-  const result = new Date(year, month - 1, date, 12);
+  let hours = 12, minutes = 0;
+  if (time) {
+    const [hh, mm] = String(time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  const result = new Date(year, month - 1, date, hours, minutes, 0, 0);
   return result.getMonth() === month - 1 ? result : null;
 }
 
 function nextOccurrence(item) {
   const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
-  if (!item.recurs) {
-    const [year, month, date] = String(item.day).split("-").map(Number);
-    return new Date(year, month - 1, date, 12);
-  }
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  if (!item.recurs) return dayTime(item.day, item.time);
   for (let year = now.getFullYear(); year <= now.getFullYear() + 8; year++) {
-    const candidate = annualDate(item.day, year);
+    const candidate = annualDate(item.day, year, item.time);
     if (candidate && candidate >= today) return candidate;
   }
   return null;
@@ -208,16 +346,26 @@ function dateItem(item) {
   const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 12);
   const days = next ? Math.round((next - midnight) / 86400000) : null;
   let label = "";
+  let chipClass = "";
+  let dataCountdown = "";
   if (days === null) label = "Дата";
   else if (days < 0) label = `${Math.abs(days)} ${plural(Math.abs(days), "день", "дня", "дней")} назад`;
+  else if (days === 0 && item.time) {
+    const countdown = countdownFromDiff(next.getTime() - Date.now());
+    label = countdown.text;
+    chipClass = countdown.overdue ? "is-overdue" : "is-countdown";
+    if (!countdown.overdue) dataCountdown = ` data-countdown="${next.getTime()}"`;
+  }
   else if (days === 0) label = "Сегодня";
   else if (days === 1) label = "Завтра";
   else label = `Через ${days} ${plural(days, "день", "дня", "дней")}`;
-  return `<div class="item"><div class="item-main"><p class="item-title">${esc(item.title)}</p><p class="item-meta">${formatDate(item.day)}${item.recurs ? " · каждый год" : " · один раз"}</p></div><span class="day-chip">${label}</span><div class="item-actions"><button class="icon-button" data-edit="dates" data-id="${item.id}" aria-label="Редактировать">${editIcon}</button><button class="icon-button danger" data-delete="dates" data-id="${item.id}" aria-label="Удалить">${trashIcon}</button></div></div>`;
+  return `<div class="item"><div class="item-main"><p class="item-title">${esc(item.title)}</p><p class="item-meta">${formatDate(item.day)}${item.recurs ? " · каждый год" : " · один раз"}${item.time ? " · " + esc(item.time) : ""}</p></div><span class="day-chip ${chipClass}"${dataCountdown}>${label}</span><div class="item-actions"><button class="icon-button" data-edit="dates" data-id="${item.id}" aria-label="Редактировать">${editIcon}</button><button class="icon-button danger" data-delete="dates" data-id="${item.id}" aria-label="Удалить">${trashIcon}</button></div></div>`;
 }
 
 function renderHome() {
-  const { pair, daily, tasks, memories } = state;
+  const { pair, tasks, memories } = state;
+  // Ритуал дня — общее действие: пока партнёр не пришёл, карточку не показываем.
+  const daily = pair.user_b ? state.daily : null;
   const upcoming = [...state.dates].sort((a, b) => {
     const da = nextOccurrence(a), db = nextOccurrence(b);
     return (da?.getTime() ?? Infinity) - (db?.getTime() ?? Infinity);
@@ -225,8 +373,6 @@ function renderHome() {
   return `<section class="view">
     <div class="hero-card"><span class="overline">ВАШ ОБЩИЙ РИТМ</span><h2 tabindex="-1">${pair.user_b ? "Маленькие шаги к большому «мы»." : "Пригласите партнёра в ваше пространство."}</h2><div class="hero-meta"><span>${pair.together_pts} XP вместе</span><span>Серия ${state.user.streak} ${plural(state.user.streak, "день", "дня", "дней")}</span></div></div>
     ${daily ? `<div class="ritual ${daily.done ? "done" : ""}"><div class="ritual-head"><span class="overline">РИТУАЛ ДНЯ</span><span class="day-chip">${daily.done ? "Выполнено" : "Сегодня"}</span></div><p>${esc(daily.action)}</p>${daily.done ? "" : '<button class="primary small" data-action="done-daily">Мы это сделали · +10 XP</button>'}</div>` : ""}
-    <div class="section-title"><h3>Добавить в вашу историю</h3></div>
-    <div class="quick-grid">${["tasks","dates","memories","wishes"].map(type => `<button class="quick-tile" data-action="add-${type}">${icons[type]}${{tasks:"План",dates:"Дата",memories:"Момент",wishes:"Желание"}[type]}</button>`).join("")}</div>
     <div class="section-title"><h3>Ближайшие планы</h3><button class="text-button" data-route="tasks">Все</button></div>
     <div class="preview-list">${tasks.length ? tasks.slice(0,3).map(item => taskItem(item)).join("") : empty("Всё впереди", "Добавьте первый совместный план.", "add-tasks")}</div>
     ${upcoming.length ? `<div class="section-title"><h3>Ближайшие даты</h3><button class="text-button" data-route="dates">Все</button></div><div class="preview-list">${upcoming.map(dateItem).join("")}</div>` : ""}
@@ -235,7 +381,9 @@ function renderHome() {
 }
 
 function renderTasks() {
-  return `<section class="view">${pageHead("Наши планы")}<button class="primary full" data-action="add-tasks">Добавить план</button><div class="preview-list">${state.tasks.length ? state.tasks.map(item => taskItem(item)).join("") : empty("Пока свободно", "Добавьте первый общий шаг.", "add-tasks")}</div>${state.completedTasks.length ? `<details class="archive"><summary>Завершённые · ${state.completedTasks.length}</summary><div class="preview-list">${state.completedTasks.map(item => taskItem(item, true)).join("")}</div></details>` : ""}</section>`;
+  // Верхняя кнопка нужна только когда список непустой: иначе она дублирует
+  // кнопку «Добавить» внутри пустого состояния.
+  return `<section class="view">${state.tasks.length ? '<button class="primary full add-button" data-action="add-tasks">Добавить план</button>' : ""}<div class="preview-list">${state.tasks.length ? state.tasks.map(item => taskItem(item)).join("") : empty("Пока свободно", "Добавьте первый общий шаг.", "add-tasks")}</div>${state.completedTasks.length ? `<details class="archive"><summary>Завершённые · ${state.completedTasks.length}</summary><div class="preview-list">${state.completedTasks.map(item => taskItem(item, true)).join("")}</div></details>` : ""}</section>`;
 }
 
 function renderDates() {
@@ -243,20 +391,24 @@ function renderDates() {
     const da = nextOccurrence(a), db = nextOccurrence(b);
     return (da?.getTime() ?? Infinity) - (db?.getTime() ?? Infinity);
   });
-  return `<section class="view">${pageHead("Значимые даты")}<button class="primary full" data-action="add-dates">Добавить дату</button><div class="preview-list">${items.length ? items.map(dateItem).join("") : empty("Важные моменты", "Сохраните дату, которую хочется беречь.", "add-dates")}</div></section>`;
+  return `<section class="view">${items.length ? '<button class="primary full add-button" data-action="add-dates">Добавить дату</button>' : ""}<div class="preview-list">${items.length ? items.map(dateItem).join("") : empty("Важные моменты", "Сохраните дату, которую хочется беречь.", "add-dates")}</div></section>`;
 }
 
 function renderMemories() {
-  return `<section class="view">${pageHead("Дневник двоих")}<button class="primary full" data-action="add-memories">Записать момент</button><div class="preview-list">${state.memories.length ? state.memories.map(memoryItem).join("") : empty("История начинается", "Запишите момент, к которому захочется вернуться.", "add-memories")}</div></section>`;
+  return `<section class="view">${state.memories.length ? '<button class="primary full add-button" data-action="add-memories">Записать момент</button>' : ""}<div class="preview-list">${state.memories.length ? state.memories.map(memoryItem).join("") : empty("История начинается", "Запишите момент, к которому захочется вернуться.", "add-memories")}</div></section>`;
 }
 
 function renderWishes() {
-  return `<section class="view">${pageHead("Наши желания")}<button class="primary full" data-action="add-wishes">Добавить желание</button><div class="preview-list">${state.wishes.length ? state.wishes.map(item => wishItem(item)).join("") : empty("О чём мечтается?", "Добавьте желание — большое или совсем маленькое.", "add-wishes")}</div>${state.completedWishes.length ? `<details class="archive"><summary>Исполненные · ${state.completedWishes.length}</summary><div class="preview-list">${state.completedWishes.map(item => wishItem(item, true)).join("")}</div></details>` : ""}</section>`;
+  const wishView = localStorage.getItem("wishView") || "my";
+  const partnerLabel = state.user?.gender === "female" ? "Его" : state.user?.gender === "male" ? "Её" : "Его/Её";
+  const wishes = state.wishes.filter(w => wishView === "my" ? w.owner_id === state.user?.tg_id : w.owner_id !== state.user?.tg_id);
+  const toggle = `<div class="section-title"><h2>${wishView === "my" ? "Мои желания" : `Желания ${partnerLabel.toLowerCase()}`}</h2><button class="text-button" data-action="toggle-wish-view">${wishView === "my" ? partnerLabel : "Мои"}</button></div>`;
+  return `<section class="view">${toggle}${wishes.length ? '<button class="primary full add-button" data-action="add-wishes">Добавить желание</button>' : ""}<div class="preview-list">${wishes.length ? wishes.map(item => wishItem(item)).join("") : empty("О чём мечтается?", "Добавьте желание — большое или совсем маленькое.", "add-wishes")}</div>${state.completedWishes.length ? `<details class="archive"><summary>Исполненные · ${state.completedWishes.length}</summary><div class="preview-list">${state.completedWishes.map(item => wishItem(item, true)).join("")}</div></details>` : ""}</section>`;
 }
 
 function renderPair() {
   const { pair, user } = state;
-  return `<section class="view">${pageHead("Наша пара")}<div class="pair-card"><p class="pair-names">${esc(pair.name1)}${pair.name2 ? ` и ${esc(pair.name2)}` : ""}</p><span class="overline">В DUOPLAN С ${formatDate(pair.started_at).toUpperCase()}</span>${pair.user_b ? "" : `<div><span class="pair-code">${esc(pair.code)}</span><p class="item-meta">Код для партнёра</p></div>`}</div><div class="stats"><div class="stat"><strong>${pair.together_pts}</strong><span>ОБЩИЕ XP</span></div><div class="stat"><strong>${user.points}</strong><span>ВАШИ XP</span></div><div class="stat"><strong>${user.streak}</strong><span>ДНЕЙ ПОДРЯД</span></div></div>${pair.user_b ? "" : '<button class="primary full" data-action="invite">Пригласить партнёра</button><button class="secondary full" data-action="copy-code">Скопировать код</button>'}<button class="danger-button full" data-action="leave-pair">Выйти из пространства</button></section>`;
+  return `<section class="view"><div class="pair-card"><p class="pair-names">${esc(pair.name1)}${pair.name2 ? ` и ${esc(pair.name2)}` : ""}</p><span class="overline">В DUOPLAN С ${formatDate(pair.started_at).toUpperCase()}</span>${pair.user_b ? "" : `<div><span class="pair-code">${esc(pair.code)}</span><p class="item-meta">Код для партнёра</p></div>`}</div><div class="stats"><div class="stat"><strong>${pair.together_pts}</strong><span>ОБЩИЕ XP</span></div><div class="stat"><strong>${user.points}</strong><span>ВАШИ XP</span></div><div class="stat"><strong>${user.streak}</strong><span>ДНЕЙ ПОДРЯД</span></div></div>${pair.user_b ? "" : '<button class="primary full" data-action="invite">Пригласить партнёра</button><button class="secondary full" data-action="copy-code">Скопировать код</button>'}<button class="secondary full pair-leave" data-action="leave-pair">Выйти из пространства</button></section>`;
 }
 
 const views = { home: renderHome, tasks: renderTasks, dates: renderDates, memories: renderMemories, wishes: renderWishes, pair: renderPair };
@@ -264,7 +416,7 @@ const views = { home: renderHome, tasks: renderTasks, dates: renderDates, memori
 function render(focus = false) {
   updateChrome();
   content.innerHTML = (views[route] || renderHome)();
-  if (focus) content.querySelector("h2")?.focus();
+  if (focus) document.querySelector("#page-title")?.focus();
 }
 
 function navigate(next, push = true) {
@@ -296,12 +448,13 @@ async function mutate(path, options, successMessage = "") {
   }
 }
 
-function showTypeDialog() {
-  typeDialog.showModal();
-}
-
 function field(name, label, type = "text", placeholder = "", value = "", attributes = "") {
   return `<label class="field"><span>${esc(label)}</span><input name="${esc(name)}" type="${esc(type)}" placeholder="${esc(placeholder)}" value="${esc(value)}" ${attributes} required></label>`;
+}
+
+// Необязательное поле: пустое значение просто не сохраняется.
+function optionalField(name, label, type = "text", placeholder = "", value = "", attributes = "") {
+  return `<label class="field"><span>${esc(label)}</span><input name="${esc(name)}" type="${esc(type)}" placeholder="${esc(placeholder)}" value="${esc(value)}" ${attributes}></label>`;
 }
 
 function textarea(name, label, placeholder, value = "", max = 2000) {
@@ -338,9 +491,8 @@ function itemById(type, id) {
 }
 
 function openAdd(type) {
-  typeDialog.close();
-  if (type === "tasks") showForm("add-tasks", "Новый план", "Одно понятное действие, которое вы сделаете вместе.", field("title", "Что хотите сделать?", "text", "Например, выбрать место для поездки", "", 'maxlength="180"'));
-  if (type === "dates") showForm("add-dates", "Значимая дата", "Сохраним событие вашей истории.", field("title", "Название", "text", "Например, наше первое путешествие", "", 'maxlength="120"') + field("day", "Дата", "date") + '<label class="check-field"><input name="recurs" type="checkbox" checked><span>Повторять каждый год</span></label>');
+  if (type === "tasks") showForm("add-tasks", "Новый план", "Одно понятное действие, которое вы сделаете вместе.", field("title", "Что хотите сделать?", "text", "Например, выбрать место для поездки", "", 'maxlength="180"') + optionalField("day", "Дата (необязательно)", "date") + optionalField("time", "Время (необязательно)", "time"));
+  if (type === "dates") showForm("add-dates", "Значимая дата", "Сохраним событие вашей истории.", field("title", "Название", "text", "Например, наше первое путешествие", "", 'maxlength="120"') + field("day", "Дата", "date") + optionalField("time", "Время (необязательно)", "time") + '<label class="check-field"><input name="recurs" type="checkbox" checked><span>Повторять каждый год</span></label>');
   if (type === "memories") showForm("add-memories", "Сохранить момент", "Пара строк, к которым будет приятно вернуться.", textarea("body", "Ваше воспоминание", "Сегодня был особенный день…", "", 2000));
   if (type === "wishes") showForm("add-wishes", "Новое желание", "Большое или совсем маленькое — партнёр его увидит.", textarea("body", "Чего вы хотите?", "Например, провести выходной у моря", "", 300));
   if (type === "join") showForm("join-pair", "Войти по коду", "Введите восьмизначный код из приглашения партнёра.", field("code", "Код приглашения", "text", "A1B2C3D4", "", 'maxlength="8" autocapitalize="characters" autocomplete="off" spellcheck="false" pattern="[A-Fa-f0-9]{8}"'), "Соединить");
@@ -349,8 +501,8 @@ function openAdd(type) {
 function openEdit(type, id) {
   const item = itemById(type, id);
   if (!item) return toast("Запись не найдена");
-  if (type === "tasks") showForm("edit-tasks", "Изменить план", "Обновите формулировку общего плана.", field("title", "План", "text", "", item.title, 'maxlength="180"'), "Сохранить", id);
-  if (type === "dates") showForm("edit-dates", "Изменить дату", "Обновите название или дату события.", field("title", "Название", "text", "", item.title, 'maxlength="120"') + field("day", "Дата", "date", "", item.day) + `<label class="check-field"><input name="recurs" type="checkbox" ${item.recurs ? "checked" : ""}><span>Повторять каждый год</span></label>`, "Сохранить", id);
+  if (type === "tasks") showForm("edit-tasks", "Изменить план", "Обновите формулировку общего плана.", field("title", "План", "text", "", item.title, 'maxlength="180"') + optionalField("day", "Дата (необязательно)", "date", "", item.day || "") + optionalField("time", "Время (необязательно)", "time", "", item.time || ""), "Сохранить", id);
+  if (type === "dates") showForm("edit-dates", "Изменить дату", "Обновите название или дату события.", field("title", "Название", "text", "", item.title, 'maxlength="120"') + field("day", "Дата", "date", "", item.day) + optionalField("time", "Время (необязательно)", "time", "", item.time || "") + `<label class="check-field"><input name="recurs" type="checkbox" ${item.recurs ? "checked" : ""}><span>Повторять каждый год</span></label>`, "Сохранить", id);
   if (type === "memories") showForm("edit-memories", "Изменить момент", "Исправьте запись в вашем дневнике.", textarea("body", "Воспоминание", "", item.body, 2000), "Сохранить", id);
   if (type === "wishes") showForm("edit-wishes", "Изменить желание", "Обновите описание желания.", textarea("body", "Желание", "", item.body, 300), "Сохранить", id);
 }
@@ -416,10 +568,14 @@ document.addEventListener("click", async event => {
     return;
   }
   if (!action) return;
+  if (action === "toggle-wish-view") {
+    const current = localStorage.getItem("wishView") || "my";
+    localStorage.setItem("wishView", current === "my" ? "partner" : "my");
+    render(true);
+    return;
+  }
   if (action.startsWith("add-")) { openAdd(action.slice(4)); return; }
   if (action === "show-join") { openAdd("join"); return; }
-  if (action === "quick-add") { showTypeDialog(); return; }
-  if (action === "close-type") { typeDialog.close(); return; }
   if (action === "close-dialog") { closeDialog(); return; }
   if (action === "reload") { if (tg?.reload) tg.reload(); else location.reload(); return; }
   if (action === "create-pair") {
@@ -439,7 +595,21 @@ document.addEventListener("click", async event => {
     catch { toast(`Код: ${state.pair.code}`); }
     return;
   }
-  if (action === "leave-pair") {
+  if (action === "set-gender") {
+      const selectedGender = button.dataset.gender;
+      if (selectedGender) {
+        await api("/api/gender", { method: "POST", body: JSON.stringify({ gender: selectedGender }) });
+        const genderDialog = document.getElementById("gender-dialog");
+        if (genderDialog) genderDialog.close();
+        // Показать приложение после выбора
+        app.hidden = false;
+        // Перезагрузить состояние, чтобы отразить изменения
+        state = normalizeState(await api("/api/state"));
+        render(true);
+      }
+      return;
+    }
+    if (action === "leave-pair") {
     const warning = state.pair.user_b
       ? "Выйти из пространства? Общие записи останутся у партнёра."
       : "Выйти и удалить пустое пространство? Это действие нельзя отменить.";
@@ -472,6 +642,32 @@ dialog.addEventListener("cancel", event => {
   closeDialog();
 });
 
+// Отсчёт живёт: раз в полминуты обновляем уже отрисованные чипы.
+function tickCountdowns() {
+  if (dialog.open) return;
+  document.querySelectorAll(".day-chip[data-countdown]").forEach(element => {
+    const target = Number(element.dataset.countdown);
+    if (!Number.isFinite(target)) return;
+    const countdown = countdownFromDiff(target - Date.now());
+    element.textContent = countdown.text;
+    element.classList.toggle("is-overdue", countdown.overdue);
+    element.classList.toggle("is-countdown", !countdown.overdue);
+    if (countdown.overdue) delete element.dataset.countdown;
+  });
+}
+setInterval(tickCountdowns, 30000);
+
+// При повороте экрана, появлении скроллбара или изменении ширины бар
+// пересобирается — каплю переставляем мгновенно, без перелёта.
+function repositionDrop() {
+  // Ширина капли задана в CSS и меняется вместе с баром, а её X стабилен.
+  // Летящую каплю не сбиваем: по завершении она сама встанет по геометрии.
+  if (app.hidden || dropAnimation) return;
+  positionDrop(navItems.find(button => button.dataset.route === route), false);
+}
+addEventListener("resize", repositionDrop);
+if ("ResizeObserver" in window && bottomNav) new ResizeObserver(repositionDrop).observe(bottomNav);
+
 async function init() {
   applyTheme();
   try {
@@ -485,11 +681,22 @@ async function init() {
     });
   } catch {}
   if (!tg?.initData) {
-    showFatal("Управление доступно внутри Telegram. Откройте @duoplanbot и нажмите «Открыть наше пространство».");
+    showFatal("Управление доступно внутри Telegram. Откройте @duoplanbot и нажмите «Открыть пространство» или кнопку «DuoPlan».");
     return;
   }
   try {
     state = normalizeState(await api("/api/state"));
+    // Если пол не задан, требуем выбор перед входом
+    if (!state.user?.gender) {
+      const genderDialog = document.getElementById("gender-dialog");
+      if (genderDialog) {
+        genderDialog.showModal();
+        // Скрываем основной интерфейс пока не выбран пол
+        app.hidden = true;
+      }
+      // Останавливаем дальнейшее выполнение init, чтобы не показывать контент
+      return;
+    }
     const initial = location.hash.replace(/^#/, "");
     route = views[initial] ? initial : "home";
     history.replaceState({ route }, "", `#${route}`);
