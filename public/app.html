@@ -13,13 +13,7 @@
   <div class="app-shell">
     <!-- Парящие стеклянные кнопки вверху окна в стиле Telegram -->
     <div class="top-glass-bar" role="region" aria-label="Быстрые действия">
-      <div class="top-glass-left">
-        <button id="back-button" class="glass-btn glass-icon-btn" type="button" hidden aria-label="Назад">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M15 18l-6-6 6-6"/>
-          </svg>
-        </button>
-      </div>
+      <div class="top-glass-left"></div>
       <div class="top-glass-right">
         <button id="pair-button" class="glass-btn pair-pill" type="button" aria-label="Наша пара">
           <span class="pair-avatars" aria-hidden="true">
@@ -102,7 +96,7 @@
       </div>
       <div id="dialog-fields" class="sheet-fields"></div>
       <div class="sheet-actions">
-        <button type="button" class="secondary" data-action="close-dialog">Отмена</button>
+        <button type="button" id="dialog-cancel" class="secondary" data-action="close-dialog">Отмена</button>
         <button type="submit" id="dialog-submit" class="primary">Сохранить</button>
       </div>
     </form>

@@ -312,12 +312,15 @@ class DuoPlanService:
             "VALUES(?, ?, 'moment', ?) ON CONFLICT(pair_id, day) DO NOTHING",
             (pair_id, today, action),
         )
+        # Пока шла вставка, другой обработчик мог уже завершить ритуал —
+        # читаем фактическое состояние, а не предполагаем "done": False.
         stored = await self.db.one(
-            "SELECT daily_value FROM daily_rolls WHERE pair_id = ? AND day = ?", (pair_id, today)
+            "SELECT daily_value, done_by FROM daily_rolls WHERE pair_id = ? AND day = ?",
+            (pair_id, today),
         )
         return {
             "action": stored["daily_value"] if stored else action,
-            "done": False,
+            "done": bool(stored["done_by"]) if stored else False,
             "day": today,
         }
 

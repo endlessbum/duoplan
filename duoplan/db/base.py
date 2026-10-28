@@ -68,6 +68,7 @@ class Database:
         self.conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._tx_owner: asyncio.Task[object] | None = None
+        self._tx: Transaction | None = None
 
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,13 +174,17 @@ class Database:
         """
         conn = self._require_conn()
         if self._owns_transaction():
-            yield Transaction()
+            # Вложенный блок разделяет флаг rollback с внешней транзакцией:
+            # иначе tx.rollback() внутри него внешнюю транзакцию не достигнет.
+            assert self._tx is not None
+            yield self._tx
             return
 
         async with self._lock:
             await conn.execute("BEGIN IMMEDIATE")
             self._tx_owner = asyncio.current_task()
             tx = Transaction()
+            self._tx = tx
             try:
                 yield tx
             except BaseException:
@@ -192,6 +197,7 @@ class Database:
                     await conn.commit()
             finally:
                 self._tx_owner = None
+                self._tx = None
 
     # ------------------------------------------------------------------ чтение
 
@@ -246,6 +252,7 @@ class Database:
             if self._tx_owner is not None:
                 await self.conn.rollback()
                 self._tx_owner = None
+                self._tx = None
             await self.conn.close()
             self.conn = None
 

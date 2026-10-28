@@ -12,6 +12,25 @@ const APP_VERSION = "2026.10.28";
 const DB_SCHEMA_VERSION = "2026.10.29";
 const DEFAULT_TZ = "Europe/Moscow";
 
+// /api/state отдаёт активные наборы целиком (с потолком) и только последние
+// записи архивов; остальное догружается страницами через /api/archive.
+const STATE_ACTIVE_LIMIT = 200;
+const STATE_RECENT_LIMIT = 10;
+const ARCHIVE_PAGE_SIZE = 20;
+const ARCHIVE_QUERIES = {
+  memories: {
+    sql: `SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT ? OFFSET ?`
+  },
+  done_tasks: {
+    sql: "SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT ? OFFSET ?"
+  },
+  done_wishes: {
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ? OFFSET ?`
+  }
+};
+
 // Схема D1 поднимается один раз на изолят Worker (CREATE IF NOT EXISTS + ADD COLUMN).
 // Это закрывает случай, когда миграции 0003/0004/0005 ещё не применены на remote.
 const schemaReady = new WeakMap();
@@ -266,7 +285,14 @@ async function leavePair(env, member) {
   const timestamp = now();
   const operations = [];
   if (!partnerId) {
+    // Последний держатель покидает пространство: данные пары удаляются
+    // полностью, освобождая место в базе (восстановить пару по коду нельзя).
     operations.push(
+      env.DB.prepare("DELETE FROM tasks WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM dates WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM memories WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM wishes WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM daily_rolls WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pair_members WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pairs WHERE id=?").bind(member.id)
     );
@@ -354,7 +380,7 @@ function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
   if (localMatches(utc)) return new Date(utc);
   // Несуществующее локальное время (весенний перевод часов):
   // используем смещение до перехода, сдвигая момент вперёд.
-  const preOffset = timeZoneOffsetMs(tz, new Date(desiredUtc - 2 * 3600000));
+  const preOffset = timeZoneOffsetMs(tz, new Date(desiredUtc - 24 * 3600000));
   const shifted = desiredUtc - preOffset;
   return new Date(shifted);
 }
@@ -416,18 +442,21 @@ async function state(env, userId) {
   const user = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(userId).first();
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily] = await Promise.all([
-    env.DB.prepare("SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day").bind(pair.id).all(),
+  const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
+    env.DB.prepare("SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT ?").bind(pair.id, STATE_RECENT_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
-      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
-    pair.user_b ? dailyFor(env, pair.id, pair.timezone) : null
+    pair.user_b ? dailyFor(env, pair.id, pair.timezone) : null,
+    // Пол партнёра — для обращений «Его/Её желания» в вишлисте.
+    partnerId ? env.DB.prepare("SELECT gender FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
   const nowMs = Date.now();
   const sortedDates = [...(dates.results || [])].sort((a, b) => {
@@ -450,7 +479,8 @@ async function state(env, userId) {
       role: pair.role,
       started_at: pair.started_at,
       together_pts: pair.together_pts,
-      timezone: pair.timezone
+      timezone: pair.timezone,
+      partner_gender: partnerUser?.gender || null
     },
     tasks: [...(tasks.results || [])].sort((a, b) => taskTargetMs(a, pair.timezone) - taskTargetMs(b, pair.timezone)),
     completedTasks: completedTasks.results,
@@ -459,6 +489,20 @@ async function state(env, userId) {
     wishes: wishes.results,
     completedWishes: completedWishes.results,
     daily
+  };
+}
+
+// Страница архива: записи после первых STATE_RECENT_LIMIT из /api/state.
+async function archivePage(env, pair, type, page) {
+  const config = ARCHIVE_QUERIES[type];
+  if (!config) throw new HttpError(400, "Неизвестный тип архива", "INVALID_ARCHIVE_TYPE");
+  const offset = STATE_RECENT_LIMIT + page * ARCHIVE_PAGE_SIZE;
+  const rows = await env.DB.prepare(config.sql).bind(pair.id, ARCHIVE_PAGE_SIZE + 1, offset).all();
+  const results = rows.results || [];
+  return {
+    items: results.slice(0, ARCHIVE_PAGE_SIZE),
+    hasMore: results.length > ARCHIVE_PAGE_SIZE,
+    page
   };
 }
 
@@ -553,6 +597,11 @@ async function api(request, env, url) {
 
   const pair = await membership(env, user.tg_id);
   if (!pair) throw new HttpError(409, "Сначала создайте или соедините пространство", "NO_PAIR");
+  if (request.method === "GET" && url.pathname === "/api/archive") {
+    const type = String(url.searchParams.get("type") || "");
+    const page = Math.min(500, Math.max(0, Math.floor(Number(url.searchParams.get("page")) || 0)));
+    return json(await archivePage(env, pair, type, page));
+  }
   if (request.method === "POST" && url.pathname === "/api/pair/leave") {
     await leavePair(env, pair);
     return json(await state(env, user.tg_id));
@@ -813,7 +862,15 @@ async function ensureSchema(env) {
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
     if (!info.results.some(row => row.name === column)) {
-      await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+      try {
+        await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+      } catch (alterError) {
+        // Другой isolate мог добавить колонку между проверкой и ALTER.
+        // Считаем шаг выполненным только если колонка действительно есть,
+        // остальные ошибки миграции не глушим.
+        const fresh = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+        if (!fresh.results.some(row => row.name === column)) throw alterError;
+      }
     }
   }
   await env.DB.batch([

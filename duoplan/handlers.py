@@ -38,6 +38,41 @@ router.callback_query.filter(F.message.chat.type == "private")
 PAGE_SIZE = 8
 PAGE_TEXT_LIMIT = 3900
 
+# Строка записи дневника в бот-вью: "<YYYY-MM-DD> · <имя>\n<тело>", между
+# записями "\n\n". Имя ограничено 64 символами (максимум Telegram), дата — 10.
+_MEMORY_ENTRY_OVERHEAD = 10 + len(" · ") + 1 + 2 + 64
+MEMORY_BODY_VIEW_MAX = (
+    PAGE_TEXT_LIMIT - len("Дневник двоих") - 2 - PAGE_SIZE * _MEMORY_ENTRY_OVERHEAD
+) // PAGE_SIZE
+
+
+def fit_entries(header: str, entries: list[str], limit: int = PAGE_TEXT_LIMIT) -> list[str]:
+    """Возвращает записи, которые помещаются в лимит вместе с заголовком.
+
+    Полный текст сообщения собирается только из вошедших записей, поэтому
+    наличие следующей страницы можно определять по реально выведенным записям.
+    """
+    rendered: list[str] = []
+    used = len(header) + 2  # "\n\n" между заголовком и первой записью
+    for entry in entries:
+        need = len(entry) + (2 if rendered else 0)
+        if used + need > limit:
+            break
+        rendered.append(entry)
+        used += need
+    return rendered
+
+
+def memory_entries(rows: list) -> list[str]:
+    """Форматирует записи дневника, ограничивая тело лимитом страницы."""
+    entries: list[str] = []
+    for row in rows:
+        body = row["body"] or ""
+        if len(body) > MEMORY_BODY_VIEW_MAX:
+            body = body[: MEMORY_BODY_VIEW_MAX - 1].rstrip() + "…"
+        entries.append(f"{row['day']} · {row['display_name'] or 'Один из вас'}\n{body}")
+    return entries
+
 
 class Form(StatesGroup):
     join_code = State()
@@ -420,11 +455,11 @@ async def memories_view(call: CallbackQuery, service: DuoPlanService, page: int 
     has_next = len(rows) > PAGE_SIZE
     rows = rows[:PAGE_SIZE]
 
-    entries = [
-        f"{row['day']} · {row['display_name'] or 'Один из вас'}\n{row['body']}" for row in rows
-    ]
-    if entries:
-        text = "Дневник двоих\n\n" + "\n\n".join(entries)
+    header = "Дневник двоих"
+    rendered = fit_entries(header, memory_entries(rows))
+    has_next = has_next or len(rendered) < len(rows)
+    if rendered:
+        text = header + "\n\n" + "\n\n".join(rendered)
     elif page == 0:
         text = (
             "Дневник двоих\n\n"
@@ -438,9 +473,7 @@ async def memories_view(call: CallbackQuery, service: DuoPlanService, page: int 
     if pager:
         buttons.append(pager)
     buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(
-        call.message, text[:PAGE_TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    await safe_edit(call.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
     return True
 
 
@@ -632,22 +665,37 @@ async def receive_date_title(message: Message, state: FSMContext) -> None:
     await message.answer("Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ.")
 
 
+def parse_date_input(raw: str, current_year: int) -> str:
+    """Разобрать ``ДД.ММ`` или ``ДД.ММ.ГГГГ`` в ISO-дату; иначе ValueError.
+
+    Год в трёхкомпонентном вводе принимается только четырьмя цифрами:
+    ``31.12.24`` — это не 2024 год, и молча превращать его в 24 год
+    нашей эры нельзя.
+    """
+    raw_parts = raw.split(".")
+    parts = [int(part) for part in raw_parts]
+    if len(parts) == 2:
+        year = current_year
+        if parts[0] == 29 and parts[1] == 2:
+            while not (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+                year += 1
+        parts.append(year)
+    if len(parts) != 3:
+        raise ValueError
+    if len(raw_parts) == 3 and len(raw_parts[2]) != 4:
+        raise ValueError
+    return date(parts[2], parts[1], parts[0]).isoformat()
+
+
 @router.message(StateFilter(Form.date_day), F.text)
 async def receive_date_day(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     try:
-        parts = [int(part) for part in raw.split(".")]
-        if len(parts) == 2:
-            year = service.local_today().year
-            if parts[0] == 29 and parts[1] == 2:
-                while not (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
-                    year += 1
-            parts.append(year)
-        if len(parts) != 3:
-            raise ValueError
-        day = date(parts[2], parts[1], parts[0]).isoformat()
+        day = parse_date_input(raw, service.local_today().year)
     except ValueError:
-        await message.answer("Не распознал дату. Попробуйте ещё раз: ДД.ММ или ДД.ММ.ГГГГ.")
+        await message.answer(
+            "Не распознал дату. Попробуйте ещё раз: ДД.ММ или ДД.ММ.ГГГГ (год — четырьмя цифрами)."
+        )
         return
 
     data = await state.get_data()

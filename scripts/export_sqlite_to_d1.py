@@ -19,21 +19,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 TABLES = {
     "pairs": (
-        "id, code, name1, name2, user_a, user_b, started_at, together_pts, "
+        "id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, "
         "created_at, updated_at"
     ),
     "users": (
         "tg_id, username, display_name, role, gender, pair_id, points, streak, "
-        "last_activity, best_streak, created_at, updated_at"
+        "last_activity, best_streak, timezone, created_at, updated_at"
     ),
     "tasks": (
-        "id, pair_id, title, status, created_by, created_at, completed_by, completed_at"
+        "id, pair_id, title, status, day, time, created_by, created_at, completed_by, "
+        "completed_at"
     ),
-    "dates": "id, pair_id, title, day, recurs, created_at",
+    "dates": "id, pair_id, title, day, time, recurs, created_at",
     "memories": "id, pair_id, author_id, body, day, created_at",
     "wishes": "id, pair_id, owner_id, body, done, created_at",
     "daily_rolls": "pair_id, day, daily_value, done_by, done_at",
 }
+
+# Колонки, которые в схеме D1 объявлены NOT NULL с DEFAULT. Если в исходной
+# SQLite колонки нет или значение NULL, вместо NULL подставляется DEFAULT,
+# иначе INSERT нарушит ограничение NOT NULL при импорте.
+NOT_NULL_FALLBACKS = {"timezone": "'Europe/Moscow'"}
 
 
 def quote(value: object) -> str:
@@ -59,8 +65,13 @@ def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str,
     names = [part.strip() for part in columns.split(",") if part.strip()]
     expressions = []
     for name in names:
-        if name in actual:
+        fallback = NOT_NULL_FALLBACKS.get(name)
+        if name in actual and fallback is None:
             expressions.append(name)
+        elif name in actual:
+            expressions.append(f"COALESCE({name}, {fallback}) AS {name}")
+        elif fallback is not None:
+            expressions.append(f"{fallback} AS {name}")
         else:
             expressions.append(f"NULL AS {name}")
     return ", ".join(expressions), names

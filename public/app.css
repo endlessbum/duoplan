@@ -133,7 +133,9 @@ html, body {
 }
 
 .pair-pill {
-  padding: 4px 12px 4px 5px;
+  min-height: 48px;
+  padding: 8px 16px 8px 10px;
+  gap: 10px;
 }
 
 .pair-avatars {
@@ -142,15 +144,15 @@ html, body {
 }
 
 .mini-avatar {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   display: grid;
   place-items: center;
   background: var(--berry-soft);
   color: var(--berry);
   font-weight: 750;
-  font-size: 12px;
+  font-size: 13px;
   border: 1.5px solid var(--surface);
 }
 
@@ -214,6 +216,48 @@ html, body {
   margin: 0;
   font-size: 12.5px;
   color: var(--muted);
+}
+
+/* ------------------------------------------------------------------
+   Переключатель вишлиста «Мои / Её(Его)» — стекло как у нижнего бара
+------------------------------------------------------------------- */
+.wish-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 5px;
+  border-radius: 999px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  outline: 1px solid var(--glass-outer-border);
+  backdrop-filter: blur(26px) saturate(200%);
+  -webkit-backdrop-filter: blur(26px) saturate(200%);
+  box-shadow: var(--glass-shadow);
+  margin: 0 0 14px;
+  user-select: none;
+}
+
+.wish-switch-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: color 0.2s ease, background 0.25s ease, transform 0.18s ease;
+}
+
+.wish-switch-btn:active {
+  transform: scale(0.96);
+}
+
+.wish-switch-btn.is-active {
+  color: var(--berry);
+  background: var(--droplet-bg);
 }
 
 /* ------------------------------------------------------------------
