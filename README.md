@@ -43,6 +43,10 @@ Telegram Mini App для пар: общие планы, значимые дат�
 
 ```bash
 wrangler d1 migrations apply duoplan --local
+Note: do not run wrangler d1 migrations apply on a DB already initialized via /setup; production schema is managed by Worker (ensureSchema).
+
+Note: do not run wrangler d1 migrations apply on a DB already initialized via /setup; production schema is managed by Worker (ensureSchema).
+
 wrangler dev --local --port 8788
 ```
 

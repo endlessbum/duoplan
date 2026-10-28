@@ -638,7 +638,11 @@ async def receive_date_day(message: Message, service: DuoPlanService, state: FSM
     try:
         parts = [int(part) for part in raw.split(".")]
         if len(parts) == 2:
-            parts.append(service.local_today().year)
+            year = service.local_today().year
+            if parts[0] == 29 and parts[1] == 2:
+                while not (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+                    year += 1
+            parts.append(year)
         if len(parts) != 3:
             raise ValueError
         day = date(parts[2], parts[1], parts[0]).isoformat()

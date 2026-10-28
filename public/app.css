@@ -606,6 +606,12 @@ html, body {
   to { transform: rotate(360deg); }
 }
 
+.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.2);
+}
+
 .toast {
   position: fixed;
   left: 50%;

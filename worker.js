@@ -152,19 +152,28 @@ async function telegramUser(initData, token) {
 }
 
 async function rateLimit(env, key, limit, windowSeconds = 60) {
-  const bucket = Math.floor(now() / windowSeconds);
+  const nowSeconds = now();
+  const bucket = Math.floor(nowSeconds / windowSeconds);
   const bucketKey = `${key}:${bucket}`;
-  await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count) VALUES(?,1)
-    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1`).bind(bucketKey).run();
+  const expiresAt = (bucket + 1) * windowSeconds;
+  const insert = () => env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
+    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at`).bind(bucketKey, expiresAt).run();
+  try {
+    await insert();
+  } catch (error) {
+    // На чистой D1 таблица rate_limits может ещё не существовать (ensureSchema
+    // вызывается позже). Создаём минимальную схему и повторяем попытку,
+    // чтобы защита от перебора секретов работала с первого запуска.
+    const message = String(error?.message || error).toLowerCase();
+    if (!message.includes("no such table")) throw error;
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)").run();
+    await insert();
+  }
   const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?").bind(bucketKey).first();
   if (bucket % 10 === 0) {
     // Удаляем только устаревшие окна того же ключа, сравнивая номер окна численно,
     // а не лексикографически по всей строке bucket_key (иначе затрагиваются другие ключи).
-    const prefix = `${key}:`;
-    await env.DB.prepare(`DELETE FROM rate_limits
-      WHERE substr(bucket_key, 1, ?) = ?
-        AND CAST(substr(bucket_key, ?) AS INTEGER) < ?`)
-      .bind(prefix.length, prefix, prefix.length + 1, bucket - 20).run();
+    await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at > 0 AND expires_at < ?").bind(nowSeconds).run();
   }
   if ((row?.count || 0) > limit) throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
 }
@@ -314,9 +323,31 @@ function timeZoneOffsetMs(timeZone, date) {
 
 function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
   const tz = timeZone || "UTC";
-  const utc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
-  const offset = timeZoneOffsetMs(tz, new Date(utc));
-  return new Date(utc - offset);
+  const desiredUtc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
+  let utc = desiredUtc;
+  for (let i = 0; i < 3; i++) {
+    const offset = timeZoneOffsetMs(tz, new Date(utc));
+    const next = desiredUtc - offset;
+    if (next === utc) break;
+    utc = next;
+  }
+  return new Date(utc);
+}
+
+function taskTargetMs(item, timeZone) {
+  if (!item || !item.day) return Number.MAX_SAFE_INTEGER;
+  const parts = String(item.day).split("-");
+  if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
+  const year = Number(parts[0]);
+  const month = Number(parts[1]) - 1;
+  const date = Number(parts[2]);
+  if (![year, month + 1, date].every(Number.isFinite)) return Number.MAX_SAFE_INTEGER;
+  let hours = 23, minutes = 59;
+  if (item.time && /^\d{2}:\d{2}$/.test(item.time)) {
+    const [hh, mm] = String(item.time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  return makeDateInTimeZone(year, month, date, hours, minutes, timeZone).getTime();
 }
 
 function nextDateOccurrence(item, timeZone) {
@@ -396,7 +427,7 @@ async function state(env, userId) {
       together_pts: pair.together_pts,
       timezone: pair.timezone
     },
-    tasks: tasks.results,
+    tasks: [...(tasks.results || [])].sort((a, b) => taskTargetMs(a, pair.timezone) - taskTargetMs(b, pair.timezone)),
     completedTasks: completedTasks.results,
     dates: sortedDates,
     memories: memories.results,
@@ -665,8 +696,11 @@ async function webhook(request, env, url) {
       let joined = false;
       // Сначала проверяем фактическое членство: повторная доставка /start не должна
       // ломать уже состоявшееся присоединение.
-      if (await membership(env, user.tg_id)) {
-        joined = true;
+      const existingMembership = await membership(env, user.tg_id);
+      if (existingMembership) {
+        // Повторное приглашение в ту же пару — идемпотентный успех.
+        // Чужой или неверный код не должен выглядеть как успешный вход.
+        joined = clean(existingMembership.code).toUpperCase() === code.toUpperCase();
       } else {
         try {
           await joinPair(env, user, code);
@@ -713,7 +747,19 @@ async function webhook(request, env, url) {
 async function ensureSchema(env) {
   try {
     const meta = await env.DB.prepare("SELECT value FROM app_meta WHERE key='schema_version'").first();
-    if (meta?.value === APP_VERSION) return;
+    if (meta?.value === APP_VERSION) {
+      try {
+        await env.DB.batch([
+          env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
+            SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0`),
+          env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
+            SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0`)
+        ]);
+      } catch (repairError) {
+        console.error("pair_members repair failed", repairError);
+      }
+      return;
+    }
   } catch {
     // Таблицы app_meta ещё нет — продолжаем полную инициализацию
   }
@@ -727,7 +773,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,done_by INTEGER,done_at INTEGER,PRIMARY KEY (pair_id,day))`,
-    `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS telegram_updates (update_id INTEGER PRIMARY KEY,received_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS idx_tasks_pair ON tasks(pair_id,status)`,
@@ -744,7 +790,8 @@ async function ensureSchema(env) {
     ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
     ["tasks", "day", "TEXT"],
     ["tasks", "time", "TEXT"],
-    ["dates", "time", "TEXT"]
+    ["dates", "time", "TEXT"],
+    ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
     if (!info.results.some(row => row.name === column)) {

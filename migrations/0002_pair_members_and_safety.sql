@@ -33,6 +33,3 @@ WHERE user_b != 0 AND EXISTS(SELECT 1 FROM users WHERE users.tg_id = pairs.user_
 
 CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id, role);
-CREATE INDEX IF NOT EXISTS idx_tasks_pair_status ON tasks(pair_id, status);
-CREATE INDEX IF NOT EXISTS idx_memories_pair_created ON memories(pair_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_wishes_pair_done ON wishes(pair_id, done);

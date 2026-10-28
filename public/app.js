@@ -27,10 +27,13 @@
 
   let appState = null;
   let currentTab = "home";
-  let previousTab = "home";
+  let tabHistory = [];
   let dropletTimer = null;
   let toastTimer = null;
   let dialogContext = null;
+  function partnerMissing() {
+    return !appState?.pair?.user_b;
+  }
 
   function applyTheme() {
     const scheme = tg?.colorScheme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
@@ -155,7 +158,6 @@
   // ------------------------------------------------------------------
   function renderTabHeader(tabKey) {
     const meta = TAB_META[tabKey] || TAB_META.home;
-    const hasBack = tabKey !== "home";
     const pair = appState?.pair;
     let subtitle = meta.sub || "";
     if (tabKey === "home" && pair) {
@@ -164,7 +166,7 @@
         : `${pair.name1} · ожидание партнёра`;
     }
     return `
-      <header class="tab-header ${hasBack ? "has-back" : ""}">
+      <header class="tab-header">
         <h1 class="tab-header-title ${meta.isHome ? "is-home" : ""}">${esc(meta.title)}</h1>
         ${subtitle ? `<p class="tab-header-sub">${esc(subtitle)}</p>` : ""}
       </header>
@@ -174,9 +176,13 @@
   function syncTopControls() {
     const pair = appState?.pair;
     const isSubScreen = currentTab !== "home";
-    backButton.hidden = !isSubScreen;
+    // Собственная кнопка «Назад» с вкладок убрана: навигация идёт через
+    // системную tg.BackButton (на главной она скрыта, чтобы показывалась
+    // кнопка закрытия приложения).
+    if (backButton) backButton.hidden = true;
     if (tg?.BackButton) {
-      tg.BackButton.hide();
+      if (isSubScreen) tg.BackButton.show();
+      else tg.BackButton.hide();
     }
 
     if (!pair) {
@@ -189,23 +195,41 @@
     bottomNav.hidden = false;
     avatarA.textContent = firstLetter(pair.name1, "А");
     avatarB.textContent = pair.user_b ? firstLetter(pair.name2, "Б") : "+";
-    pairPillLabel.textContent = pair.user_b ? `${pair.name1} · ${pair.name2}` : "Код пары";
+    // В кнопке перехода на «Нашу пару» текст не показываем — только круглые аватарки.
+    pairPillLabel.hidden = true;
+    pairPillLabel.textContent = "";
   }
 
-  function switchTab(tab, pushScroll = true) {
-    if (tab !== "pair" && currentTab !== "pair") {
-      previousTab = currentTab;
-    } else if (tab === "pair" && currentTab !== "pair") {
-      previousTab = currentTab;
-    }
-    currentTab = tab;
-    if (TAB_ORDER.includes(tab)) {
-      updateDroplet(tab, true);
+  function switchTab(tab, pushScroll = true, pushHistory = true) {
+    if (tab !== currentTab) {
+      if (pushHistory && currentTab) {
+        tabHistory.push(currentTab);
+      }
+      currentTab = tab;
+      if (TAB_ORDER.includes(tab)) {
+        updateDroplet(tab, true);
+      }
     }
     render();
     if (pushScroll) {
       window.scrollTo({ top: 0, behavior: "instant" });
     }
+  }
+
+  function goBack() {
+    while (tabHistory.length && tabHistory[tabHistory.length - 1] === currentTab) {
+      tabHistory.pop();
+    }
+    const prev = tabHistory.pop();
+    if (prev && prev !== currentTab) {
+      switchTab(prev, true, false);
+      return;
+    }
+    if (currentTab !== "home") {
+      switchTab("home", true, false);
+      return;
+    }
+    if (tg?.close) tg.close();
   }
 
   // ------------------------------------------------------------------
@@ -232,9 +256,15 @@
 
   function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
     const tz = timeZone || "UTC";
-    const utc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
-    const offset = timeZoneOffsetMs(tz, new Date(utc));
-    return new Date(utc - offset);
+    const desiredUtc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
+    let utc = desiredUtc;
+    for (let i = 0; i < 3; i++) {
+      const offset = timeZoneOffsetMs(tz, new Date(utc));
+      const next = desiredUtc - offset;
+      if (next === utc) break;
+      utc = next;
+    }
+    return new Date(utc);
   }
 
   function zonedToday(timeZone) {
@@ -384,14 +414,32 @@
         <p>Планы, значимые даты, дневник воспоминаний и вишлист — в одном уютном месте.</p>
         <div style="margin-top:16px; display:grid; gap:10px;">
           <button class="primary full" type="button" data-action="create-pair">Создать пространство</button>
-          <button class="secondary full" type="button" data-action="open-join">Войти по коду партнёра</button>
         </div>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Вход по коду</p>
+        <h3>Добавить партнёра по коду</h3>
+        <label class="field"><span>Код партнёра (8 символов)</span><input id="join-code-home" maxlength="8" placeholder="Например, 740C04B5"></label>
+        <button class="secondary full" type="button" data-action="join-code" data-input="join-code-home">Войти по коду партнёра</button>
       </section>
     `;
   }
 
   function renderHome() {
     const { pair, user, daily, tasks = [], dates = [], memories = [] } = appState;
+    if (!pair?.user_b) {
+      return `
+        ${renderTabHeader("home")}
+        <section class="card">
+          <p class="eyebrow">Ожидание партнёра</p>
+          <h2>Пригласите партнёра в пространство</h2>
+          <p>Отправьте код партнёру. После его присоединения здесь появятся общие планы, значимые даты, дневник двоих, вишлист и ритуал дня.</p>
+          <div style="margin-top:12px;">
+            <button class="primary full" type="button" data-action="go-tab" data-tab="pair">Наша пара</button>
+          </div>
+        </section>
+      `;
+    }
     const ritualBlock = pair.user_b && daily ? `
       <section class="card">
         <p class="eyebrow">Ритуал дня</p>
@@ -401,7 +449,11 @@
       </section>
     ` : "";
 
-    const previewTasks = tasks.slice(0, 3).map(taskItem).join("");
+    const previewTasks = [...tasks]
+      .sort((a, b) => (planTarget(a.day, a.time)?.getTime() ?? Infinity) - (planTarget(b.day, b.time)?.getTime() ?? Infinity))
+      .slice(0, 3)
+      .map(taskItem)
+      .join("");
     const sortedDates = [...dates].sort(compareDates);
     const previewDates = sortedDates.slice(0, 2).map(dateItem).join("");
     const latestMemory = memories[0];
@@ -421,17 +473,21 @@
 
       ${ritualBlock}
 
+      ${previewTasks ? `
       <div class="section-head-inline">
         <h3>Ближайшие планы</h3>
         <button class="link-btn" type="button" data-action="go-tab" data-tab="tasks">Все →</button>
       </div>
-      ${previewTasks || `<div class="card"><p>Пока нет активных планов.</p><div style="margin-top:10px;"><button class="secondary" type="button" data-action="add-task">Добавить план</button></div></div>`}
+      ${previewTasks}
+      ` : ""}
 
+      ${previewDates ? `
       <div class="section-head-inline">
         <h3>Значимые даты</h3>
         <button class="link-btn" type="button" data-action="go-tab" data-tab="dates">Все →</button>
       </div>
-      ${previewDates || `<div class="card"><p>Сохраните важные дни вашей пары.</p></div>`}
+      ${previewDates}
+      ` : ""}
 
       ${latestMemory ? `
         <div class="section-head-inline">
@@ -593,15 +649,16 @@
   }
 
   function renderListTab(tabKey, items, addAction, addLabel, emptyTitle, emptyCopy, renderer) {
+    const disabledClass = partnerMissing() ? " is-disabled" : "";
     return `
       ${renderTabHeader(tabKey)}
-      ${items.length ? `<button class="primary full add-button" type="button" data-action="${addAction}">${esc(addLabel)}</button>` : ""}
+      ${items.length ? `<button class="primary full add-button${disabledClass}" type="button" data-action="${addAction}">${esc(addLabel)}</button>` : ""}
       ${items.length ? items.map(renderer).join("") : `
         <section class="card">
           <h3>${esc(emptyTitle)}</h3>
           <p>${esc(emptyCopy)}</p>
           <div style="margin-top:12px;">
-            <button class="primary full" type="button" data-action="${addAction}">${esc(addLabel)}</button>
+            <button class="primary full${disabledClass}" type="button" data-action="${addAction}">${esc(addLabel)}</button>
           </div>
         </section>
       `}
@@ -610,18 +667,37 @@
 
   function renderPair() {
     const { pair } = appState;
-    return `
-      ${renderTabHeader("pair")}
+    const inviteBlock = !pair.user_b ? `
       <section class="card">
-        <p class="eyebrow">Участники пространства</p>
-        <h3>${esc(pair.name1)} ${pair.user_b ? `и ${esc(pair.name2)}` : "(ожидание партнёра)"}</h3>
-        <p>Общие очки пары: ${pair.together_pts || 0} XP</p>
+        <p class="eyebrow">Приглашение партнёра</p>
+        <h3>Отправьте код партнёру</h3>
+        <p>После его присоединения здесь появятся общие планы, значимые даты, дневник двоих, вишлист и ритуал дня. Общие очки пары: ${pair.together_pts || 0} XP</p>
         ${pair.code ? `
           <div style="margin-top:14px;">
             <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
           </div>
         ` : ""}
+      </section>
+    ` : "";
+    return `
+      ${renderTabHeader("pair")}
+      ${inviteBlock}
+      <section class="card">
+        <p class="eyebrow">Участники пространства</p>
+        <h3>${esc(pair.name1)} ${pair.user_b ? `и ${esc(pair.name2)}` : "(ожидание партнёра)"}</h3>
+        <p>Общие очки пары: ${pair.together_pts || 0} XP</p>
+        ${pair.user_b && pair.code ? `
+          <div style="margin-top:14px;">
+            <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
+          </div>
+        ` : ""}
         <button class="secondary full pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Вход по коду</p>
+        <h3>Добавить партнёра по коду</h3>
+        <label class="field"><span>Код партнёра (8 символов)</span><input id="join-code-pair" maxlength="8" placeholder="Например, 740C04B5"></label>
+        <button class="secondary full" type="button" data-action="join-code" data-input="join-code-pair">Войти по коду партнёра</button>
       </section>
     `;
   }
@@ -635,11 +711,12 @@
     if (currentTab === "home") {
       appEl.innerHTML = renderHome();
     } else if (currentTab === "tasks") {
-      const openTasks = appState.tasks || [];
+      const openTasks = [...(appState.tasks || [])].sort((a, b) => (planTarget(a.day, a.time)?.getTime() ?? Infinity) - (planTarget(b.day, b.time)?.getTime() ?? Infinity));
       const doneTasks = appState.completedTasks || [];
+      const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
       let html = renderTabHeader("tasks");
       if (openTasks.length) {
-        html += `<button class="primary full add-button" type="button" data-action="add-task">Добавить план</button>`;
+        html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
         html += openTasks.map(taskItem).join("");
       } else if (!doneTasks.length) {
         html += `
@@ -647,10 +724,12 @@
             <h3>Всё впереди</h3>
             <p>Запишите идею свидания, поездки или общего дела.</p>
             <div style="margin-top:12px;">
-              <button class="primary full" type="button" data-action="add-task">Добавить план</button>
+              <button class="primary full${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>
             </div>
           </section>
         `;
+      } else {
+        html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
       }
       if (doneTasks.length) {
         html += `<div class="section-head-inline"><h3>Завершённые · ${doneTasks.length}</h3></div>`;
@@ -665,19 +744,20 @@
     } else if (currentTab === "wishes") {
       const openWishes = appState.wishes || [];
       const doneWishes = appState.completedWishes || [];
+      const wishDisabledClass = partnerMissing() ? " is-disabled" : "";
       let html = renderTabHeader("wishes");
       if (openWishes.length) {
-        html += `<button class="primary full add-button" type="button" data-action="add-wish">Добавить желание</button>`;
+        html += `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>`;
         html += openWishes.map(wishItem).join("");
       } else if (doneWishes.length) {
-        html += `<button class="primary full add-button" type="button" data-action="add-wish">Добавить желание</button>`;
+        html += `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>`;
       } else {
         html += `
           <section class="card">
             <h3>Вишлист пуст</h3>
             <p>Поделитесь идеями подарков и маленькими мечтами.</p>
             <div style="margin-top:12px;">
-              <button class="primary full" type="button" data-action="add-wish">Добавить желание</button>
+              <button class="primary full${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>
             </div>
           </section>
         `;
@@ -703,6 +783,14 @@
   }
 
   let dialogSubmitting = false;
+  // Дата обязательна, если указано время (ограничение API).
+  dialogFields.addEventListener("input", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement) || target.name !== "time") return;
+    const form = target.closest("form");
+    const dayInput = form?.querySelector('input[name="day"]');
+    if (dayInput) dayInput.required = Boolean(target.value);
+  });
   dialogForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!dialogContext || dialogSubmitting) return;
@@ -731,12 +819,11 @@
     switchTab(btn.dataset.tab);
   });
 
-  backButton?.addEventListener("click", () => {
-    switchTab(currentTab === "pair" ? (previousTab || "home") : "home");
-  });
+  backButton?.addEventListener("click", goBack);
 
   pairButton?.addEventListener("click", () => {
-    switchTab(currentTab === "pair" ? (previousTab || "home") : "pair");
+    if (currentTab === "pair") goBack();
+    else switchTab("pair");
   });
 
   document.addEventListener("click", async (e) => {
@@ -745,6 +832,10 @@
     const action = btn.dataset.action;
 
     try {
+      if (["add-task", "add-date", "add-memory", "add-wish"].includes(action) && partnerMissing()) {
+        showToast("Сначала добавьте партнёра");
+        return;
+      }
       if (action === "close-dialog") {
         dialog.close();
       } else if (action === "go-tab") {
@@ -758,6 +849,13 @@
           fields: `<label class="field"><span>Код партнёра (8 символов)</span><input name="code" maxlength="8" required placeholder="Например, 740C04B5"></label>`,
           onSubmit: (fd) => request("/api/pair/join", { method: "POST", body: { code: fd.get("code") } })
         });
+      } else if (action === "join-code") {
+        const inputId = btn.dataset.input;
+        const input = inputId ? document.getElementById(inputId) : null;
+        const code = input?.value?.trim() || "";
+        appState = await request("/api/pair/join", { method: "POST", body: { code } });
+        if (input) input.value = "";
+        switchTab("home");
       } else if (action === "add-task") {
         openDialog({
           title: "Новый план",
@@ -892,6 +990,8 @@
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") refreshState();
   });
+
+  if (tg?.BackButton?.onClick) tg.BackButton.onClick(goBack);
 
   // Инициализация
   (async () => {

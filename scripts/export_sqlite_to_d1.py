@@ -44,14 +44,36 @@ def quote(value: object) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Не удалось прочитать структуру таблицы {table}: {exc}") from exc
+    return {str(row["name"]) for row in rows}
+
+
+def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str, list[str]]:
+    actual = table_columns(db, table)
+    if not actual:
+        raise RuntimeError(f"Таблица {table} отсутствует в SQLite-базе")
+    names = [part.strip() for part in columns.split(",") if part.strip()]
+    expressions = []
+    for name in names:
+        if name in actual:
+            expressions.append(name)
+        else:
+            expressions.append(f"NULL AS {name}")
+    return ", ".join(expressions), names
+
+
 def dump(source: Path) -> str:
     db = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
     lines = ["PRAGMA foreign_keys=ON;", "BEGIN;"]
     try:
         for table, columns in TABLES.items():
-            rows = db.execute(f"SELECT {columns} FROM {table}").fetchall()
-            names = [part.strip() for part in columns.split(",")]
+            select_columns, names = build_select(db, table, columns)
+            rows = db.execute(f"SELECT {select_columns} FROM {table}").fetchall()
             for row in rows:
                 values = ", ".join(quote(row[name]) for name in names)
                 lines.append(f"INSERT OR REPLACE INTO {table}({columns}) VALUES({values});")

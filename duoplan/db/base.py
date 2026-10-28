@@ -24,7 +24,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -38,6 +38,9 @@ MIGRATIONS: dict[int, Sequence[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_pairs_user_b ON pairs(user_b)",
         "CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(pair_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_wishes_created ON wishes(pair_id, created_at)",
+    ),
+    3: (
+        "ALTER TABLE users ADD COLUMN gender TEXT",
     ),
 }
 
@@ -97,7 +100,13 @@ class Database:
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 for sql in statements:
-                    await conn.execute(sql)
+                    try:
+                        await conn.execute(sql)
+                    except aiosqlite.OperationalError as exc:
+                        # Повторное применение миграции на уже актуальной схеме:
+                        # игнорируем только «duplicate column name», остальные ошибки пробрасываем.
+                        if "duplicate column name" not in str(exc).lower():
+                            raise
                 # Версия фиксируется в той же транзакции, что и миграция:
                 # при сбое откатываются и изменения схемы, и номер версии.
                 await conn.execute(f"PRAGMA user_version = {version}")
