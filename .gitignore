@@ -12,3 +12,9 @@ tests/__pycache__/
 .wrangler/
 node_modules/
 .workbuddy-ai/tmp/
+.pytest_cache/
+data/*.db
+data/*.sql
+_cc.py
+_lv.py
+_smoke.py

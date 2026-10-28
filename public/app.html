@@ -4,65 +4,111 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f7f3ed">
-  <meta name="robots" content="noindex,nofollow">
-  <title>DuoPlan — наше пространство</title>
+  <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
-  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-  <script src="/app.js" defer></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <noscript><p class="noscript">Для DuoPlan нужен JavaScript. Откройте <a href="https://t.me/duoplanbot">@duoplanbot</a> в Telegram.</p></noscript>
+  <div class="app-shell">
+    <!-- Парящие стеклянные кнопки вверху окна в стиле Telegram -->
+    <div class="top-glass-bar" role="region" aria-label="Быстрые действия">
+      <div class="top-glass-left">
+        <button id="back-button" class="glass-btn glass-icon-btn" type="button" hidden aria-label="Назад">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="top-glass-right">
+        <button id="pair-button" class="glass-btn pair-pill" type="button" aria-label="Наша пара">
+          <span class="pair-avatars" aria-hidden="true">
+            <span id="avatar-a" class="mini-avatar">Д</span>
+            <span id="avatar-b" class="mini-avatar is-second">П</span>
+          </span>
+          <span id="pair-pill-label" class="pair-pill-label">Пара</span>
+        </button>
+      </div>
+    </div>
 
-  <div id="app" class="app" hidden>
-    <header class="topbar">
-      <div class="topbar-copy"><button class="back-button topbar-back" id="topbar-back" data-route="home" aria-label="Назад на главную" hidden>←</button><h1 id="page-title" tabindex="-1">НАШЕ ПРОСТРАНСТВО</h1></div>
-      <button class="avatar-button" data-route="pair" aria-label="Наша пара"><span id="avatar-letter">Д</span></button>
-    </header>
+    <!-- Основной контент вкладки (шапка внедрена прямо внутрь вкладки над элементами) -->
+    <main id="app" class="main-view" aria-live="polite">
+      <div class="loading-card">
+        <div class="spinner" aria-hidden="true"></div>
+        <p>Открываем ваше пространство…</p>
+      </div>
+    </main>
 
-    <main id="content" class="content"></main>
+    <!-- Нижний стеклянный бар с движущейся каплей в стиле последнего Telegram -->
+    <nav id="bottom-nav" class="bottom-nav" aria-label="Разделы пространства" hidden>
+      <div id="nav-droplet" class="nav-droplet" aria-hidden="true"></div>
 
-    <nav class="bottom-nav" aria-label="Основные разделы">
-      <span class="nav-drop" aria-hidden="true"></span>
-      <button class="nav-item active" data-route="home" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z"/></svg><span>Главная</span></button>
-      <button class="nav-item" data-route="tasks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 12 4 4L19 6"/><path d="M21 12a9 9 0 1 1-5-8"/></svg><span>Планы</span></button>
-      <button class="nav-item" data-route="wishes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9Z"/></svg><span>Желания</span></button>
-      <button class="nav-item" data-route="memories"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg><span>Дневник</span></button>
-      <button class="nav-item" data-route="dates"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4m8-4v4M3 10h18"/></svg><span>Даты</span></button>
+      <button class="nav-item is-active" type="button" data-tab="home" aria-current="page">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20.5s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/>
+          </svg>
+        </span>
+        <span class="nav-label">Главная</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="tasks">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m6 12.5 3.8 3.8L18.5 7.6"/>
+            <rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/>
+          </svg>
+        </span>
+        <span class="nav-label">Планы</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="dates">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/>
+            <path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/>
+          </svg>
+        </span>
+        <span class="nav-label">Даты</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="memories">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/>
+            <path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/>
+          </svg>
+        </span>
+        <span class="nav-label">Дневник</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="wishes">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 3.4 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3.4Z"/>
+          </svg>
+        </span>
+        <span class="nav-label">Желания</span>
+      </button>
     </nav>
   </div>
 
-  <section id="onboarding" class="onboarding" hidden>
-    <div class="onboarding-art" aria-hidden="true"><span></span><span></span></div>
-    <p class="overline">DuoPlan</p><h1>Ваше общее<br>пространство</h1>
-    <p>Создайте место только для вас двоих или войдите по приглашению партнёра. Эти записи видите только вы.</p>
-    <button class="primary full" data-action="create-pair">Создать пространство</button>
-    <button class="secondary full" data-action="show-join">У меня есть код</button>
-  </section>
-
-  <section id="outside" class="outside">
-    <dialog id="gender-dialog" class="dialog" aria-labelledby="gender-title" aria-describedby="gender-description">
-      <form id="gender-form">
-        <h2 id="gender-title">Выберите ваш пол</h2>
-        <p id="gender-description">Это необходимо для корректного отображения желаний.</p>
-        <button type="button" class="primary" data-action="set-gender" data-gender="male">Мужской</button>
-        <button type="button" class="primary" data-action="set-gender" data-gender="female">Женский</button>
-      </form>
-    </dialog>
-    <div class="loader-mark" aria-hidden="true"></div><h1>Открываем DuoPlan…</h1><p>Подготавливаем ваше пространство.</p>
-  </section>
-
-  <dialog id="dialog" class="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
-    <form id="dialog-form">
-      <div class="dialog-handle" aria-hidden="true"></div>
-      <h2 id="dialog-title"></h2>
-      <p id="dialog-description"></p>
-      <div id="dialog-fields"></div>
-      <p id="dialog-error" class="form-error" role="alert" tabindex="-1" hidden></p>
-      <div class="dialog-actions"><button type="button" class="secondary" data-action="close-dialog">Отмена</button><button type="submit" class="primary">Сохранить</button></div>
+  <!-- Модальное окно создания/редактирования -->
+  <dialog id="item-dialog" class="sheet-dialog">
+    <form id="item-form" method="dialog" class="sheet-form" novalidate>
+      <div class="sheet-head">
+        <h2 id="dialog-title">Новая запись</h2>
+        <button type="button" class="icon-close" data-action="close-dialog" aria-label="Закрыть">✕</button>
+      </div>
+      <div id="dialog-fields" class="sheet-fields"></div>
+      <div class="sheet-actions">
+        <button type="button" class="secondary" data-action="close-dialog">Отмена</button>
+        <button type="submit" id="dialog-submit" class="primary">Сохранить</button>
+      </div>
     </form>
   </dialog>
 
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js" defer></script>
 </body>
 </html>

@@ -23,7 +23,7 @@ TABLES = {
         "created_at, updated_at"
     ),
     "users": (
-        "tg_id, username, display_name, role, pair_id, points, streak, "
+        "tg_id, username, display_name, role, gender, pair_id, points, streak, "
         "last_activity, best_streak, created_at, updated_at"
     ),
     "tasks": (
@@ -57,7 +57,7 @@ def dump(source: Path) -> str:
                 lines.append(f"INSERT OR REPLACE INTO {table}({columns}) VALUES({values});")
 
         # pair_members — новый единственный источник членства в D1.
-        for role, owner, guest in (("a", "user_a", "user_b"), ("b", "user_b", None)):
+        for role, owner, guest in (("a", "user_a", None), ("b", "user_b", None)):
             condition = f"{owner} != 0"
             if guest:
                 condition += f" AND {guest} != 0"

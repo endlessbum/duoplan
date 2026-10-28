@@ -158,7 +158,13 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
     ON CONFLICT(bucket_key) DO UPDATE SET count=count+1`).bind(bucketKey).run();
   const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?").bind(bucketKey).first();
   if (bucket % 10 === 0) {
-    await env.DB.prepare("DELETE FROM rate_limits WHERE bucket_key<?").bind(`${key}:${bucket - 20}`).run();
+    // Удаляем только устаревшие окна того же ключа, сравнивая номер окна численно,
+    // а не лексикографически по всей строке bucket_key (иначе затрагиваются другие ключи).
+    const prefix = `${key}:`;
+    await env.DB.prepare(`DELETE FROM rate_limits
+      WHERE substr(bucket_key, 1, ?) = ?
+        AND CAST(substr(bucket_key, ?) AS INTEGER) < ?`)
+      .bind(prefix.length, prefix, prefix.length + 1, bucket - 20).run();
   }
   if ((row?.count || 0) > limit) throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
 }
@@ -216,8 +222,9 @@ async function joinPair(env, user, rawCode) {
   if (pair.user_a === user.tg_id) throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
   if (pair.user_b) throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
   const timestamp = now();
+  let results;
   try {
-    await env.DB.batch([
+    results = await env.DB.batch([
       env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,updated_at=? WHERE id=? AND user_b=0")
         .bind(user.tg_id, user.display_name, timestamp, pair.id),
       env.DB.prepare("INSERT INTO pair_members(tg_id,pair_id,role,joined_at) VALUES(?,?,'b',?)")
@@ -225,7 +232,14 @@ async function joinPair(env, user, rawCode) {
       env.DB.prepare("UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?")
         .bind(pair.id, timestamp, user.tg_id)
     ]);
-  } catch {
+  } catch (error) {
+    const message = String(error?.message || error).toLowerCase();
+    if (message.includes("unique") || message.includes("constraint") || message.includes("foreign key")) {
+      throw new HttpError(409, "Не удалось войти: пространство уже занято", "JOIN_CONFLICT");
+    }
+    throw error;
+  }
+  if (!results?.[0]?.meta?.changes) {
     throw new HttpError(409, "Не удалось войти: пространство уже занято", "JOIN_CONFLICT");
   }
   return membership(env, user.tg_id);
@@ -283,23 +297,92 @@ function publicUser(user) {
   };
 }
 
+function timeZoneOffsetMs(timeZone, date) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timeZone || "UTC",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+  });
+  const parts = formatter.formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "0";
+  const asUtc = Date.UTC(
+    Number(get("year")), Number(get("month")) - 1, Number(get("day")),
+    Number(get("hour")), Number(get("minute")), Number(get("second"))
+  );
+  return asUtc - date.getTime();
+}
+
+function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
+  const tz = timeZone || "UTC";
+  const utc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
+  const offset = timeZoneOffsetMs(tz, new Date(utc));
+  return new Date(utc - offset);
+}
+
+function nextDateOccurrence(item, timeZone) {
+  if (!item || !item.day) return Number.MAX_SAFE_INTEGER;
+  const parts = String(item.day).split("-");
+  if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
+  const month = Number(parts[1]) - 1;
+  const date = Number(parts[2]);
+  if (!Number.isFinite(month) || !Number.isFinite(date)) return Number.MAX_SAFE_INTEGER;
+  const tz = timeZone || "UTC";
+  const now = new Date();
+  const todayParts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const [todayYear, todayMonth, todayDay] = todayParts.split("-").map(Number);
+  const today = makeDateInTimeZone(todayYear, todayMonth - 1, todayDay, 0, 0, tz);
+  let hours = 12, minutes = 0;
+  if (item.time && /^\d{2}:\d{2}$/.test(item.time)) {
+    const [hh, mm] = String(item.time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  const isRecurring = !!item.recurs;
+  const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+  const years = isRecurring
+    ? Array.from({ length: 9 }, (_, index) => currentYear + index)
+    : [Number(parts[0])];
+  for (const year of years) {
+    const candidate = makeDateInTimeZone(year, month, date, hours, minutes, tz);
+    const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
+    const cparts = fmt.formatToParts(candidate);
+    const cm = Number(cparts.find((p) => p.type === "month")?.value);
+    const cd = Number(cparts.find((p) => p.type === "day")?.value);
+    if (cm !== month + 1 || cd !== date) continue;
+    if (!isRecurring || candidate >= today) return candidate.getTime();
+  }
+  // Для ежегодного события не используем исходную (возможно прошедшую) дату как результат.
+  if (isRecurring) return Number.MAX_SAFE_INTEGER;
+  const fallback = makeDateInTimeZone(Number(parts[0]), month, date, hours, minutes, tz);
+  return Number.isNaN(fallback.getTime()) ? Number.MAX_SAFE_INTEGER : fallback.getTime();
+}
+
 async function state(env, userId) {
   const user = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(userId).first();
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily] = await Promise.all([
     env.DB.prepare("SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT 100").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC").bind(pair.id).all(),
     env.DB.prepare("SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day").bind(pair.id).all(),
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC`).bind(pair.id).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC`).bind(pair.id).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT 100`).bind(pair.id).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC`).bind(pair.id).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     pair.user_b ? dailyFor(env, pair.id, pair.timezone) : null
   ]);
+  const nowMs = Date.now();
+  const sortedDates = [...(dates.results || [])].sort((a, b) => {
+    const ta = nextDateOccurrence(a, pair.timezone);
+    const tb = nextDateOccurrence(b, pair.timezone);
+    const aPast = !a.recurs && ta < nowMs;
+    const bPast = !b.recurs && tb < nowMs;
+    if (aPast !== bPast) return aPast ? 1 : -1;
+    if (aPast && bPast) return tb - ta;
+    return ta - tb;
+  });
   return {
     user: publicUser(user),
     pair: {
@@ -315,7 +398,7 @@ async function state(env, userId) {
     },
     tasks: tasks.results,
     completedTasks: completedTasks.results,
-    dates: dates.results,
+    dates: sortedDates,
     memories: memories.results,
     wishes: wishes.results,
     completedWishes: completedWishes.results,
@@ -357,7 +440,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       values.push(textField(body, "title", 120, "Название"));
       if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
       fields.push("day=?", "recurs=?", "time=?");
-      values.push(clean(body.day), body.recurs === false ? 0 : 1, optionalTime(body.time));
+      values.push(clean(body.day), body.recurs === false || body.recurs === 0 ? 0 : 1, optionalTime(body.time));
     } else if (type === "memories") {
       fields.push("body=?");
       values.push(textField(body, "body", 2000, "Воспоминание"));
@@ -430,7 +513,7 @@ async function api(request, env, url) {
     if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
     const time = optionalTime(body.time);
     await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,created_at) VALUES(?,?,?,?,?,?)")
-      .bind(pair.id, title, clean(body.day), time, body.recurs === false ? 0 : 1, now()).run();
+      .bind(pair.id, title, clean(body.day), time, body.recurs === false || body.recurs === 0 ? 0 : 1, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
@@ -455,22 +538,47 @@ async function api(request, env, url) {
     if (!pair.user_b) throw new HttpError(409, "Ритуал дня откроется, когда партнёр присоединится", "PAIR_INCOMPLETE");
     const daily = await dailyFor(env, pair.id, pair.timezone);
     if (daily.done) return json({ ...(await state(env, user.tg_id)), awarded: false });
-    const previous = user.last_activity
-      ? Math.round((Date.parse(localDay(pair.timezone)) - Date.parse(user.last_activity)) / 86400000)
-      : null;
-    const streak = previous === 1 ? user.streak + 1 : 1;
+
     const stamp = now();
-    const results = await env.DB.batch([
+    // Захват ритуала и начисление XP выполняются в одной транзакции (D1 batch).
+    // Если этап начисления завершится ошибкой, захват откатится вместе с ним,
+    // и повторный запрос сможет корректно повторить начисление.
+    // changes() отражает результат предыдущего UPDATE в той же транзакции:
+    // XP начисляется только если захват ритуала сработал (changes > 0),
+    // что исключает дубли и повторное начисление при гонках.
+    const batchResults = await env.DB.batch([
       env.DB.prepare("UPDATE daily_rolls SET done_by=?,done_at=? WHERE pair_id=? AND day=? AND done_by IS NULL")
         .bind(user.tg_id, stamp, pair.id, daily.day),
-      env.DB.prepare(`UPDATE users SET points=points+10,streak=?,best_streak=MAX(best_streak,?),last_activity=?,updated_at=?
-        WHERE tg_id=? AND EXISTS(SELECT 1 FROM daily_rolls WHERE pair_id=? AND day=? AND done_by=? AND done_at=?)`)
-        .bind(streak, streak, daily.day, stamp, user.tg_id, pair.id, daily.day, user.tg_id, stamp),
+      env.DB.prepare(`UPDATE users SET
+        points = points + 10,
+        streak = CASE
+          WHEN last_activity IS NULL THEN 1
+          WHEN last_activity = ? THEN MAX(1, streak)
+          WHEN julianday(?) - julianday(last_activity) = 1 THEN streak + 1
+          ELSE 1
+        END,
+        best_streak = MAX(best_streak, CASE
+          WHEN last_activity IS NULL THEN 1
+          WHEN last_activity = ? THEN MAX(1, streak)
+          WHEN julianday(?) - julianday(last_activity) = 1 THEN streak + 1
+          ELSE 1
+        END),
+        last_activity = ?,
+        updated_at = ?
+        WHERE tg_id = ?
+          AND (SELECT changes()) > 0`)
+        .bind(daily.day, daily.day, daily.day, daily.day, daily.day, stamp, user.tg_id),
       env.DB.prepare(`UPDATE pairs SET together_pts=together_pts+10,updated_at=?
-        WHERE id=? AND EXISTS(SELECT 1 FROM daily_rolls WHERE pair_id=? AND day=? AND done_by=? AND done_at=?)`)
-        .bind(stamp, pair.id, pair.id, daily.day, user.tg_id, stamp)
+        WHERE id = ?
+          AND (SELECT changes()) > 0`)
+        .bind(stamp, pair.id)
     ]);
-    return json({ ...(await state(env, user.tg_id)), awarded: results[0].meta.changes > 0 });
+    const captured = Number(batchResults?.[0]?.meta?.changes || 0) > 0;
+    if (!captured) {
+      // Ритуал уже был отмечен — повторный запрос полностью идемпотентен.
+      return json({ ...(await state(env, user.tg_id)), awarded: false });
+    }
+    return json({ ...(await state(env, user.tg_id)), awarded: true });
   }
   if (await itemRoute(env, pair, user, request.method, url.pathname, body)) {
     return json(await state(env, user.tg_id));
@@ -526,29 +634,55 @@ async function webhook(request, env, url) {
   if (!env.WEBHOOK_SECRET || !safeEqual(request.headers.get("x-telegram-bot-api-secret-token"), env.WEBHOOK_SECRET)) {
     return new Response("Forbidden", { status: 403 });
   }
+  // Ограничиваем рост таблицы дедупликации: храним отметки около недели.
+  try {
+    await env.DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(now() - 7 * 24 * 60 * 60).run();
+  } catch {}
+
   let update;
   try {
     update = await request.json();
   } catch {
     return json({ ok: true });
   }
-  if (positiveId(update?.update_id)) {
+  const updateId = positiveId(update?.update_id) ? update.update_id : null;
+  let recorded = false;
+  if (updateId) {
     const seen = await env.DB.prepare("INSERT OR IGNORE INTO telegram_updates(update_id,received_at) VALUES(?,?)")
-      .bind(update.update_id, now()).run();
+      .bind(updateId, now()).run();
     if (!seen.meta.changes) return json({ ok: true });
+    recorded = true;
   }
   const message = update.message;
-  if (!message?.text || message.chat?.type !== "private" || !positiveId(message.from?.id)) return json({ ok: true });
+  if (!message?.text || message.chat?.type !== "private" || !positiveId(message.from?.id)) {
+    return json({ ok: true });
+  }
   try {
     const user = await ensureUser(env, message.from, null);
     const text = clean(message.text);
     const code = text.startsWith("/start ") ? text.slice(7).trim() : "";
     if (code) {
       let joined = false;
-      try {
-        await joinPair(env, user, code);
+      // Сначала проверяем фактическое членство: повторная доставка /start не должна
+      // ломать уже состоявшееся присоединение.
+      if (await membership(env, user.tg_id)) {
         joined = true;
-      } catch {}
+      } else {
+        try {
+          await joinPair(env, user, code);
+          joined = true;
+        } catch (error) {
+          if (await membership(env, user.tg_id)) {
+            joined = true;
+          } else if (error instanceof HttpError) {
+            joined = false;
+          } else {
+            // Инфраструктурная ошибка не должна маскироваться под «код недействителен»;
+            // пробрасываем её, чтобы Telegram мог повторить доставку.
+            throw error;
+          }
+        }
+      }
       await openApp(env, message.chat.id, url, joined
         ? "Готово — теперь у вас одно пространство на двоих."
         : "Это приглашение недоступно. Проверьте код у партнёра.");
@@ -563,11 +697,27 @@ async function webhook(request, env, url) {
     }
   } catch (error) {
     console.error("webhook delivery failed", error);
+    // Снимаем отметку об обработке, чтобы Telegram мог повторить доставку.
+    if (recorded && updateId) {
+      try {
+        await env.DB.prepare("DELETE FROM telegram_updates WHERE update_id=?").bind(updateId).run();
+      } catch (cleanupError) {
+        console.error("webhook dedup cleanup failed", cleanupError);
+      }
+    }
+    return json({ ok: false, error: "delivery_failed" }, 500);
   }
   return json({ ok: true });
 }
 
 async function ensureSchema(env) {
+  try {
+    const meta = await env.DB.prepare("SELECT value FROM app_meta WHERE key='schema_version'").first();
+    if (meta?.value === APP_VERSION) return;
+  } catch {
+    // Таблицы app_meta ещё нет — продолжаем полную инициализацию
+  }
+
   const statements = [
     `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
@@ -607,6 +757,9 @@ async function ensureSchema(env) {
     env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
       SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`)
   ]);
+  await env.DB.prepare(
+    "INSERT INTO app_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+  ).bind(APP_VERSION).run();
 }
 
 async function setup(request, env, url) {
@@ -615,6 +768,8 @@ async function setup(request, env, url) {
     return json({ error: `Cloudflare Worker не видит: ${missing.join(", ")}`, missing }, 503);
   }
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  // Лимит применяем до проверки секрета, чтобы неудачные попытки тоже учитывались.
+  await rateLimit(env, `setup:${ip}`, 5, 600);
   const supplied = request.headers.get("x-setup-token") ||
     (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
   const expected = env.SETUP_TOKEN || env.BOT_TOKEN;
@@ -627,7 +782,6 @@ async function setup(request, env, url) {
     console.error("D1 setup failed", error);
     return json({ error: "Не удалось обновить таблицы D1" }, 500);
   }
-  await rateLimit(env, `setup:${ip}`, 5, 600);
   const base = (env.APP_ORIGIN || url.origin).replace(/\/$/, "");
   try {
     await telegram(env, "setWebhook", {
