@@ -36,10 +36,10 @@ if (constsStart === -1 || constsEnd === -1 || constsEnd < constsStart) {
 }
 const consts = source.slice(constsStart, constsEnd);
 const load = new Function(
-  `${consts}\n${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function nextDateOccurrence")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("class HttpError")}\n${extractBraced("async function archivePage")}\n` +
-  "return { archivePage, taskTargetMs, sortDateRows, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };"
+  `${consts}\n${extractBraced("function byRowId")}\n${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function nextDateOccurrence")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("function sortByTaskDeadline")}\n${extractBraced("class HttpError")}\n${extractBraced("async function archivePage")}\n` +
+  "return { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };"
 );
-const { archivePage, taskTargetMs, sortDateRows, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE } = load();
+const { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE } = load();
 
 const TOTAL = 50; // 10 последних в /api/state, остальные 40 — архив
 

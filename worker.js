@@ -31,8 +31,10 @@ const ARCHIVE_QUERIES = {
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ? OFFSET ?`
   },
   // Активные наборы: продолжение списков /api/state после 200-й записи.
-  // Порядок wishes совпадает со state (SQL), а tasks/dates state() пересортировывает
-  // в JS — поэтому страница отрезается от полностью упорядоченного списка.
+  // Порядок wishes совпадает со state (SQL). Для tasks/dates И state(), И эта
+  // страница сортируют ОДНИМ хелпером полный набор без SQL-лимита: state отдаёт
+  // первые 200, страница — сдвиг от 200-й. Разные последовательности дают дубли
+  // и потерянные записи (репорт 2026-10-29), поэтому SQL здесь намеренно без LIMIT.
   tasks: {
     active: true,
     sort: "deadline",
@@ -175,9 +177,9 @@ async function telegramUser(initData, token) {
   if (!received || !Number.isFinite(authDate)) return null;
   if (authDate > now() + 300 || now() - authDate > 86400) return null;
   params.delete("hash");
-  // Bot API 9.x добавляет в initData поле signature (сторонняя валидация Ed25519):
-  // по спецификации в data-check-string входят все поля, кроме hash и signature.
-  params.delete("signature");
+  // Поле signature (Bot API 9.x, Ed25519-валидация третьими сторонами) при HMAC-проверке
+  // не исключается: data-check-string — это «chain of all received fields», кроме hash.
+  // Исключать signature нужно только в Ed25519-схеме из раздела third-party документации.
   const check = [...params.entries()]
     .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .map(([key, value]) => `${key}=${value}`)
@@ -423,6 +425,18 @@ function taskTargetMs(item, timeZone) {
   return makeDateInTimeZone(year, month, date, hours, minutes, timeZone).getTime();
 }
 
+// Стабильный tie-break по id: годится и для числовых rowid, и для строковых id.
+function byRowId(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// Единая сортировка открытых планов для state() и archivePage(): по ближайшему
+// дедлайну, равные ключи — по id. Хелпер один, чтобы первая страница списка и
+// архивное продолжение были согласованными последовательностями (репорт 2026-10-29).
+function sortByTaskDeadline(rows, timeZone) {
+  return [...rows].sort((a, b) => taskTargetMs(a, timeZone) - taskTargetMs(b, timeZone) || byRowId(a.id, b.id));
+}
+
 function nextDateOccurrence(item, timeZone) {
   if (!item || !item.day) return Number.MAX_SAFE_INTEGER;
   const parts = String(item.day).split("-");
@@ -463,15 +477,16 @@ function nextDateOccurrence(item, timeZone) {
 // Сортировка дат для /api/state: сначала будущие по ближайшему наступлению,
 // затем прошедшие не-ежегодные от свежих к старым. Timestamp считается один
 // раз на запись: nextDateOccurrence строит Intl.DateTimeFormat и слишком
-// дорог, чтобы вызывать его из компаратора на каждое сравнение.
+// дорог, чтобы вызывать его из компаратора на каждое сравнение. Равные ключи
+// разбираются по id: порядок в state() и в архивном продолжении обязан совпадать.
 function sortDateRows(rows, timeZone, nowMs = Date.now()) {
   const decorated = rows.map((row) => ({ row, at: nextDateOccurrence(row, timeZone) }));
   decorated.sort(({ row: a, at: ta }, { row: b, at: tb }) => {
     const aPast = !a.recurs && ta < nowMs;
     const bPast = !b.recurs && tb < nowMs;
     if (aPast !== bPast) return aPast ? 1 : -1;
-    if (aPast && bPast) return tb - ta;
-    return ta - tb;
+    if (aPast && bPast) return tb - ta || byRowId(a.id, b.id);
+    return ta - tb || byRowId(a.id, b.id);
   });
   return decorated.map(({ row }) => row);
 }
@@ -482,9 +497,9 @@ async function state(env, userId) {
   if (!pair) return { user: publicUser(user), pair: null };
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
-    env.DB.prepare("SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open'").bind(pair.id).all(),
     env.DB.prepare("SELECT id,title,status,day,time,completed_at FROM tasks WHERE pair_id=? AND status='done' ORDER BY completed_at DESC LIMIT ?").bind(pair.id, STATE_RECENT_LIMIT).all(),
-    env.DB.prepare("SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=?").bind(pair.id).all(),
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
@@ -496,7 +511,7 @@ async function state(env, userId) {
     // Пол партнёра — для обращений «Его/Её желания» в вишлисте.
     partnerId ? env.DB.prepare("SELECT gender FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
-  const sortedDates = sortDateRows(dates.results || [], pair.timezone);
+  const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
   return {
     user: publicUser(user),
     pair: {
@@ -511,7 +526,7 @@ async function state(env, userId) {
       timezone: pair.timezone,
       partner_gender: partnerUser?.gender || null
     },
-    tasks: [...(tasks.results || [])].sort((a, b) => taskTargetMs(a, pair.timezone) - taskTargetMs(b, pair.timezone)),
+    tasks: sortByTaskDeadline(tasks.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT),
     completedTasks: completedTasks.results,
     dates: sortedDates,
     memories: memories.results,
@@ -532,7 +547,7 @@ async function archivePage(env, pair, type, page) {
     const all = await env.DB.prepare(config.sql).bind(pair.id).all();
     const ordered = config.sort === "date"
       ? sortDateRows(all.results || [], pair.timezone)
-      : [...(all.results || [])].sort((a, b) => taskTargetMs(a, pair.timezone) - taskTargetMs(b, pair.timezone));
+      : sortByTaskDeadline(all.results || [], pair.timezone);
     const start = STATE_ACTIVE_LIMIT + page * ARCHIVE_PAGE_SIZE;
     return {
       items: ordered.slice(start, start + ARCHIVE_PAGE_SIZE),
@@ -638,6 +653,15 @@ async function api(request, env, url) {
     await joinPair(env, user, body.code);
     return json(await state(env, user.tg_id));
   }
+  // Пол запрашивается гейтом до онбординга, поэтому маршрут обязан работать
+  // без пары — как pair/create и pair/join: иначе новый пользователь не сможет
+  // его сохранить и не попадёт к созданию пространства.
+  if (request.method === "POST" && url.pathname === "/api/gender") {
+    const gender = clean(body?.gender);
+    if (gender !== "male" && gender !== "female") throw new HttpError(400, "Недопустимый пол", "INVALID_GENDER");
+    await env.DB.prepare("UPDATE users SET gender = ?, updated_at = ? WHERE tg_id = ?").bind(gender, now(), user.tg_id).run();
+    return json(await state(env, user.tg_id));
+  }
 
   const pair = await membership(env, user.tg_id);
   if (!pair) throw new HttpError(409, "Сначала создайте или соедините пространство", "NO_PAIR");
@@ -675,12 +699,6 @@ async function api(request, env, url) {
     const text = textField(body, "body", 300, "Желание");
     await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,created_at) VALUES(?,?,?,?)")
       .bind(pair.id, user.tg_id, text, now()).run();
-    return json(await state(env, user.tg_id));
-  }
-  if (request.method === "POST" && url.pathname === "/api/gender") {
-    const gender = clean(body?.gender);
-    if (gender !== "male" && gender !== "female") throw new HttpError(400, "Недопустимый пол", "INVALID_GENDER");
-    await env.DB.prepare("UPDATE users SET gender = ?, updated_at = ? WHERE tg_id = ?").bind(gender, now(), user.tg_id).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/daily/done") {
@@ -838,7 +856,7 @@ async function webhook(request, env, url) {
       });
       await openApp(env, message.chat.id, url, "Ваше пространство всегда под рукой.");
     } else {
-      await openApp(env, message.chat.id, url, "Ваши планы, воспоминания и маленькие радости — в одном уютном месте.");
+      await openApp(env, message.chat.id, url, "Совместные планы, воспоминания и желания — в одном месте.");
     }
   } catch (error) {
     console.error("webhook delivery failed", error);

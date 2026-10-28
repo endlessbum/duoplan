@@ -33,6 +33,7 @@ function extractBraced(declaration) {
 
 const load = new Function(
   [
+    extractBraced("function byRowId"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function nextDateOccurrence"),

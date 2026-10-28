@@ -58,11 +58,12 @@ const TOKEN = "123456:test-bot-token";
 const USER = { id: 777, first_name: "Тест", username: "tester" };
 
 // Подписывает fields ровно по официальной схеме Telegram.
-// hash и signature в data-check-string не входят (по спецификации).
+// hash в data-check-string не входит; остальные поля (включая signature,
+// если передан) — входят: «chain of all received fields».
 function signInitData(fields, token = TOKEN) {
   const secret = createHmac("sha256", "WebAppData").update(token).digest();
   const pairs = Object.entries(fields)
-    .filter(([key]) => key !== "hash" && key !== "signature")
+    .filter(([key]) => key !== "hash")
     .map(([key, value]) => [key, String(value)]);
   const check = pairs
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -79,7 +80,7 @@ function signInitData(fields, token = TOKEN) {
 function signInitDataReversed(fields, token = TOKEN) {
   const secret = createHmac("sha256", token).update("WebAppData").digest();
   const pairs = Object.entries(fields)
-    .filter(([key]) => key !== "hash" && key !== "signature")
+    .filter(([key]) => key !== "hash")
     .map(([key, value]) => [key, String(value)]);
   const check = pairs
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -138,14 +139,16 @@ test("auth_date из будущего (больше 5 минут) отклоня
   equal(user, null);
 });
 
-test("поле signature исключается из data-check-string (Bot API 9.x)", async () => {
-  // В initData новых клиентов есть signature для сторонней валидации:
-  // в data-check-string входят все поля, кроме hash и signature.
+test("поле signature входит в data-check-string (Bot API 9.x)", async () => {
+  // В initData новых клиентов есть signature для сторонней Ed25519-валидации.
+  // При HMAC-проверке исключается только hash: signature — обычное поле
+  // data-check-string («chain of all received fields» по спецификации).
+  // Исключать signature нужно лишь в Ed25519-схеме third-party из документации.
   const withSignature = signInitData({ ...baseFields(), signature: "c2lnbmF0dXJl" });
   deepStrictEqual(await telegramUser(withSignature, TOKEN), USER);
-  // hash подписью не покрывается, поэтому значение signature можно менять.
+  // signature покрывается hash-подписью, поэтому подмена значения ломает проверку.
   const tampered = withSignature.replace(/signature=[^&]+/, "signature=tampered");
-  deepStrictEqual(await telegramUser(tampered, TOKEN), USER);
+  equal(await telegramUser(tampered, TOKEN), null);
 });
 
 test("мусорные initData отклоняются", async () => {
