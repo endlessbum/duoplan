@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from duoplan.handlers import (
     MEMORY_BODY_VIEW_MAX,
+    MEMORY_NAME_VIEW_MAX,
     PAGE_SIZE,
     PAGE_TEXT_LIMIT,
     fit_entries,
@@ -10,10 +11,10 @@ from duoplan.handlers import (
 from duoplan.services import MEMORY_MAX
 
 
-def _rows(count: int) -> list[dict]:
+def _rows(count: int, name_len: int = 64) -> list[dict]:
     """Худший случай: максимально длинные тела и имена."""
     return [
-        {"day": "2026-10-28", "display_name": "И" * 64, "body": "Б" * MEMORY_MAX}
+        {"day": "2026-10-28", "display_name": "И" * name_len, "body": "Б" * MEMORY_MAX}
         for _ in range(count)
     ]
 
@@ -59,3 +60,28 @@ def test_worst_case_page_with_next_is_within_limit():
     assert len(rendered) == len(rows[:PAGE_SIZE])
     text = "Дневник двоих\n\n" + "\n\n".join(rendered)
     assert len(text) <= PAGE_TEXT_LIMIT
+
+
+def test_long_full_name_is_capped_with_ellipsis():
+    # full_name = имя + фамилия и длиннее «максимума Telegram» для одного
+    # имени: отображаемое имя обязано уложиться в MEMORY_NAME_VIEW_MAX.
+    rows = [{"day": "2026-10-28", "display_name": "И" * 129, "body": "Привет"}]
+    entry = memory_entries(rows)[0]
+    head = entry.split("\n", 1)[0]
+    assert len(head) == 10 + len(" · ") + MEMORY_NAME_VIEW_MAX
+    assert head.endswith("…")
+    # Короткое имя не трогается.
+    short = memory_entries([{"day": "2026-10-28", "display_name": "Аня", "body": "х"}])[0]
+    assert short.startswith("2026-10-28 · Аня\n")
+
+
+def test_eight_entries_with_overlong_names_fit_into_one_page():
+    # Раньше имя длиннее 64 символов сжимало страницу до 7 записей,
+    # а фиксированный offset=page*PAGE_SIZE следующей страницы навсегда
+    # терял недопоказанную восьмую запись.
+    rendered = fit_entries("Дневник двоих", memory_entries(_rows(PAGE_SIZE, name_len=129)))
+    assert len(rendered) == PAGE_SIZE
+    text = "Дневник двоих\n\n" + "\n\n".join(rendered)
+    assert len(text) <= PAGE_TEXT_LIMIT
+    # Восьмая запись страницы остаётся на ней же, а не «переезжает» на следующую.
+    assert rendered[-1].startswith("2026-10-28 · ")

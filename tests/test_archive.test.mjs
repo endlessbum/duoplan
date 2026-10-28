@@ -36,14 +36,14 @@ if (constsStart === -1 || constsEnd === -1 || constsEnd < constsStart) {
 }
 const consts = source.slice(constsStart, constsEnd);
 const load = new Function(
-  `${consts}\n${extractBraced("class HttpError")}\n${extractBraced("async function archivePage")}\n` +
-  "return { archivePage, STATE_RECENT_LIMIT, ARCHIVE_PAGE_SIZE };"
+  `${consts}\n${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function nextDateOccurrence")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("class HttpError")}\n${extractBraced("async function archivePage")}\n` +
+  "return { archivePage, taskTargetMs, sortDateRows, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };"
 );
-const { archivePage, STATE_RECENT_LIMIT, ARCHIVE_PAGE_SIZE } = load();
+const { archivePage, taskTargetMs, sortDateRows, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE } = load();
 
 const TOTAL = 50; // 10 последних в /api/state, остальные 40 — архив
 
-function makeMockDb() {
+function makeMockDb(total = TOTAL) {
   const db = {
     prepare(_sql) {
       return {
@@ -52,7 +52,7 @@ function makeMockDb() {
           return {
             async all() {
               const rows = [];
-              for (let id = offset + 1; id <= Math.min(offset + limit, TOTAL); id++) {
+              for (let id = offset + 1; id <= Math.min(offset + limit, total); id++) {
                 rows.push({ id });
               }
               return { results: rows };
@@ -63,6 +63,20 @@ function makeMockDb() {
     }
   };
   return { db };
+}
+
+// Активный путь (tasks/dates) биндит только pair.id и получает весь набор.
+function makeActiveDb(rows) {
+  return {
+    prepare() {
+      return {
+        bind(...params) {
+          if (params.length !== 1) throw new Error(`активный путь биндит только pair.id, получено ${params.length}`);
+          return { async all() { return { results: rows }; } };
+        }
+      };
+    }
+  };
 }
 
 test("константы лимитов согласованы", () => {
@@ -91,4 +105,43 @@ test("последняя страница возвращает остаток и
 test("неизвестный тип архива отклоняется", async () => {
   const { db } = makeMockDb();
   await rejects(archivePage({ DB: db }, { id: 1 }, "hack", 0), /Неизвестный тип архива/);
+});
+
+test("активные желания грузятся страницами после 200, а не после 10", async () => {
+  const { db } = makeMockDb(230);
+  const result = await archivePage({ DB: db }, { id: 1 }, "wishes", 0);
+  deepStrictEqual(result.items.map((r) => r.id), Array.from({ length: ARCHIVE_PAGE_SIZE }, (_, i) => STATE_ACTIVE_LIMIT + 1 + i));
+  deepStrictEqual(result.hasMore, true);
+  // Страница за концом набора пуста.
+  const tail = await archivePage({ DB: db }, { id: 1 }, "wishes", 2);
+  deepStrictEqual(tail.items, []);
+  deepStrictEqual(tail.hasMore, false);
+});
+
+test("открытые планы после 200 приходят в порядке дедлайна (как в state)", async () => {
+  const rows = Array.from({ length: STATE_ACTIVE_LIMIT + 25 }, (_, i) => ({
+    id: i + 1,
+    day: `2026-${String((i % 12) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`,
+    recurs: false
+  }));
+  const expected = [...rows].sort((a, b) => taskTargetMs(a, "UTC") - taskTargetMs(b, "UTC")).map((r) => r.id);
+  const first = await archivePage({ DB: makeActiveDb(rows) }, { id: 1, timezone: "UTC" }, "tasks", 0);
+  deepStrictEqual(first.items.map((r) => r.id), expected.slice(STATE_ACTIVE_LIMIT, STATE_ACTIVE_LIMIT + ARCHIVE_PAGE_SIZE));
+  deepStrictEqual(first.hasMore, true); // 225 > 220
+  const second = await archivePage({ DB: makeActiveDb(rows) }, { id: 1, timezone: "UTC" }, "tasks", 1);
+  deepStrictEqual(second.items.map((r) => r.id), expected.slice(220, 225));
+  deepStrictEqual(second.hasMore, false); // 225 > 240 нет
+});
+
+test("даты после 200 продолжают зональный порядок /api/state", async () => {
+  const rows = Array.from({ length: STATE_ACTIVE_LIMIT + 3 }, (_, i) => ({
+    id: i + 1,
+    day: `202${i % 10}-${String((i % 12) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`,
+    recurs: i % 4 === 0
+  }));
+  const expected = sortDateRows(rows, "UTC").map((r) => r.id);
+  const result = await archivePage({ DB: makeActiveDb(rows) }, { id: 1, timezone: "UTC" }, "dates", 0);
+  deepStrictEqual(result.items.map((r) => r.id), expected.slice(STATE_ACTIVE_LIMIT, STATE_ACTIVE_LIMIT + ARCHIVE_PAGE_SIZE));
+  deepStrictEqual(result.items.length, 3);
+  deepStrictEqual(result.hasMore, false);
 });

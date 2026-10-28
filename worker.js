@@ -12,8 +12,9 @@ const APP_VERSION = "2026.10.28";
 const DB_SCHEMA_VERSION = "2026.10.29";
 const DEFAULT_TZ = "Europe/Moscow";
 
-// /api/state отдаёт активные наборы целиком (с потолком) и только последние
-// записи архивов; остальное догружается страницами через /api/archive.
+// /api/state отдаёт активные наборы с потолком STATE_ACTIVE_LIMIT и только
+// последние записи архивов; остальное догружается страницами через /api/archive
+// (у активных наборов база смещения — STATE_ACTIVE_LIMIT, у архивов — STATE_RECENT_LIMIT).
 const STATE_ACTIVE_LIMIT = 200;
 const STATE_RECENT_LIMIT = 10;
 const ARCHIVE_PAGE_SIZE = 20;
@@ -28,6 +29,24 @@ const ARCHIVE_QUERIES = {
   done_wishes: {
     sql: `SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ? OFFSET ?`
+  },
+  // Активные наборы: продолжение списков /api/state после 200-й записи.
+  // Порядок wishes совпадает со state (SQL), а tasks/dates state() пересортировывает
+  // в JS — поэтому страница отрезается от полностью упорядоченного списка.
+  tasks: {
+    active: true,
+    sort: "deadline",
+    sql: "SELECT id,title,status,day,time,created_at FROM tasks WHERE pair_id=? AND status='open' ORDER BY created_at DESC"
+  },
+  dates: {
+    active: true,
+    sort: "date",
+    sql: "SELECT id,title,day,time,recurs,created_at FROM dates WHERE pair_id=? ORDER BY day"
+  },
+  wishes: {
+    active: true,
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT ? OFFSET ?`
   }
 };
 
@@ -156,6 +175,9 @@ async function telegramUser(initData, token) {
   if (!received || !Number.isFinite(authDate)) return null;
   if (authDate > now() + 300 || now() - authDate > 86400) return null;
   params.delete("hash");
+  // Bot API 9.x добавляет в initData поле signature (сторонняя валидация Ed25519):
+  // по спецификации в data-check-string входят все поля, кроме hash и signature.
+  params.delete("signature");
   const check = [...params.entries()]
     .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .map(([key, value]) => `${key}=${value}`)
@@ -438,6 +460,22 @@ function nextDateOccurrence(item, timeZone) {
   return Number.isNaN(fallback.getTime()) ? Number.MAX_SAFE_INTEGER : fallback.getTime();
 }
 
+// Сортировка дат для /api/state: сначала будущие по ближайшему наступлению,
+// затем прошедшие не-ежегодные от свежих к старым. Timestamp считается один
+// раз на запись: nextDateOccurrence строит Intl.DateTimeFormat и слишком
+// дорог, чтобы вызывать его из компаратора на каждое сравнение.
+function sortDateRows(rows, timeZone, nowMs = Date.now()) {
+  const decorated = rows.map((row) => ({ row, at: nextDateOccurrence(row, timeZone) }));
+  decorated.sort(({ row: a, at: ta }, { row: b, at: tb }) => {
+    const aPast = !a.recurs && ta < nowMs;
+    const bPast = !b.recurs && tb < nowMs;
+    if (aPast !== bPast) return aPast ? 1 : -1;
+    if (aPast && bPast) return tb - ta;
+    return ta - tb;
+  });
+  return decorated.map(({ row }) => row);
+}
+
 async function state(env, userId) {
   const user = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(userId).first();
   const pair = await membership(env, userId);
@@ -458,16 +496,7 @@ async function state(env, userId) {
     // Пол партнёра — для обращений «Его/Её желания» в вишлисте.
     partnerId ? env.DB.prepare("SELECT gender FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
-  const nowMs = Date.now();
-  const sortedDates = [...(dates.results || [])].sort((a, b) => {
-    const ta = nextDateOccurrence(a, pair.timezone);
-    const tb = nextDateOccurrence(b, pair.timezone);
-    const aPast = !a.recurs && ta < nowMs;
-    const bPast = !b.recurs && tb < nowMs;
-    if (aPast !== bPast) return aPast ? 1 : -1;
-    if (aPast && bPast) return tb - ta;
-    return ta - tb;
-  });
+  const sortedDates = sortDateRows(dates.results || [], pair.timezone);
   return {
     user: publicUser(user),
     pair: {
@@ -492,11 +521,26 @@ async function state(env, userId) {
   };
 }
 
-// Страница архива: записи после первых STATE_RECENT_LIMIT из /api/state.
+// Страница догрузки: архивы продолжают первые STATE_RECENT_LIMIT записей
+// из /api/state, активные наборы — записи после STATE_ACTIVE_LIMIT.
 async function archivePage(env, pair, type, page) {
   const config = ARCHIVE_QUERIES[type];
   if (!config) throw new HttpError(400, "Неизвестный тип архива", "INVALID_ARCHIVE_TYPE");
-  const offset = STATE_RECENT_LIMIT + page * ARCHIVE_PAGE_SIZE;
+  if (config.sort) {
+    // tasks/dates: сервер сортирует весь набор тем же способом, что и state(),
+    // и отрезает страницу — порядок продолжения совпадает с порядком списка.
+    const all = await env.DB.prepare(config.sql).bind(pair.id).all();
+    const ordered = config.sort === "date"
+      ? sortDateRows(all.results || [], pair.timezone)
+      : [...(all.results || [])].sort((a, b) => taskTargetMs(a, pair.timezone) - taskTargetMs(b, pair.timezone));
+    const start = STATE_ACTIVE_LIMIT + page * ARCHIVE_PAGE_SIZE;
+    return {
+      items: ordered.slice(start, start + ARCHIVE_PAGE_SIZE),
+      hasMore: ordered.length > start + ARCHIVE_PAGE_SIZE,
+      page
+    };
+  }
+  const offset = (config.active ? STATE_ACTIVE_LIMIT : STATE_RECENT_LIMIT) + page * ARCHIVE_PAGE_SIZE;
   const rows = await env.DB.prepare(config.sql).bind(pair.id, ARCHIVE_PAGE_SIZE + 1, offset).all();
   const results = rows.results || [];
   return {
@@ -905,6 +949,10 @@ async function setup(request, env, url) {
     return json({ error: "Не удалось обновить таблицы D1" }, 500);
   }
   const base = (env.APP_ORIGIN || url.origin).replace(/\/$/, "");
+  // getMe заодно проверяет токен и возвращает has_main_web_app — признак
+  // Main Mini App, которая задаётся вручную в @BotFather (кнопка «ОТКРЫТЬ»
+  // в списке чатов появляется только после этого).
+  let hasMainApp = false;
   try {
     await telegram(env, "setWebhook", {
       url: `${base}/telegram/webhook`,
@@ -912,20 +960,22 @@ async function setup(request, env, url) {
       allowed_updates: ["message"],
       drop_pending_updates: false
     });
-    await Promise.all([
+    const [, , me] = await Promise.all([
       telegram(env, "setMyCommands", { commands: [
         { command: "menu", description: "Наше пространство" },
         { command: "help", description: "Как работает DuoPlan" }
       ] }),
-      telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${base}/app` } } })
+      telegram(env, "setChatMenuButton", { menu_button: { type: "web_app", text: "DuoPlan", web_app: { url: `${base}/app` } } }),
+      telegram(env, "getMe", {})
     ]);
+    hasMainApp = me?.has_main_web_app === true;
     await env.DB.prepare("INSERT INTO app_meta(key,value) VALUES('setup_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .bind(DB_SCHEMA_VERSION).run();
   } catch (error) {
     console.error("Telegram setup failed", error);
     return json({ error: "Таблицы готовы, но Telegram не ответил. Проверьте BOT_TOKEN." }, 502);
   }
-  return json({ ok: true, webhook_url: `${base}/telegram/webhook`, mini_app_url: `${base}/app`, version: APP_VERSION });
+  return json({ ok: true, webhook_url: `${base}/telegram/webhook`, mini_app_url: `${base}/app`, has_main_web_app: hasMainApp, version: APP_VERSION });
 }
 
 export default {

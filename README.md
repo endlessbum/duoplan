@@ -39,6 +39,23 @@ Telegram Mini App для пар: общие планы, значимые дат�
 2. Откройте `/setup` (или `/setup.html`), введите `SETUP_TOKEN` либо `BOT_TOKEN`.
 3. Страница создаст/обновит таблицы D1, установит webhook и кнопку Mini App.
 
+### Telegram: кнопка «ОТКРЫТЬ» в списке чатов (Main Mini App)
+
+Синяя кнопка «ОТКРЫТЬ» рядом с чатом бота в списке чатов — это **Main Mini App**.
+Кодом она не ставится, только вручную в @BotFather:
+
+1. `/mybots` → выбрать бота → **Bot Settings → Configure Mini App → Main Mini App**.
+2. Указать `https://duoplan.stacheight.workers.dev/app` (совпадает с `APP_ORIGIN` в `wrangler.jsonc`).
+3. По желанию загрузить иконку и скриншоты — они покажутся в профиле бота.
+
+Проверка: `POST /api/setup` отдаёт `has_main_web_app: true` (из `getMe`), а в
+списке чатов у бота появляется кнопка «ОТКРЫТЬ». Меню-кнопка у поля ввода
+(`setChatMenuButton` с web_app) ставится кодом на шаге 3 «Активации».
+
+Полный экран и кнопка «на главный экран» — клиентские API Bot API 8.0+
+(`requestFullscreen`, `addToHomeScreen`), фронтенд вызывает их сам; на старых
+клиентах и Telegram Desktop приложение просто остаётся в оконном режиме.
+
 Локальная проверка Worker:
 
 Примечание: не запускайте `wrangler d1 migrations apply` на базе, уже инициализированной через `/setup` — схема в production управляется Worker'ом.

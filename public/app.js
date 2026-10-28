@@ -9,6 +9,8 @@
   const avatarA = document.getElementById("avatar-a");
   const avatarB = document.getElementById("avatar-b");
   const pairPillLabel = document.getElementById("pair-pill-label");
+  const fullscreenClose = document.getElementById("fullscreen-close");
+  const homeScreenButton = document.getElementById("homescreen-button");
   const dialog = document.getElementById("item-dialog");
   const dialogForm = document.getElementById("item-form");
   const dialogTitle = document.getElementById("dialog-title");
@@ -31,26 +33,92 @@
   let currentTab = "home";
   let wishView = "mine"; // "mine" | "partner" — переключатель вишлиста
   let tabHistory = [];
-  // Архивы (старые воспоминания, завершённые планы и желания) приходят
-  // с сервера страницами и живут здесь — минутный refresh их не сбрасывает.
+  // Архивы и «хвосты» активных наборов приходят с сервера страницами и живут
+  // здесь — минутный refresh их не сбрасывает. У активных наборов (tasks,
+  // dates, wishes) страницы начинаются после STATE_ACTIVE_LIMIT=200 из /api/state,
+  // у архивов (memories, done_*) — после STATE_RECENT_LIMIT.
   const STATE_RECENT_LIMIT = 10;
+  const STATE_ACTIVE_LIMIT = 200;
   const archiveCache = {
+    tasks: { items: [], page: -1, hasMore: null },
+    dates: { items: [], page: -1, hasMore: null },
+    wishes: { items: [], page: -1, hasMore: null },
     memories: { items: [], page: -1, hasMore: null },
     done_tasks: { items: [], page: -1, hasMore: null },
     done_wishes: { items: [], page: -1, hasMore: null }
   };
+  let archiveCachePairId = null;
+  function emptyArchiveEntry() {
+    return { items: [], page: -1, hasMore: null };
+  }
+  // Кэш архивов живёт в пределах одной пары: сменилась пара (выход, создание,
+  // вход по коду) — сбрасываем, чтобы чужие записи и счётчик страниц не утекли
+  // в новое пространство.
+  function syncArchiveCachePair() {
+    const pairId = appState?.pair?.id ?? null;
+    if (archiveCachePairId === pairId) return;
+    archiveCachePairId = pairId;
+    for (const type of Object.keys(archiveCache)) archiveCache[type] = emptyArchiveEntry();
+  }
+  // Активная запись и её завершённая копия живут в разных кэшах — чистим оба,
+  // id в таблицах D1 независимы, поэтому по типу идём строго по своим ключам.
+  const ARCHIVE_KEYS_BY_TYPE = {
+    memories: ["memories"],
+    dates: ["dates"],
+    tasks: ["tasks", "done_tasks"],
+    wishes: ["wishes", "done_wishes"]
+  };
+  function removeFromArchiveCache(type, id) {
+    for (const key of ARCHIVE_KEYS_BY_TYPE[type] || []) {
+      archiveCache[key].items = archiveCache[key].items.filter((x) => Number(x.id) !== Number(id));
+    }
+  }
+  function patchArchiveItem(type, id, patch) {
+    for (const key of ARCHIVE_KEYS_BY_TYPE[type] || []) {
+      archiveCache[key].items = archiveCache[key].items.map((x) => Number(x.id) === Number(id) ? { ...x, ...patch } : x);
+    }
+  }
+  // Загрузка страницы архива. Флаг loading на тип не даёт двойному тапу
+  // запросить один и тот же page дважды (кэш задвоился бы, а следующая
+  // страница пропустилась); дедуп по id страхует от повторов; ответ,
+  // прилетевший после смены пары, отбрасывается.
+  async function loadArchivePage(type, button) {
+    const cache = archiveCache[type];
+    if (!cache || cache.loading) return;
+    cache.loading = true;
+    if (button) button.disabled = true;
+    const pairIdAtStart = archiveCachePairId;
+    try {
+      const next = await request(`/api/archive?type=${encodeURIComponent(type)}&page=${cache.page + 1}`);
+      if (archiveCachePairId !== pairIdAtStart) return;
+      const seen = new Set(cache.items.map((x) => Number(x.id)));
+      cache.items.push(...(next.items || []).filter((x) => !seen.has(Number(x.id))));
+      cache.page += 1;
+      cache.hasMore = Boolean(next.hasMore);
+      render();
+    } finally {
+      cache.loading = false;
+      if (button) button.disabled = false;
+    }
+  }
 
   function mergedArchive(type, recent) {
     const seen = new Set(recent.map((x) => Number(x.id)));
-    // Записи, которые снова стали активными (вернули из завершённых), из кэша архива не показываем.
+    // Записи, которые снова стали активными (вернули из завершённых), из кэша архива не показываем;
+    // «хвост» активного набора наоборот скрывается, когда запись завершили или удалили.
     if (type === "done_tasks") for (const x of appState?.tasks || []) seen.add(Number(x.id));
     if (type === "done_wishes") for (const x of appState?.wishes || []) seen.add(Number(x.id));
+    if (type === "tasks") for (const x of appState?.completedTasks || []) seen.add(Number(x.id));
+    if (type === "wishes") for (const x of appState?.completedWishes || []) seen.add(Number(x.id));
     return recent.concat(archiveCache[type].items.filter((x) => !seen.has(Number(x.id))));
   }
 
   function archiveMoreHtml(type, recentCount) {
     const cache = archiveCache[type];
-    const mayExist = recentCount >= STATE_RECENT_LIMIT || cache.page >= 0;
+    // Кнопка «Показать ещё» у активных наборов появляется только на границе
+    // 200 записей, у архивов — сразу после 10 недавних.
+    const threshold = { tasks: STATE_ACTIVE_LIMIT, dates: STATE_ACTIVE_LIMIT, wishes: STATE_ACTIVE_LIMIT }[type] || STATE_RECENT_LIMIT;
+    const mayExist = recentCount >= threshold || cache.page >= 0;
     if (!mayExist || cache.hasMore === false) return "";
     return `<button class="secondary full" type="button" data-action="load-archive" data-type="${type}" style="margin-top:10px;">Показать ещё</button>`;
   }
@@ -61,9 +129,25 @@
     return !appState?.pair?.user_b;
   }
 
+  // SDK бросает WebAppMethodUnsupported, если метод новее клиента Telegram, —
+  // необязательные вызовы гасим, чтобы не валить инициализацию приложения.
+  function safeTg(fn) {
+    try {
+      return fn();
+    } catch {
+      return undefined;
+    }
+  }
+
   function applyTheme() {
     const scheme = tg?.colorScheme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = scheme === "dark" ? "dark" : "light";
+    // В полноэкранном режиме шапка Telegram прозрачная — сообщаем цвет,
+    // чтобы системный статус-бар подстраивался под тему приложения.
+    if (tg) {
+      safeTg(() => tg.setHeaderColor("bg_color"));
+      safeTg(() => tg.setBackgroundColor("bg_color"));
+    }
   }
 
   if (tg) {
@@ -71,9 +155,43 @@
     tg.expand();
     applyTheme();
     tg.onEvent?.("themeChanged", applyTheme);
+    // Полный экран (Bot API 8.0+). На старых клиентах и Telegram Desktop
+    // прилетит fullscreenFailed или бросок метода — молча остаёмся в оконном режиме.
+    tg.onEvent?.("fullscreenChanged", () => {
+      document.body.classList.toggle("tg-fullscreen", Boolean(tg.isFullscreen));
+    });
+    safeTg(() => tg.requestFullscreen());
   } else {
     applyTheme();
   }
+
+  // ------------------------------------------------------------------
+  // Иконка на домашний экран (Bot API 8.0+) и закрытие в полноэкранном режиме
+  // ------------------------------------------------------------------
+  const HS_ADDED_KEY = "duoplan.homescreenAdded";
+  function syncHomeScreenButton(status) {
+    if (!homeScreenButton) return;
+    let storedAdded = false;
+    try { storedAdded = localStorage.getItem(HS_ADDED_KEY) === "1"; } catch {}
+    // unknown — клиент не смог определить статус: кнопку всё равно показываем,
+    // повторный вызов addToHomeScreen безопасен.
+    const knownAdded = storedAdded || status === "added";
+    homeScreenButton.hidden = knownAdded || (status !== "missed" && status !== "unknown");
+  }
+  if (tg?.addToHomeScreen) {
+    tg.onEvent?.("homeScreenChecked", (data) => syncHomeScreenButton(data?.status));
+    tg.onEvent?.("homeScreenAdded", () => {
+      try { localStorage.setItem(HS_ADDED_KEY, "1"); } catch {}
+      syncHomeScreenButton("added");
+    });
+    safeTg(() => tg.checkHomeScreenStatus((data) => syncHomeScreenButton(data?.status)));
+    homeScreenButton.addEventListener("click", () => {
+      safeTg(() => tg.addToHomeScreen());
+      // Статус мог быть unknown — переспрашиваем после системного диалога.
+      safeTg(() => tg.checkHomeScreenStatus((data) => syncHomeScreenButton(data?.status)));
+    });
+  }
+  fullscreenClose?.addEventListener("click", () => tg?.close?.());
 
   function esc(value) {
     return String(value ?? "")
@@ -363,17 +481,6 @@
     return dayTime(item.day, item.time, 12);
   }
 
-  function compareDates(a, b) {
-    const ta = nextOccurrence(a)?.getTime() ?? Infinity;
-    const tb = nextOccurrence(b)?.getTime() ?? Infinity;
-    const now = Date.now();
-    const aPast = !a?.recurs && ta < now;
-    const bPast = !b?.recurs && tb < now;
-    if (aPast !== bPast) return aPast ? 1 : -1;
-    if (aPast && bPast) return tb - ta;
-    return ta - tb;
-  }
-
   function countdownFromDiff(diff) {
     if (diff <= 0) return { overdue: true, text: "Время пришло" };
     const totalMinutes = Math.floor(diff / 60000);
@@ -653,10 +760,10 @@
 
   function findItem(type, id) {
     const collections = {
-      tasks: [...(appState?.tasks || []), ...mergedArchive("done_tasks", appState?.completedTasks || [])],
-      dates: appState?.dates || [],
+      tasks: [...mergedArchive("tasks", appState?.tasks || []), ...mergedArchive("done_tasks", appState?.completedTasks || [])],
+      dates: mergedArchive("dates", appState?.dates || []),
       memories: mergedArchive("memories", appState?.memories || []),
-      wishes: [...(appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])]
+      wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])]
     };
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
   }
@@ -747,6 +854,7 @@
   }
 
   function render() {
+    syncArchiveCachePair();
     syncTopControls();
     if (!appState?.user?.gender) {
       appEl.innerHTML = renderGenderGate();
@@ -759,7 +867,7 @@
     if (currentTab === "home") {
       appEl.innerHTML = renderHome();
     } else if (currentTab === "tasks") {
-      const openTasks = [...(appState.tasks || [])].sort((a, b) => (planTarget(a.day, a.time)?.getTime() ?? Infinity) - (planTarget(b.day, b.time)?.getTime() ?? Infinity));
+      const openTasks = mergedArchive("tasks", [...(appState.tasks || [])].sort((a, b) => (planTarget(a.day, a.time)?.getTime() ?? Infinity) - (planTarget(b.day, b.time)?.getTime() ?? Infinity)));
       const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
       const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
       let html = renderTabHeader("tasks");
@@ -784,10 +892,13 @@
         html += doneTasks.map(completedTaskItem).join("");
       }
       html += archiveMoreHtml("done_tasks", (appState.completedTasks || []).length);
+      html += archiveMoreHtml("tasks", (appState.tasks || []).length);
       appEl.innerHTML = html;
     } else if (currentTab === "dates") {
-      const sortedDates = [...(appState.dates || [])].sort(compareDates);
-      appEl.innerHTML = renderListTab("dates", sortedDates, "add-date", "Добавить дату", "Значимые даты", "Добавьте годовщину, день знакомства или важный праздник.", dateItem);
+      // Порядок приходит отсортированным из /api/state (sortDateRows):
+      // повторная сортировка с часовыми поясами на каждое сравнение не нужна.
+      const sortedDates = mergedArchive("dates", appState.dates || []);
+      appEl.innerHTML = renderListTab("dates", sortedDates, "add-date", "Добавить дату", "Значимые даты", "Добавьте годовщину, день знакомства или важный праздник.", dateItem) + archiveMoreHtml("dates", (appState.dates || []).length);
     } else if (currentTab === "memories") {
       const recentMemories = appState.memories || [];
       const memoriesHtml = renderListTab("memories", mergedArchive("memories", recentMemories), "add-memory", "Записать момент", "Дневник двоих", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem);
@@ -798,7 +909,7 @@
       if (wishView === "partner" && !hasPartner) wishView = "mine";
       const myId = appState.user?.tg_id;
       const isMine = wishView === "mine";
-      const allOpen = appState.wishes || [];
+      const allOpen = mergedArchive("wishes", appState.wishes || []);
       const allDone = mergedArchive("done_wishes", appState.completedWishes || []);
       const ownOpen = allOpen.filter((w) => Number(w.owner_id) === Number(myId));
       const ownDone = allDone.filter((w) => Number(w.owner_id) === Number(myId));
@@ -848,6 +959,7 @@
         html += doneWishes.map((item) => completedWishItem(item, isMine)).join("");
       }
       html += archiveMoreHtml("done_wishes", (appState.completedWishes || []).length);
+      html += archiveMoreHtml("wishes", (appState.wishes || []).length);
       appEl.innerHTML = html;
     } else if (currentTab === "pair") {
       appEl.innerHTML = renderPair();
@@ -901,10 +1013,14 @@
   }
 
   let dialogSubmitting = false;
-  // Дата обязательна, если указано время (ограничение API).
+  // У планов дата обязательна, если указано время (ограничение API) — такие
+  // поля time помечены data-requires-day. У значимых дат дата обязательна
+  // всегда, поэтому общий обработчик их не трогает: иначе очистка времени
+  // снимала бы required с даты, и форма уходила на сервер без неё.
   dialogFields.addEventListener("input", (e) => {
     const target = e.target;
     if (!(target instanceof HTMLInputElement) || target.name !== "time") return;
+    if (!target.hasAttribute("data-requires-day")) return;
     const form = target.closest("form");
     const dayInput = form?.querySelector('input[name="day"]');
     if (dayInput) dayInput.required = Boolean(target.value);
@@ -982,7 +1098,7 @@
           fields: `
             <label class="field"><span>Что запланируем?</span><input name="title" maxlength="180" required placeholder="Поехать за город на выходных"></label>
             <label class="field"><span>Дата (необязательно)</span><input type="date" name="day"></label>
-            <label class="field"><span>Время (необязательно)</span><input type="time" name="time"></label>
+            <label class="field"><span>Время (необязательно)</span><input type="time" name="time" data-requires-day></label>
           `,
           onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time") } })
         });
@@ -1023,6 +1139,9 @@
         render();
       } else if (action === "delete-item") {
         appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
+        // Из appState удалённая запись уходит сразу, но в кэше архива она
+        // осталась бы и продолжала отображаться (и повторное удаление дало бы 404).
+        removeFromArchiveCache(btn.dataset.type, btn.dataset.id);
         render();
       } else if (action === "reopen-item") {
         const type = btn.dataset.type;
@@ -1043,9 +1162,14 @@
             fields: `
               <label class="field"><span>Что запланируем?</span><input name="title" maxlength="180" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Дата (необязательно)</span><input type="date" name="day" value="${esc(item.day || "")}"></label>
-              <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}"></label>
+              <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" data-requires-day></label>
             `,
-            onSubmit: (fd) => request(`/api/tasks/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time") } })
+            onSubmit: async (fd) => {
+              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time") };
+              const state = await request(`/api/tasks/${id}`, { method: "PATCH", body });
+              patchArchiveItem("tasks", id, body);
+              return state;
+            }
           });
         } else if (type === "dates") {
           openDialog({
@@ -1062,13 +1186,23 @@
           openDialog({
             title: "Редактировать запись",
             fields: `<label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required>${esc(item.body || "")}</textarea></label>`,
-            onSubmit: (fd) => request(`/api/memories/${id}`, { method: "PATCH", body: { body: fd.get("body") } })
+            onSubmit: async (fd) => {
+              const body = { body: fd.get("body") };
+              const state = await request(`/api/memories/${id}`, { method: "PATCH", body });
+              patchArchiveItem("memories", id, body);
+              return state;
+            }
           });
         } else if (type === "wishes") {
           openDialog({
             title: "Редактировать желание",
             fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required value="${esc(item.body || "")}"></label>`,
-            onSubmit: (fd) => request(`/api/wishes/${id}`, { method: "PATCH", body: { body: fd.get("body") } })
+            onSubmit: async (fd) => {
+              const body = { body: fd.get("body") };
+              const state = await request(`/api/wishes/${id}`, { method: "PATCH", body });
+              patchArchiveItem("wishes", id, body);
+              return state;
+            }
           });
         }
       } else if (action === "copy-code") {
@@ -1089,14 +1223,7 @@
         wishView = btn.dataset.view === "partner" ? "partner" : "mine";
         render();
       } else if (action === "load-archive") {
-        const type = btn.dataset.type;
-        const cache = archiveCache[type];
-        if (!cache) return;
-        const next = await request(`/api/archive?type=${encodeURIComponent(type)}&page=${cache.page + 1}`);
-        cache.items.push(...(next.items || []));
-        cache.page += 1;
-        cache.hasMore = Boolean(next.hasMore);
-        render();
+        await loadArchivePage(btn.dataset.type, btn);
       } else if (action === "set-gender") {
         appState = await request("/api/gender", { method: "POST", body: { gender: btn.dataset.gender } });
         render();

@@ -37,10 +37,13 @@ router.callback_query.filter(F.message.chat.type == "private")
 
 PAGE_SIZE = 8
 PAGE_TEXT_LIMIT = 3900
+# full_name складывается из имени и фамилии и длиннее «максимума Telegram»
+# для одного имени (64), поэтому memory_entries обрезает имя до этой длины.
+MEMORY_NAME_VIEW_MAX = 64
 
 # Строка записи дневника в бот-вью: "<YYYY-MM-DD> · <имя>\n<тело>", между
-# записями "\n\n". Имя ограничено 64 символами (максимум Telegram), дата — 10.
-_MEMORY_ENTRY_OVERHEAD = 10 + len(" · ") + 1 + 2 + 64
+# записями "\n\n". Дата — 10 символов, имя — не больше MEMORY_NAME_VIEW_MAX.
+_MEMORY_ENTRY_OVERHEAD = 10 + len(" · ") + 1 + 2 + MEMORY_NAME_VIEW_MAX
 MEMORY_BODY_VIEW_MAX = (
     PAGE_TEXT_LIMIT - len("Дневник двоих") - 2 - PAGE_SIZE * _MEMORY_ENTRY_OVERHEAD
 ) // PAGE_SIZE
@@ -64,13 +67,21 @@ def fit_entries(header: str, entries: list[str], limit: int = PAGE_TEXT_LIMIT) -
 
 
 def memory_entries(rows: list) -> list[str]:
-    """Форматирует записи дневника, ограничивая тело лимитом страницы."""
+    """Форматирует записи дневника, ограничивая тело и имя лимитом страницы.
+
+    Имя обрезается до MEMORY_NAME_VIEW_MAX: full_name длиннее 64 символов
+    раздувало бы запись, fit_entries выводил бы меньше восьми строк, а
+    фиксированный offset следующей страницы навсегда терял недопоказанную.
+    """
     entries: list[str] = []
     for row in rows:
         body = row["body"] or ""
         if len(body) > MEMORY_BODY_VIEW_MAX:
             body = body[: MEMORY_BODY_VIEW_MAX - 1].rstrip() + "…"
-        entries.append(f"{row['day']} · {row['display_name'] or 'Один из вас'}\n{body}")
+        display_name = row["display_name"] or "Один из вас"
+        if len(display_name) > MEMORY_NAME_VIEW_MAX:
+            display_name = display_name[: MEMORY_NAME_VIEW_MAX - 1].rstrip() + "…"
+        entries.append(f"{row['day']} · {display_name}\n{body}")
     return entries
 
 
