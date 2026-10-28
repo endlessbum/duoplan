@@ -11,6 +11,22 @@ const DAILY_ACTIONS = [
 const APP_VERSION = "2026.10.28";
 const DEFAULT_TZ = "Europe/Moscow";
 
+// Схема D1 поднимается один раз на изолят Worker (CREATE IF NOT EXISTS + ADD COLUMN).
+// Это закрывает случай, когда миграции 0003/0004/0005 ещё не применены на remote.
+const schemaReady = new WeakMap();
+async function ensureSchemaOnce(env) {
+  if (!env?.DB) return;
+  let pending = schemaReady.get(env.DB);
+  if (!pending) {
+    pending = ensureSchema(env).catch(error => {
+      schemaReady.delete(env.DB);
+      throw error;
+    });
+    schemaReady.set(env.DB, pending);
+  }
+  await pending;
+}
+
 class HttpError extends Error {
   constructor(status, message, code = "REQUEST_ERROR") {
     super(message);
@@ -376,6 +392,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
 
 async function api(request, env, url) {
   if (!env.DB) throw new HttpError(503, "База данных ещё не подключена", "DB_UNAVAILABLE");
+  await ensureSchemaOnce(env);
   const initData = request.headers.get("x-telegram-init-data");
   const tgUser = await telegramUser(initData, env.BOT_TOKEN);
   if (!tgUser) throw new HttpError(401, "Сессия Telegram истекла. Откройте приложение заново.", "AUTH_EXPIRED");
@@ -501,7 +518,7 @@ async function openApp(env, chatId, requestUrl, text) {
   return telegram(env, "sendMessage", {
     chat_id: chatId,
     text,
-    reply_markup: { inline_keyboard: [[{ text: "Открыть пространство", web_app: { url: appUrl(env, requestUrl) } }]] }
+    reply_markup: { inline_keyboard: [[{ text: "Открыть наше пространство", web_app: { url: appUrl(env, requestUrl) } }]] }
   });
 }
 
@@ -542,7 +559,7 @@ async function webhook(request, env, url) {
       });
       await openApp(env, message.chat.id, url, "Ваше пространство всегда под рукой.");
     } else {
-      await openApp(env, message.chat.id, url, "Ваши планы, воспоминания и желания — в одном месте.");
+      await openApp(env, message.chat.id, url, "Ваши планы, воспоминания и маленькие радости — в одном уютном месте.");
     }
   } catch (error) {
     console.error("webhook delivery failed", error);

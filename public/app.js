@@ -596,20 +596,29 @@ document.addEventListener("click", async event => {
     return;
   }
   if (action === "set-gender") {
-      const selectedGender = button.dataset.gender;
-      if (selectedGender) {
-        await api("/api/gender", { method: "POST", body: JSON.stringify({ gender: selectedGender }) });
-        const genderDialog = document.getElementById("gender-dialog");
-        if (genderDialog) genderDialog.close();
-        // Показать приложение после выбора
-        app.hidden = false;
-        // Перезагрузить состояние, чтобы отразить изменения
-        state = normalizeState(await api("/api/state"));
+    const selectedGender = button.dataset.gender;
+    if (!selectedGender) return;
+    try {
+      button.disabled = true;
+      await api("/api/gender", { method: "POST", body: JSON.stringify({ gender: selectedGender }) });
+      document.getElementById("gender-dialog")?.close();
+      state = normalizeState(await api("/api/state"));
+      const initial = location.hash.replace(/^#/, "");
+      route = views[initial] ? initial : "home";
+      history.replaceState({ route }, "", `#${route}`);
+      showApp();
+      window.addEventListener("popstate", event => {
+        route = views[event.state?.route] ? event.state.route : "home";
         render(true);
-      }
-      return;
+      });
+    } catch (error) {
+      button.disabled = false;
+      if (error.status === 401) showAuthExpired(error.message);
+      else toast(error.message || "Не удалось сохранить");
     }
-    if (action === "leave-pair") {
+    return;
+  }
+  if (action === "leave-pair") {
     const warning = state.pair.user_b
       ? "Выйти из пространства? Общие записи останутся у партнёра."
       : "Выйти и удалить пустое пространство? Это действие нельзя отменить.";
@@ -681,20 +690,19 @@ async function init() {
     });
   } catch {}
   if (!tg?.initData) {
-    showFatal("Управление доступно внутри Telegram. Откройте @duoplanbot и нажмите «Открыть пространство» или кнопку «DuoPlan».");
+    showFatal("Управление доступно внутри Telegram. Откройте @duoplanbot и нажмите «Открыть наше пространство».");
     return;
   }
   try {
     state = normalizeState(await api("/api/state"));
     // Если пол не задан, требуем выбор перед входом
     if (!state.user?.gender) {
+      app.hidden = true;
+      onboarding.hidden = true;
+      // Прячем лоадер, оставляем только диалог выбора пола
+      outside.querySelectorAll(":scope > :not(dialog)").forEach(el => { el.hidden = true; });
       const genderDialog = document.getElementById("gender-dialog");
-      if (genderDialog) {
-        genderDialog.showModal();
-        // Скрываем основной интерфейс пока не выбран пол
-        app.hidden = true;
-      }
-      // Останавливаем дальнейшее выполнение init, чтобы не показывать контент
+      if (genderDialog) genderDialog.showModal();
       return;
     }
     const initial = location.hash.replace(/^#/, "");
