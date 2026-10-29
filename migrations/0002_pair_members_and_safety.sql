@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS pair_members (
 
 CREATE TABLE IF NOT EXISTS rate_limits (
   bucket_key TEXT PRIMARY KEY,
-  count INTEGER NOT NULL
+  count INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS telegram_updates (

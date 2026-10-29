@@ -164,9 +164,28 @@ def welcome_text() -> str:
     )
 
 
-def home_text(pair, user) -> str:
+def display_streak(user, today: date) -> int:
+    """Серия для вывода: пропущенный день уже её прервал.
+
+    ``users.streak`` хранит последнее достигнутое значение до следующей
+    отметки ритуала, поэтому при ``last_activity`` старше вчерашнего дня
+    показываем 0, а не устаревшее число.
+    """
+    if user is None:
+        return 0
+    streak = int(user["streak"] or 0)
+    if streak <= 0:
+        return 0
+    try:
+        last = date.fromisoformat(str(user["last_activity"]))
+    except (TypeError, ValueError):
+        return 0
+    return streak if (today - last).days in (0, 1) else 0
+
+
+def home_text(pair, user, today: date) -> str:
     points = user["points"] if user is not None else 0
-    streak = user["streak"] if user is not None else 0
+    streak = display_streak(user, today)
     level, next_xp, missing = level_for(points)
     title, symbol = title_for(level)
     return (
@@ -204,7 +223,7 @@ async def send_home(message: Message, service: DuoPlanService, user_id: int) -> 
         )
         return
     user = await service.user(user_id)
-    await message.answer(home_text(pair, user), reply_markup=MAIN_MENU)
+    await message.answer(home_text(pair, user, service.local_today()), reply_markup=MAIN_MENU)
 
 
 async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
@@ -220,7 +239,7 @@ async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
         )
         return
     user = await service.user(call.from_user.id)
-    await safe_edit(call.message, home_text(pair, user), MAIN_MENU)
+    await safe_edit(call.message, home_text(pair, user, service.local_today()), MAIN_MENU)
 
 
 # -------------------------------------------------------------------- команды
@@ -382,7 +401,7 @@ async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
     user = await service.user(call.from_user.id)
     level, _, _ = level_for(pair["together_pts"])
     title, symbol = title_for(level)
-    streak = user["streak"] if user is not None else 0
+    streak = display_streak(user, service.local_today())
     await safe_edit(
         call.message,
         f"{pair['name1']} и {pair['name2']}\n\n"

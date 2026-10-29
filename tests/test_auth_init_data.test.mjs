@@ -117,7 +117,9 @@ test("изменённый hash отклоняется", async () => {
   const initData = signInitData(baseFields());
   const params = new URLSearchParams(initData);
   const hash = params.get("hash");
-  params.set("hash", (hash.slice(0, -1) === "0" ? "1" : "0") + hash.slice(1));
+  // Меняем символ в середине, чтобы изменение гарантированно попало в подпись
+  // (старая запись меняла первый символ и иногда совпадала с оригиналом).
+  params.set("hash", hash.slice(0, 32) + (hash[32] === "0" ? "1" : "0") + hash.slice(33));
   const user = await telegramUser(params.toString(), TOKEN);
   equal(user, null);
 });
@@ -127,8 +129,14 @@ test("чужой токен бота отклоняется", async () => {
   equal(user, null);
 });
 
-test("просроченный auth_date (больше 24 часов) отклоняется", async () => {
-  const stale = Math.floor(Date.now() / 1000) - 90000;
+test("initData двухдневной давности принимается: приложение открыто дольше суток", async () => {
+  const twoDays = Math.floor(Date.now() / 1000) - 2 * 86400;
+  const user = await telegramUser(signInitData(baseFields(twoDays)), TOKEN);
+  deepStrictEqual(user, USER);
+});
+
+test("auth_date старше недели отклоняется", async () => {
+  const stale = Math.floor(Date.now() / 1000) - 8 * 86400;
   const user = await telegramUser(signInitData(baseFields(stale)), TOKEN);
   equal(user, null);
 });

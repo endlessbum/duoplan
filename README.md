@@ -99,6 +99,7 @@ FSM-состояния хранятся в SQLite с TTL.
 
 ```bash
 .venv/Scripts/python.exe -m pytest
+node --test "tests/*.test.mjs"
 node --check worker.js
 node --check public/app.js
 wrangler deploy --dry-run

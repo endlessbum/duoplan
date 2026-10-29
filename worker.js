@@ -9,7 +9,7 @@ const DAILY_ACTIONS = [
 ];
 
 const APP_VERSION = "2026.10.28";
-const DB_SCHEMA_VERSION = "2026.10.29";
+const DB_SCHEMA_VERSION = "2026.10.31";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // /api/state отдаёт активные наборы с потолком STATE_ACTIVE_LIMIT и только
@@ -110,13 +110,13 @@ function validTimeZone(value) {
   }
 }
 
-function localDay(timeZone = DEFAULT_TZ) {
+function localDay(timeZone = DEFAULT_TZ, atMs = Date.now()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: validTimeZone(timeZone) || DEFAULT_TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
-  }).formatToParts(new Date());
+  }).formatToParts(new Date(atMs));
   const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
 }
@@ -175,7 +175,11 @@ async function telegramUser(initData, token) {
   const received = params.get("hash");
   const authDate = Number(params.get("auth_date"));
   if (!received || !Number.isFinite(authDate)) return null;
-  if (authDate > now() + 300 || now() - authDate > 86400) return null;
+  // Mini App может оставаться открытым сутками, а initData обновляется только
+  // при запуске: суточный порог обрывал живую сессию на второй день. Неделя
+  // покрывает нормальную работу и всё ещё ограничивает replay украденных данных.
+  const MAX_AGE = 7 * 86400;
+  if (authDate > now() + 300 || now() - authDate > MAX_AGE) return null;
   params.delete("hash");
   // Поле signature (Bot API 9.x, Ed25519-валидация третьими сторонами) при HMAC-проверке
   // не исключается: data-check-string — это «chain of all received fields», кроме hash.
@@ -200,10 +204,14 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
   const bucket = Math.floor(nowSeconds / windowSeconds);
   const bucketKey = `${key}:${bucket}`;
   const expiresAt = (bucket + 1) * windowSeconds;
-  const insert = () => env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
-    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at`).bind(bucketKey, expiresAt).run();
+  // Счётчик читается через RETURNING в том же UPSERT: отдельный SELECT давал
+  // лишний запрос и мог прочитать устаревшее значение при гонке (репорт 2026-10-29).
+  const upsert = () => env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
+    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at
+    RETURNING count`).bind(bucketKey, expiresAt).first();
+  let row;
   try {
-    await insert();
+    row = await upsert();
   } catch (error) {
     // На чистой D1 таблица rate_limits может ещё не существовать (ensureSchema
     // вызывается позже). Создаём минимальную схему и повторяем попытку,
@@ -211,21 +219,46 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
     const message = String(error?.message || error).toLowerCase();
     if (message.includes("no such table")) {
       await env.DB.prepare("CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)").run();
-      await insert();
+      row = await upsert();
     } else if (message.includes("no column named expires_at")) {
       await env.DB.prepare("ALTER TABLE rate_limits ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0").run();
-      await insert();
+      row = await upsert();
     } else {
       throw error;
     }
   }
-  const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?").bind(bucketKey).first();
   if (bucket % 10 === 0) {
     // Удаляем только устаревшие окна того же ключа, сравнивая номер окна численно,
     // а не лексикографически по всей строке bucket_key (иначе затрагиваются другие ключи).
     await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(nowSeconds).run();
   }
   if ((row?.count || 0) > limit) throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
+}
+
+// Вход по коду — главная точка перебора: успешный подбор открывает чужое
+// пространство целиком. Код — 4 байта (2^32 вариантов), общий лимит 240/мин
+// на аккаунт даёт сотни тысяч попыток в сутки, а путь /start CODE в вебхуке
+// общего лимита не имеет вовсе. Считаем только неудачные попытки («код не
+// найден»): опечатки пользователя почти не задевает, перебор упирается в
+// 5 неудач за 15 минут на аккаунт. Таблица rate_limits общая с rateLimit —
+// устаревшие окна чистятся тем же механизмом по expires_at.
+const JOIN_ATTEMPT_LIMIT = 5;
+const JOIN_ATTEMPT_WINDOW = 15 * 60;
+
+async function checkJoinAttempts(env, userId) {
+  const bucket = Math.floor(now() / JOIN_ATTEMPT_WINDOW);
+  const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?")
+    .bind(`jf:${userId}:${bucket}`).first();
+  if ((row?.count || 0) >= JOIN_ATTEMPT_LIMIT) {
+    throw new HttpError(429, "Слишком много неудачных попыток входа по коду. Попробуйте снова через 15 минут.", "JOIN_RATE_LIMITED");
+  }
+}
+
+async function recordJoinFailure(env, userId) {
+  const bucket = Math.floor(now() / JOIN_ATTEMPT_WINDOW);
+  await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
+    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at`)
+    .bind(`jf:${userId}:${bucket}`, (bucket + 1) * JOIN_ATTEMPT_WINDOW).run();
 }
 
 async function ensureUser(env, tgUser, requestedTimeZone) {
@@ -276,8 +309,12 @@ async function joinPair(env, user, rawCode) {
   const code = clean(rawCode).toUpperCase().slice(0, 16);
   if (!/^[A-F0-9]{8}$/.test(code)) throw new HttpError(400, "Код должен состоять из 8 символов", "INVALID_CODE");
   if (await membership(env, user.tg_id)) throw new HttpError(409, "Вы уже состоите в пространстве", "ALREADY_PAIRED");
+  await checkJoinAttempts(env, user.tg_id);
   const pair = await env.DB.prepare("SELECT * FROM pairs WHERE code=?").bind(code).first();
-  if (!pair) throw new HttpError(404, "Код не найден", "CODE_NOT_FOUND");
+  if (!pair) {
+    await recordJoinFailure(env, user.tg_id);
+    throw new HttpError(404, "Код не найден", "CODE_NOT_FOUND");
+  }
   if (pair.user_a === user.tg_id) throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
   if (pair.user_b) throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
   const timestamp = now();
@@ -317,6 +354,7 @@ async function leavePair(env, member) {
       env.DB.prepare("DELETE FROM memories WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM wishes WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM daily_rolls WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM daily_completions WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pair_members WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pairs WHERE id=?").bind(member.id)
     );
@@ -338,7 +376,10 @@ async function leavePair(env, member) {
   await env.DB.batch(operations);
 }
 
-async function dailyFor(env, pairId, timeZone) {
+// Ритуал теперь отмечается каждым партнёром отдельно: daily_rolls хранит общее
+// действие дня, daily_completions — кто уже отметил. done отражает отметку
+// текущего пользователя (userId), partnerDone — отметку второго участника.
+async function dailyFor(env, pairId, timeZone, userId = null) {
   const day = localDay(timeZone);
   let row = await env.DB.prepare("SELECT * FROM daily_rolls WHERE pair_id=? AND day=?").bind(pairId, day).first();
   if (!row) {
@@ -348,7 +389,24 @@ async function dailyFor(env, pairId, timeZone) {
     await env.DB.prepare("INSERT OR IGNORE INTO daily_rolls(pair_id,day,daily_value) VALUES(?,?,?)").bind(pairId, day, action).run();
     row = await env.DB.prepare("SELECT * FROM daily_rolls WHERE pair_id=? AND day=?").bind(pairId, day).first();
   }
-  return { day, action: row.daily_value, done: Boolean(row.done_by), doneBy: row.done_by || null };
+  const completions = await env.DB.prepare("SELECT tg_id FROM daily_completions WHERE pair_id=? AND day=?").bind(pairId, day).all();
+  const completed = new Set((completions.results || []).map((r) => Number(r.tg_id)));
+  const myDone = userId != null && completed.has(Number(userId));
+  const partnerDone = userId != null ? completed.size > (myDone ? 1 : 0) : completed.size > 0;
+  return { day, action: row.daily_value, done: myDone, partnerDone, completedCount: completed.size };
+}
+
+// users.streak хранит последнее достигнутое значение и не обнуляется сам по
+// себе: после пропущенных дней там остаётся «7», пока кто-то не отметит ритуал.
+// Для вывода считаем серию прерванной, если last_activity не сегодня и не
+// вчера — иначе интерфейс показывает устаревшую серию (репорт 2026-10-29).
+function displayStreak(user) {
+  const streak = Number(user?.streak || 0);
+  if (streak <= 0) return 0;
+  const last = String(user?.last_activity || "").slice(0, 10);
+  const today = localDay(user?.timezone);
+  const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  return last === today || last === yesterday ? streak : 0;
 }
 
 function publicUser(user) {
@@ -356,7 +414,7 @@ function publicUser(user) {
     tg_id: user.tg_id,
     display_name: user.display_name,
     points: user.points,
-    streak: user.streak,
+    streak: displayStreak(user),
     best_streak: user.best_streak,
     timezone: user.timezone,
     gender: user.gender || null
@@ -433,8 +491,13 @@ function byRowId(a, b) {
 // Единая сортировка открытых планов для state() и archivePage(): по ближайшему
 // дедлайну, равные ключи — по id. Хелпер один, чтобы первая страница списка и
 // архивное продолжение были согласованными последовательностями (репорт 2026-10-29).
+// Ключ считается один раз на запись: taskTargetMs строит Intl.DateTimeFormat
+// (несколько на вызов) и слишком дорог, чтобы вызывать его из компаратора на
+// каждое сравнение — тот же decorate-sort-undecorate, что и в sortDateRows.
 function sortByTaskDeadline(rows, timeZone) {
-  return [...rows].sort((a, b) => taskTargetMs(a, timeZone) - taskTargetMs(b, timeZone) || byRowId(a.id, b.id));
+  const decorated = rows.map((row) => ({ row, at: taskTargetMs(row, timeZone) }));
+  decorated.sort(({ row: a, at: ta }, { row: b, at: tb }) => ta - tb || byRowId(a.id, b.id));
+  return decorated.map(({ row }) => row);
 }
 
 function nextDateOccurrence(item, timeZone) {
@@ -474,6 +537,17 @@ function nextDateOccurrence(item, timeZone) {
   return Number.isNaN(fallback.getTime()) ? Number.MAX_SAFE_INTEGER : fallback.getTime();
 }
 
+// Дата — событие дня, а не момента: не-ежегодная запись прошедшая только когда
+// прошёл её календарный день. Сравнение по timestamp отправляло «сегодня» в
+// прошедшие уже после полудня (12:00 — время по умолчанию), хотя интерфейс
+// подписывает её «Сегодня» (репорт 2026-10-29).
+function isPastDate(row, timeZone, nowMs) {
+  if (!row || row.recurs) return false;
+  const day = String(row.day || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  return day < localDay(timeZone || "UTC", nowMs);
+}
+
 // Сортировка дат для /api/state: сначала будущие по ближайшему наступлению,
 // затем прошедшие не-ежегодные от свежих к старым. Timestamp считается один
 // раз на запись: nextDateOccurrence строит Intl.DateTimeFormat и слишком
@@ -482,8 +556,8 @@ function nextDateOccurrence(item, timeZone) {
 function sortDateRows(rows, timeZone, nowMs = Date.now()) {
   const decorated = rows.map((row) => ({ row, at: nextDateOccurrence(row, timeZone) }));
   decorated.sort(({ row: a, at: ta }, { row: b, at: tb }) => {
-    const aPast = !a.recurs && ta < nowMs;
-    const bPast = !b.recurs && tb < nowMs;
+    const aPast = isPastDate(a, timeZone, nowMs);
+    const bPast = isPastDate(b, timeZone, nowMs);
     if (aPast !== bPast) return aPast ? 1 : -1;
     if (aPast && bPast) return tb - ta || byRowId(a.id, b.id);
     return ta - tb || byRowId(a.id, b.id);
@@ -507,7 +581,8 @@ async function state(env, userId) {
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
-    pair.user_b ? dailyFor(env, pair.id, pair.timezone) : null,
+    // dailyFor учитывает отметку текущего пользователя (user.tg_id).
+    pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
     // Пол партнёра — для обращений «Его/Её желания» в вишлисте.
     partnerId ? env.DB.prepare("SELECT gender FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
@@ -539,8 +614,13 @@ async function state(env, userId) {
 // Страница догрузки: архивы продолжают первые STATE_RECENT_LIMIT записей
 // из /api/state, активные наборы — записи после STATE_ACTIVE_LIMIT.
 async function archivePage(env, pair, type, page) {
+  // Object.hasOwn, а не ARCHIVE_QUERIES[type]: имена из прототипа
+  // ("constructor", "toString", "__proto__") дают truthy-функцию, проходят
+  // проверку и падают на config.sql уже внутри D1 — 500 вместо 400.
+  if (!Object.hasOwn(ARCHIVE_QUERIES, type)) {
+    throw new HttpError(400, "Неизвестный тип архива", "INVALID_ARCHIVE_TYPE");
+  }
   const config = ARCHIVE_QUERIES[type];
-  if (!config) throw new HttpError(400, "Неизвестный тип архива", "INVALID_ARCHIVE_TYPE");
   if (config.sort) {
     // tasks/dates: сервер сортирует весь набор тем же способом, что и state(),
     // и отрезает страницу — порядок продолжения совпадает с порядком списка.
@@ -575,6 +655,19 @@ async function readJson(request) {
   }
 }
 
+// Желания личные: партнёр видит их в вишлисте, но менять (PATCH, DELETE,
+// done/reopen) может только автор. Условия pair_id в SQL недостаточно — оно
+// подтверждает лишь, что запись из общего пространства, а не право на правку
+// (репорт 2026-10-29: чужие желания менялись через API при read-only UI).
+async function ensureWishOwner(env, pair, user, id) {
+  const wish = await env.DB.prepare("SELECT owner_id FROM wishes WHERE id=? AND pair_id=?")
+    .bind(id, pair.id).first();
+  if (!wish) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+  if (Number(wish.owner_id) !== Number(user.tg_id)) {
+    throw new HttpError(403, "Желание принадлежит партнёру", "WISH_NOT_OWNER");
+  }
+}
+
 async function itemRoute(env, pair, user, method, pathname, body) {
   const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes)\/(\d+)(?:\/(done|reopen))?$/);
   if (!match) return false;
@@ -582,6 +675,10 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   const id = Number(rawId);
   if (!positiveId(id)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
   const table = { tasks: "tasks", dates: "dates", memories: "memories", wishes: "wishes" }[type];
+  // Проверяем владельца до любой записи, чтобы чужая строка не менялась даже
+  // частично (UPDATE ... WHERE не сработал бы, но 403 точнее 404).
+  const mutating = method === "DELETE" || method === "PATCH" || (method === "POST" && action);
+  if (type === "wishes" && mutating) await ensureWishOwner(env, pair, user, id);
   if (method === "DELETE") {
     const result = await env.DB.prepare(`DELETE FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
@@ -639,8 +736,10 @@ async function api(request, env, url) {
   const tgUser = await telegramUser(initData, env.BOT_TOKEN);
   if (!tgUser) throw new HttpError(401, "Сессия Telegram истекла. Откройте приложение заново.", "AUTH_EXPIRED");
   const timezone = validTimeZone(request.headers.get("x-timezone"));
-  const user = await ensureUser(env, tgUser, timezone);
+  // Лимит проверяем ДО записи пользователя: иначе флуд всё равно создаёт
+  // строки в users, а rate limit срабатывает только после (репорт 2026-10-29).
   await rateLimit(env, `u:${tgUser.id}`, 240, 60);
+  const user = await ensureUser(env, tgUser, timezone);
 
   if (request.method === "GET" && url.pathname === "/api/state") return json(await state(env, user.tg_id));
 
@@ -703,7 +802,7 @@ async function api(request, env, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/daily/done") {
     if (!pair.user_b) throw new HttpError(409, "Ритуал дня откроется, когда партнёр присоединится", "PAIR_INCOMPLETE");
-    const daily = await dailyFor(env, pair.id, pair.timezone);
+    const daily = await dailyFor(env, pair.id, pair.timezone, user.tg_id);
     if (daily.done) return json({ ...(await state(env, user.tg_id)), awarded: false });
 
     const stamp = now();
@@ -714,8 +813,8 @@ async function api(request, env, url) {
     // XP начисляется только если захват ритуала сработал (changes > 0),
     // что исключает дубли и повторное начисление при гонках.
     const batchResults = await env.DB.batch([
-      env.DB.prepare("UPDATE daily_rolls SET done_by=?,done_at=? WHERE pair_id=? AND day=? AND done_by IS NULL")
-        .bind(user.tg_id, stamp, pair.id, daily.day),
+      env.DB.prepare("INSERT OR IGNORE INTO daily_completions(pair_id,tg_id,day,completed_at) VALUES(?,?,?,?)")
+        .bind(pair.id, user.tg_id, daily.day, stamp),
       env.DB.prepare(`UPDATE users SET
         points = points + 10,
         streak = CASE
@@ -801,6 +900,9 @@ async function webhook(request, env, url) {
   if (!env.WEBHOOK_SECRET || !safeEqual(request.headers.get("x-telegram-bot-api-secret-token"), env.WEBHOOK_SECRET)) {
     return new Response("Forbidden", { status: 403 });
   }
+  // Схема (включая индекс по received_at) создаётся до очистки: иначе
+  // DELETE бьёт по таблице без индекса на каждый апдейт (репорт 2026-10-29).
+  await ensureSchemaOnce(env);
   // Ограничиваем рост таблицы дедупликации: храним отметки около недели.
   try {
     await env.DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(now() - 7 * 24 * 60 * 60).run();
@@ -904,13 +1006,16 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,done_by INTEGER,done_at INTEGER,PRIMARY KEY (pair_id,day))`,
     `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS telegram_updates (update_id INTEGER PRIMARY KEY,received_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS daily_completions (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,day TEXT NOT NULL,completed_at INTEGER NOT NULL,PRIMARY KEY (pair_id,tg_id,day))`,
     `CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS idx_tasks_pair ON tasks(pair_id,status)`,
     `CREATE INDEX IF NOT EXISTS idx_dates_pair ON dates(pair_id,day)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_pair ON memories(pair_id,created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_wishes_pair ON wishes(pair_id,done)`,
     `CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id)`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id,role)`
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id,role)`,
+    `CREATE INDEX IF NOT EXISTS idx_telegram_updates_received_at ON telegram_updates(received_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_daily_completions_pair_day ON daily_completions(pair_id,day)`
   ];
   await env.DB.batch(statements.map(sql => env.DB.prepare(sql)));
   for (const [table, column, definition] of [

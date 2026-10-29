@@ -33,17 +33,24 @@ function extractBraced(declaration) {
 
 const load = new Function(
   [
+    'const DEFAULT_TZ = "Europe/Moscow";',
+    extractBraced("function validTimeZone"),
+    extractBraced("function localDay"),
     extractBraced("function byRowId"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function nextDateOccurrence"),
+    extractBraced("function isPastDate"),
     extractBraced("function sortDateRows")
   ].join("\n") + "\nreturn { nextDateOccurrence, sortDateRows };"
 );
 const { nextDateOccurrence, sortDateRows } = load();
 
 const TZ = "Europe/Amsterdam";
-const NOW_MS = new Date("2026-06-15T12:00:00Z").getTime();
+// До полудня по Амстердаму: эталонный компаратор ниже не знает про дефект
+// «сегодня после 12:00», поэтому эквивалентность проверяем на времени, где
+// старое и новое поведение совпадают. Сам дефект — в отдельном тесте.
+const NOW_MS = new Date("2026-06-15T08:00:00Z").getTime();
 
 // Прежний inline-компаратор из state() до оптимизации (поведение-эталон).
 function legacySort(rows, timeZone, nowMs) {
@@ -69,6 +76,20 @@ test("будущие даты по возрастанию, прошедшие п
   const sorted = sortDateRows(rows, TZ, NOW_MS);
   // recurring 05-05: в 2026 уже прошло → следующее 2027-05-05, в будущей группе.
   deepStrictEqual(sorted.map((r) => r.id), ["future-soon", "future-late", "recurring-may", "past-new", "past-old"]);
+});
+
+test("неповторяющаяся дата «сегодня» остаётся в будущих и после полудня", () => {
+  // 17:00 по Амстердаму: время по умолчанию (12:00) уже прошло.
+  const now = new Date("2026-06-15T15:00:00Z").getTime();
+  const rows = [
+    { id: "yesterday", day: "2026-06-14" },
+    { id: "today-timed", day: "2026-06-15", time: "09:00" },
+    { id: "today", day: "2026-06-15" },
+    { id: "tomorrow", day: "2026-06-16" }
+  ];
+  const sorted = sortDateRows(rows, TZ, now);
+  // Прошедшая — только вчера; сегодняшние остаются впереди, по времени.
+  deepStrictEqual(sorted.map((r) => r.id), ["today-timed", "today", "tomorrow", "yesterday"]);
 });
 
 test("29 февраля ежегодной даты резолвится в ближайший високосный год", () => {

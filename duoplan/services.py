@@ -303,24 +303,23 @@ class DuoPlanService:
         row = await self.db.one(
             "SELECT * FROM daily_rolls WHERE pair_id = ? AND day = ?", (pair_id, today)
         )
-        if row:
-            return {"action": row["daily_value"], "done": bool(row["done_by"]), "day": today}
-
-        action = self._daily_action(pair_id, today)
-        await self.db.execute(
-            "INSERT INTO daily_rolls(pair_id, day, daily_kind, daily_value) "
-            "VALUES(?, ?, 'moment', ?) ON CONFLICT(pair_id, day) DO NOTHING",
-            (pair_id, today, action),
-        )
-        # Пока шла вставка, другой обработчик мог уже завершить ритуал —
-        # читаем фактическое состояние, а не предполагаем "done": False.
-        stored = await self.db.one(
-            "SELECT daily_value, done_by FROM daily_rolls WHERE pair_id = ? AND day = ?",
+        if not row:
+            action = self._daily_action(pair_id, today)
+            await self.db.execute(
+                "INSERT INTO daily_rolls(pair_id, day, daily_kind, daily_value) "
+                "VALUES(?, ?, 'moment', ?) ON CONFLICT(pair_id, day) DO NOTHING",
+                (pair_id, today, action),
+            )
+            row = await self.db.one(
+                "SELECT * FROM daily_rolls WHERE pair_id = ? AND day = ?", (pair_id, today)
+            )
+        completed = await self.db.one(
+            "SELECT COUNT(*) AS n FROM daily_completions WHERE pair_id = ? AND day = ?",
             (pair_id, today),
         )
         return {
-            "action": stored["daily_value"] if stored else action,
-            "done": bool(stored["done_by"]) if stored else False,
+            "action": (row["daily_value"] if row else None),
+            "done": bool(completed and completed["n"]),
             "day": today,
         }
 
@@ -339,13 +338,15 @@ class DuoPlanService:
                 (pair_id, today, action),
             )
 
+            # Каждый партнёр отмечает ритуал сам: daily_completions хранит
+            # факты отметок, поэтому второй участник тоже может получить XP.
             _, changes = await self.db.execute_row(
-                "UPDATE daily_rolls SET done_by = ?, done_at = ? "
-                "WHERE pair_id = ? AND day = ? AND done_by IS NULL",
-                (user_id, timestamp, pair_id, today),
+                "INSERT INTO daily_completions(pair_id, tg_id, day, completed_at) "
+                "VALUES(?, ?, ?, ?) ON CONFLICT(pair_id, tg_id, day) DO NOTHING",
+                (pair_id, user_id, today, timestamp),
             )
             if changes != 1:
-                # Уже отмечено (второй тап или гонка) — ничего не начисляем.
+                # Уже отмечено этим пользователем — повтор ничего не начисляет.
                 tx.rollback()
                 return False
 

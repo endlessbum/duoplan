@@ -124,6 +124,7 @@
   }
   let dropletTimer = null;
   let toastTimer = null;
+  let sessionExpired = false;
   let dialogContext = null;
   function partnerMissing() {
     return !appState?.pair?.user_b;
@@ -160,6 +161,9 @@
     tg.onEvent?.("fullscreenChanged", () => {
       document.body.classList.toggle("tg-fullscreen", Boolean(tg.isFullscreen));
     });
+    // Свайп вниз сворачивает мини-апп — отключаем: сворачивание только кнопкой
+    // закрытия, случайный жест не должен сворачивать приложение (Bot API 7.7+).
+    safeTg(() => tg.disableVerticalSwipes());
     safeTg(() => tg.requestFullscreen());
   } else {
     applyTheme();
@@ -169,14 +173,19 @@
   // Иконка на домашний экран (Bot API 8.0+) и закрытие в полноэкранном режиме
   // ------------------------------------------------------------------
   const HS_ADDED_KEY = "duoplan.homescreenAdded";
+  let homeScreenStatus = null;
   function syncHomeScreenButton(status) {
+    if (status) homeScreenStatus = status;
     if (!homeScreenButton) return;
     let storedAdded = false;
     try { storedAdded = localStorage.getItem(HS_ADDED_KEY) === "1"; } catch {}
     // unknown — клиент не смог определить статус: кнопку всё равно показываем,
-    // повторный вызов addToHomeScreen безопасен.
-    const knownAdded = storedAdded || status === "added";
-    homeScreenButton.hidden = knownAdded || (status !== "missed" && status !== "unknown");
+    // повторный вызов addToHomeScreen безопасен. Показ — только на экране «Наша пара»,
+    // на остальных вкладках прячем.
+    const knownAdded = storedAdded || homeScreenStatus === "added";
+    homeScreenButton.hidden = knownAdded
+      || (homeScreenStatus !== "missed" && homeScreenStatus !== "unknown")
+      || currentTab !== "pair";
   }
   if (tg?.addToHomeScreen) {
     tg.onEvent?.("homeScreenChecked", (data) => syncHomeScreenButton(data?.status));
@@ -206,14 +215,28 @@
     return clean ? Array.from(clean)[0].toUpperCase() : fallback;
   }
 
-  function showToast(message) {
+  function showToast(message, { sticky = false } = {}) {
     if (!toastEl) return;
     toastEl.textContent = message;
     toastEl.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      toastEl.hidden = true;
-    }, 2600);
+    if (!sticky) {
+      toastTimer = setTimeout(() => {
+        toastEl.hidden = true;
+      }, 2600);
+    }
+  }
+
+  // 401 нельзя глотать в фоне: иначе интерфейс молча показывает устаревшие
+  // данные, пока следующее действие не упадёт коротким тостом. Сообщение об
+  // истёкшей сессии держим на экране до перезапуска приложения.
+  function handleRequestError(error) {
+    if (error?.status === 401) {
+      sessionExpired = true;
+      showToast(error.message, { sticky: true });
+      return;
+    }
+    showToast(error.message);
   }
 
   async function request(path, options = {}) {
@@ -229,7 +252,10 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(payload.error || payload.message || `Ошибка ${response.status}`);
+      const error = new Error(payload.error || payload.message || `Ошибка ${response.status}`);
+      error.status = response.status;
+      error.code = payload.code;
+      throw error;
     }
     return payload;
   }
@@ -318,6 +344,9 @@
   }
 
   function syncTopControls() {
+    // Видимость кнопки «на главный экран» зависит и от вкладки (только «Наша
+    // пара»), и от статуса клиента — пересинхронизируем на каждом рендере.
+    syncHomeScreenButton();
     const pair = appState?.pair;
     const isSubScreen = currentTab !== "home";
     // Собственная кнопка «Назад» с вкладок убрана: навигация идёт через
@@ -436,6 +465,21 @@
     return Number.isNaN(result.getTime()) ? null : result;
   }
 
+  // Стабильный tie-break по id: годится и для числовых rowid, и для строковых id.
+  function byRowId(a, b) {
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+
+  // Ключ дедлайна считается один раз на запись: planTarget строит
+  // Intl.DateTimeFormat и слишком дорог внутри компаратора на каждое сравнение.
+  // Тай-брейк по id повторяет серверную sortByTaskDeadline, чтобы порядок
+  // клиента совпадал с /api/state и архивными страницами.
+  function sortByTaskDeadline(rows) {
+    const decorated = rows.map((row) => ({ row, at: planTarget(row.day, row.time)?.getTime() ?? Infinity }));
+    decorated.sort((a, b) => a.at - b.at || byRowId(a.row.id, b.row.id));
+    return decorated.map(({ row }) => row);
+  }
+
   function dayTime(day, time, fallbackHour = 12) {
     if (!day) return null;
     const [year, month, date] = String(day).split("-").map(Number);
@@ -479,6 +523,16 @@
       if (candidate && candidate >= today) return candidate;
     }
     return dayTime(item.day, item.time, 12);
+  }
+
+  // Русская плюрализация: 1 день / 2 дня / 5 дней (21 день, 11 дней, 14 дней).
+  function plural(n, one, few, many) {
+    const value = Math.abs(Number(n) || 0);
+    const mod10 = value % 10;
+    const mod100 = value % 100;
+    if (mod10 === 1 && mod100 !== 11) return one;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+    return many;
   }
 
   function countdownFromDiff(diff) {
@@ -601,18 +655,14 @@
       <section class="card">
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
-        <p>${daily.done ? "Выполнено сегодня · +10 XP в копилку пары" : "Маленький шаг навстречу друг другу сегодня."}</p>
+        <p>${daily.done ? `Вы отметили ритуал · +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP.")}</p>
         ${daily.done ? "" : `<div style="margin-top:12px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это · +10 XP</button></div>`}
       </section>
     ` : "";
 
-    const previewTasks = [...tasks]
-      .sort((a, b) => (planTarget(a.day, a.time)?.getTime() ?? Infinity) - (planTarget(b.day, b.time)?.getTime() ?? Infinity))
-      .slice(0, 3)
-      .map(taskItem)
-      .join("");
-    const sortedDates = [...dates].sort(compareDates);
-    const previewDates = sortedDates.slice(0, 2).map(dateItem).join("");
+    const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
+    // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
+    const previewDates = dates.slice(0, 2).map(dateItem).join("");
     const latestMemory = memories[0];
 
     return `
@@ -830,8 +880,9 @@
         <h3>Отправьте код партнёру</h3>
         <p>После его присоединения здесь появятся общие планы, значимые даты, дневник двоих, вишлист и ритуал дня. Общие очки пары: ${pair.together_pts || 0} XP</p>
         ${pair.code ? `
-          <div style="margin-top:14px;">
+          <div style="margin-top:14px; display:grid; gap:8px;">
             <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
+            <button class="secondary full" type="button" data-action="copy-link" data-code="${esc(pair.code)}">Скопировать ссылку для партнёра</button>
           </div>
         ` : ""}
       </section>
@@ -867,7 +918,7 @@
     if (currentTab === "home") {
       appEl.innerHTML = renderHome();
     } else if (currentTab === "tasks") {
-      const openTasks = mergedArchive("tasks", [...(appState.tasks || [])].sort((a, b) => (planTarget(a.day, a.time)?.getTime() ?? Infinity) - (planTarget(b.day, b.time)?.getTime() ?? Infinity)));
+      const openTasks = mergedArchive("tasks", sortByTaskDeadline(appState.tasks || []));
       const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
       const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
       let html = renderTabHeader("tasks");
@@ -1028,6 +1079,10 @@
   dialogForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!dialogContext || dialogSubmitting) return;
+    // Страховка к нативной проверке: required/type=date должны остановить
+    // отправку до запроса к API. reportValidity показывает то же сообщение
+    // браузера и работает, даже если атрибут novalidate когда-нибудь вернут.
+    if (!dialogForm.reportValidity()) return;
     const submitBtn = dialogForm.querySelector('button[type="submit"]');
     dialogSubmitting = true;
     if (submitBtn) submitBtn.disabled = true;
@@ -1039,7 +1094,7 @@
       // Цепочка шагов (например, повторное подтверждение выхода).
       dialogContext?.chain?.();
     } catch (error) {
-      showToast(error.message);
+      handleRequestError(error);
     } finally {
       dialogSubmitting = false;
       if (submitBtn) submitBtn.disabled = false;
@@ -1217,6 +1272,19 @@
         } else {
           showToast(`Код: ${code}`);
         }
+      } else if (action === "copy-link") {
+        const code = btn.dataset.code || "";
+        const link = `https://t.me/duoplanbot?start=${encodeURIComponent(code)}`;
+        if (navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(link);
+            showToast("Ссылка скопирована");
+          } catch (error) {
+            showToast(link);
+          }
+        } else {
+          showToast(link);
+        }
       } else if (action === "leave-pair") {
         confirmLeaveSpace();
       } else if (action === "wish-view") {
@@ -1229,17 +1297,33 @@
         render();
       }
     } catch (error) {
-      showToast(error.message);
+      handleRequestError(error);
     }
   });
 
   async function refreshState() {
+    if (sessionExpired) return;
     if (dialog?.open) return;
+    // Пользователь печатает (код приглашения в онбординге) — тик пропускаем
+    // целиком, данные придут снова на следующем тике после ухода фокуса.
+    const isTyping = () => document.activeElement instanceof HTMLInputElement
+      || document.activeElement instanceof HTMLTextAreaElement;
+    if (isTyping()) return;
     try {
-      appState = await request("/api/state");
+      const next = await request("/api/state");
+      // Фокус могли включить, пока запрос летел, — тогда данные не забираем,
+      // чтобы не потерять изменение для следующего тика.
+      if (isTyping()) return;
+      // Данные не изменились — перерисовка не нужна: она сбрасывает ввод,
+      // выделение текста и фокус.
+      const unchanged = JSON.stringify(next) === JSON.stringify(appState);
+      appState = next;
+      if (unchanged) return;
       render();
     } catch (error) {
-      // Фоновое обновление не должно прерывать работу интерфейса.
+      // Сетевые ошибки глотаем, как и раньше: фон не должен прерывать работу.
+      // Истёкшая сессия — отдельный случай: сообщаем явно, а не молчим.
+      if (error?.status === 401) handleRequestError(error);
     }
   }
 

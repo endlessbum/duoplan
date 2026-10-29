@@ -27,19 +27,22 @@ async def test_concurrent_daily_charges_xp_once(tmp_path, monkeypatch):
 
         results = await asyncio.gather(
             owner.complete_daily(pair["id"], 1),
-            partner.complete_daily(pair["id"], 1),
+            partner.complete_daily(pair["id"], 2),
         )
 
-        assert sorted(results) == [False, True]
-        user = await owner.user(1)
+        # Оба участника отмечают ритуал сами и получают XP.
+        assert sorted(results) == [True, True]
+        owner_user = await owner.user(1)
+        partner_user = await owner.user(2)
         pair_after = await owner.pair_for(1)
-        assert user["points"] == DAILY_XP
-        assert pair_after["together_pts"] == DAILY_XP
-        roll = await owner.db.one(
-            "SELECT done_by FROM daily_rolls WHERE pair_id = ? AND day = ?",
+        assert owner_user["points"] == DAILY_XP
+        assert partner_user["points"] == DAILY_XP
+        assert pair_after["together_pts"] == DAILY_XP * 2
+        completions = await owner.db.one(
+            "SELECT COUNT(*) AS n FROM daily_completions WHERE pair_id = ? AND day = ?",
             (pair["id"], fixed.isoformat()),
         )
-        assert roll["done_by"] == 1
+        assert completions["n"] == 2
     finally:
         await first.close()
         await second.close()

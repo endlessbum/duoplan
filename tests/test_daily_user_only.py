@@ -20,8 +20,8 @@ async def test_daily_awards_only_pressing_user(pair, monkeypatch):
     assert partner["points"] == 0
     assert current["together_pts"] == DAILY_XP
 
-    # Повторное нажатие партнёром не начисляет очки.
-    assert await service.complete_daily(pair_id, partner_id) is False
+    # Партнёр тоже может отметить ритуал в тот же день — и получает XP.
+    assert await service.complete_daily(pair_id, partner_id) is True
     partner_after = await service.user(partner_id)
-    assert partner_after["points"] == 0
-    assert (await service.pair_for(owner_id))["together_pts"] == DAILY_XP
+    assert partner_after["points"] == DAILY_XP
+    assert (await service.pair_for(owner_id))["together_pts"] == DAILY_XP * 2

@@ -44,14 +44,19 @@ if (constsStart === -1 || constsEnd === -1 || constsEnd < constsStart) {
 const load = new Function(
   `${source.slice(constsStart, constsEnd)}\n` +
   [
+    'const DEFAULT_TZ = "Europe/Moscow";',
     extractBraced("class HttpError"),
+    extractBraced("function validTimeZone"),
+    extractBraced("function localDay"),
     extractBraced("function byRowId"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function taskTargetMs"),
     extractBraced("function sortByTaskDeadline"),
     extractBraced("function nextDateOccurrence"),
+    extractBraced("function isPastDate"),
     extractBraced("function sortDateRows"),
+    extractBraced("function displayStreak"),
     extractBraced("function publicUser"),
     extractBraced("async function membership"),
     extractBraced("async function state"),

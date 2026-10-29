@@ -3,6 +3,14 @@
   Referrer-Policy: no-referrer
   Permissions-Policy: geolocation=(), camera=(), microphone=()
   Content-Security-Policy: default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'self'
+
+# HTML-страницы не кэшируем: Cloudflare склеивает одноимённые заголовки
+# из нескольких правил через запятую, поэтому Cache-Control нельзя задавать
+# в общем правиле /* — иначе получится "no-cache, public, max-age=300".
+/*.html
+  Cache-Control: no-cache
+
+/
   Cache-Control: no-cache
 
 /app.js
