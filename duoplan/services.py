@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 import secrets
 import sqlite3
 from datetime import date
@@ -11,8 +10,11 @@ from datetime import tzinfo
 from duoplan.db.base import Database
 from duoplan.db.schema import now
 
+# Канонический список — tests/fixtures/daily_actions.json (источник истины
+# worker.js): тексты и порядок обязаны совпадать с Mini App, иначе одна и та же
+# пара видит разные формулировки на двух поверхностях.
 DAILY_ACTIONS = (
-    "Выделите сегодня 15 минут только друг для друга — без телефонов и дел.",
+    "Выделите 15 минут только друг для друга — без телефонов и дел.",
     "Назовите друг другу три вещи, за которые вы благодарны этой неделе.",
     "Запланируйте маленькое совместное удовольствие на ближайшие выходные.",
     "Поделитесь воспоминанием, к которому хочется возвращаться.",
@@ -295,10 +297,29 @@ class DuoPlanService:
     # ------------------------------------------------------------------- ритуал
 
     def _daily_action(self, pair_id: int, day: str) -> str:
-        seed = f"{pair_id}:{day}"
-        return DAILY_ACTIONS[random.Random(seed).randrange(len(DAILY_ACTIONS))]
+        """Действие дня — та же функция, что ``dailyAction()`` в ``worker.js``.
 
-    async def daily(self, pair_id: int) -> dict[str, object]:
+        Детерминированный полиномиальный хеш по строке ``pair:day`` (база 31,
+        переполнение по 32 битам) вместо ``random.Random(seed)``: Mersenne
+        Twister в Python и хеш в Worker давали разные задания одной и той же
+        паре в один день, поэтому бот и Mini App расходились. Строка всегда
+        ASCII (число и ISO-дата), так что ``ord()`` и ``charCodeAt()`` совпадают.
+        """
+        seed = 0
+        for char in f"{pair_id}:{day}":
+            seed = (seed * 31 + ord(char)) & 0xFFFFFFFF
+        return DAILY_ACTIONS[seed % len(DAILY_ACTIONS)]
+
+    async def daily(self, pair_id: int, user_id: int) -> dict[str, object]:
+        """Ритуал дня с отметкой конкретного пользователя.
+
+        ``done`` — отметил ли ритуал именно этот пользователь, ``partner_done`` —
+        второй участник. Раньше ``done`` считался по паре (``COUNT(*) > 0``),
+        поэтому после отметки одного партнёра у второго пропадала кнопка
+        «Мы это сделали»: он видел «уже отмечено» и не мог забрать свои XP,
+        хотя ``complete_daily()`` начисляет их каждому. Та же семантика, что
+        ``dailyFor(..., userId)`` в worker.js: done/partnerDone на пользователя.
+        """
         today = self.local_today().isoformat()
         row = await self.db.one(
             "SELECT * FROM daily_rolls WHERE pair_id = ? AND day = ?", (pair_id, today)
@@ -306,21 +327,25 @@ class DuoPlanService:
         if not row:
             action = self._daily_action(pair_id, today)
             await self.db.execute(
-                "INSERT INTO daily_rolls(pair_id, day, daily_kind, daily_value) "
-                "VALUES(?, ?, 'moment', ?) ON CONFLICT(pair_id, day) DO NOTHING",
+                "INSERT INTO daily_rolls(pair_id, day, daily_value) "
+                "VALUES(?, ?, ?) ON CONFLICT(pair_id, day) DO NOTHING",
                 (pair_id, today, action),
             )
             row = await self.db.one(
                 "SELECT * FROM daily_rolls WHERE pair_id = ? AND day = ?", (pair_id, today)
             )
-        completed = await self.db.one(
-            "SELECT COUNT(*) AS n FROM daily_completions WHERE pair_id = ? AND day = ?",
+        completed = await self.db.query(
+            "SELECT tg_id FROM daily_completions WHERE pair_id = ? AND day = ?",
             (pair_id, today),
         )
+        completed_by = {int(record["tg_id"]) for record in completed}
+        me = int(user_id)
         return {
             "action": (row["daily_value"] if row else None),
-            "done": bool(completed and completed["n"]),
             "day": today,
+            "done": me in completed_by,
+            "partner_done": bool(completed_by - {me}),
+            "completed_count": len(completed_by),
         }
 
     async def complete_daily(self, pair_id: int, user_id: int) -> bool:
@@ -333,8 +358,8 @@ class DuoPlanService:
         async with self.db.transaction() as tx:
             # Ритуал мог ещё не открываться — создаём детерминированную запись.
             await self.db.execute_row(
-                "INSERT INTO daily_rolls(pair_id, day, daily_kind, daily_value) "
-                "VALUES(?, ?, 'moment', ?) ON CONFLICT(pair_id, day) DO NOTHING",
+                "INSERT INTO daily_rolls(pair_id, day, daily_value) "
+                "VALUES(?, ?, ?) ON CONFLICT(pair_id, day) DO NOTHING",
                 (pair_id, today, action),
             )
 

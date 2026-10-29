@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "duoplan-bot"
 dynamic = ["version"]
-description = "DuoPlan — тёплый Telegram-бот для пар: дневник двоих, общие планы, значимые даты, вишлист и мягкая игра."
+description = "DuoPlan — приложение для пар: общие планы, значимые даты, общий дневник и вишлисты."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

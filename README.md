@@ -1,7 +1,6 @@
 # DuoPlan
 
-Telegram Mini App для пар: общие планы, значимые даты, дневник двоих, вишлист и
-ежедневный ритуал с XP и серией.
+Приложение для пар: общие планы, значимые даты, общий дневник и вишлисты.
 
 ## Архитектура
 
@@ -18,6 +17,13 @@ Telegram Mini App для пар: общие планы, значимые дат�
 с Worker на одном `BOT_TOKEN`: webhook и long polling конфликтуют (`409`). При
 старте Python-бот проверяет `getWebhookInfo` и отказывается запускать polling,
 если webhook уже установлен.
+
+Схема общих таблиц задаётся только миграциями D1 и `ensureSchema` в `worker.js`;
+`duoplan/db/schema.py` обязан совпадать с ними по составу колонок (расхождение
+ловит `tests/test_schema_parity.py`). Ритуал дня считается одной и той же
+функцией на обеих поверхностях — `dailyAction()` в `worker.js` и
+`_daily_action()` в `duoplan/services.py`; паритет держат
+`tests/test_daily_parity.*` на общих векторах из `tests/fixtures/daily_actions.json`.
 
 Публичный адрес: `https://duoplan.stacheight.workers.dev`.
 

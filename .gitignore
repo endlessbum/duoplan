@@ -11,7 +11,7 @@ tests/__pycache__/
 .dev.vars
 .wrangler/
 node_modules/
-.workbuddy-ai/tmp/
+.workbuddy-ai/
 .pytest_cache/
 data/*.db
 data/*.sql

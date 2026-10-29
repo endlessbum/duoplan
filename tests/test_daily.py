@@ -82,9 +82,13 @@ async def test_daily_sees_completion_that_landed_during_race(tmp_path, monkeypat
 
         monkeypatch.setattr(owner.db, "execute", execute_with_completion)
 
-        daily = await owner.daily(pair["id"])
-        assert daily["done"] is True
+        daily = await owner.daily(pair["id"], 1)
+        # Отметку поставил партнёр (id 2), пока owner читал ритуал:
+        # done относится к конкретному пользователю, а не к паре.
+        assert daily["done"] is False
+        assert daily["partner_done"] is True
         assert daily["action"]
+        assert (await owner.daily(pair["id"], 2))["done"] is True
     finally:
         await first.close()
         await second.close()
@@ -107,7 +111,7 @@ async def test_daily_uses_local_day_and_streak(pair, monkeypatch):
     service, pair_id, owner_id, _ = pair
 
     monkeypatch.setattr(service, "local_today", lambda at=None: date(2026, 3, 1))
-    daily = await service.daily(pair_id)
+    daily = await service.daily(pair_id, owner_id)
     assert daily["day"] == "2026-03-01"
     assert await service.complete_daily(pair_id, owner_id) is True
     assert (await service.user(owner_id))["streak"] == 1

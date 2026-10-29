@@ -622,7 +622,7 @@
       <section class="card hero-card">
         <p class="eyebrow">DuoPlan · для двоих</p>
         <h2>Создайте ваше общее пространство</h2>
-        <p>Планы, значимые даты, дневник воспоминаний и вишлист — в одном уютном месте.</p>
+        <p>Совместные планы, воспоминания и желания — в одном месте.</p>
         <div style="margin-top:16px; display:grid; gap:10px;">
           <button class="primary full" type="button" data-action="create-pair">Создать пространство</button>
         </div>
@@ -630,7 +630,7 @@
       <section class="card">
         <p class="eyebrow">Вход по коду</p>
         <h3>Добавить партнёра по коду</h3>
-        <label class="field"><span>Код партнёра (8 символов)</span><input id="join-code-home" maxlength="8" placeholder="Например, 740C04B5"></label>
+        <label class="field"><span>Код партнёра (8 символов)</span><input id="join-code-home" maxlength="8" placeholder="Введите 8-значный код"></label>
         <button class="secondary full" type="button" data-action="join-code" data-input="join-code-home">Войти по коду партнёра</button>
       </section>
     `;
@@ -1137,7 +1137,7 @@
       } else if (action === "open-join") {
         openDialog({
           title: "Войти по коду",
-          fields: `<label class="field"><span>Код партнёра (8 символов)</span><input name="code" maxlength="8" required placeholder="Например, 740C04B5"></label>`,
+          fields: `<label class="field"><span>Код партнёра (8 символов)</span><input name="code" maxlength="8" required placeholder="Введите 8-значный код"></label>`,
           onSubmit: (fd) => request("/api/pair/join", { method: "POST", body: { code: fd.get("code") } })
         });
       } else if (action === "join-code") {

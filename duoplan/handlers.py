@@ -578,10 +578,14 @@ async def game(call: CallbackQuery, service: DuoPlanService) -> None:
     if not pair:
         await call.answer("Сначала соедините пространство")
         return
-    daily = await service.daily(pair["id"])
+    daily = await service.daily(pair["id"], call.from_user.id)
     text = f"Ритуал дня · {daily['day']}\n\n{daily['action']}"
     if daily["done"]:
         text += "\n\nСегодняшний ритуал уже отмечен. До завтра!"
+    elif daily["partner_done"]:
+        # Партнёр отметил, а этот пользователь — нет: кнопка остаётся, иначе
+        # он видит «уже отмечено» и теряет свои +10 XP.
+        text += "\n\nПартнёр уже отметил ритуал — отметьте и вы."
     await safe_edit(call.message, text, HOME_MENU if daily["done"] else GAME_MENU)
     await call.answer()
 
@@ -593,7 +597,7 @@ async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer("Сначала соедините пространство")
         return
     completed = await service.complete_daily(pair["id"], call.from_user.id)
-    daily = await service.daily(pair["id"])
+    daily = await service.daily(pair["id"], call.from_user.id)
     if completed:
         # Кнопка и текст отражают фактический результат, а не ожидание.
         await call.answer("+10 XP · ритуал отмечен")

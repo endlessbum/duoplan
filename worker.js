@@ -8,8 +8,24 @@ const DAILY_ACTIONS = [
   "Устройте мини-свидание: чай, прогулка или любимый фильм."
 ];
 
-const APP_VERSION = "2026.10.28";
-const DB_SCHEMA_VERSION = "2026.10.31";
+// Действие дня детерминировано парой и датой, чтобы одна и та же пара получала
+// одно и то же задание на любой поверхности: полиномиальный хеш по кодовым
+// точкам (база 31, переполнение по 32 битам беззнаково), индекс — остаток.
+// Точно такой же алгоритм в duoplan/services.py::_daily_action. Менять только
+// вместе: tests/test_daily_parity.test.mjs и tests/test_daily_parity.py держат
+// обе реализации на общих векторах из tests/fixtures/daily_actions.json.
+function dailyAction(pairId, day) {
+  let seed = 0;
+  for (const char of `${pairId}:${day}`) seed = (seed * 31 + char.charCodeAt(0)) >>> 0;
+  return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
+}
+
+const APP_VERSION = "2026.10.29";
+// Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD.
+// Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
+// с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
+// миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
+const DB_SCHEMA_VERSION = "2026.10.29";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // /api/state отдаёт активные наборы с потолком STATE_ACTIVE_LIMIT и только
@@ -383,10 +399,8 @@ async function dailyFor(env, pairId, timeZone, userId = null) {
   const day = localDay(timeZone);
   let row = await env.DB.prepare("SELECT * FROM daily_rolls WHERE pair_id=? AND day=?").bind(pairId, day).first();
   if (!row) {
-    let seed = 0;
-    for (const char of `${pairId}:${day}`) seed = (seed * 31 + char.charCodeAt(0)) >>> 0;
-    const action = DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
-    await env.DB.prepare("INSERT OR IGNORE INTO daily_rolls(pair_id,day,daily_value) VALUES(?,?,?)").bind(pairId, day, action).run();
+    await env.DB.prepare("INSERT OR IGNORE INTO daily_rolls(pair_id,day,daily_value) VALUES(?,?,?)")
+      .bind(pairId, day, dailyAction(pairId, day)).run();
     row = await env.DB.prepare("SELECT * FROM daily_rolls WHERE pair_id=? AND day=?").bind(pairId, day).first();
   }
   const completions = await env.DB.prepare("SELECT tg_id FROM daily_completions WHERE pair_id=? AND day=?").bind(pairId, day).all();
@@ -731,10 +745,14 @@ async function itemRoute(env, pair, user, method, pathname, body) {
 
 async function api(request, env, url) {
   if (!env.DB) throw new HttpError(503, "База данных ещё не подключена", "DB_UNAVAILABLE");
-  await ensureSchemaOnce(env);
   const initData = request.headers.get("x-telegram-init-data");
   const tgUser = await telegramUser(initData, env.BOT_TOKEN);
   if (!tgUser) throw new HttpError(401, "Сессия Telegram истекла. Откройте приложение заново.", "AUTH_EXPIRED");
+  // Схема поднимается только после проверки подписи initData: ensureSchema
+  // выполняет DDL, и вызов до авторизации позволял любому анонимному запросу
+  // запускать миграцию на «холодном» изоляте. rateLimit ниже сам создаёт
+  // минимальную таблицу rate_limits, поэтому защита от перебора не страдает.
+  await ensureSchemaOnce(env);
   const timezone = validTimeZone(request.headers.get("x-timezone"));
   // Лимит проверяем ДО записи пользователя: иначе флуд всё равно создаёт
   // строки в users, а rate limit срабатывает только после (репорт 2026-10-29).
@@ -852,7 +870,17 @@ async function api(request, env, url) {
   throw new HttpError(404, "Раздел не найден", "NOT_FOUND");
 }
 
+// Повтор при сетевой ошибке безопасен только для методов, у которых нет
+// побочного эффекта в чате: обрыв соединения и таймаут (AbortSignal) не говорят,
+// дошёл ли запрос до Telegram. Для sendMessage повтор после таймаута давал бы
+// второе сообщение, поэтому сеть ретраится только для идемпотентных методов,
+// а 429 — для всех: там Telegram явно отверг вызов и ничего не отправил.
+const TELEGRAM_IDEMPOTENT = new Set([
+  "getMe", "getWebhookInfo", "setWebhook", "deleteWebhook", "setMyCommands", "setChatMenuButton"
+]);
+
 async function telegram(env, method, payload, attempt = 0) {
+  const retryOnNetwork = TELEGRAM_IDEMPOTENT.has(method);
   let response;
   try {
     response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
@@ -862,7 +890,7 @@ async function telegram(env, method, payload, attempt = 0) {
       signal: AbortSignal.timeout(12000)
     });
   } catch (error) {
-    if (attempt < 2) {
+    if (retryOnNetwork && attempt < 2) {
       await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
       return telegram(env, method, payload, attempt + 1);
     }
@@ -922,7 +950,10 @@ async function webhook(request, env, url) {
     if (!seen.meta.changes) return json({ ok: true });
     recorded = true;
   }
-  const message = update.message;
+  // Тело апдейта может быть любым JSON: "null" парсится успешно и даёт
+  // update === null, поэтому обращение к update.message падало бы TypeError
+  // вне try и отдавало 500 вместо тихого {ok:true}.
+  const message = update?.message;
   if (!message?.text || message.chat?.type !== "private" || !positiveId(message.from?.id)) {
     return json({ ok: true });
   }
