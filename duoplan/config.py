@@ -54,15 +54,6 @@ def parse_env_file(text: str) -> dict[str, str]:
     return values
 
 
-def parse_admin_ids(raw: str) -> frozenset[int]:
-    """``"1, 2 3"`` -> ``{1, 2, 3}``. Нечисловые токены игнорируются."""
-    ids: set[int] = set()
-    for token in raw.replace(";", ",").replace(",", " ").split():
-        if token.lstrip("-").isdigit():
-            ids.add(int(token))
-    return frozenset(ids)
-
-
 def resolve_timezone(name: str) -> tuple[tzinfo, str]:
     """Вернуть (зона, фактическое имя). Невалидное имя не подменяется молча."""
     for candidate in (name, DEFAULT_TZ):
@@ -76,11 +67,6 @@ def resolve_timezone(name: str) -> tuple[tzinfo, str]:
     return timezone.utc, "UTC"
 
 
-def load_timezone(name: str) -> tzinfo:
-    """Совместимый со старым кодом вызов: только зона."""
-    return resolve_timezone(name)[0]
-
-
 def _parse_ttl(raw: str) -> int:
     try:
         return max(0, int(raw))
@@ -91,9 +77,6 @@ def _parse_ttl(raw: str) -> int:
 @dataclass(slots=True)
 class Settings:
     bot_token: str
-    # ADMIN_* и BOT_NAME оставлены в публичном API Settings: их читают внешние
-    # скрипты, даже если сам бот пока не использует админ-команды.
-    admin_ids: frozenset[int]
     admin_chat_id: int | None
     db_path: Path
     bot_name: str
@@ -105,9 +88,6 @@ class Settings:
     @property
     def is_configured(self) -> bool:
         return bool(self.bot_token)
-
-    def is_admin(self, user_id: int | None) -> bool:
-        return user_id is not None and user_id in self.admin_ids
 
 
 def load_settings(env_file: Path | str | None = None) -> Settings:
@@ -132,7 +112,6 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
     tz, tz_name = resolve_timezone(get("TZ", DEFAULT_TZ) or DEFAULT_TZ)
     return Settings(
         bot_token=get("BOT_TOKEN"),
-        admin_ids=parse_admin_ids(get("ADMIN_IDS")),
         admin_chat_id=admin_chat_id,
         db_path=db_path,
         bot_name=get("BOT_NAME", "DuoPlan") or "DuoPlan",

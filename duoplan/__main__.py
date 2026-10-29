@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 
 from aiogram import Bot
 from aiogram import Dispatcher
@@ -26,11 +27,6 @@ WEBHOOK_HINT = (
 )
 
 
-async def on_error(event: ErrorEvent) -> bool:
-    log.exception("Ошибка обработки обновления", exc_info=event.exception)
-    return True
-
-
 async def main() -> int:
     settings = load_settings()
     if not settings.is_configured:
@@ -50,6 +46,21 @@ async def main() -> int:
         dp.message.outer_middleware(EnsureUserMiddleware())
         dp.callback_query.outer_middleware(EnsureUserMiddleware())
         dp.include_router(router)
+
+        async def on_error(event: ErrorEvent) -> bool:
+            log.exception("Ошибка обработки обновления", exc_info=event.exception)
+            chat_id = settings.admin_chat_id
+            if chat_id is not None:
+                try:
+                    tb = "".join(traceback.format_exception(type(event.exception), event.exception, event.exception.__traceback__))
+                    text = "⚠️ Ошибка обработки обновления:\n" + tb
+                    if len(text) > 4000:
+                        text = text[:4000] + "…"
+                    await bot.send_message(chat_id, text)
+                except Exception:
+                    log.exception("Не удалось отправить ошибку в админ-чат")
+            return True
+
         dp.errors.register(on_error)
 
         info = await bot.get_webhook_info()

@@ -216,10 +216,6 @@ body.tg-fullscreen #fullscreen-close {
   min-height: calc(env(safe-area-inset-top, 0px) + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px) + 70px);
 }
 
-.tab-header.has-back {
-  padding-left: 66px;
-}
-
 /* В полноэкранном режиме слева висит кнопка закрытия — заголовок уходит правее. */
 body.tg-fullscreen .tab-header {
   padding-left: 66px;
