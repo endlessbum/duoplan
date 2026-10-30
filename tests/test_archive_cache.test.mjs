@@ -74,9 +74,9 @@ test("смена пары сбрасывает кэш, та же пара — н
   // Новая пара — полный сброс, включая счётчик страниц.
   ctx.setAppState({ pair: { id: 2 }, memories: [] });
   ctx.syncArchiveCachePair();
-  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null });
-  deepStrictEqual(ctx.archiveCache.done_tasks, { items: [], page: -1, hasMore: null });
-  deepStrictEqual(ctx.archiveCache.done_wishes, { items: [], page: -1, hasMore: null });
+  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null, remaining: null });
+  deepStrictEqual(ctx.archiveCache.done_tasks, { items: [], page: -1, hasMore: null, remaining: null });
+  deepStrictEqual(ctx.archiveCache.done_wishes, { items: [], page: -1, hasMore: null, remaining: null });
 });
 
 test("выход из пары (pair=null) сбрасывает кэш", () => {
@@ -202,7 +202,7 @@ test("ответ, прилетевший после смены пары, отб�
   release();
   await flight;
   // Кэш новой пары остался чистым: page=-1, элементов нет.
-  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null });
+  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null, remaining: null });
 });
 
 test("кнопка «Показать ещё» у активных наборов появляется на границе 200", () => {
@@ -310,9 +310,9 @@ test("ошибка сети при перезагрузке сбрасывает
 
   fail = true;
   await ctx.revalidateArchiveCache();
-  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null });
+  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null, remaining: null });
   // Остальные типы не задеты.
-  deepStrictEqual(ctx.archiveCache.done_tasks, { items: [], page: -1, hasMore: null });
+  deepStrictEqual(ctx.archiveCache.done_tasks, { items: [], page: -1, hasMore: null, remaining: null });
 });
 
 test("загружаемый сейчас тип (loading) перезагрузка не трогает", async () => {
@@ -350,6 +350,7 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       // пропускает тик, пока идёт жест по переключателю.
       "let liquidNav = null;",
       "let wishSwitch = null;",
+      extractBraced("function deepEqual"),
       extractBraced("async function refreshState"),
       "return { refreshState, setAppState: (v) => { appState = v; } };"
     ].join("\n")

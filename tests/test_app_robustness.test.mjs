@@ -211,3 +211,33 @@ test("фоновое обновление не перерисовывает вк
   match(body, /liquidNav\?\.getState\?\.\(\)\.dragging/);
   match(body, /wishSwitch\?\.getState\?\.\(\)\.dragging/);
 });
+
+test("минутный тик синхронизации работает и при visibilityState hidden (IAB)", () => {
+  // В IAB Telegram document.visibilityState может постоянно быть "hidden":
+  // гейт «visible» останавливал бы минутную синхронизацию навсегда, и
+  // изменения партнёра доезжали бы только при действии пользователя
+  // (репорт аудита 2026-10-30). В Telegram тик обязан идти всегда,
+  // в обычном браузере — по-прежнему только на видимой вкладке.
+  const start = source.indexOf("setInterval(() => {");
+  ok(start > 0, "регистрация минутного setInterval не найдена");
+  const tail = "}, 60000);";
+  const end = source.indexOf(tail, start);
+  ok(end > 0, "конец setInterval не найден");
+  const block = source.slice(start, end + tail.length);
+
+  let calls = 0;
+  const run = new Function("setInterval", "tg", "document", "refreshState", block);
+  const tick = (fn) => fn(); // мок setInterval: выполняем callback сразу
+
+  // IAB Telegram: tg есть, visibilityState hidden — тик идёт.
+  run(tick, {}, { visibilityState: "hidden" }, () => { calls += 1; });
+  equal(calls, 1, "в Telegram hidden-состояние не должно останавливать тик");
+
+  // Обычный браузер: нет tg, вкладка скрыта — тик пропускается.
+  run(tick, null, { visibilityState: "hidden" }, () => { calls += 1; });
+  equal(calls, 1, "в браузере hidden-вкладка не должна тикать");
+
+  // Обычный браузер: вкладка видима — тик идёт.
+  run(tick, null, { visibilityState: "visible" }, () => { calls += 1; });
+  equal(calls, 2, "в браузере видимая вкладка тикает");
+});

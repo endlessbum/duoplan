@@ -50,6 +50,7 @@ const buildApi = new Function(
     extractBraced("class HttpError"),
     extractLine("const now = "),
     extractLine("const clean = "),
+    extractBraced("function validateSchema"),
     extractBraced("async function api"),
     "return api;"
   ].join("\n")

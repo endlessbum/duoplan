@@ -4,11 +4,9 @@
   const bottomNav = document.getElementById("bottom-nav");
   const navDroplet = document.getElementById("nav-droplet");
   const navButtons = Array.from(document.querySelectorAll(".nav-item[data-tab]"));
-  const backButton = document.getElementById("back-button");
   const pairButton = document.getElementById("pair-button");
   const avatarA = document.getElementById("avatar-a");
   const avatarB = document.getElementById("avatar-b");
-  const pairPillLabel = document.getElementById("pair-pill-label");
   const fullscreenClose = document.getElementById("fullscreen-close");
   const homeScreenButton = document.getElementById("homescreen-button");
   const dialog = document.getElementById("item-dialog");
@@ -48,17 +46,21 @@
   // у архивов (memories, done_*) — после STATE_RECENT_LIMIT.
   const STATE_RECENT_LIMIT = 10;
   const STATE_ACTIVE_LIMIT = 200;
+  // Размер страницы /api/archive: для счётчика «Показать ещё (N из M)».
+  const ARCHIVE_PAGE_SIZE = 20;
   const archiveCache = {
-    tasks: { items: [], page: -1, hasMore: null },
-    dates: { items: [], page: -1, hasMore: null },
-    wishes: { items: [], page: -1, hasMore: null },
-    memories: { items: [], page: -1, hasMore: null },
-    done_tasks: { items: [], page: -1, hasMore: null },
-    done_wishes: { items: [], page: -1, hasMore: null }
+    tasks: emptyArchiveEntry(),
+    dates: emptyArchiveEntry(),
+    wishes: emptyArchiveEntry(),
+    memories: emptyArchiveEntry(),
+    done_tasks: emptyArchiveEntry(),
+    done_wishes: emptyArchiveEntry()
   };
   let archiveCachePairId = null;
   function emptyArchiveEntry() {
-    return { items: [], page: -1, hasMore: null };
+    // remaining — сколько записей сервер ещё не отдал (для счётчика на кнопке);
+    // null — неизвестно (ответ без remaining).
+    return { items: [], page: -1, hasMore: null, remaining: null };
   }
   // Кэш архивов живёт в пределах одной пары: сменилась пара (выход, создание,
   // вход по коду) — сбрасываем, чтобы чужие записи и счётчик страниц не утекли
@@ -107,6 +109,7 @@
       cache.items.push(...(next.items || []).filter((x) => !seen.has(Number(x.id))));
       cache.page += 1;
       cache.hasMore = Boolean(next.hasMore);
+      cache.remaining = Number.isFinite(next.remaining) ? Number(next.remaining) : null;
       render();
     } finally {
       cache.loading = false;
@@ -135,6 +138,7 @@
           cache.items.push(...(next.items || []).filter((x) => !seen.has(Number(x.id))));
           cache.page = page;
           cache.hasMore = Boolean(next.hasMore);
+          cache.remaining = Number.isFinite(next.remaining) ? Number(next.remaining) : null;
         } catch {
           archiveCache[type] = emptyArchiveEntry();
           return;
@@ -163,7 +167,12 @@
     const threshold = { tasks: STATE_ACTIVE_LIMIT, dates: STATE_ACTIVE_LIMIT, wishes: STATE_ACTIVE_LIMIT }[type] || STATE_RECENT_LIMIT;
     const mayExist = recentCount >= threshold || cache.page >= 0;
     if (!mayExist || cache.hasMore === false) return "";
-    return `<button class="secondary full" type="button" data-action="load-archive" data-type="${type}" style="margin-top:10px;">Показать ещё</button>`;
+    // Счётчик «(N из M)»: N — сколько войдёт в следующую страницу,
+    // M — сколько записей ещё не показано. Остаток неизвестен — без счётчика.
+    // Собирается только из чисел — экранирование не требуется.
+    const remaining = Number.isFinite(cache.remaining) ? cache.remaining : null;
+    const counter = remaining === null ? "" : ` (${Math.min(ARCHIVE_PAGE_SIZE, remaining)} из ${remaining})`;
+    return `<button class="secondary full" type="button" data-action="load-archive" data-type="${type}" style="margin-top:10px;">Показать ещё${counter}</button>`;
   }
   let toastTimer = null;
   let sessionExpired = false;
@@ -213,6 +222,14 @@
     const root = document.documentElement;
     const dark = root.dataset.theme === "dark";
     const key = appState?.user?.accent_color || "berry";
+    // Свотчи в настройках показывают актуальный для темы вариант палитры:
+    // в тёмной теме светлый образец выглядел темнее фактического акцента.
+    // Синхронизация здесь — applyAccent вызывается и из applyTheme
+    // (themeChanged), и из render().
+    document.querySelectorAll(".swatch[data-accent]").forEach((el) => {
+      const palette = ACCENT_PALETTES[el.dataset.accent];
+      if (palette) el.style.background = palette[dark ? "dark" : "light"];
+    });
     const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-bg", "--droplet-border", "--droplet-glow", "--droplet-hi", "--droplet-fill", "--droplet-deep", "--droplet-halo", "--berry-shadow"];
     const hex = ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
     if (key === "berry" || !hex) {
@@ -526,10 +543,9 @@
     syncHomeScreenButton();
     const pair = appState?.pair;
     const isSubScreen = currentTab !== "home";
-    // Собственная кнопка «Назад» с вкладок убрана: навигация идёт через
+    // Собственная кнопка «Назад» не используется: навигация идёт через
     // системную tg.BackButton (на главной она скрыта, чтобы показывалась
     // кнопка закрытия приложения).
-    if (backButton) backButton.hidden = true;
     if (tg?.BackButton) {
       if (isSubScreen) tg.BackButton.show();
       else tg.BackButton.hide();
@@ -551,9 +567,6 @@
     if (wasHidden) liquidNav?.refresh();
     avatarA.textContent = firstLetter(pair.name1, "А");
     avatarB.textContent = pair.user_b ? firstLetter(pair.name2, "Б") : "+";
-    // В кнопке перехода на «Нашу пару» текст не показываем — только круглые аватарки.
-    pairPillLabel.hidden = true;
-    pairPillLabel.textContent = "";
   }
 
   function switchTab(tab, pushScroll = true) {
@@ -716,7 +729,9 @@
   }
 
   function countdownFromDiff(diff) {
-    if (diff <= 0) return { overdue: true, text: "Время пришло" };
+    // Просрочка старше недели помечается stale: событие давно позади, и яркий
+    // чип выглядит как ошибка, а не как статус (см. .day-chip.is-stale).
+    if (diff <= 0) return { overdue: true, stale: -diff > 7 * 86400000, text: "Время пришло" };
     const totalMinutes = Math.floor(diff / 60000);
     const minutes = totalMinutes % 60;
     const hours = Math.floor(totalMinutes / 60) % 24;
@@ -737,7 +752,8 @@
     if (!target) return "";
     const diff = target.getTime() - Date.now();
     if (diff <= 0) {
-      return `<span class="day-chip is-overdue" data-countdown="${esc(day)}|${esc(time || "")}">Время пришло</span>`;
+      const stale = -diff > 7 * 86400000;
+      return `<span class="day-chip is-overdue${stale ? " is-stale" : ""}" data-countdown="${esc(day)}|${esc(time || "")}">Время пришло</span>`;
     }
     const hours = Math.floor(diff / 3600000);
     const mins = Math.max(1, Math.floor((diff % 3600000) / 60000));
@@ -767,6 +783,7 @@
       node.textContent = countdown.text;
       node.classList.toggle("is-overdue", countdown.overdue);
       node.classList.toggle("is-countdown", !countdown.overdue);
+      node.classList.toggle("is-stale", Boolean(countdown.stale));
       if (countdown.overdue) delete node.dataset.countdown;
     });
   }
@@ -896,6 +913,7 @@
               ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
               ${item.day ? `<span>${esc(item.day)}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
               ${countdownChip(item.day, item.time)}
+              ${item.day ? `<button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>` : ""}
             </div>
           </div>
           <div class="item-actions">
@@ -940,6 +958,7 @@
               ${item.recurs ? `<span>· Ежегодно</span>` : ""}
               ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
               ${chip}
+              <button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>
             </div>
           </div>
           <div class="item-actions">
@@ -1353,9 +1372,12 @@
   function renderPairSettings() {
     const user = appState.user;
     const accent = user.accent_color || "berry";
+    // Свотчи сразу рисуются вариантом текущей темы; при смене темы между
+    // рендерами их перекрашивает applyAccent().
+    const dark = document.documentElement.dataset.theme === "dark";
     const swatches = Object.entries(ACCENT_PALETTES).map(([key, palette]) => `
       <button class="swatch${key === accent ? " is-active" : ""}" type="button" data-action="set-accent" data-accent="${key}"
-        style="background:${palette.light}" aria-label="Акцентный цвет: ${key}"></button>
+        style="background:${palette[dark ? "dark" : "light"]}" aria-label="Акцентный цвет: ${key}"></button>
     `).join("");
     return `
       <section class="card">
@@ -1375,9 +1397,11 @@
           <input type="time" id="dates-digest-time" value="${esc(user.dates_digest_time || "09:00")}">
         </label>
         <p class="settings-hint">Напомнит о завтрашних датах накануне в выбранное время. Кроме сводок бот предупреждает о плане с точным временем за 3 часа и за час.</p>
-        <div style="margin-top:14px;">
+        <div style="margin-top:14px; display:grid; gap:8px;">
           <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
+          <button class="secondary full" type="button" data-action="export-diary">Выслать дневник сообщением</button>
         </div>
+        <p class="settings-hint">«Выслать дневник» — бот отправит все записи дневника пары личным сообщением: резервная копия на случай, если захочется перечитать всё сразу.</p>
       </section>
     `;
   }
@@ -1597,7 +1621,24 @@
     if (dialogSubmit) dialogSubmit.textContent = config.submitLabel ?? "Сохранить";
     if (dialogCancel) dialogCancel.textContent = config.cancelLabel ?? "Отмена";
     dialog.showModal();
+    // Focus trap для старых WebView, которые не поддерживают нативный <dialog> focus.
+    const focusables = () => Array.from(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter(el => !el.disabled && el.offsetParent !== null);
+    const first = () => focusables()[0];
+    const last = () => focusables()[focusables().length - 1];
+    setTimeout(() => first()?.focus(), 0);
+    dialog._focusTrap = (e) => {
+      if (e.key !== "Tab") return;
+      const f = focusables();
+      if (f.length === 0) { e.preventDefault(); return; }
+      if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+      else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+    };
+    dialog.addEventListener("keydown", dialog._focusTrap);
   }
+
+  dialog.addEventListener("close", () => {
+    if (dialog._focusTrap) { dialog.removeEventListener("keydown", dialog._focusTrap); dialog._focusTrap = null; }
+  });
 
   function sureLabel() {
     const gender = appState?.user?.gender;
@@ -1670,7 +1711,6 @@
     }
   });
 
-  // ------------------------------------------------------------------
   // ------------------------------------------------------------------
   // Меню форматирования выделенного текста (как в Telegram): появляется
   // над текстовым полем диалога, пока в нём есть выделение. Кнопки
@@ -1763,8 +1803,6 @@
     switchTab(btn.dataset.tab);
   });
 
-  backButton?.addEventListener("click", goBack);
-
   pairButton?.addEventListener("click", () => {
     if (currentTab === "pair") {
       goBack();
@@ -1795,17 +1833,22 @@
         shiftCalendarMonth(1);
       } else if (action === "calendar-day") {
         selectCalendarDay(btn.dataset.day);
+      } else if (action === "show-in-calendar") {
+        // Переход к месяцу события из списка: выбираем день и открываем
+        // вкладку календаря. Состояние задаём напрямую — промежуточный
+        // render() текущей вкладки не нужен.
+        const day = btn.dataset.day || "";
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          const [year, month] = day.split("-").map(Number);
+          calendarMonth = { year, month };
+          calendarSelected = day;
+        }
+        switchTab("pair");
       } else if (action === "go-tab") {
         switchTab(btn.dataset.tab || "home");
       } else if (action === "create-pair") {
         appState = await request("/api/pair/create", { method: "POST", body: {} });
         switchTab("home");
-      } else if (action === "open-join") {
-        openDialog({
-          title: "Войти по коду",
-          fields: `<label class="field"><span>Код партнёра (8 символов)</span><input name="code" maxlength="8" required placeholder="Введите 8-значный код"></label>`,
-          onSubmit: (fd) => request("/api/pair/join", { method: "POST", body: { code: fd.get("code") } })
-        });
       } else if (action === "join-code") {
         const inputId = btn.dataset.input;
         const input = inputId ? document.getElementById(inputId) : null;
@@ -1862,6 +1905,8 @@
         appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}/done`, { method: "POST", body: {} });
         render();
       } else if (action === "delete-item") {
+        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание" };
+        if (!confirm(`Удалить ${typeNames[btn.dataset.type] || "запись"}? Это действие нельзя отменить.`)) return;
         appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
         // Из appState удалённая запись уходит сразу, но в кэше архива она
         // осталась бы и продолжала отображаться (и повторное удаление дало бы 404).
@@ -1991,6 +2036,14 @@
         });
         showToast("Настройки сохранены");
         render();
+      } else if (action === "export-diary") {
+        btn.disabled = true;
+        try {
+          await request("/api/diary/export", { method: "POST", body: {} });
+          showToast("Дневник выслан сообщениями от бота");
+        } finally {
+          btn.disabled = false;
+        }
       } else if (action === "set-gender") {
         appState = await request("/api/gender", { method: "POST", body: { gender: btn.dataset.gender } });
         render();
@@ -1999,6 +2052,28 @@
       handleRequestError(error);
     }
   });
+
+  function deepEqual(a, b) {
+    if (a === b) return true;
+    if (a == null || b == null) return a === b;
+    if (typeof a !== typeof b) return false;
+    if (typeof a !== "object") return false;
+    const aIsArr = Array.isArray(a), bIsArr = Array.isArray(b);
+    if (aIsArr !== bIsArr) return false;
+    if (aIsArr) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) if (!deepEqual(a[i], b[i])) return false;
+      return true;
+    }
+    const aKeys = Object.keys(a).sort();
+    const bKeys = Object.keys(b).sort();
+    if (aKeys.length !== bKeys.length) return false;
+    for (let i = 0; i < aKeys.length; i++) {
+      const k = aKeys[i];
+      if (k !== bKeys[i] || !deepEqual(a[k], b[k])) return false;
+    }
+    return true;
+  }
 
   let refreshInProgress = false;
   async function refreshState() {
@@ -2020,7 +2095,7 @@
       if (isTyping()) return;
       // Данные не изменились — перерисовка не нужна: она сбрасывает ввод,
       // выделение текста и фокус.
-      const unchanged = JSON.stringify(next) === JSON.stringify(appState);
+      const unchanged = deepEqual(next, appState);
       appState = next;
       if (unchanged) return;
       // Изменение мог сделать и партнёр: его удаления, правки и «сделать
@@ -2041,7 +2116,13 @@
   }
 
   setInterval(() => {
-    if (document.visibilityState === "visible") refreshState();
+    // В IAB Telegram document.visibilityState может постоянно быть "hidden":
+    // гейт «visible» останавливал бы минутную синхронизацию навсегда, и
+    // изменения партнёра доезжали бы только при действии пользователя.
+    // В Telegram тик идёт всегда — лишние прогоны гасят refreshInProgress,
+    // deepEqual и фокус-гейты внутри refreshState; в обычном браузере тик,
+    // как и раньше, только на видимой вкладке.
+    if (tg || document.visibilityState === "visible") refreshState();
   }, 60000);
 
   document.addEventListener("visibilitychange", () => {
@@ -2064,7 +2145,7 @@
       // Успешная загрузка — сбрасываем состояние ошибки
       sessionExpired = false;
     } catch (error) {
-      // Сетевые ошибки и истекшие сессии показываем карточку с кнопкой повторногоtry
+      // Сетевые ошибки и истекшие сессии показываем карточку с кнопкой повторной загрузки
       if (error?.status === 401) {
         sessionExpired = true;
         appEl.innerHTML = `

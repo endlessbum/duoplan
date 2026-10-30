@@ -5,6 +5,24 @@ def _utf16_len(s: str) -> int:
     return len(s.encode("utf-16-le")) // 2
 
 
+def _truncate_utf16(s: str, max_len: int) -> str:
+    """Обрезать строку до max_len UTF-16 единиц; к усечённой добавляется «…».
+
+    Срез по кодопоинтам здесь нельзя: при астральных символах (эмодзи) он
+    укорачивает строку вдвое медленнее, чем растёт её UTF-16 длина, и
+    «обрезка» превращается в no-op. Режем байты UTF-16-LE с errors="ignore":
+    срез может попасть в середину суррогатной пары — обрубок отбрасывается,
+    и результат гарантированно не длиннее ``max_len`` единиц.
+    """
+    if _utf16_len(s) <= max_len:
+        return s
+    # Срез до max_len - 1 единицы: appended «…» занимает ещё одну,
+    # и результат гарантированно укладывается ровно в max_len.
+    encoded = s.encode("utf-16-le")
+    truncated = encoded[: (max_len - 1) * 2].decode("utf-16-le", errors="ignore")
+    return truncated.rstrip() + "…"
+
+
 from datetime import date
 
 from aiogram import F
@@ -95,7 +113,10 @@ def render_list_items(
 
     Считаем видимую длину: теги в лимит Telegram не входят, а экранированный
     символ остаётся одним видимым. Обрезаем «сырой» заголовок ДО рендера —
-    срез готового HTML разрубил бы тег и уронил editMessageText.
+    срез готового HTML разрубил бы тег и уронил editMessageText. Обрезка
+    обязана идти по UTF-16 единицам (через _truncate_utf16), а не по
+    кодопоинтам: иначе эмодзи-тяжёлый пункт не укорачивался бы и страница
+    вылезала бы за лимит Telegram в 4096 единиц.
     """
     blocks: list[str] = []
     used = 0
@@ -106,7 +127,7 @@ def render_list_items(
             room = limit - used - _utf16_len(prefix) - _utf16_len(suffix)
             if room <= 0:
                 break
-            blocks.append(rich_list_item(prefix, raw[:room], suffix))
+            blocks.append(rich_list_item(prefix, _truncate_utf16(raw, room), suffix))
             break
         blocks.append(rich_list_item(prefix, raw, suffix))
         used += need
@@ -119,24 +140,16 @@ def memory_entries(rows: list) -> list[str]:
     Имя обрезается до MEMORY_NAME_VIEW_MAX: full_name длиннее 64 символов
     раздувало бы запись, fit_entries выводил бы меньше восьми строк, а
     фиксированный offset следующей страницы навсегда терял недопоказанную.
+    Обрезка — по UTF-16 единицам (_truncate_utf16), как считает Telegram.
     """
-    def _truncate_utf16(s: str, max_len: int) -> str:
-        """Обрезает строку до max_len UTF-16 единиц."""
-        if _utf16_len(s) <= max_len:
-            return s
-        # Кодируем в UTF-16 и обрезаем
-        encoded = s.encode("utf-16-le")
-        truncated = encoded[: max_len * 2].decode("utf-16-le", errors="ignore")
-        return truncated.rstrip() + "…"
-
     entries: list[str] = []
     for row in rows:
         body = row["body"] or ""
         if _utf16_len(body) > MEMORY_BODY_VIEW_MAX:
-            body = _truncate_utf16(body, MEMORY_BODY_VIEW_MAX - 1)
+            body = _truncate_utf16(body, MEMORY_BODY_VIEW_MAX)
         display_name = row["display_name"] or "Один из вас"
         if _utf16_len(display_name) > MEMORY_NAME_VIEW_MAX:
-            display_name = _truncate_utf16(display_name, MEMORY_NAME_VIEW_MAX - 1)
+            display_name = _truncate_utf16(display_name, MEMORY_NAME_VIEW_MAX)
         entries.append(f"{row['day']} · {display_name}\n{body}")
     return entries
 
@@ -146,6 +159,7 @@ class Form(StatesGroup):
     task = State()
     date_title = State()
     date_day = State()
+    date_recurs = State()
     memory = State()
     wish = State()
 
@@ -155,6 +169,7 @@ ALL_FORMS = StateFilter(
     Form.task,
     Form.date_title,
     Form.date_day,
+    Form.date_recurs,
     Form.memory,
     Form.wish,
 )
@@ -193,6 +208,16 @@ async def safe_edit(
         if "message is not modified" in str(exc).lower():
             return
         raise
+
+
+def parse_yes_no(raw: object) -> bool | None:
+    """«Да/нет» для уточняющих вопросов FSM; ``None`` — ответ не распознан."""
+    text = str(raw or "").strip().lower()
+    if text in {"да", "давай", "конечно", "yes", "y", "д", "1", "+"}:
+        return True
+    if text in {"нет", "no", "n", "0", "-"}:
+        return False
+    return None
 
 
 def parse_tail(data: str | None, prefix: str) -> tuple[int, int] | None:
@@ -323,8 +348,9 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
         member = await service.membership(message.from_user.id)
         if member is not None:
             await message.answer(
-                "Вы уже в пространстве. Выйти из пары пока нельзя, "
-                "поэтому новый код не применяю.",
+                "Вы уже в пространстве, поэтому новый код не применяю. "
+                "Если нужно сменить пару, сначала выйдите из текущей в "
+                "приложении: «Наша пара» → «Выйти из пространства».",
             )
         elif await service.join_pair(message.from_user.id, name_of(message.from_user), code):
             await message.answer("Готово — теперь у вас одно пространство на двоих.")
@@ -802,7 +828,7 @@ async def receive_date_title(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(title=title)
     await state.set_state(Form.date_day)
-    await message.answer("Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ.")
+    await message.answer("Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ — после этого уточню, ежегодная ли она.")
 
 
 def parse_date_input(raw: str, current_year: int) -> str:
@@ -844,13 +870,38 @@ async def receive_date_day(message: Message, service: DuoPlanService, state: FSM
         await state.clear()
         await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
         return
+    # 29 февраля существует не в каждом году: календарь и уведомления
+    # пропускают эту дату в невисокосный год — предупреждаем сразу, а не
+    # молча «теряем» напоминание.
+    leap_note = (
+        "\n\n29 февраля существует не в каждом году — напомню только в високосный."
+        if day.endswith("-02-29") else ""
+    )
+    await state.update_data(day=day)
+    await state.set_state(Form.date_recurs)
+    await message.answer("Напоминать ежегодно? Ответьте «да» или «нет»." + leap_note)
+
+
+@router.message(StateFilter(Form.date_recurs), F.text)
+async def receive_date_recurs(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    answer = parse_yes_no(message.text)
+    if answer is None:
+        await message.answer("Ответьте «да» или «нет» (или /cancel).")
+        return
+    data = await state.get_data()
+    pair = await service.pair_for(message.from_user.id)
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return
     try:
-        await service.add_date(pair["id"], data.get("title", ""), day, 1)
+        await service.add_date(pair["id"], data.get("title", ""), data.get("day", ""), 1 if answer else 0)
     except ValidationError as exc:
         await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
         return
     await state.clear()
-    await message.answer("Дата сохранена.", reply_markup=section_menu("dates"))
+    tail = " Напомню каждый год." if answer else " Однократная: ежегодного напоминания не будет."
+    await message.answer("Дата сохранена." + tail, reply_markup=section_menu("dates"))
 
 
 @router.message(StateFilter(Form.memory), F.text)

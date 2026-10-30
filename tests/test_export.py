@@ -1,3 +1,4 @@
+import pytest
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -204,3 +205,25 @@ def test_export_covers_every_column_of_current_schema():
             f"в списке экспорта лишние {sorted(listed - actual)}"
         )
     con.close()
+
+
+def test_export_refuses_duplicate_pair_codes(tmp_path):
+    """Дубли code в источнике — признак повреждённой базы.
+
+    INSERT OR REPLACE на импорте при конфликте уникального code удаляет
+    строку pairs, и ON DELETE CASCADE сносит её планы, даты, дневник и
+    желания. Экспорт обязан упасть с ясной ошибкой, а не молча терять данные.
+    """
+    db_path = tmp_path / "dupe.db"
+    _make_db(db_path)
+    con = sqlite3.connect(db_path)
+    # Вторая пара с тем же кодом (в рабочей схеме code UNIQUE, здесь — нет:
+    # проверяем поведение дампера, а не constraint источника).
+    con.execute(
+        "INSERT INTO pairs(id,code,name1,name2,user_a,user_b,started_at,together_pts,timezone,created_at,updated_at) "
+        "VALUES(2,'ABC','Second','',20,0,'2026-01-02',0,'Europe/Moscow',2,2)"
+    )
+    con.commit()
+    con.close()
+    with pytest.raises(RuntimeError, match="дублируются коды"):
+        dump(db_path)

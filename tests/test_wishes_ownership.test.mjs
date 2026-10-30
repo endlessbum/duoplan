@@ -39,6 +39,7 @@ const buildItemRoute = new Function(
     extractBraced("async function ensureWishOwner"),
     extractBraced("async function ensureDateVisible"),
     extractBraced("async function ensureTaskVisible"),
+    extractBraced("function validateSchema"),
     extractBraced("async function itemRoute"),
     "return itemRoute;"
   ].join("\n")

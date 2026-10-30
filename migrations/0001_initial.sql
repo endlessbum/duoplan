@@ -67,8 +67,6 @@ CREATE TABLE IF NOT EXISTS daily_rolls (
   pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
   day TEXT NOT NULL,
   daily_value TEXT NOT NULL,
-  done_by INTEGER,
-  done_at INTEGER,
   PRIMARY KEY (pair_id, day)
 );
 

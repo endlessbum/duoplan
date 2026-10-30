@@ -38,7 +38,7 @@ TABLES = {
     "dates": "id, pair_id, title, day, time, recurs, is_private, created_by, created_at",
     "memories": "id, pair_id, author_id, body, day, created_at",
     "wishes": "id, pair_id, owner_id, body, done, done_at, url, created_at",
-    "daily_rolls": "pair_id, day, daily_value, done_by, done_at",
+    "daily_rolls": "pair_id, day, daily_value",
     "daily_completions": "pair_id, tg_id, day, completed_at",
 }
 
@@ -133,6 +133,21 @@ def dump(source: Path) -> str:
         # Проверяем, есть ли таблица pairs (может не быть в пустой базе).
         _, _, pairs_exists = build_select(db, "pairs", "id")
         if pairs_exists:
+            # INSERT OR REPLACE ниже при конфликте уникального code удаляет
+            # строку, а ON DELETE CASCADE сносит её планы, даты, дневник и
+            # желания. В здоровой базе коды уникальны по constraint, поэтому
+            # дубли — признак повреждённого источника: останавливаемся с ясной
+            # ошибкой вместо тихой потери данных на импорте.
+            duplicates = db.execute(
+                "SELECT code, COUNT(*) AS n FROM pairs GROUP BY code HAVING n > 1"
+            ).fetchall()
+            if duplicates:
+                shown = ", ".join(f"{row['code']}×{row['n']}" for row in duplicates)
+                raise RuntimeError(
+                    "В исходной базе дублируются коды пространств "
+                    f"({shown}): импорт INSERT OR REPLACE удалил бы данные "
+                    "по каскаду. Восстановите базу и повторите экспорт."
+                )
             for role, owner, guest in (("a", "user_a", None), ("b", "user_b", None)):
                 condition = f"{owner} != 0"
                 if guest:

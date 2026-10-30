@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.30.14";
+const APP_VERSION = "2026.10.30.16";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.30.14";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.30.14";
+const DB_SCHEMA_VERSION = "2026.10.30.16";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -279,7 +279,10 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
     // а не лексикографически по всей строке bucket_key (иначе затрагиваются другие ключи).
     await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(nowSeconds).run();
   }
-  if ((row?.count || 0) > limit) throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
+  if ((row?.count || 0) > limit) {
+    console.log(`[metric] rate_limit_hit key=${key} count=${row?.count || 0} limit=${limit}`);
+    throw new HttpError(429, "Слишком много запросов. Подождите минуту.", "RATE_LIMITED");
+  }
 }
 
 // Вход по коду — главная точка перебора: успешный подбор открывает чужое
@@ -560,14 +563,14 @@ function byRowId(a, b) {
 // дедлайну, равные ключи — по id. Хелпер один, чтобы первая страница списка и
 // архивное продолжение были согласованными последовательностями (репорт 2026-10-29).
 // Ключ считается один раз на запись: taskTargetMs строит Intl.DateTimeFormat
-// (несколько на вызов) и слишком дорог, чтобы вызывать его из компаратора на
-// Стабильная сортировка планов по дедлайну.
+// (несколько на вызов) и слишком дорог, чтобы вызывать его из компаратора
+// на каждое сравнение.
 function sortByTaskDeadline(rows, timeZone) {
   const decorated = rows.map((row) => ({ row, at: taskTargetMs(row, timeZone) }));
   decorated.sort((a, b) => {
     const ta = a.at, tb = b.at;
     if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
-    // Обе Infinity —равны, сортируем по id.
+    // Обе Infinity равны, сортируем по id.
     if (!Number.isFinite(ta) && !Number.isFinite(tb)) return byRowId(a.row.id, b.row.id);
     // Только одна Infinity — она уходит в конец (больше любое число).
     return ta === Infinity ? 1 : -1;
@@ -694,6 +697,17 @@ async function state(env, userId) {
 
 // Страница догрузки: архивы продолжают первые STATE_RECENT_LIMIT записей
 // из /api/state, активные наборы — записи после STATE_ACTIVE_LIMIT.
+
+// Счётчики для точного остатка на кнопке «Показать ещё»: совпадают с
+// фильтрами соответствующих запросов ARCHIVE_QUERIES. tasks/dates (sort-путь)
+// считают остаток по уже загруженному полному набору — COUNT им не нужен.
+const ARCHIVE_COUNT_SQL = {
+  memories: "SELECT COUNT(*) AS n FROM memories WHERE pair_id=?",
+  done_tasks: "SELECT COUNT(*) AS n FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?)",
+  done_wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=1",
+  wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=0"
+};
+
 async function archivePage(env, pair, type, page, userId = null) {
   // Object.hasOwn, а не ARCHIVE_QUERIES[type]: имена из прототипа
   // ("constructor", "toString", "__proto__") дают truthy-функцию, проходят
@@ -711,19 +725,27 @@ async function archivePage(env, pair, type, page, userId = null) {
       ? sortDateRows(all.results || [], pair.timezone)
       : sortByTaskDeadline(all.results || [], pair.timezone);
     const start = STATE_ACTIVE_LIMIT + page * ARCHIVE_PAGE_SIZE;
+    const shown = Math.min(ordered.length, start + ARCHIVE_PAGE_SIZE);
     return {
-      items: ordered.slice(start, start + ARCHIVE_PAGE_SIZE),
+      items: ordered.slice(start, shown),
       hasMore: ordered.length > start + ARCHIVE_PAGE_SIZE,
-      page
+      page,
+      // Сколько записей ещё не показано после этой страницы — клиент
+      // подписывает им кнопку «Показать ещё (N из M)».
+      remaining: Math.max(0, ordered.length - shown)
     };
   }
   const offset = (config.active ? STATE_ACTIVE_LIMIT : STATE_RECENT_LIMIT) + page * ARCHIVE_PAGE_SIZE;
   const rows = await env.DB.prepare(config.sql).bind(pair.id, ARCHIVE_PAGE_SIZE + 1, offset).all();
   const results = rows.results || [];
+  const shown = offset + Math.min(results.length, ARCHIVE_PAGE_SIZE);
+  const totalRow = await env.DB.prepare(ARCHIVE_COUNT_SQL[type])
+    .bind(...(config.userScoped ? [pair.id, userId] : [pair.id])).first();
   return {
     items: results.slice(0, ARCHIVE_PAGE_SIZE),
     hasMore: results.length > ARCHIVE_PAGE_SIZE,
-    page
+    page,
+    remaining: Math.max(0, Number(totalRow?.n || 0) - shown)
   };
 }
 
@@ -796,6 +818,13 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     return true;
   }
   if (method === "PATCH") {
+    const patchSchemas = {
+      tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, is_private: { type: "boolean" } },
+      dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, is_private: { type: "boolean" } },
+      memories: { body: { type: "string", maxLength: 2000 } },
+      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } }
+    };
+    if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
     const fields = [];
     const values = [];
     if (type === "tasks") {
@@ -860,6 +889,22 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   throw new HttpError(405, "Метод не поддерживается", "METHOD_NOT_ALLOWED");
 }
 
+function validateSchema(body, schema) {
+  if (typeof body !== "object" || body === null) throw new HttpError(400, "Тело запроса должно быть объектом JSON", "INVALID_BODY");
+  for (const [key, rule] of Object.entries(schema)) {
+    const code = rule.errorCode || "MISSING_FIELD";
+    if (rule.required && !(key in body)) throw new HttpError(400, `Отсутствует обязательное поле: ${key}`, code);
+    if (key in body && body[key] !== null) {
+      const value = body[key];
+      if (rule.type === "string" && typeof value !== "string") throw new HttpError(400, `Поле ${key} должно быть строкой`, code);
+      if (rule.type === "boolean" && typeof value !== "boolean") throw new HttpError(400, `Поле ${key} должно быть булевым`, code);
+      if (rule.type === "number" && typeof value !== "number") throw new HttpError(400, `Поле ${key} должно быть числом`, code);
+      if (rule.enum && !rule.enum.includes(value)) throw new HttpError(400, `Недопустимое значение для ${key}`, code);
+      if (rule.maxLength && String(value).length > rule.maxLength) throw new HttpError(400, `Поле ${key} превышает ${rule.maxLength} символов`, code);
+    }
+  }
+}
+
 async function api(request, env, url) {
   if (!env.DB) throw new HttpError(503, "База данных ещё не подключена", "DB_UNAVAILABLE");
   const initData = request.headers.get("x-telegram-init-data");
@@ -876,7 +921,12 @@ async function api(request, env, url) {
   await rateLimit(env, `u:${tgUser.id}`, 240, 60);
   const user = await ensureUser(env, tgUser, timezone);
 
-  if (request.method === "GET" && url.pathname === "/api/state") return json(await state(env, user.tg_id));
+  if (request.method === "GET" && url.pathname === "/api/state") {
+    const t0 = Date.now();
+    const result = await state(env, user.tg_id);
+    console.log(`[metric] api_state_ms=${Date.now() - t0}`);
+    return json(result);
+  }
 
   const body = ["POST", "PATCH"].includes(request.method) ? await readJson(request) : {};
   if (request.method === "POST" && url.pathname === "/api/pair/create") {
@@ -884,6 +934,7 @@ async function api(request, env, url) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/pair/join") {
+    validateSchema(body, { code: { type: "string", required: true } });
     await joinPair(env, user, body.code);
     return json(await state(env, user.tg_id));
   }
@@ -891,14 +942,21 @@ async function api(request, env, url) {
   // без пары — как pair/create и pair/join: иначе новый пользователь не сможет
   // его сохранить и не попадёт к созданию пространства.
   if (request.method === "POST" && url.pathname === "/api/gender") {
-    const gender = clean(body?.gender);
-    if (gender !== "male" && gender !== "female") throw new HttpError(400, "Недопустимый пол", "INVALID_GENDER");
+    validateSchema(body, { gender: { type: "string", required: true, enum: ["male", "female"], errorCode: "INVALID_GENDER" } });
+    const gender = clean(body.gender);
     await env.DB.prepare("UPDATE users SET gender = ?, updated_at = ? WHERE tg_id = ?").bind(gender, now(), user.tg_id).run();
     return json(await state(env, user.tg_id));
   }
   // Персональные настройки (карточка «Настройки» на вкладке «Наша пара»):
   // время сводок, их вкл/выкл и акцентный цвет. Доступно и без пары.
   if (request.method === "POST" && url.pathname === "/api/settings") {
+    validateSchema(body, {
+      accent_color: { type: "string" },
+      digest_time: { type: "string" },
+      digest_enabled: { type: "boolean" },
+      dates_digest_time: { type: "string" },
+      dates_digest_enabled: { type: "boolean" }
+    });
     const updates = [];
     const values = [];
     if (body?.accent_color !== undefined) {
@@ -943,7 +1001,21 @@ async function api(request, env, url) {
     await leavePair(env, pair, url);
     return json(await state(env, user.tg_id));
   }
+  // Резервная копия дневника: записи пары высылаются сообщениями от бота
+  // запрашивающему партнёру. Дневник общий — выгружаются все записи, включая
+  // записи партнёра: он их и так видит во вкладке «Дневник».
+  if (request.method === "POST" && url.pathname === "/api/diary/export") {
+    await rateLimit(env, `diary:${user.tg_id}`, 5, 3600);
+    const rows = (await env.DB.prepare(`SELECT m.body,m.day,u.display_name FROM memories m
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at ASC, m.id ASC`)
+      .bind(pair.id).all()).results || [];
+    for (const text of diaryExportMessages(rows)) {
+      await telegram(env, "sendMessage", { chat_id: user.tg_id, text, parse_mode: "HTML" });
+    }
+    return json({ ok: true });
+  }
   if (request.method === "POST" && url.pathname === "/api/tasks") {
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, is_private: { type: "boolean" } });
     const title = textField(body, "title", 180, "План");
     const { day, time } = planSchedule(body);
     const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
@@ -952,23 +1024,24 @@ async function api(request, env, url) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/dates") {
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, is_private: { type: "boolean" } });
     const title = textField(body, "title", 120, "Название");
     if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
     const time = optionalTime(body.time);
-    // created_by пишется у всех дат: приватность (is_private=1) привязывает
-    // видимость к автору, у общих дат это просто метаданные создателя.
     const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
     await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)")
       .bind(pair.id, title, clean(body.day), time, body.recurs === false || body.recurs === 0 ? 0 : 1, isPrivate, user.tg_id, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
+    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 } });
     const text = textField(body, "body", 2000, "Воспоминание");
     await env.DB.prepare("INSERT INTO memories(pair_id,author_id,body,day,created_at) VALUES(?,?,?,?,?)")
       .bind(pair.id, user.tg_id, text, localDay(pair.timezone), now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/wishes") {
+    validateSchema(body, { body: { type: "string", required: true, maxLength: 300 }, url: { type: "string" } });
     const text = textField(body, "body", 300, "Желание");
     const wishLink = wishUrl(body.url);
     await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,created_at) VALUES(?,?,?,?,?)")
@@ -1115,12 +1188,13 @@ async function webhook(request, env, url) {
   // update === null, поэтому обращение к update.message падало бы TypeError
   // вне try и отдавало 500 вместо тихого {ok:true}.
   const message = update?.message;
-  if (!message?.text || message.chat?.type !== "private" || !positiveId(message.from?.id)) {
+  const msgText = message?.text || message?.caption;
+  if (!msgText || message.chat?.type !== "private" || !positiveId(message.from?.id)) {
     return json({ ok: true });
   }
   try {
     const user = await ensureUser(env, message.from, null);
-    const text = clean(message.text);
+    const text = clean(msgText);
     const code = text.startsWith("/start ") ? text.slice(7).trim() : "";
     if (code) {
       let joined = false;
@@ -1343,14 +1417,66 @@ function datesDigestText(timeZone, tomorrow, dates) {
   return ["Напоминаю: завтра значимые даты:", "", ...lines].join("\n").trim();
 }
 
+// ------------------------------------------------------------------
+// Резервная копия дневника (POST /api/diary/export): записи пары рендерятся
+// через richToHtml (экранирование внутри) и режутся на сообщения по блокам —
+// Telegram принимает не больше 4096 символов на сообщение, а разметка и
+// экранирование раздувают строку (запись «<"×2000» превращается в ~8000).
+// ------------------------------------------------------------------
+const DIARY_EXPORT_MESSAGE_LIMIT = 3800;
+const DIARY_EXPORT_MAX_MESSAGES = 20;
+
+// Обрезка по UTF-16 единицам (как считает Telegram), без разрыва суррогатных пар.
+function cutUtf16(text, max) {
+  let out = "";
+  let used = 0;
+  for (const ch of String(text ?? "")) {
+    const width = ch.codePointAt(0) > 0xffff ? 2 : 1;
+    if (used + width > max) break;
+    out += ch;
+    used += width;
+  }
+  return out;
+}
+
+function diaryExportMessages(rows) {
+  const blocks = (rows || []).map((row) =>
+    `📅 ${row.day} · ${escapeHtml(clean(row.display_name) || "Партнёр")}\n${richToHtml(row.body || "")}`
+  );
+  if (!blocks.length) return ["В вашем дневнике пока нет записей."];
+  const messages = [];
+  let current = "";
+  for (const block of blocks) {
+    const chunk = cutUtf16(block, DIARY_EXPORT_MESSAGE_LIMIT);
+    if (current && current.length + 2 + chunk.length > DIARY_EXPORT_MESSAGE_LIMIT) {
+      messages.push(current);
+      current = "";
+    }
+    current = current ? `${current}\n\n${chunk}` : chunk;
+  }
+  if (current) messages.push(current);
+  messages[0] = `Общий дневник — резервная копия, записей: ${rows.length}\n\n${messages[0]}`;
+  // Кап сообщений: не высылаем бесконечный поток, хвост подскажет, что в
+  // выгрузку попала только часть.
+  if (messages.length > DIARY_EXPORT_MAX_MESSAGES) {
+    messages.length = DIARY_EXPORT_MAX_MESSAGES - 1;
+    messages.push("…выслана только часть дневника — остальные записи откройте в приложении.");
+  }
+  return messages;
+}
+
 async function deliverNotification(env, member, day, kind, text) {
   // Журнал — и дедуп, и защита от повторов при транзиентных сбоях крона.
   const marked = await env.DB.prepare("INSERT OR IGNORE INTO notification_log(tg_id,day,kind,sent_at) VALUES(?,?,?,?)")
     .bind(member, day, kind, now()).run();
-  if (!marked.meta.changes) return false;
+  if (!marked.meta.changes) {
+    console.log(`[metric] notification_skipped member=${member} kind=${kind} day=${day}`);
+    return false;
+  }
   try {
     // requestUrl в кроне нет: appUrl использует env.APP_ORIGIN из vars.
     await openApp(env, member, { origin: "" }, text);
+    console.log(`[metric] notification_sent member=${member} kind=${kind} day=${day}`);
     return true;
   } catch (error) {
     const description = String(error?.message || error);
@@ -1412,7 +1538,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
   const reminders = planTaskReminders(tasks, timeZone, nowMs);
   for (const reminder of reminders) {
     for (const member of members) {
-      if (budget.left < 2) return;
+      if (budget.left < 2) break;
       if (Number(reminder.task.is_private) === 1 && Number(reminder.task.created_by) !== Number(member)) continue;
       budget.left -= 2;
       const title = Number(reminder.task.is_private) === 1 ? RICH_MASKED : richToHtml(reminder.task.title);
@@ -1429,7 +1555,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
     if (Number(user?.digest_enabled ?? 1) === 1 && minutes >= parseTimeMinutes(user?.digest_time)) {
       const text = digestText(today, tomorrow, visibleDates, visibleTasks);
       if (text) {
-        if (budget.left < 2) return;
+        if (budget.left < 2) break;
         budget.left -= 2;
         await deliverNotification(env, member, today, "digest", text);
       }
@@ -1438,7 +1564,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
     if (Number(user?.dates_digest_enabled ?? 1) === 1 && minutes >= parseTimeMinutes(user?.dates_digest_time)) {
       const text = datesDigestText(timeZone, tomorrow, visibleDates);
       if (text) {
-        if (budget.left < 2) return;
+        if (budget.left < 2) break;
         budget.left -= 2;
         await deliverNotification(env, member, today, "dates_digest", text);
       }
@@ -1468,6 +1594,7 @@ async function sendDigests(env) {
     return;
   }
   if (!pairs.length) return;
+  console.log(`[metric] active_pairs=${pairs.length}`);
   const stamp = new Date();
   // Ротация по минутам двигает очередь между 15-минутными тиками, чтобы
   // при большом числе пар все дожидались своего тика, а не только первые.
@@ -1512,7 +1639,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
-    `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,done_by INTEGER,done_at INTEGER,PRIMARY KEY (pair_id,day))`,
+    `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,PRIMARY KEY (pair_id,day))`,  /* done_by/done_at removed: relic of pre-daily_completions schema */
     `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS telegram_updates (update_id INTEGER PRIMARY KEY,received_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS daily_completions (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,day TEXT NOT NULL,completed_at INTEGER NOT NULL,PRIMARY KEY (pair_id,tg_id,day))`,

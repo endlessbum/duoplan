@@ -229,13 +229,6 @@ body {
   color: var(--sage);
 }
 
-.pair-pill-label {
-  max-width: 118px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* ------------------------------------------------------------------
    Внедренная шапка прямо на вкладке над элементами (закрепленная вверху)
 ------------------------------------------------------------------- */
@@ -250,9 +243,9 @@ body {
   top: 0;
   z-index: 25;
   margin: 0 -16px 14px;
-  /* 10px — отступ стеклянного бара сверху, 70px = 10 + 48 (кнопка «Наша пара»)
-     + 12 (нижний внутренний отступ): контент шапки центрируется ровно в полосу
-     высотой 48px, т.е. на уровне плавающих кнопок. */
+  /* Контент шапки центрируется в полосу высотой 48px на уровне плавающих
+     кнопок: top = safe-area + 54px (полоса кнопок), снизу 12px,
+     min-height = safe-area + 114px = 54 + 48 + 12. */
   padding: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 54px) 148px 12px 16px;
   background: var(--sticky-fade);
   backdrop-filter: blur(16px) saturate(160%);
@@ -905,6 +898,13 @@ body.tg-fullscreen .tab-header {
   color: var(--berry);
 }
 
+/* Просрочка старше недели: чип приглушается — событие давно позади,
+   и яркая метка выглядит как ошибка, а не как статус. */
+.day-chip.is-overdue.is-stale {
+  opacity: 0.55;
+  filter: grayscale(0.35);
+}
+
 /* Разметка текста в карточках (Telegram-стиль). */
 .rich-spoiler {
   background: var(--surface-2);
@@ -1132,6 +1132,7 @@ body.tg-fullscreen .tab-header {
   opacity: 0.45;
   cursor: not-allowed;
   filter: grayscale(0.2);
+  pointer-events: none;
 }
 
 .toast {

@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, rejects } from "node:assert/strict";
+import { deepStrictEqual, equal, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -36,9 +36,8 @@ if (constsStart === -1 || constsEnd === -1 || constsEnd < constsStart) {
 }
 const consts = source.slice(constsStart, constsEnd);
 const load = new Function(
-  `const DEFAULT_TZ = "Europe/Moscow";\n${consts}\n${extractBraced("function validTimeZone")}\n${extractBraced("function localDay")}\n${extractBraced("function byRowId")}\n${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function nextDateOccurrence")}\n${extractBraced("function isPastDate")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("function sortByTaskDeadline")}\n${extractBraced("class HttpError")}\n${extractBraced("async function archivePage")}\n` +
-  "return { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };"
-);
+  `const DEFAULT_TZ = "Europe/Moscow";\n${consts}\n${extractBraced("function validTimeZone")}\n${extractBraced("function localDay")}\n${extractBraced("function byRowId")}\n${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function nextDateOccurrence")}\n${extractBraced("function isPastDate")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("function sortByTaskDeadline")}\n${extractBraced("class HttpError")}\n${extractBraced("const ARCHIVE_COUNT_SQL")}\n${extractBraced("async function archivePage")}\n` +
+  "return { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };");
 const { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE } = load();
 
 const TOTAL = 50; // 10 последних в /api/state, остальные 40 — архив
@@ -56,6 +55,10 @@ function makeMockDb(total = TOTAL) {
                 rows.push({ id });
               }
               return { results: rows };
+            },
+            // COUNT-запрос archivePage: в наборе ровно total подходящих строк.
+            async first() {
+              return { n: total };
             }
           };
         }
@@ -156,4 +159,20 @@ test("даты после 200 продолжают зональный поряд
   deepStrictEqual(result.items.map((r) => r.id), expected.slice(STATE_ACTIVE_LIMIT, STATE_ACTIVE_LIMIT + ARCHIVE_PAGE_SIZE));
   deepStrictEqual(result.items.length, 3);
   deepStrictEqual(result.hasMore, false);
+});
+
+test("archivePage отдаёт remaining — счётчик кнопки «Показать ещё»", async () => {
+  // SQL-путь (memories): COUNT в моке равен total.
+  const { db } = makeMockDb();
+  const first = await archivePage({ DB: db }, { id: 1, timezone: "UTC" }, "memories", 0);
+  equal(first.remaining, 20); // 50 записей, показано 10 + 20 → осталось 20
+  equal(first.hasMore, true);
+  const last = await archivePage({ DB: db }, { id: 1, timezone: "UTC" }, "memories", 1);
+  equal(last.remaining, 0);
+  equal(last.hasMore, false);
+  // Sort-путь (tasks): остаток считается по уже загруженному набору.
+  const rows = Array.from({ length: 225 }, (_, i) => ({ id: i + 1, day: "", time: "" }));
+  const page = await archivePage({ DB: makeActiveDb(rows) }, { id: 1, timezone: "UTC" }, "tasks", 0);
+  equal(page.remaining, 5); // 225 - 220 (200 база + 20 страница)
+  equal(page.hasMore, true);
 });

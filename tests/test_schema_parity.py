@@ -93,7 +93,7 @@ def test_daily_rolls_has_no_column_outside_d1():
     local = _python_schema()
     assert "daily_rolls" in local
     assert [name for name, _ in local["daily_rolls"]] == [
-        "pair_id", "day", "daily_value", "done_by", "done_at",
+        "pair_id", "day", "daily_value",
     ]
 
 

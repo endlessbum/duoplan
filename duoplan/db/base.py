@@ -36,7 +36,10 @@ MIGRATIONS: dict[int, Sequence[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_users_pair ON users(pair_id)",
         "CREATE INDEX IF NOT EXISTS idx_pairs_user_a ON pairs(user_a)",
         "CREATE INDEX IF NOT EXISTS idx_pairs_user_b ON pairs(user_b)",
-        "CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(pair_id, created_at)",
+        # idx_memories_created/idx_wishes_created убраны: idx_memories_pair и
+        # idx_wishes_pair из базовой схемы покрывают те же колонки. На уже
+        # применённых базах лишний индекс memories остаётся (он безвреден),
+        # новые базы дубликата больше не получают.
         "CREATE INDEX IF NOT EXISTS idx_wishes_created ON wishes(pair_id, created_at)",
     ),
     3: (

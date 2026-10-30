@@ -54,10 +54,11 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 ### Кэш статики Mini App
 
 `/app.js` и `/app.css` отдаются через Cloudflare Workers assets; в `public/_headers`
-им выставлен `Cache-Control: public, max-age=300`. Чтобы деплой не оставлял
-пользователей на старом скрипте (API мог бы разойтись), пути версионируются
-query-string: `/app.css?v=<APP_VERSION>` и `/app.js?v=<APP_VERSION>` (сейчас
-`2026.10.30.2`). Новый деплой → новый URL → новый cache entry; HTML при этом
+им выставлен `Cache-Control: public, max-age=31536000, immutable`. Чтобы деплой
+не оставлял пользователей на старом скрипте (API мог бы разойтись), пути
+версионируются query-string: `/app.css?v=<APP_VERSION>` и `/app.js?v=<APP_VERSION>`
+(значение берётся из `const APP_VERSION` в `worker.js` и дублируется в
+`public/app.html`). Новый деплой → новый URL → новый cache entry; HTML при этом
 no-cache, поэтому свежая версия подхватывается сразу без ожидания TTL.
 
 ### Telegram: кнопка «ОТКРЫТЬ» в списке чатов (Main Mini App)
