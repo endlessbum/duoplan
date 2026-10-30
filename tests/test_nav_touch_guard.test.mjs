@@ -67,6 +67,16 @@ test("destroy снимает обработчик touchmove", () => {
   match(body, /removeEventListener\("touchmove",\s*onTouchMove\)/);
 });
 
+test("lostpointercapture от дочернего элемента не считается отменой жеста", () => {
+  // Палец попадает в иконку внутри вкладки — браузер ставит неявный capture
+  // на неё, а setPointerCapture(nav) его снимает. Событие всплывает до панели,
+  // и без проверки target жест умирал сразу после старта (реальный touch это
+  // и ловил: капля дёргалась на пару пикселей и возвращалась).
+  const body = functionBody("onPointerCancel");
+  match(body, /event\.type === "lostpointercapture" && event\.target !== nav/);
+  match(body, /if \(event\.type === "lostpointercapture"[^\n]*\) return;/);
+});
+
 test("цель жеста ищется обходом предков, а не closest()", () => {
   const body = functionBody("onPointerDown");
   ok(!/event\.target\.closest/.test(body), "closest() на SVG в WebView не поднимается до .nav-item");

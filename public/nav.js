@@ -571,6 +571,12 @@
 
     function onPointerCancel(event) {
       if (event.isPrimary === false) return;
+      // lostpointercapture всплывает от дочерних элементов. Палец попадает в
+      // иконку/SVG внутри вкладки, браузер ставит неявный capture на неё, а наш
+      // setPointerCapture(nav) его снимает — и это событие прилетало сюда как
+      // «отмена», убивая жест сразу после старта. Реальная потеря захвата
+      // приходит на саму панель (target === nav) вместе с pointercancel.
+      if (event.type === "lostpointercapture" && event.target !== nav) return;
       const press = state.press;
       if (!press || event.pointerId !== press.pointerId) return;
       if (press.dragging) {

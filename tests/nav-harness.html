@@ -358,6 +358,30 @@
   nav.dispatchEvent(releasedTouch);
   check("после отпускания touchmove снова не отменяется", releasedTouch.defaultPrevented === false, releasedTouch.defaultPrevented);
 
+  // 15. Реальный палец попадает в иконку внутри вкладки: браузер ставит
+  //     неявный capture на неё, а setPointerCapture(nav) его снимает. Такое
+  //     lostpointercapture всплывает до панели и не должно рвать жест.
+  reset();
+  down(home.x, home.y, nav.querySelector('.nav-item[data-tab="home"] .nav-icon'));
+  move(home.x + 20, home.y);
+  await frames(2);
+  const icon = nav.querySelector('.nav-item[data-tab="home"] .nav-icon svg');
+  icon.dispatchEvent(new PointerEvent("lostpointercapture", {
+    bubbles: true, cancelable: false, pointerId: 1, pointerType: "touch", isPrimary: true
+  }));
+  await frames(1);
+  const draggingAfterCaptureLoss = liquid.getState().dragging;
+  move(dates.x, dates.y);
+  await frames(2);
+  up(dates.x, dates.y);
+  await frames(2);
+  check(
+    "потеря capture у дочернего элемента не рвёт жест",
+    draggingAfterCaptureLoss === true && liquid.getState().active === "dates",
+    `dragging=${draggingAfterCaptureLoss}, active=${liquid.getState().active}`
+  );
+
+
   // 14. Палец попадает в саму каплю (SVG): .nav-item не находится обходом
   //     предков, цель определяется по геометрии.
   reset();

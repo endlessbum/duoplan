@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>DuoPlan · проверка drag реальными касаниями</title>
+<link rel="stylesheet" href="../public/app.css">
+<style>
+  /* Длинная страница: если браузер всё-таки перехватит жест, он начнёт
+     прокрутку и уведёт pointer в pointercancel — это и ловим. */
+  .page { padding: 16px 16px 140px; display: grid; gap: 12px; }
+  .page div { height: 120px; border-radius: 16px; background: var(--surface-2, #222); }
+</style>
+</head>
+<body>
+<div class="page" aria-hidden="true">
+  <div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div>
+</div>
+
+<nav id="bottom-nav" class="bottom-nav" aria-label="Разделы пространства">
+  <svg id="nav-droplet" class="nav-droplet" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="nav-drop-fill" x1="0" y1="0" x2="0" y2="1">
+        <stop class="nav-drop-stop-top" offset="0" />
+        <stop class="nav-drop-stop-mid" offset="0.62" />
+        <stop class="nav-drop-stop-bottom" offset="1" />
+      </linearGradient>
+    </defs>
+    <path id="nav-droplet-path" class="nav-droplet-path" d="" />
+  </svg>
+
+  <button class="nav-item is-active" type="button" data-tab="home" aria-current="page">
+    <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/></svg></span>
+    <span class="nav-label">Главная</span>
+  </button>
+  <button class="nav-item" type="button" data-tab="tasks">
+    <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/></svg></span>
+    <span class="nav-label">Планы</span>
+  </button>
+  <button class="nav-item" type="button" data-tab="dates">
+    <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/></svg></span>
+    <span class="nav-label">Даты</span>
+  </button>
+  <button class="nav-item" type="button" data-tab="memories">
+    <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/></svg></span>
+    <span class="nav-label">Дневник</span>
+  </button>
+  <button class="nav-item" type="button" data-tab="wishes">
+    <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/></svg></span>
+    <span class="nav-label">Желания</span>
+  </button>
+</nav>
+
+<script src="../public/zoom-guard.js"></script>
+<script src="../public/nav.js"></script>
+<script>
+(() => {
+  const nav = document.getElementById("bottom-nav");
+  const svg = document.getElementById("nav-droplet");
+  const path = document.getElementById("nav-droplet-path");
+  const items = Array.from(nav.querySelectorAll(".nav-item[data-tab]"));
+  const commits = [];
+  const events = [];
+
+  const liquid = window.createLiquidNav({
+    nav, svg, path, items,
+    onCommit: (tab) => { commits.push(tab); liquid.setActive(tab, true); }
+  });
+  // Как в app.js: без явной установки активной вкладки состояние капли пустое,
+  // и захват не начинается (isActiveTab(null) === false).
+  liquid.setActive("home", false);
+
+  // Аналог обработчика клика из app.js: тап по вкладке переключает страницу.
+  nav.addEventListener("click", (event) => {
+    const btn = event.target.closest && event.target.closest(".nav-item[data-tab]");
+    if (!btn) return;
+    commits.push(`click:${btn.dataset.tab}`);
+    liquid.setActive(btn.dataset.tab, true);
+  });
+
+  nav.addEventListener("pointercancel", () => events.push("pointercancel"), true);
+  window.addEventListener("pointercancel", () => events.push("window:pointercancel"), true);
+  nav.addEventListener("lostpointercapture", () => events.push("lostpointercapture"), true);
+  nav.addEventListener("pointerdown", (e) => events.push(`pointerdown:${e.pointerType}`), true);
+  nav.addEventListener("pointerup", () => events.push("pointerup"), true);
+  window.addEventListener("scroll", () => events.push("scroll"), { passive: true });
+
+  // Диагностика: полный поток pointer-событий с указателем и целью.
+  const trace = [];
+  for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel",
+                      "gotpointercapture", "lostpointercapture"]) {
+    window.addEventListener(type, (e) => {
+      const tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : "?";
+      trace.push(`${type}#${e.pointerId}@${tag}`);
+    }, true);
+  }
+
+  // Точки вкладок — в координатах окна, как их ждёт Input.dispatchTouchEvent.
+  window.__probe = () => {
+    const box = (tab) => {
+      const r = nav.querySelector(`.nav-item[data-tab="${tab}"]`).getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    };
+    const state = liquid.getState();
+    return {
+      home: box("home"),
+      dates: box("dates"),
+      active: state.active,
+      pos: state.pos,
+      dragging: state.dragging,
+      scrollY: window.scrollY,
+      commits: commits.slice(),
+      events: events.slice(),
+      trace: trace.slice()
+    };
+  };
+
+  window.__reset = () => {
+    commits.length = 0;
+    events.length = 0;
+    trace.length = 0;
+    window.scrollTo(0, 0);
+    liquid.setActive("home", false);
+  };
+
+  window.__ready = true;
+})();
+</script>
+</body>
+</html>
