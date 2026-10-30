@@ -10,15 +10,34 @@
   --berry-soft: rgba(184, 84, 100, 0.14);
   --sage: #55766a;
   --sage-soft: rgba(85, 118, 106, 0.14);
+  /* Семантика календаря: планы — зелёные, значимые даты — красные.
+     Эти цвета не зависят от акцентной палитры пользователя. */
+  --cal-task: #4f8a5f;
+  --cal-date: #c25550;
+  --cal-wish: #d9a520;
+  --cal-private: #948d86;
 
   /* Жидкое стекло Telegram (Light) */
   --glass-bg: rgba(255, 253, 249, 0.68);
   --glass-border: rgba(255, 255, 255, 0.62);
   --glass-outer-border: rgba(41, 37, 36, 0.08);
   --glass-shadow: 0 10px 30px rgba(45, 34, 28, 0.11), inset 0 1px 0.5px rgba(255, 255, 255, 0.85);
+  /* Верхний блик материала и внутренняя окантовка стекла. */
+  --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.42) 0%, rgba(255, 255, 255, 0) 58%);
+  /* Панель навигации чуть прозрачнее остальных стеклянных элементов: под ней
+     проезжает контент, и материал должен его «ловить». */
+  --nav-glass-bg: rgba(255, 253, 249, 0.74);
+  /* Подписи вкладок лежат на стекле поверх контента — им нужен запас контраста. */
+  --nav-label: rgba(41, 37, 36, 0.84);
+  --glass-inner: inset 0 1px 0.5px rgba(255, 255, 255, 0.9), inset 0 -1px 0.5px rgba(41, 37, 36, 0.05);
   --droplet-bg: rgba(184, 84, 100, 0.15);
   --droplet-border: rgba(184, 84, 100, 0.24);
   --droplet-glow: inset 0 1px 1.5px rgba(255, 255, 255, 0.8), 0 4px 14px rgba(184, 84, 100, 0.16);
+  /* Градиент капли: светлое стекло сверху, акцент в середине, тень снизу. */
+  --droplet-hi: rgba(255, 255, 255, 0.58);
+  --droplet-fill: rgba(184, 84, 100, 0.30);
+  --droplet-deep: rgba(184, 84, 100, 0.16);
+  --droplet-halo: rgba(184, 84, 100, 0.22);
   --sticky-fade: rgba(247, 243, 237, 0.84);
 }
 
@@ -34,15 +53,27 @@
   --berry-soft: rgba(217, 115, 131, 0.18);
   --sage: #7ba394;
   --sage-soft: rgba(123, 163, 148, 0.18);
+  --cal-task: #86c79a;
+  --cal-date: #e88a84;
+  --cal-wish: #f0c24e;
+  --cal-private: #9d958c;
 
   /* Жидкое стекло Telegram (Dark) */
   --glass-bg: rgba(34, 31, 30, 0.66);
   --glass-border: rgba(255, 255, 255, 0.14);
   --glass-outer-border: rgba(0, 0, 0, 0.35);
   --glass-shadow: 0 14px 36px rgba(0, 0, 0, 0.42), inset 0 1px 0.5px rgba(255, 255, 255, 0.18);
+  --glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0) 60%);
+  --nav-glass-bg: rgba(28, 26, 25, 0.72);
+  --nav-label: rgba(245, 240, 234, 0.88);
+  --glass-inner: inset 0 1px 0.5px rgba(255, 255, 255, 0.18), inset 0 -1px 0.5px rgba(0, 0, 0, 0.3);
   --droplet-bg: rgba(217, 115, 131, 0.22);
   --droplet-border: rgba(255, 255, 255, 0.16);
   --droplet-glow: inset 0 1px 1px rgba(255, 255, 255, 0.22), 0 4px 16px rgba(217, 115, 131, 0.22);
+  --droplet-hi: rgba(255, 255, 255, 0.22);
+  --droplet-fill: rgba(217, 115, 131, 0.38);
+  --droplet-deep: rgba(217, 115, 131, 0.18);
+  --droplet-halo: rgba(217, 115, 131, 0.30);
   --sticky-fade: rgba(22, 21, 20, 0.84);
 }
 
@@ -67,6 +98,27 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Прокрутка одним пальцем разрешена в обе стороны, pinch-zoom и
+   double-tap-zoom — нет. Навигация ниже задаёт свой touch-action: pan-y,
+   он пересекается с этим и не мешает горизонтальному drag капли. */
+html {
+  touch-action: pan-x pan-y;
+  background-color: var(--bg);
+  /* Отскок за края документа открывал фон WebView — на iOS это давало
+     полосы другого цвета на верхней и нижней границе. Отключаем цепочку
+     overscroll там, где браузер это поддерживает; обычная прокрутка,
+     sticky-шапка и фиксированная навигация не страдают. */
+  overscroll-behavior-y: none;
+}
+
+/* Корень всегда покрывает вьюпорт: при коротком содержимом под ним не
+   остаётся незакрашенной области (dvh — где поддерживается, иначе 100%). */
+body {
+  min-height: 100dvh;
+  background-color: var(--bg);
+  overscroll-behavior-y: none;
+}
+
 .app-shell {
   max-width: 520px;
   margin: 0 auto;
@@ -79,9 +131,12 @@ html, body {
 ------------------------------------------------------------------- */
 .top-glass-bar {
   position: fixed;
-  /* env() — системные отступы, --tg-*-safe-area-inset-* — от Telegram SDK
-     (нужны в полноэкранном режиме, когда webview уходит под статус-бар и «челку»). */
-  top: calc(env(safe-area-inset-top, 0px) + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px) + 10px);
+  /* --tg-content-safe-area-inset-top (Telegram SDK) в полноэкранном режиме
+     уже включает и статус-бар, и шапку Telegram — суммировать его с env()
+     или --tg-safe-area-inset-top нельзя (статус-бар учтётся дважды).
+     max() выбирает бо́льший из вариантов: в Telegram — контентную площадь,
+     в обычном браузере — системный отступ под «челку». */
+  top: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 10px);
   left: 50%;
   transform: translateX(-50%);
   width: min(520px, 100%);
@@ -205,7 +260,7 @@ body.tg-fullscreen #fullscreen-close {
   /* 10px — отступ стеклянного бара сверху, 70px = 10 + 48 (кнопка «Наша пара»)
      + 12 (нижний внутренний отступ): контент шапки центрируется ровно в полосу
      высотой 48px, т.е. на уровне плавающих кнопок. */
-  padding: calc(env(safe-area-inset-top, 0px) + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px) + 10px) 148px 12px 16px;
+  padding: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 10px) 148px 12px 16px;
   background: var(--sticky-fade);
   backdrop-filter: blur(16px) saturate(160%);
   -webkit-backdrop-filter: blur(16px) saturate(160%);
@@ -213,7 +268,7 @@ body.tg-fullscreen #fullscreen-close {
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  min-height: calc(env(safe-area-inset-top, 0px) + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px) + 70px);
+  min-height: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 70px);
 }
 
 /* В полноэкранном режиме слева висит кнопка закрытия — заголовок уходит правее. */
@@ -267,7 +322,7 @@ body.tg-fullscreen .tab-header {
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--nav-label, var(--muted));
   border-radius: 999px;
   padding: 9px 10px;
   font: inherit;
@@ -288,7 +343,9 @@ body.tg-fullscreen .tab-header {
 }
 
 /* ------------------------------------------------------------------
-   Нижний бар в стиле последнего Telegram (стекло + движущаяся капля)
+   Нижний бар: Liquid Glass в духе Telegram iOS + жидкая SVG-капля.
+   Слои материала: фон с размытием → верхний блик (sheen) → внутренняя
+   окантовка (::after) → капля → иконки и подписи сверху.
 ------------------------------------------------------------------- */
 .bottom-nav {
   position: fixed;
@@ -299,41 +356,59 @@ body.tg-fullscreen .tab-header {
   height: 62px;
   padding: 5px;
   border-radius: 999px;
-  background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   outline: 1px solid var(--glass-outer-border);
-  backdrop-filter: blur(26px) saturate(200%);
-  -webkit-backdrop-filter: blur(26px) saturate(200%);
+  background-color: var(--nav-glass-bg, var(--glass-bg));
+  background-image: var(--glass-sheen);
+  backdrop-filter: blur(34px) saturate(175%);
+  -webkit-backdrop-filter: blur(34px) saturate(175%);
   box-shadow: var(--glass-shadow);
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   align-items: stretch;
   z-index: 45;
   user-select: none;
+  -webkit-user-select: none;
   touch-action: pan-y;
+  isolation: isolate;
 }
 
+/* Внутренняя окантовка стекла: тонкий блик сверху и едва заметная тень снизу. */
+.bottom-nav::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: var(--glass-inner);
+  z-index: 3;
+}
+
+/* Капля — SVG во всю панель: координаты пути совпадают с пикселями панели. */
 .nav-droplet {
   position: absolute;
-  top: 5px;
-  bottom: 5px;
-  left: 5px;
-  width: calc((100% - 10px) / 5);
-  border-radius: 999px;
-  background: var(--droplet-bg);
-  border: 1px solid var(--droplet-border);
-  box-shadow: var(--droplet-glow);
-  backdrop-filter: blur(12px) saturate(180%);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
-  transform: translate3d(var(--drop-x, 0px), 0, 0) scale(var(--drop-sx, 1), var(--drop-sy, 1));
-  transform-origin: center center;
-  transition: transform 0.42s cubic-bezier(0.22, 1.18, 0.36, 1);
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   pointer-events: none;
   z-index: 0;
 }
 
-.nav-droplet.is-stretching {
-  transition: transform 0.22s cubic-bezier(0.32, 0, 0.2, 1);
+.nav-droplet-path {
+  fill: url(#nav-drop-fill);
+  stroke: var(--droplet-border);
+  stroke-width: 1;
+  filter: drop-shadow(0 6px 14px var(--droplet-halo));
+  transition: fill 0.3s ease, stroke 0.3s ease;
+}
+
+.nav-drop-stop-top { stop-color: var(--droplet-hi); }
+.nav-drop-stop-mid { stop-color: var(--droplet-fill, var(--droplet-bg)); }
+.nav-drop-stop-bottom { stop-color: var(--droplet-deep); }
+
+.bottom-nav.is-dragging {
+  cursor: grabbing;
 }
 
 .nav-item {
@@ -364,6 +439,31 @@ body.tg-fullscreen .tab-header {
   font-weight: 700;
 }
 
+/* Предпросмотр цели во время перетаскивания: подсветка, но не активное
+   состояние — страница до отпускания пальца не меняется. */
+.nav-item.is-preview-target {
+  color: var(--berry);
+  opacity: 0.7;
+}
+
+.nav-item.is-preview-target .nav-icon {
+  transform: translateY(-1px) scale(1.04);
+}
+
+/* Во время жеста иконки не «догоняют» каплю transition-ами — иначе дёргаются.
+   Заодно снимаем :active-масштаб: getBoundingClientRect() вкладок должен
+   оставаться стабильным, иначе площадь пересечения считается по сжатым
+   прямоугольникам. */
+.bottom-nav.is-dragging .nav-item,
+.bottom-nav.is-dragging .nav-item:active {
+  transform: none;
+}
+
+.bottom-nav.is-dragging .nav-item,
+.bottom-nav.is-dragging .nav-icon {
+  transition: none;
+}
+
 .nav-icon {
   width: 22px;
   height: 22px;
@@ -385,6 +485,14 @@ body.tg-fullscreen .tab-header {
   font-size: 10.5px;
   line-height: 1.1;
   letter-spacing: -0.01em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-item,
+  .nav-icon,
+  .nav-droplet-path {
+    transition: none;
+  }
 }
 
 /* ------------------------------------------------------------------
@@ -445,7 +553,9 @@ body.tg-fullscreen .tab-header {
 
 .primary, .secondary {
   appearance: none;
-  border-radius: 14px;
+  /* Пилюля, как у нижнего бара: радиус половиной высоты не задаём — 999px
+     округляет кнопку по бокам при любой высоте, ширину и высоту не меняет. */
+  border-radius: 999px;
   min-height: 44px;
   padding: 0 18px;
   font: inherit;
@@ -463,7 +573,7 @@ body.tg-fullscreen .tab-header {
   border: 0;
   background: var(--berry);
   color: #fff;
-  box-shadow: 0 8px 20px rgba(184, 84, 100, 0.24);
+  box-shadow: 0 8px 20px var(--berry-shadow, rgba(184, 84, 100, 0.24));
 }
 
 .secondary {
@@ -487,6 +597,263 @@ body.tg-fullscreen .tab-header {
 .pair-leave {
   color: var(--berry);
   margin-top: 10px;
+}
+
+/* ------------------------------------------------------------------
+   Календарь на вкладке «Наша пара»: сетка месяца и события выбранного дня
+------------------------------------------------------------------- */
+.calendar-card {
+  display: grid;
+  gap: 10px;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cal-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+.cal-nav-btn {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform 0.16s ease, background 0.2s ease;
+}
+
+.cal-nav-btn:active {
+  transform: scale(0.92);
+  background: var(--berry-soft);
+}
+
+.cal-weekdays,
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.cal-weekdays {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+.cal-day {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+/* Число чуть выше центра, чтобы точки событий не наезжали на цифру. */
+.cal-day .cal-num {
+  line-height: 1;
+  transform: translateY(-2px);
+}
+
+.cal-day.is-outside {
+  color: var(--muted);
+  opacity: 0.45;
+}
+
+/* Сегодня и выбранный день — разные состояния. */
+.cal-day.is-today {
+  box-shadow: inset 0 0 0 1.5px var(--berry);
+}
+
+.cal-day.is-selected {
+  background: var(--berry-soft);
+  color: var(--berry);
+  font-weight: 700;
+}
+
+.cal-day.has-events .cal-num {
+  font-weight: 650;
+}
+
+.cal-dots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 3px;
+  height: 9px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  justify-content: center;
+}
+
+.cal-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+}
+
+.cal-dot.is-task { background: var(--cal-task); }
+.cal-dot.is-date { background: var(--cal-date); }
+/* Личные планы и даты: серый маркер, чтобы не путать с общими. */
+.cal-dot.is-private { background: var(--cal-private); }
+
+/* Звезда — вручённое желание. Жёлтая, крупнее точки. */
+.cal-star {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--cal-wish);
+  display: inline-block;
+}
+
+.cal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cal-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cal-events {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.cal-events-date {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.cal-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cal-event .cal-dot {
+  margin-top: 6px;
+}
+
+.cal-event .cal-star {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.cal-event-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cal-event-title {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.cal-event-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cal-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Персональные настройки на вкладке «Наша пара»: акцент и время сводок. */
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0 2px;
+}
+
+.settings-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.settings-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.swatch-row {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--surface);
+  outline: 1px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.15s ease;
+}
+
+.swatch:active {
+  transform: scale(0.9);
+}
+
+.swatch.is-active {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.settings-row input[type="time"] {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
 }
 
 .item-row {
@@ -538,6 +905,90 @@ body.tg-fullscreen .tab-header {
   color: var(--berry);
 }
 
+/* Разметка текста в карточках (Telegram-стиль). */
+.rich-spoiler {
+  background: var(--surface-2);
+  color: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.rich-spoiler.is-revealed {
+  color: var(--ink);
+}
+
+.rich-quote {
+  margin: 6px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--berry);
+  background: var(--berry-soft);
+  border-radius: 8px;
+}
+
+/* Плавающее меню форматирования выделенного текста (внутри dialog). */
+.fmt-toolbar {
+  position: fixed;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  outline: 1px solid var(--glass-outer-border);
+  backdrop-filter: blur(26px) saturate(200%);
+  -webkit-backdrop-filter: blur(26px) saturate(200%);
+  box-shadow: var(--glass-shadow);
+  z-index: 60;
+  /* left/top задаёт JS в координатах вьюпорта: центрируем по горизонтали и
+     поднимаем над полем. */
+  transform: translate(-50%, -100%);
+}
+
+/* Авторский display перебивает UA-правило [hidden] — гасим явно. */
+.fmt-toolbar[hidden] {
+  display: none;
+}
+
+/* Мало места сверху (поле у кромки или открыта клавиатура) — показываем под полем. */
+.fmt-toolbar.is-below {
+  transform: translate(-50%, 0);
+}
+
+.fmt-toolbar button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.fmt-toolbar button:active {
+  background: var(--berry-soft);
+}
+
+.fmt-spoiler-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink);
+  filter: blur(2px);
+  display: inline-block;
+}
+
+/* Личная дата: видна только её автору. */
+.day-chip.is-private {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
 .item-actions {
   display: flex;
   align-items: center;
@@ -548,7 +999,7 @@ body.tg-fullscreen .tab-header {
 .icon-btn {
   width: 34px;
   height: 34px;
-  border-radius: 10px;
+  border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--ink);

@@ -40,3 +40,18 @@ test("HTML-страницы явно помечены no-cache", () => {
   ok(blockFor("/*.html").some((l) => /^Cache-Control:\s*no-cache$/i.test(l)));
   ok(blockFor("/").some((l) => /^Cache-Control:\s*no-cache$/i.test(l)));
 });
+
+test("мини-апп asset-пути версионированы — деплой не подхватывает старый кэш", () => {
+  const appHtml = readFileSync(join(root, "public", "app.html"), "utf8");
+  const workerSource = readFileSync(join(root, "worker.js"), "utf8");
+  const version = workerSource.match(/const APP_VERSION = "([^"]+)";/)?.[1];
+  ok(version, "APP_VERSION в worker.js не найден");
+  ok(
+    new RegExp(`src="/app\\.js\\?v=${version.replace(/\./g, "\\.")}"`).test(appHtml),
+    `/app.js?v=${version} — версия должна совпадать с APP_VERSION`
+  );
+  ok(
+    new RegExp(`href="/app\\.css\\?v=${version.replace(/\./g, "\\.")}"`).test(appHtml),
+    `/app.css?v=${version} — версия должна совпадать с APP_VERSION`
+  );
+});

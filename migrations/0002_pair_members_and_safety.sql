@@ -1,5 +1,6 @@
-ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Europe/Moscow';
-ALTER TABLE pairs ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Europe/Moscow';
+-- Колонки уже есть в schema.py, поэтому добавляем с IF NOT EXISTS.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'Europe/Moscow';
+ALTER TABLE pairs ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'Europe/Moscow';
 
 CREATE TABLE IF NOT EXISTS pair_members (
   tg_id INTEGER PRIMARY KEY,

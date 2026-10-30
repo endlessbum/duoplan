@@ -45,8 +45,20 @@ NOT_NULL_FALLBACKS = {"timezone": "'Europe/Moscow'"}
 def quote(value: object) -> str:
     if value is None:
         return "NULL"
-    if isinstance(value, (int, float)):
+    # bool перед int, т.к. bool — подкласс int
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, float):
+        import math
+
+        if math.isnan(value):
+            return "NULL"  # NaN невалиден в SQL
         return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, bytes):
+        # BLOB в SQLite сохраняем как hex-литерал
+        return "X'" + value.hex() + "'"
     return "'" + str(value).replace("'", "''") + "'"
 
 
@@ -58,10 +70,11 @@ def table_columns(db: sqlite3.Connection, table: str) -> set[str]:
     return {str(row["name"]) for row in rows}
 
 
-def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str, list[str]]:
+def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str, list[str], bool]:
+    """Возвращает (SELECT выражение, список колонок, есть_ли_таблица)."""
     actual = table_columns(db, table)
     if not actual:
-        raise RuntimeError(f"Таблица {table} отсутствует в SQLite-базе")
+        return "", [], False
     names = [part.strip() for part in columns.split(",") if part.strip()]
     expressions = []
     for name in names:
@@ -74,35 +87,50 @@ def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str,
             expressions.append(f"{fallback} AS {name}")
         else:
             expressions.append(f"NULL AS {name}")
-    return ", ".join(expressions), names
+    return ", ".join(expressions), names, True
 
 
 def dump(source: Path) -> str:
-    db = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    # Экранируем путь для SQLite URI: пробелы, ?, #, % и кириллица
+    # превращаются в %XX. Используем quote с safe='/\\:' для Windows-путей.
+    from urllib.parse import quote
+
+    resolved = Path(source).resolve()
+    # Windows: C:\path -> /c:/path и экранируем
+    posix_path = str(resolved).replace(chr(92), "/")
+    if posix_path[1:3] == ":/":
+        posix_path = "/" + posix_path  # /c:/path
+    source_uri = "file:" + quote(posix_path, safe="/\\:") + "?mode=ro"
+    db = sqlite3.connect(source_uri, uri=True)
     db.row_factory = sqlite3.Row
     lines = ["PRAGMA foreign_keys=ON;", "BEGIN;"]
     try:
         for table, columns in TABLES.items():
-            select_columns, names = build_select(db, table, columns)
+            select_columns, names, table_exists = build_select(db, table, columns)
+            if not table_exists:
+                continue  # Пропускаем таблицы, которых нет в пустой базе
             rows = db.execute(f"SELECT {select_columns} FROM {table}").fetchall()
             for row in rows:
                 values = ", ".join(quote(row[name]) for name in names)
                 lines.append(f"INSERT OR REPLACE INTO {table}({columns}) VALUES({values});")
 
         # pair_members — новый единственный источник членства в D1.
-        for role, owner, guest in (("a", "user_a", None), ("b", "user_b", None)):
-            condition = f"{owner} != 0"
-            if guest:
-                condition += f" AND {guest} != 0"
-            rows = db.execute(
-                f"SELECT {owner} AS tg_id, id AS pair_id, created_at FROM pairs WHERE {condition}"
-            ).fetchall()
-            for row in rows:
-                lines.append(
-                    "INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at) "
-                    f"VALUES({quote(row['tg_id'])},{quote(row['pair_id'])},{quote(role)},"
-                    f"{quote(row['created_at'])});"
-                )
+        # Проверяем, есть ли таблица pairs (может не быть в пустой базе).
+        _, _, pairs_exists = build_select(db, "pairs", "id")
+        if pairs_exists:
+            for role, owner, guest in (("a", "user_a", None), ("b", "user_b", None)):
+                condition = f"{owner} != 0"
+                if guest:
+                    condition += f" AND {guest} != 0"
+                rows = db.execute(
+                    f"SELECT {owner} AS tg_id, id AS pair_id, created_at FROM pairs WHERE {condition}"
+                ).fetchall()
+                for row in rows:
+                    lines.append(
+                        "INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at) "
+                        f"VALUES({quote(row['tg_id'])},{quote(row['pair_id'])},{quote(role)},"
+                        f"{quote(row['created_at'])});"
+                    )
         lines.append("COMMIT;")
     finally:
         db.close()

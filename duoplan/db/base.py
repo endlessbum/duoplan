@@ -24,7 +24,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -41,6 +41,9 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     ),
     3: (
         "ALTER TABLE users ADD COLUMN gender TEXT",
+    ),
+    4: (
+        "ALTER TABLE wishes ADD COLUMN url TEXT",
     ),
 }
 

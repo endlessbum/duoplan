@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>DuoPlan · zoom guard harness</title>
+<link rel="stylesheet" href="../public/app.css">
+<style>
+  body { margin: 0; min-height: 100vh; background: var(--bg); }
+  #out { position: fixed; inset: 0 0 auto 0; margin: 0; padding: 8px; font: 11px/1.4 monospace; color: var(--ink); background: var(--surface); z-index: 999; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<pre id="out">running…</pre>
+
+<nav id="bottom-nav" class="bottom-nav" aria-label="Разделы пространства">
+  <svg id="nav-droplet" class="nav-droplet" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="nav-drop-fill" x1="0" y1="0" x2="0" y2="1">
+        <stop class="nav-drop-stop-top" offset="0" />
+        <stop class="nav-drop-stop-mid" offset="0.62" />
+        <stop class="nav-drop-stop-bottom" offset="1" />
+      </linearGradient>
+    </defs>
+    <path id="nav-droplet-path" class="nav-droplet-path" d="" />
+  </svg>
+  <button class="nav-item is-active" type="button" data-tab="home" aria-current="page"><span class="nav-icon"></span><span class="nav-label">Главная</span></button>
+  <button class="nav-item" type="button" data-tab="tasks"><span class="nav-icon"></span><span class="nav-label">Планы</span></button>
+  <button class="nav-item" type="button" data-tab="dates"><span class="nav-icon"></span><span class="nav-label">Даты</span></button>
+  <button class="nav-item" type="button" data-tab="memories"><span class="nav-icon"></span><span class="nav-label">Дневник</span></button>
+  <button class="nav-item" type="button" data-tab="wishes"><span class="nav-icon"></span><span class="nav-label">Желания</span></button>
+</nav>
+
+<script>
+  // headless --dump-dom не прогоняет requestAnimationFrame — кадры идут по таймеру.
+  window.requestAnimationFrame = (cb) => window.setTimeout(() => cb(performance.now()), 16);
+  window.cancelAnimationFrame = (id) => window.clearTimeout(id);
+</script>
+<script src="../public/zoom-guard.js"></script>
+<script src="../public/nav.js"></script>
+<script>
+(async () => {
+  const results = [];
+  const check = (name, ok, detail) => results.push({ name, ok: Boolean(ok), detail: String(detail ?? "") });
+  const frames = async (n = 2) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 34)); };
+
+  try {
+    const body = document.body;
+    const touchList = (count) => Array.from({ length: count }, (_, index) => new Touch({
+      identifier: index + 1,
+      target: body,
+      clientX: 80 + index * 40,
+      clientY: 320
+    }));
+    const fireTouch = (type, count) => {
+      const touches = touchList(count);
+      const event = new TouchEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        touches,
+        targetTouches: touches,
+        changedTouches: touches
+      });
+      body.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    check("два пальца: touchstart отменён", fireTouch("touchstart", 2));
+    check("два пальца: touchmove отменён", fireTouch("touchmove", 2));
+    check("три пальца: touchmove отменён", fireTouch("touchmove", 3));
+    check("один палец: touchstart не отменён", !fireTouch("touchstart", 1));
+    check("один палец: touchmove не отменён", !fireTouch("touchmove", 1));
+
+    const fireEvent = (type, init) => {
+      const event = new Event(type, { bubbles: true, cancelable: true, ...init });
+      body.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    check("gesturestart отменён", fireEvent("gesturestart"));
+    check("gesturechange отменён", fireEvent("gesturechange"));
+    check("gestureend отменён", fireEvent("gestureend"));
+
+    const zoomWheel = new WheelEvent("wheel", { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -20 });
+    body.dispatchEvent(zoomWheel);
+    check("Ctrl+wheel отменён", zoomWheel.defaultPrevented);
+    const scrollWheel = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 20 });
+    body.dispatchEvent(scrollWheel);
+    check("обычный wheel не отменён", !scrollWheel.defaultPrevented);
+
+    const rootAction = getComputedStyle(document.documentElement).touchAction;
+    check("html: touch-action = pan-x pan-y", rootAction === "pan-x pan-y", rootAction);
+    const nav = document.getElementById("bottom-nav");
+    const navAction = getComputedStyle(nav).touchAction;
+    check("панель: touch-action = pan-y", navAction === "pan-y", navAction);
+
+    // Навигация под включённой защитой должна работать как раньше.
+    const items = Array.from(nav.querySelectorAll(".nav-item[data-tab]"));
+    const commits = [];
+    const liquid = window.createLiquidNav({
+      nav,
+      svg: document.getElementById("nav-droplet"),
+      path: document.getElementById("nav-droplet-path"),
+      items,
+      onCommit: (tab) => { commits.push(tab); liquid.setActive(tab, true); }
+    });
+    // Как в app.js: при инициализации активная вкладка ставится явно.
+    liquid.setActive("home", false);
+    nav.addEventListener("click", (event) => {
+      const btn = event.target.closest(".nav-item[data-tab]");
+      if (!btn) return;
+      commits.push("click:" + btn.dataset.tab);
+      liquid.setActive(btn.dataset.tab, true);
+    });
+    const item = (tab) => nav.querySelector(`.nav-item[data-tab="${tab}"]`);
+    const center = (tab) => {
+      const r = item(tab).getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    };
+    const pointer = (type, x, y, target) => (target || window).dispatchEvent(new PointerEvent(type, {
+      pointerId: 1, clientX: x, clientY: y, bubbles: true, cancelable: true, pointerType: "touch", isPrimary: true
+    }));
+
+    const home = center("home");
+    const dates = center("dates");
+    pointer("pointerdown", home.x, home.y, item("home"));
+    pointer("pointermove", home.x + 30, home.y);
+    await frames(2);
+    pointer("pointermove", dates.x, dates.y);
+    await frames(2);
+    pointer("pointerup", dates.x, dates.y);
+    await frames(2);
+    check("drag капли работает при включённой защите", liquid.getState().active === "dates", commits.join(","));
+
+    item("memories").click();
+    await frames(2);
+    check("обычный тап по вкладке работает", liquid.getState().active === "memories", commits.join(","));
+  } catch (error) {
+    results.push({ name: "исключение в сценарии", ok: false, detail: String((error && error.stack) || error) });
+  }
+
+  document.getElementById("out").textContent = JSON.stringify(results, null, 1);
+})();
+</script>
+</body>
+</html>

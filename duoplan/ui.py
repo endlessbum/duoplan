@@ -9,7 +9,7 @@ def button(text: str, data: str) -> InlineKeyboardButton:
 MAIN_MENU = InlineKeyboardMarkup(
     inline_keyboard=[
         [button("Наши планы", "menu:tasks"), button("Значимые даты", "menu:dates")],
-        [button("Дневник двоих", "menu:memories"), button("Вишлист", "menu:wishes")],
+        [button("Общий дневник", "menu:memories"), button("Вишлист", "menu:wishes")],
         [button("Ритуал дня", "menu:game")],
         [button("Наша пара", "menu:pair")],
     ]

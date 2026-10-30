@@ -22,9 +22,9 @@ def _rows(count: int, name_len: int = 64) -> list[dict]:
 def test_eight_long_entries_fit_into_one_page():
     # Раньше готовый текст обрезался до PAGE_TEXT_LIMIT и записи молча
     # пропадали, а кнопки следующей страницы не было: записей всего 8.
-    rendered = fit_entries("Дневник двоих", memory_entries(_rows(PAGE_SIZE)))
+    rendered = fit_entries("Общий дневник", memory_entries(_rows(PAGE_SIZE)))
     assert len(rendered) == PAGE_SIZE
-    text = "Дневник двоих\n\n" + "\n\n".join(rendered)
+    text = "Общий дневник\n\n" + "\n\n".join(rendered)
     assert len(text) <= PAGE_TEXT_LIMIT
 
 
@@ -55,10 +55,10 @@ def test_worst_case_page_with_next_is_within_limit():
     # появляется по числу записей, и весь текст обязан влезать в лимит.
     rows = _rows(PAGE_SIZE + 1)
     has_next = len(rows) > PAGE_SIZE
-    rendered = fit_entries("Дневник двоих", memory_entries(rows[:PAGE_SIZE]))
+    rendered = fit_entries("Общий дневник", memory_entries(rows[:PAGE_SIZE]))
     assert has_next
     assert len(rendered) == len(rows[:PAGE_SIZE])
-    text = "Дневник двоих\n\n" + "\n\n".join(rendered)
+    text = "Общий дневник\n\n" + "\n\n".join(rendered)
     assert len(text) <= PAGE_TEXT_LIMIT
 
 
@@ -79,9 +79,9 @@ def test_eight_entries_with_overlong_names_fit_into_one_page():
     # Раньше имя длиннее 64 символов сжимало страницу до 7 записей,
     # а фиксированный offset=page*PAGE_SIZE следующей страницы навсегда
     # терял недопоказанную восьмую запись.
-    rendered = fit_entries("Дневник двоих", memory_entries(_rows(PAGE_SIZE, name_len=129)))
+    rendered = fit_entries("Общий дневник", memory_entries(_rows(PAGE_SIZE, name_len=129)))
     assert len(rendered) == PAGE_SIZE
-    text = "Дневник двоих\n\n" + "\n\n".join(rendered)
+    text = "Общий дневник\n\n" + "\n\n".join(rendered)
     assert len(text) <= PAGE_TEXT_LIMIT
     # Восьмая запись страницы остаётся на ней же, а не «переезжает» на следующую.
     assert rendered[-1].startswith("2026-10-28 · ")

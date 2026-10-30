@@ -6,6 +6,7 @@ from duoplan.services import DATE_TITLE_MAX
 from duoplan.services import MEMORY_MAX
 from duoplan.services import TASK_TITLE_MAX
 from duoplan.services import WISH_MAX
+from duoplan.services import WISH_URL_MAX
 from duoplan.services import ValidationError
 from duoplan.services import normalize_code
 
@@ -38,6 +39,13 @@ async def test_memory_and_wish_validation(pair):
     with pytest.raises(ValidationError):
         await service.add_wish(pair_id, owner_id, "x" * (WISH_MAX + 1))
     assert await service.add_wish(pair_id, owner_id, "x" * WISH_MAX) > 0
+
+    wish_id = await service.add_wish(pair_id, owner_id, "Поехать к морю", "https://example.com/tickets")
+    wish = await service.db.one("SELECT url FROM wishes WHERE id = ?", (wish_id,))
+    assert wish["url"] == "https://example.com/tickets"
+
+    with pytest.raises(ValidationError):
+        await service.add_wish(pair_id, owner_id, "Поехать к морю", "x" * (WISH_URL_MAX + 1))
 
 
 async def test_date_validation_and_recurs_default(pair):

@@ -71,7 +71,8 @@ function makeActiveDb(rows) {
     prepare() {
       return {
         bind(...params) {
-          if (params.length !== 1) throw new Error(`активный путь биндит только pair.id, получено ${params.length}`);
+          // 1 параметр — tasks, 2 (pair.id + userId) — dates с фильтром приватности.
+          if (params.length !== 1 && params.length !== 2) throw new Error(`активный путь биндит pair.id (и userId для дат), получено ${params.length}`);
           return { async all() { return { results: rows }; } };
         }
       };

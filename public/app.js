@@ -13,6 +13,11 @@
   const homeScreenButton = document.getElementById("homescreen-button");
   const dialog = document.getElementById("item-dialog");
   const dialogForm = document.getElementById("item-form");
+
+  // Очищаем контекст диалога при любом закрывании (Escape, backdrop, programmatic)
+  dialog.addEventListener("close", () => {
+    dialogContext = null;
+  });
   const dialogTitle = document.getElementById("dialog-title");
   const dialogFields = document.getElementById("dialog-fields");
   const dialogSubmit = document.getElementById("dialog-submit");
@@ -24,7 +29,7 @@
     home: { title: "Наше пространство", isHome: false },
     tasks: { title: "Наши планы", sub: "Общие дела, свидания и идеи" },
     dates: { title: "Значимые даты", sub: "Важные дни вашей истории" },
-    memories: { title: "Дневник двоих", sub: "Тёплые моменты и заметки" },
+    memories: { title: "Общий дневник", sub: "Тёплые моменты и заметки" },
     wishes: { title: "Вишлист", sub: "Желания и подсказки для подарков" },
     pair: { title: "Наша пара", sub: "Настройки вашего пространства" }
   };
@@ -32,7 +37,11 @@
   let appState = null;
   let currentTab = "home";
   let wishView = "mine"; // "mine" | "partner" — переключатель вишлиста
-  let tabHistory = [];
+  // Календарь на вкладке «Наша пара»: месяц и выбранный день живут вне
+  // рендера, иначе любой refresh возвращал бы пользователя на текущий месяц.
+  let calendarMonth = null;   // { year, month } — month 1..12
+  let calendarSelected = null; // "YYYY-MM-DD"
+  let calendarFetching = false;
   // Архивы и «хвосты» активных наборов приходят с сервера страницами и живут
   // здесь — минутный refresh их не сбрасывает. У активных наборов (tasks,
   // dates, wishes) страницы начинаются после STATE_ACTIVE_LIMIT=200 из /api/state,
@@ -54,11 +63,14 @@
   // Кэш архивов живёт в пределах одной пары: сменилась пара (выход, создание,
   // вход по коду) — сбрасываем, чтобы чужие записи и счётчик страниц не утекли
   // в новое пространство.
+  function resetArchiveCache() {
+    for (const type of Object.keys(archiveCache)) archiveCache[type] = emptyArchiveEntry();
+  }
   function syncArchiveCachePair() {
     const pairId = appState?.pair?.id ?? null;
     if (archiveCachePairId === pairId) return;
     archiveCachePairId = pairId;
-    for (const type of Object.keys(archiveCache)) archiveCache[type] = emptyArchiveEntry();
+    resetArchiveCache();
   }
   // Активная запись и её завершённая копия живут в разных кэшах — чистим оба,
   // id в таблицах D1 независимы, поэтому по типу идём строго по своим ключам.
@@ -102,6 +114,37 @@
     }
   }
 
+  // Партнёр мог удалить запись, завершить план или сделать дату личной, пока
+  // кэш страниц архива жил в памяти. По изменившемуся состоянию фоновый
+  // refreshState молча перезагружает загруженные страницы: список остаётся
+  // раскрытым, но содержимое — всегда серверная истина. Сбой сети сбрасывает
+  // тип: лучше схлопнувшийся список, чем устаревшие записи партнёра.
+  async function revalidateArchiveCache() {
+    for (const type of Object.keys(archiveCache)) {
+      const cache = archiveCache[type];
+      if (cache.page < 0 || cache.loading) continue;
+      const lastPage = cache.page;
+      cache.page = -1;
+      cache.items = [];
+      cache.hasMore = null;
+      for (let page = 0; page <= lastPage; page++) {
+        cache.loading = true;
+        try {
+          const next = await request(`/api/archive?type=${encodeURIComponent(type)}&page=${page}`);
+          const seen = new Set(cache.items.map((x) => Number(x.id)));
+          cache.items.push(...(next.items || []).filter((x) => !seen.has(Number(x.id))));
+          cache.page = page;
+          cache.hasMore = Boolean(next.hasMore);
+        } catch {
+          archiveCache[type] = emptyArchiveEntry();
+          return;
+        } finally {
+          cache.loading = false;
+        }
+      }
+    }
+  }
+
   function mergedArchive(type, recent) {
     const seen = new Set(recent.map((x) => Number(x.id)));
     // Записи, которые снова стали активными (вернули из завершённых), из кэша архива не показываем;
@@ -122,7 +165,6 @@
     if (!mayExist || cache.hasMore === false) return "";
     return `<button class="secondary full" type="button" data-action="load-archive" data-type="${type}" style="margin-top:10px;">Показать ещё</button>`;
   }
-  let dropletTimer = null;
   let toastTimer = null;
   let sessionExpired = false;
   let dialogContext = null;
@@ -140,15 +182,88 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Акцентный цвет интерфейса (настройки на вкладке «Наша пара»).
+  // Палитры под светлую/тёмную тему; «berry» — дефолт из CSS, он снимает
+  // инлайн-переопределения переменных на :root.
+  // ------------------------------------------------------------------
+  const ACCENT_PALETTES = {
+    berry: { light: "#b85464", dark: "#d97383" },
+    sage: { light: "#55766a", dark: "#7ba394" },
+    ocean: { light: "#4a6f8f", dark: "#7fa3c0" },
+    violet: { light: "#7a5f9e", dark: "#a48cc9" },
+    amber: { light: "#b06a2c", dark: "#d3924e" }
+  };
+
+  function hexRgb(hex) {
+    const value = String(hex || "").replace("#", "");
+    const full = value.length === 3 ? value.split("").map(c => c + c).join("") : value;
+    if (!/^[0-9a-fA-F]{6}$/.test(full)) return null;
+    const num = Number.parseInt(full, 16);
+    return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+  }
+
+  function shadeHex(hex, factor) {
+    const rgb = hexRgb(hex);
+    if (!rgb) return hex;
+    return `rgb(${rgb.map(c => Math.max(0, Math.min(255, Math.round(c * factor)))).join(", ")})`;
+  }
+
+  function applyAccent() {
+    const root = document.documentElement;
+    const dark = root.dataset.theme === "dark";
+    const key = appState?.user?.accent_color || "berry";
+    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-bg", "--droplet-border", "--droplet-glow", "--droplet-hi", "--droplet-fill", "--droplet-deep", "--droplet-halo", "--berry-shadow"];
+    const hex = ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
+    if (key === "berry" || !hex) {
+      for (const name of names) root.style.removeProperty(name);
+      return;
+    }
+    const rgb = hexRgb(hex);
+    const rgba = (alpha) => `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+    root.style.setProperty("--berry", hex);
+    root.style.setProperty("--berry-dark", shadeHex(hex, 0.82));
+    root.style.setProperty("--berry-soft", rgba(dark ? 0.18 : 0.14));
+    root.style.setProperty("--droplet-bg", rgba(dark ? 0.22 : 0.15));
+    root.style.setProperty("--droplet-border", dark ? "rgba(255, 255, 255, 0.16)" : rgba(0.24));
+    root.style.setProperty("--droplet-glow", dark
+      ? `inset 0 1px 1px rgba(255, 255, 255, 0.22), 0 4px 16px ${rgba(0.22)}`
+      : `inset 0 1px 1.5px rgba(255, 255, 255, 0.8), 0 4px 14px ${rgba(0.16)}`);
+    // Капля — SVG-градиент: светлая кромка сверху, акцент в середине, тень снизу.
+    root.style.setProperty("--droplet-hi", dark ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.58)");
+    root.style.setProperty("--droplet-fill", rgba(dark ? 0.38 : 0.30));
+    root.style.setProperty("--droplet-deep", rgba(dark ? 0.18 : 0.16));
+    root.style.setProperty("--droplet-halo", rgba(dark ? 0.30 : 0.22));
+    root.style.setProperty("--berry-shadow", `0 8px 20px ${rgba(0.24)}`);
+  }
+
+  // Фон WebView в Telegram — это то, что видно за краями документа при
+  // отскоке прокрутки (и в полноэкранном режиме под шапкой). Ключ "bg_color"
+  // отдаёт цвет темы Telegram: в тёмной теме это чёрный, в светлой — белый,
+  // а у приложения свой --bg. На длинном свайпе из-за этого появлялись
+  // полосы другого цвета. Берём фактический цвет приложения.
+  function themeBackground() {
+    const value = window.getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+    return /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(value) ? value : null;
+  }
+
   function applyTheme() {
     const scheme = tg?.colorScheme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = scheme === "dark" ? "dark" : "light";
+    // Цвет читаем после смены темы: --bg уже пересчитан.
+    const background = themeBackground();
     // В полноэкранном режиме шапка Telegram прозрачная — сообщаем цвет,
     // чтобы системный статус-бар подстраивался под тему приложения.
     if (tg) {
-      safeTg(() => tg.setHeaderColor("bg_color"));
-      safeTg(() => tg.setBackgroundColor("bg_color"));
+      safeTg(() => tg.setHeaderColor(background || "bg_color"));
+      safeTg(() => tg.setBackgroundColor(background || "bg_color"));
     }
+    // Обычный браузер: адресная строка и системная панель красятся тем же цветом.
+    if (background) {
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", background);
+    }
+    applyAccent();
   }
 
   if (tg) {
@@ -210,6 +325,65 @@
       .replace(/"/g, "&quot;");
   }
 
+  // ------------------------------------------------------------------
+  // Telegram-разметка в текстах (жирный/курсив/подчёркнутый/зачёркнутый/
+  // спойлер/цитата). Разметка хранится прямо в тексте поля теми же
+  // маркерами, что и в Telegram: **ж**, _к_, __ч__, ~~з~~, ||спойлер||,
+  // строки «> » — цитата. Сначала экранируем всё, затем наклеиваем теги из
+  // фиксированного набора — произвольный HTML в поля не пройдёт никогда.
+  // Спойлер раскрывается тапом, цитата красится акцентным цветом (CSS).
+  // ------------------------------------------------------------------
+  const RICH_TOKENS = [["**", "b", ""], ["__", "u", ""], ["||", "span", "rich-spoiler"], ["~~", "s", ""], ["_", "i", ""]];
+
+  function richInline(escaped) {
+    const out = [];
+    const stack = [];
+    let i = 0;
+    while (i < escaped.length) {
+      const token = RICH_TOKENS.find(([t]) => escaped.startsWith(t, i));
+      if (token) {
+        const [tok, tag, cls] = token;
+        // Балансировка как в HTML: закрывающий маркер закрывает и все вложенные
+        // в него элементы — интерливинг «__а _б__ в_» не ломает структуру тегов.
+        const openIndex = stack.map(item => item.tok).lastIndexOf(tok);
+        if (openIndex !== -1) {
+          for (let s = stack.length - 1; s >= openIndex; s--) out.push(stack[s].cls ? "</span>" : `</${stack[s].tag}>`);
+          stack.length = openIndex;
+        } else {
+          out.push(cls ? `<span class="${cls}" data-spoiler>` : `<${tag}>`);
+          stack.push({ tok, tag, cls });
+        }
+        i += tok.length;
+        continue;
+      }
+      out.push(escaped[i++]);
+    }
+    while (stack.length) {
+      const top = stack.pop();
+      out.push(top.cls ? "</span>" : `</${top.tag}>`);
+    }
+    return out.join("");
+  }
+
+  function renderRichText(raw) {
+    const lines = esc(raw).split("\n");
+    const out = [];
+    let quote = null;
+    const flushQuote = () => {
+      if (!quote) return;
+      out.push(`<blockquote class="rich-quote">${quote.map(richInline).join("\n")}</blockquote>`);
+      quote = null;
+    };
+    for (const line of lines) {
+      if (line.startsWith("&gt; ")) { (quote ??= []).push(line.slice(5)); continue; }
+      if (line === "&gt;") { (quote ??= []).push(""); continue; }
+      flushQuote();
+      out.push(richInline(line));
+    }
+    flushQuote();
+    return out.join("\n");
+  }
+
   function firstLetter(name, fallback = "Д") {
     const clean = String(name ?? "").trim();
     return clean ? Array.from(clean)[0].toUpperCase() : fallback;
@@ -261,67 +435,25 @@
   }
 
   // ------------------------------------------------------------------
-  // Анимация стеклянной капли нижнего бара (Telegram Liquid Pill)
+  // Нижняя навигация: жидкая стеклянная капля (public/nav.js)
   // ------------------------------------------------------------------
+  // Модуль владеет геометрией и жестом, но не переключает страницы: о цели он
+  // сообщает через onCommit, а дальше работает существующий switchTab.
+  const liquidNav = window.createLiquidNav
+    ? window.createLiquidNav({
+        nav: bottomNav,
+        svg: navDroplet,
+        path: document.getElementById("nav-droplet-path"),
+        items: navButtons,
+        onCommit: (tab) => switchTab(tab, true, true)
+      })
+    : null;
+
+  // Единственная точка управления каплей для остального кода приложения.
   function updateDroplet(targetTab, animate = true) {
-    const idx = TAB_ORDER.indexOf(targetTab);
-    if (idx === -1 || !bottomNav || !navDroplet) return;
-
-    const innerWidth = bottomNav.clientWidth - 10;
-    const slotWidth = innerWidth / TAB_ORDER.length;
-    const x = Math.round(idx * slotWidth);
-
-    navButtons.forEach((btn) => {
-      const active = btn.dataset.tab === targetTab;
-      btn.classList.toggle("is-active", active);
-      if (active) btn.setAttribute("aria-current", "page");
-      else btn.removeAttribute("aria-current");
-    });
-
-    if (!animate) {
-      navDroplet.style.setProperty("--drop-x", `${x}px`);
-      navDroplet.style.setProperty("--drop-sx", "1");
-      navDroplet.style.setProperty("--drop-sy", "1");
-      return;
-    }
-
-    navDroplet.classList.add("is-stretching");
-    navDroplet.style.setProperty("--drop-x", `${x}px`);
-    navDroplet.style.setProperty("--drop-sx", "1.16");
-    navDroplet.style.setProperty("--drop-sy", "0.92");
-
-    clearTimeout(dropletTimer);
-    dropletTimer = setTimeout(() => {
-      navDroplet.classList.remove("is-stretching");
-      navDroplet.style.setProperty("--drop-sx", "1");
-      navDroplet.style.setProperty("--drop-sy", "1");
-    }, 170);
+    if (!liquidNav) return;
+    liquidNav.setActive(targetTab, animate);
   }
-
-  window.addEventListener("resize", () => {
-    if (TAB_ORDER.includes(currentTab)) {
-      updateDroplet(currentTab, false);
-    }
-  });
-
-  // Поддержка свайпа пальцем по нижнему бару как в Telegram
-  let navDragging = false;
-  bottomNav?.addEventListener("pointerdown", (e) => {
-    const btn = e.target.closest(".nav-item[data-tab]");
-    if (!btn) return;
-    navDragging = true;
-  });
-  bottomNav?.addEventListener("pointermove", (e) => {
-    if (!navDragging) return;
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const btn = el?.closest?.(".nav-item[data-tab]");
-    if (btn && btn.dataset.tab && btn.dataset.tab !== currentTab) {
-      switchTab(btn.dataset.tab);
-    }
-  });
-  window.addEventListener("pointerup", () => {
-    navDragging = false;
-  });
 
   // ------------------------------------------------------------------
   // Встроенная шапка вкладки (прямо над элементами на странице)
@@ -365,7 +497,13 @@
     }
 
     pairButton.hidden = false;
+    // Панель могла быть скрыта в момент инициализации (нет пары) — размеры
+    // появились только сейчас, поэтому пересчитываем геометрию капли.
+    // Только на переходе «скрыта → показана»: иначе refresh() на каждом
+    // рендере сбрасывал бы незавершённую анимацию капли.
+    const wasHidden = bottomNav.hidden;
     bottomNav.hidden = false;
+    if (wasHidden) liquidNav?.refresh();
     avatarA.textContent = firstLetter(pair.name1, "А");
     avatarB.textContent = pair.user_b ? firstLetter(pair.name2, "Б") : "+";
     // В кнопке перехода на «Нашу пару» текст не показываем — только круглые аватарки.
@@ -373,11 +511,8 @@
     pairPillLabel.textContent = "";
   }
 
-  function switchTab(tab, pushScroll = true, pushHistory = true) {
+  function switchTab(tab, pushScroll = true) {
     if (tab !== currentTab) {
-      if (pushHistory && currentTab) {
-        tabHistory.push(currentTab);
-      }
       currentTab = tab;
       if (TAB_ORDER.includes(tab)) {
         updateDroplet(tab, true);
@@ -644,7 +779,7 @@
         <section class="card">
           <p class="eyebrow">Ожидание партнёра</p>
           <h2>Пригласите партнёра в пространство</h2>
-          <p>Отправьте код партнёру. После его присоединения здесь появятся общие планы, значимые даты, дневник двоих, вишлист и ритуал дня.</p>
+          <p>Отправьте код партнёру. После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня.</p>
           <div style="margin-top:12px;">
             <button class="primary full" type="button" data-action="go-tab" data-tab="pair">Наша пара</button>
           </div>
@@ -711,8 +846,9 @@
       <article class="card">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${esc(item.title)}</h3>
+            <h3 class="item-title">${renderRichText(item.title)}</h3>
             <div class="item-meta">
+              ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
               ${item.day ? `<span>${esc(item.day)}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
               ${countdownChip(item.day, item.time)}
             </div>
@@ -753,10 +889,11 @@
       <article class="card">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${esc(item.title)}</h3>
+            <h3 class="item-title">${renderRichText(item.title)}</h3>
             <div class="item-meta">
               <span>${esc(item.day)}${item.time ? ` · ${esc(item.time)}` : ""}</span>
               ${item.recurs ? `<span>· Ежегодно</span>` : ""}
+              ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
               ${chip}
             </div>
           </div>
@@ -774,7 +911,7 @@
       <article class="card">
         <div class="item-row">
           <div class="item-main">
-            <p style="color:var(--ink); white-space:pre-wrap; margin-bottom:6px;">${esc(item.body)}</p>
+            <p style="color:var(--ink); white-space:pre-wrap; margin-bottom:6px;">${renderRichText(item.body)}</p>
             <div class="item-meta">
               <span>${esc(item.display_name || "Партнёр")}</span>
               <span>· ${esc(item.day)}</span>
@@ -790,7 +927,8 @@
   }
 
   function wishItem(item, editable = true) {
-    const actions = editable ? `
+    const canEdit = editable && item.owner_id === appState.user.tg_id;
+    const actions = canEdit ? `
       <button class="icon-btn" type="button" data-action="done-item" data-type="wishes" data-id="${item.id}" aria-label="Исполнено">✓</button>
       <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">✎</button>
       <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">✕</button>
@@ -799,8 +937,8 @@
       <article class="card">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${esc(item.body)}</h3>
-            ${editable ? "" : `<div class="item-meta"><span>Желание: ${esc(item.display_name || "Партнёр")}</span></div>`}
+            <h3 class="item-title">${renderRichText(item.body)}</h3>
+            ${item.url ? `<button class="secondary small" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
           </div>
           ${actions ? `<div class="item-actions">${actions}</div>` : ""}
         </div>
@@ -823,7 +961,7 @@
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title" style="text-decoration:line-through;">${esc(item.title)}</h3>
+            <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.title)}</h3>
             <div class="item-meta"><span>Завершён</span></div>
           </div>
           <div class="item-actions">
@@ -837,7 +975,8 @@
   }
 
   function completedWishItem(item, editable = true) {
-    const actions = editable ? `
+    const canEdit = editable && item.owner_id === appState.user.tg_id;
+    const actions = canEdit ? `
       <button class="icon-btn" type="button" data-action="reopen-item" data-type="wishes" data-id="${item.id}" aria-label="Вернуть в желания">↩</button>
       <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">✎</button>
       <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">✕</button>
@@ -846,7 +985,8 @@
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title" style="text-decoration:line-through;">${esc(item.body)}</h3>
+            <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
+            ${item.url ? `<button class="secondary small" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
             <div class="item-meta"><span>Исполнено</span></div>
           </div>
           ${actions ? `<div class="item-actions">${actions}</div>` : ""}
@@ -872,13 +1012,341 @@
     `;
   }
 
+  // ------------------------------------------------------------------
+  // Календарь вкладки «Наша пара»
+  // ------------------------------------------------------------------
+  // Работаем с календарными ключами "YYYY-MM-DD" и арифметикой Date.UTC:
+  // new Date("2026-05-15") парсится как UTC-полночь и в поясе пары может
+  // уехать на предыдущий день. Часовой пояс пары нужен только для «сегодня».
+
+  function calendarPad(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function calendarDayKey(year, month, day) {
+    return `${year}-${calendarPad(month)}-${calendarPad(day)}`;
+  }
+
+  // Дней в месяце: день 0 следующего месяца = последний день текущего.
+  function calendarDaysInMonth(year, month) {
+    return new Date(Date.UTC(year, month, 0)).getUTCDate();
+  }
+
+  // Сетка месяца, неделя с понедельника. Ячейки соседних месяцев нужны,
+  // чтобы недели были ровными: они помечены inMonth: false.
+  function calendarGrid(year, month) {
+    const first = new Date(Date.UTC(year, month - 1, 1));
+    const offset = (first.getUTCDay() + 6) % 7;
+    const total = Math.ceil((offset + calendarDaysInMonth(year, month)) / 7) * 7;
+    const cells = [];
+    for (let i = 0; i < total; i++) {
+      const cursor = new Date(Date.UTC(year, month - 1, 1 - offset + i));
+      const cellYear = cursor.getUTCFullYear();
+      const cellMonth = cursor.getUTCMonth() + 1;
+      const cellDay = cursor.getUTCDate();
+      cells.push({
+        key: calendarDayKey(cellYear, cellMonth, cellDay),
+        day: cellDay,
+        month: cellMonth,
+        year: cellYear,
+        inMonth: cellMonth === month && cellYear === year
+      });
+    }
+    return cells;
+  }
+
+  // События месяца по дням: Map<"YYYY-MM-DD", { tasks: [], dates: [] }>.
+  // Планы без даты не попадают, ежегодные даты проецируются на тот же
+  // месяц/день, 29 февраля в невисокосный год пропускается.
+  function calendarEventIndex(tasks, dates, wishes, year, month) {
+    const index = new Map();
+    const push = (key, kind, item) => {
+      const bucket = index.get(key) || { tasks: [], dates: [], wishes: [] };
+      bucket[kind].push(item);
+      index.set(key, bucket);
+    };
+    for (const task of tasks || []) {
+      if (!task.day) continue;
+      const [taskYear, taskMonth, taskDay] = String(task.day).split("-").map(Number);
+      if (taskYear !== year || taskMonth !== month) continue;
+      push(calendarDayKey(year, month, taskDay), "tasks", task);
+    }
+    for (const date of dates || []) {
+      if (!date.day) continue;
+      const [dateYear, dateMonth, dateDay] = String(date.day).split("-").map(Number);
+      if (![dateYear, dateMonth, dateDay].every(Number.isFinite)) continue;
+      const recurs = Number(date.recurs) === 1 || date.recurs === true;
+      if (!recurs) {
+        if (dateYear === year && dateMonth === month) {
+          push(calendarDayKey(year, month, dateDay), "dates", date);
+        }
+        continue;
+      }
+      if (dateMonth !== month) continue;
+      // Ежегодная дата не показывается раньше года, в котором её создали.
+      if (year < dateYear) continue;
+      // 29 февраля существует не в каждом году — не переносим на 28-е/1-е.
+      if (dateDay > calendarDaysInMonth(year, month)) continue;
+      push(calendarDayKey(year, month, dateDay), "dates", date);
+    }
+    // Вручённые желания: звезда стоит в день, когда желание отметили
+    // исполненным. Даты вручения у старых записей нет — такие пропускаем.
+    const monthPrefix = `${year}-${calendarPad(month)}`;
+    for (const wish of wishes || []) {
+      if (Number(wish.done) !== 1 && wish.done !== true) continue;
+      const at = Number(wish.done_at);
+      if (!Number.isFinite(at) || at <= 0) continue;
+      const key = calendarKeyFromDate(new Date(at * 1000));
+      if (!key || !key.startsWith(monthPrefix)) continue;
+      push(key, "wishes", wish);
+    }
+    return index;
+  }
+
+  function calendarMonthTitle(year, month) {
+    // timeZone: "UTC" — иначе полночь первого числа в отрицательном поясе
+    // отрисуется как предыдущий месяц.
+    const name = new Intl.DateTimeFormat("ru-RU", { month: "long", timeZone: "UTC" })
+      .format(new Date(Date.UTC(year, month - 1, 1)));
+    return `${name.charAt(0).toUpperCase()}${name.slice(1)} ${year}`;
+  }
+
+  function calendarLongDate(key) {
+    const [year, month, day] = String(key).split("-").map(Number);
+    return new Intl.DateTimeFormat("ru-RU", {
+      day: "numeric", month: "long", year: "numeric", timeZone: "UTC"
+    }).format(new Date(Date.UTC(year, month - 1, day)));
+  }
+
+  // Календарный ключ момента в поясе пары (а не по поясу устройства).
+  function calendarKeyFromDate(date) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: pairTimeZone(), year: "numeric", month: "2-digit", day: "2-digit"
+    }).formatToParts(date);
+    const get = (type) => parts.find((part) => part.type === type)?.value;
+    if (!get("year")) return null;
+    return `${get("year")}-${get("month")}-${get("day")}`;
+  }
+
+  function calendarTodayKey() {
+    return calendarKeyFromDate(new Date());
+  }
+
+  function calendarCurrentMonth() {
+    if (calendarMonth) return calendarMonth;
+    const [year, month] = calendarTodayKey().split("-").map(Number);
+    calendarMonth = { year, month };
+    return calendarMonth;
+  }
+
+  function shiftCalendarMonth(delta) {
+    const { year, month } = calendarCurrentMonth();
+    const next = new Date(Date.UTC(year, month - 1 + delta, 1));
+    calendarMonth = { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1 };
+    // Выбранный день принадлежал другому месяцу — снимаем выделение.
+    calendarSelected = null;
+    render();
+  }
+
+  function selectCalendarDay(key) {
+    if (!key) return;
+    const [year, month] = key.split("-").map(Number);
+    calendarSelected = key;
+    // Клик по дню соседнего месяца перелистывает календарь на его месяц.
+    if (!calendarMonth || calendarMonth.year !== year || calendarMonth.month !== month) {
+      calendarMonth = { year, month };
+    }
+    render();
+  }
+
+  function calendarEventRows(bucket) {
+    if (!bucket) return [];
+    const rows = [
+      ...bucket.tasks.map((task) => ({
+        kind: "task", title: task.title, time: task.time, isPrivate: Number(task.is_private) === 1
+      })),
+      ...bucket.dates.map((date) => ({
+        kind: "date", title: date.title, time: date.time, isPrivate: Number(date.is_private) === 1
+      })),
+      ...(bucket.wishes || []).map((wish) => ({
+        kind: "wish", title: wish.body, time: null, isPrivate: false
+      }))
+    ];
+    // События со временем — по возрастанию, без времени — в конце.
+    return rows.sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
+  }
+
+  // Календарь показывает все загруженные записи: state + страницы архива.
+  // Приватность уже обеспечена сервером — /api/archive фильтрует is_private
+  // по текущему пользователю, здесь никаких обходов нет.
+  function renderPairCalendar() {
+    const tasks = mergedArchive("tasks", appState.tasks || []);
+    const dates = mergedArchive("dates", appState.dates || []);
+    // Звёздочка — только мои вручённые желания: чужие подарки в календаре
+    // пользователя не показываем (owner_id — владелец желания).
+    const myId = Number(appState.user?.tg_id);
+    const wishes = mergedArchive("done_wishes", appState.completedWishes || [])
+      .filter((wish) => Number(wish.owner_id) === myId);
+    const today = calendarTodayKey();
+    const { year, month } = calendarCurrentMonth();
+    const index = calendarEventIndex(tasks, dates, wishes, year, month);
+    const selected = calendarSelected;
+    const weekdays = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+    const cellsHtml = calendarGrid(year, month).map((cell) => {
+      const bucket = index.get(cell.key);
+      const cellTasks = bucket?.tasks || [];
+      const cellDates = bucket?.dates || [];
+      const dots = [];
+      // Звезда — вручённое желание, точки — планы и даты. Личные записи
+      // (is_private) помечаем серым, чтобы не путать с общими.
+      if (bucket?.wishes.length) dots.push('<span class="cal-star">★</span>');
+      if (cellTasks.length) {
+        dots.push(`<i class="cal-dot ${cellTasks.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-task"}"></i>`);
+      }
+      if (cellDates.length) {
+        dots.push(`<i class="cal-dot ${cellDates.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-date"}"></i>`);
+      }
+      const classes = ["cal-day"];
+      if (!cell.inMonth) classes.push("is-outside");
+      // «Сегодня» подсвечиваем только в своём месяце: в сетке соседнего
+      // месяца кольцо на приглушённой ячейке читается как выбранный день.
+      if (cell.inMonth && cell.key === today) classes.push("is-today");
+      if (cell.key === selected) classes.push("is-selected");
+      if (dots.length) classes.push("has-events");
+      const label = dots.length
+        ? `${calendarLongDate(cell.key)}, есть события`
+        : calendarLongDate(cell.key);
+      return `
+        <button class="${classes.join(" ")}" type="button" data-action="calendar-day" data-day="${cell.key}"
+          aria-label="${esc(label)}"${cell.key === selected ? ' aria-pressed="true"' : ""}>
+          <span class="cal-num">${cell.day}</span>
+          <span class="cal-dots" aria-hidden="true">${dots.join("")}</span>
+        </button>
+      `;
+    }).join("");
+
+    let details = "";
+    if (selected) {
+      const rows = calendarEventRows(index.get(selected));
+      details = `
+        <div class="cal-events">
+          <p class="cal-events-date">${esc(calendarLongDate(selected))}</p>
+          ${rows.length ? rows.map((row) => `
+            <div class="cal-event">
+              ${row.kind === "wish"
+                ? '<span class="cal-star" aria-hidden="true">★</span>'
+                : `<i class="cal-dot ${row.isPrivate ? "is-private" : row.kind === "task" ? "is-task" : "is-date"}" aria-hidden="true"></i>`}
+              <div class="cal-event-body">
+                <span class="cal-event-title">${renderRichText(row.title)}</span>
+                <span class="cal-event-meta">${row.kind === "task" ? "План" : row.kind === "date" ? "Значимая дата" : "Желание подарено"}${row.isPrivate ? " · личное" : ""}${row.time ? ` · ${esc(row.time)}` : ""}</span>
+              </div>
+            </div>
+          `).join("") : `<p class="cal-empty">На этот день событий нет.</p>`}
+        </div>
+      `;
+    }
+
+    return `
+      <section class="card calendar-card">
+        <p class="eyebrow">Календарь</p>
+        <div class="cal-head">
+          <button class="cal-nav-btn" type="button" data-action="calendar-prev" aria-label="Предыдущий месяц">‹</button>
+          <h3 class="cal-title">${esc(calendarMonthTitle(year, month))}</h3>
+          <button class="cal-nav-btn" type="button" data-action="calendar-next" aria-label="Следующий месяц">›</button>
+        </div>
+        <div class="cal-weekdays" aria-hidden="true">${weekdays.map((day) => `<span>${day}</span>`).join("")}</div>
+        <div class="cal-grid">${cellsHtml}</div>
+        <div class="cal-legend">
+          <span><i class="cal-dot is-task" aria-hidden="true"></i> Планы</span>
+          <span><i class="cal-dot is-date" aria-hidden="true"></i> Значимые даты</span>
+          <span><span class="cal-star" aria-hidden="true">★</span> Желания</span>
+          <span><i class="cal-dot is-private" aria-hidden="true"></i> Личное</span>
+        </div>
+        ${details}
+      </section>
+    `;
+  }
+
+  // /api/state отдаёт не больше STATE_ACTIVE_LIMIT активных записей, остальное
+  // лежит в /api/archive. Если лимит достигнут, догружаем страницы в фоне:
+  // календарь сразу показывает известное и обновляется по мере поступления.
+  function calendarArchivePending(type) {
+    const recent = type === "tasks" ? (appState?.tasks || [])
+      : type === "dates" ? (appState?.dates || [])
+        : (appState?.completedWishes || []);
+    // Вручённые желания живут в «архиве» уже с 10 записей, активные — с 200.
+    const threshold = type === "done_wishes" ? STATE_RECENT_LIMIT : STATE_ACTIVE_LIMIT;
+    if (recent.length < threshold) return false;
+    return archiveCache[type].hasMore !== false;
+  }
+
+  async function ensureCalendarArchive() {
+    if (calendarFetching) return;
+    calendarFetching = true;
+    try {
+      for (const type of ["tasks", "dates", "done_wishes"]) {
+        if (!calendarArchivePending(type)) continue;
+        const cache = archiveCache[type];
+        let guard = 0;
+        while (cache.hasMore !== false && guard++ < 50) {
+          const before = cache.items.length;
+          await loadArchivePage(type);
+          // Страница без новых записей — дальше не крутимся.
+          if (cache.items.length === before) break;
+        }
+      }
+    } catch (error) {
+      // Сеть недоступна: календарь покажет то, что уже загружено.
+    } finally {
+      calendarFetching = false;
+    }
+  }
+
+  // Персональные настройки: акцентный цвет, время утренней сводки и сводки
+  // о датах за сутки. Напоминания о планах (за 3 часа и за час) включены всегда.
+  function renderPairSettings() {
+    const user = appState.user;
+    const accent = user.accent_color || "berry";
+    const swatches = Object.entries(ACCENT_PALETTES).map(([key, palette]) => `
+      <button class="swatch${key === accent ? " is-active" : ""}" type="button" data-action="set-accent" data-accent="${key}"
+        style="background:${palette.light}" aria-label="Акцентный цвет: ${key}"></button>
+    `).join("");
+    return `
+      <section class="card">
+        <p class="eyebrow">Настройки</p>
+        <h3>Оформление и уведомления</h3>
+        <div class="settings-row">
+          <span class="settings-label">Акцентный цвет</span>
+          <div class="swatch-row">${swatches}</div>
+        </div>
+        <label class="settings-row">
+          <span class="settings-label"><input type="checkbox" id="digest-enabled" ${user.digest_enabled ? "checked" : ""}> Утренняя сводка</span>
+          <input type="time" id="digest-time" value="${esc(user.digest_time || "09:00")}">
+        </label>
+        <p class="settings-hint">Планы и значимые даты на сегодня и завтра — личным сообщением от бота.</p>
+        <label class="settings-row">
+          <span class="settings-label"><input type="checkbox" id="dates-digest-enabled" ${user.dates_digest_enabled ? "checked" : ""}> Даты за сутки</span>
+          <input type="time" id="dates-digest-time" value="${esc(user.dates_digest_time || "09:00")}">
+        </label>
+        <p class="settings-hint">Напомнит о завтрашних датах накануне в выбранное время. Кроме сводок бот предупреждает о плане с точным временем за 3 часа и за час.</p>
+        <div style="margin-top:14px;">
+          <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
+        </div>
+      </section>
+    `;
+  }
+
   function renderPair() {
     const { pair } = appState;
-    const inviteBlock = !pair.user_b ? `
+    // Карточка приглашения живёт ровно пока партнёра нет: как только он
+    // присоединился (user_b заполнен) — скрываем; если партнёр вышел
+    // (сервер обнуляет user_b) — карточка возвращается.
+    const inviteBlock = partnerMissing() ? `
       <section class="card">
         <p class="eyebrow">Приглашение партнёра</p>
         <h3>Отправьте код партнёру</h3>
-        <p>После его присоединения здесь появятся общие планы, значимые даты, дневник двоих, вишлист и ритуал дня. Общие очки пары: ${pair.together_pts || 0} XP</p>
+        <p>После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня. Общие очки пары: ${pair.together_pts || 0} XP</p>
         ${pair.code ? `
           <div style="margin-top:14px; display:grid; gap:8px;">
             <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
@@ -901,10 +1369,14 @@
         ` : ""}
         <button class="secondary full pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
       </section>
+      ${renderPairCalendar()}
+      ${renderPairSettings()}
     `;
   }
 
   function render() {
+    // Акцент мог измениться (настройки/тема) — пере-применяем на каждом рендере.
+    applyAccent();
     syncArchiveCachePair();
     syncTopControls();
     if (!appState?.user?.gender) {
@@ -949,10 +1421,10 @@
       // Порядок приходит отсортированным из /api/state (sortDateRows):
       // повторная сортировка с часовыми поясами на каждое сравнение не нужна.
       const sortedDates = mergedArchive("dates", appState.dates || []);
-      appEl.innerHTML = renderListTab("dates", sortedDates, "add-date", "Добавить дату", "Значимые даты", "Добавьте годовщину, день знакомства или важный праздник.", dateItem) + archiveMoreHtml("dates", (appState.dates || []).length);
+      appEl.innerHTML = renderListTab("dates", sortedDates, "add-date", "Добавить дату", "Хочу запомнить", "Добавьте годовщину, день знакомства или важный праздник.", dateItem) + archiveMoreHtml("dates", (appState.dates || []).length);
     } else if (currentTab === "memories") {
       const recentMemories = appState.memories || [];
-      const memoriesHtml = renderListTab("memories", mergedArchive("memories", recentMemories), "add-memory", "Записать момент", "Дневник двоих", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem);
+      const memoriesHtml = renderListTab("memories", mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem);
       appEl.innerHTML = memoriesHtml + archiveMoreHtml("memories", recentMemories.length);
     } else if (currentTab === "wishes") {
       const wishDisabledClass = partnerMissing() ? " is-disabled" : "";
@@ -987,7 +1459,7 @@
         } else {
           html += `
             <section class="card">
-              <h3>Вишлист пуст</h3>
+              <h3>Желание</h3>
               <p>Поделитесь идеями подарков и маленькими мечтами.</p>
               <div style="margin-top:12px;">
                 <button class="primary full${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>
@@ -1014,6 +1486,9 @@
       appEl.innerHTML = html;
     } else if (currentTab === "pair") {
       appEl.innerHTML = renderPair();
+      // Если активных записей больше лимита /api/state, календарь догружает
+      // страницы архива в фоне и перерисовывается сам.
+      ensureCalendarArchive();
     }
   }
 
@@ -1043,9 +1518,7 @@
     const label = sureLabel();
     openDialog({
       title: "Вы покидаете пространство",
-      fields: `<p style="margin:2px 0 0;">${esc(lastHolder
-        ? "Вы покидаете пространство будучи последним его держателем. В случае если Вы выходите, то добавить обратно вышедшего из вашего пространства пользователя больше не выйдет, а Ваши общие данные будут стерты. Вы уверены?"
-        : "Вы уверены?")}</p>`,
+      fields: `<p style="margin:2px 0 0;">${lastHolder ? "Вы последний держатель. Все данные будут удалены безвозвратно." : "Вы уверены?"}</p>`,
       submitLabel: label,
       cancelLabel: "Нет",
       onSubmit: async () => appState,
@@ -1089,10 +1562,11 @@
     const formData = new FormData(dialogForm);
     try {
       appState = await dialogContext.onSubmit(formData);
+      const chain = dialogContext.chain;
       dialog.close();
       render();
       // Цепочка шагов (например, повторное подтверждение выхода).
-      dialogContext?.chain?.();
+      chain?.();
     } catch (error) {
       handleRequestError(error);
     } finally {
@@ -1102,6 +1576,90 @@
   });
 
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Меню форматирования выделенного текста (как в Telegram): появляется
+  // над текстовым полем диалога, пока в нём есть выделение. Кнопки
+  // оборачивают выделение маркерами разметки (повторное нажатие снимает).
+  // ------------------------------------------------------------------
+  const fmtToolbar = document.getElementById("fmt-toolbar");
+  function isFmtTarget(el) {
+    if (!el || !el.closest?.("#dialog-fields")) return false;
+    if (el instanceof HTMLTextAreaElement) return true;
+    return el instanceof HTMLInputElement && (!el.type || el.type === "text");
+  }
+  function hideFmtToolbar() {
+    if (fmtToolbar) fmtToolbar.hidden = true;
+  }
+  function updateFmtToolbar() {
+    if (!fmtToolbar) return;
+    const el = document.activeElement;
+    // Выделения нет — меню не нужно; у полей не-текстового типа его тоже нет.
+    if (!isFmtTarget(el) || el.selectionEnd === el.selectionStart) {
+      hideFmtToolbar();
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    fmtToolbar.hidden = false;
+    fmtToolbar.style.left = `${Math.round(rect.left + rect.width / 2)}px`;
+    // Над полем не хватает места (верх экрана, шапка диалога или клавиатура) —
+    // показываем под полем, чтобы не закрывать заголовок.
+    const dialogTop = dialog?.getBoundingClientRect().top ?? 0;
+    const above = rect.top - 52 >= Math.max(8, dialogTop + 8);
+    fmtToolbar.classList.toggle("is-below", !above);
+    fmtToolbar.style.top = `${Math.round(above ? rect.top - 8 : rect.bottom + 8)}px`;
+  }
+  document.addEventListener("selectionchange", updateFmtToolbar);
+  // selectionchange для input/textarea есть не во всех webview (старые iOS) —
+  // дублируем на событиях самого поля.
+  for (const type of ["select", "keyup", "pointerup", "touchend"]) {
+    dialogFields?.addEventListener(type, () => setTimeout(updateFmtToolbar, 0));
+  }
+  // Замена диапазона: setRangeText есть не везде (старый WKWebView), поэтому
+  // собираем значение вручную — это ещё и оставляет фокус в поле.
+  function replaceRange(field, text, from, to, selStart, selEnd) {
+    field.value = field.value.slice(0, from) + text + field.value.slice(to);
+    field.focus();
+    field.setSelectionRange(selStart, selEnd);
+  }
+  function applyFmtMarker(field, marker) {
+    const start = field.selectionStart;
+    const end = field.selectionEnd;
+    if (start === end) return;
+    if (marker === ">") {
+      // Цитата: каждой выделенной строке — префикс «> » (повтор снимает).
+      const selected = field.value.slice(start, end);
+      const quoted = selected.split("\n")
+        .map(line => line.startsWith("> ") ? line.slice(2) : `> ${line}`)
+        .join("\n");
+      replaceRange(field, quoted, start, end, start, start + quoted.length);
+      return;
+    }
+    const selected = field.value.slice(start, end);
+    // Уже обёрнуто тем же маркером — снимаем разметку.
+    if (field.value.slice(start - marker.length, start) === marker
+      && field.value.slice(end, end + marker.length) === marker) {
+      replaceRange(field, selected, start - marker.length, end + marker.length,
+        start - marker.length, end - marker.length);
+      return;
+    }
+    replaceRange(field, marker + selected + marker, start, end,
+      start + marker.length, start + marker.length + selected.length);
+  }
+  fmtToolbar?.addEventListener("pointerdown", (e) => {
+    // preventDefault: поле не теряет фокус и выделение между нажатиями.
+    e.preventDefault();
+    const btn = e.target.closest("[data-fmt]");
+    const field = document.activeElement;
+    if (btn && isFmtTarget(field)) applyFmtMarker(field, btn.dataset.fmt);
+  });
+  dialog?.addEventListener("close", hideFmtToolbar);
+
+  // Спойлер в карточках раскрывается тапом (как в Telegram).
+  document.addEventListener("click", (e) => {
+    const spoiler = e.target.closest?.("[data-spoiler]");
+    if (spoiler) spoiler.classList.toggle("is-revealed");
+  });
+
   // Обработчики кликов
   // ------------------------------------------------------------------
   bottomNav?.addEventListener("click", (e) => {
@@ -1113,8 +1671,15 @@
   backButton?.addEventListener("click", goBack);
 
   pairButton?.addEventListener("click", () => {
-    if (currentTab === "pair") goBack();
-    else switchTab("pair");
+    if (currentTab === "pair") {
+      goBack();
+      return;
+    }
+    switchTab("pair");
+    // Партнёр мог присоединиться или выйти, пока вкладка была закрыта:
+    // обновляем состояние, чтобы карточка приглашения появилась/исчезла
+    // сразу, а не на следующем минутном тике.
+    refreshState();
   });
 
   document.addEventListener("click", async (e) => {
@@ -1129,6 +1694,12 @@
       }
       if (action === "close-dialog") {
         dialog.close();
+      } else if (action === "calendar-prev") {
+        shiftCalendarMonth(-1);
+      } else if (action === "calendar-next") {
+        shiftCalendarMonth(1);
+      } else if (action === "calendar-day") {
+        selectCalendarDay(btn.dataset.day);
       } else if (action === "go-tab") {
         switchTab(btn.dataset.tab || "home");
       } else if (action === "create-pair") {
@@ -1154,8 +1725,9 @@
             <label class="field"><span>Что запланируем?</span><input name="title" maxlength="180" required placeholder="Поехать за город на выходных"></label>
             <label class="field"><span>Дата (необязательно)</span><input type="date" name="day"></label>
             <label class="field"><span>Время (необязательно)</span><input type="time" name="time" data-requires-day></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личный — партнёр не увидит, в уведомлениях будет «Скрытый»</span></label>
           `,
-          onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time") } })
+          onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-date") {
         openDialog({
@@ -1164,8 +1736,9 @@
             <label class="field"><span>Название</span><input name="title" maxlength="120" required placeholder="День нашего знакомства"></label>
             <label class="field"><span>Дата</span><input type="date" name="day" required></label>
             <label class="field"><span>Время (необязательно)</span><input type="time" name="time"></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личная — партнёр не увидит эту дату</span></label>
           `,
-          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), recurs: true } })
+          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), recurs: true, is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-memory") {
         openDialog({
@@ -1176,8 +1749,9 @@
       } else if (action === "add-wish") {
         openDialog({
           title: "Новое желание",
-          fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required placeholder="Плёночный фотоаппарат"></label>`,
-          onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body") } })
+          fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required placeholder="Плёночный фотоаппарат"></label>
+           <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>`,
+          onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), url: fd.get("url") } })
         });
       } else if (action === "daily-done") {
         btn.disabled = true;
@@ -1212,21 +1786,27 @@
           return;
         }
         if (type === "tasks") {
+          // Чекбокс приватности — только автору плана (зеркально датам).
+          const ownsPrivacy = Number(item.created_by) === Number(appState.user.tg_id);
           openDialog({
             title: "Редактировать план",
             fields: `
               <label class="field"><span>Что запланируем?</span><input name="title" maxlength="180" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Дата (необязательно)</span><input type="date" name="day" value="${esc(item.day || "")}"></label>
               <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" data-requires-day></label>
+              ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личный — партнёр не увидит, в уведомлениях будет «Скрытый»</span></label>` : ""}
             `,
             onSubmit: async (fd) => {
-              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time") };
+              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
               const state = await request(`/api/tasks/${id}`, { method: "PATCH", body });
               patchArchiveItem("tasks", id, body);
               return state;
             }
           });
         } else if (type === "dates") {
+          // Чекбокс приватности видит только автор: партнёр чужую дату
+          // «личной» сделать не может, сервер его флаг всё равно игнорирует.
+          const ownsPrivacy = Number(item.created_by) === Number(appState.user.tg_id);
           openDialog({
             title: "Редактировать дату",
             fields: `
@@ -1234,8 +1814,9 @@
               <label class="field"><span>Дата</span><input type="date" name="day" required value="${esc(item.day || "")}"></label>
               <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}"></label>
               <label class="field"><span><input type="checkbox" name="recurs" ${item.recurs ? "checked" : ""}> Повторять ежегодно</span></label>
+              ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личная — партнёр не увидит эту дату</span></label>` : ""}
             `,
-            onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), recurs: fd.get("recurs") === "on" } })
+            onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), recurs: fd.get("recurs") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined } })
           });
         } else if (type === "memories") {
           openDialog({
@@ -1251,16 +1832,21 @@
         } else if (type === "wishes") {
           openDialog({
             title: "Редактировать желание",
-            fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required value="${esc(item.body || "")}"></label>`,
+            fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required value="${esc(item.body || "")}"></label>
+           <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com" value="${esc(item.url || "")}"></label>`,
             onSubmit: async (fd) => {
               const body = { body: fd.get("body") };
+              if (fd.get("url") !== undefined) body.url = fd.get("url");
               const state = await request(`/api/wishes/${id}`, { method: "PATCH", body });
               patchArchiveItem("wishes", id, body);
               return state;
             }
           });
         }
-      } else if (action === "copy-code") {
+      } else if (action === "open-url") {
+    const url = btn.dataset.url;
+    if (url) window.open(url, "_blank");
+  } else if (action === "copy-code") {
         const code = btn.dataset.code || "";
         if (navigator.clipboard?.writeText) {
           try {
@@ -1274,7 +1860,7 @@
         }
       } else if (action === "copy-link") {
         const code = btn.dataset.code || "";
-        const link = `https://t.me/duoplanbot?start=${encodeURIComponent(code)}`;
+        const link = `https://t.me/${appState?.pair?.bot_name || "DuoPlan"}?start=${encodeURIComponent(code)}`;
         if (navigator.clipboard?.writeText) {
           try {
             await navigator.clipboard.writeText(link);
@@ -1292,6 +1878,25 @@
         render();
       } else if (action === "load-archive") {
         await loadArchivePage(btn.dataset.type, btn);
+      } else if (action === "set-accent") {
+        appState = await request("/api/settings", { method: "POST", body: { accent_color: btn.dataset.accent || null } });
+        render();
+      } else if (action === "save-settings") {
+        const timeOf = (id) => {
+          const value = document.getElementById(id)?.value || "";
+          return /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : null;
+        };
+        appState = await request("/api/settings", {
+          method: "POST",
+          body: {
+            digest_enabled: document.getElementById("digest-enabled")?.checked ?? true,
+            digest_time: timeOf("digest-time"),
+            dates_digest_enabled: document.getElementById("dates-digest-enabled")?.checked ?? true,
+            dates_digest_time: timeOf("dates-digest-time")
+          }
+        });
+        showToast("Настройки сохранены");
+        render();
       } else if (action === "set-gender") {
         appState = await request("/api/gender", { method: "POST", body: { gender: btn.dataset.gender } });
         render();
@@ -1301,14 +1906,16 @@
     }
   });
 
+  let refreshInProgress = false;
   async function refreshState() {
-    if (sessionExpired) return;
+    if (sessionExpired || refreshInProgress) return;
     if (dialog?.open) return;
     // Пользователь печатает (код приглашения в онбординге) — тик пропускаем
     // целиком, данные придут снова на следующем тике после ухода фокуса.
     const isTyping = () => document.activeElement instanceof HTMLInputElement
       || document.activeElement instanceof HTMLTextAreaElement;
     if (isTyping()) return;
+    refreshInProgress = true;
     try {
       const next = await request("/api/state");
       // Фокус могли включить, пока запрос летел, — тогда данные не забираем,
@@ -1319,11 +1926,20 @@
       const unchanged = JSON.stringify(next) === JSON.stringify(appState);
       appState = next;
       if (unchanged) return;
+      // Изменение мог сделать и партнёр: его удаления, правки и «сделать
+      // личной» не проходят через локальные кэш-патчи. Сразу показываем новое
+      // состояние, параллельно перезагружаем страницы архива и доснимаем
+      // вторым рендером.
+      const revalidated = revalidateArchiveCache();
+      render();
+      await revalidated;
       render();
     } catch (error) {
       // Сетевые ошибки глотаем, как и раньше: фон не должен прерывать работу.
       // Истёкшая сессия — отдельный случай: сообщаем явно, а не молчим.
       if (error?.status === 401) handleRequestError(error);
+    } finally {
+      refreshInProgress = false;
     }
   }
 
@@ -1337,20 +1953,52 @@
 
   if (tg?.BackButton?.onClick) tg.BackButton.onClick(goBack);
 
-  // Инициализация
-  (async () => {
-    try {
-      appState = await request("/api/state");
-      render();
-      updateDroplet("home", false);
-    } catch (error) {
-      appEl.innerHTML = `
-        ${renderTabHeader("home")}
-        <section class="card">
-          <h3>Не удалось загрузить пространство</h3>
-          <p>${esc(error.message)}</p>
-        </section>
-      `;
+  // Инициализация — отдельная функция, чтобы её можно было вызвать повторно
+  async function initApp() {
+    let initOk = false;
+    while (!initOk) {
+      try {
+        appState = await request("/api/state");
+        render();
+        updateDroplet("home", false);
+        initOk = true;
+      } catch (error) {
+        // Сетевые ошибки и истекшие сессии показываем с кнопкой повтора
+        if (error?.status === 401) {
+          sessionExpired = true;
+          // Сеанс истёк — пытаемся обновить и показываем ошибку
+          try {
+            appState = await request("/api/state");
+            render();
+            updateDroplet("home", false);
+            initOk = true;
+          } catch (e) {
+            appEl.innerHTML = `
+              ${renderTabHeader("home")}
+              <section class="card">
+                <h3>Сессия истекла</h3>
+                <p>${esc(e.message)}</p>
+                <button id="retry-btn" class="primary">Повторить</button>
+              </section>
+            `;
+            document.getElementById("retry-btn").addEventListener("click", initApp);
+            return;
+          }
+        } else {
+          appEl.innerHTML = `
+            ${renderTabHeader("home")}
+            <section class="card">
+              <h3>Не удалось загрузить пространство</h3>
+              <p>${esc(error.message)}</p>
+              <button id="retry-btn" class="primary">Повторить</button>
+            </section>
+          `;
+          document.getElementById("retry-btn").addEventListener("click", initApp);
+        }
+      }
     }
-  })();
+  }
+
+  // Точка входа инициализации
+  initApp();
 })();

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+def _utf16_len(s: str) -> int:
+    """Длина строки в UTF-16 единицах, как считает Telegram API."""
+    return len(s.encode("utf-16-le")) // 2
+
+
 from datetime import date
 
 from aiogram import F
@@ -18,6 +23,9 @@ from aiogram.types import Message
 from duoplan.config import Settings
 from duoplan.game.levels import level_for
 from duoplan.game.levels import title_for
+from duoplan.richtext import escape_html
+from duoplan.richtext import rich_to_html
+from duoplan.richtext import rich_to_plain
 from duoplan.services import DATE_TITLE_MAX
 from duoplan.services import DuoPlanService
 from duoplan.services import ValidationError
@@ -38,14 +46,15 @@ router.callback_query.filter(F.message.chat.type == "private")
 PAGE_SIZE = 8
 PAGE_TEXT_LIMIT = 3900
 # full_name складывается из имени и фамилии и длиннее «максимума Telegram»
-# для одного имени (64), поэтому memory_entries обрезает имя до этой длины.
+# для одного имени (64 символа ~ 128 UTF-16 единиц, если там эмодзи),
+# поэтому memory_entries обрезает имя до этой длины в UTF-16 единицах.
 MEMORY_NAME_VIEW_MAX = 64
 
 # Строка записи дневника в бот-вью: "<YYYY-MM-DD> · <имя>\n<тело>", между
 # записями "\n\n". Дата — 10 символов, имя — не больше MEMORY_NAME_VIEW_MAX.
-_MEMORY_ENTRY_OVERHEAD = 10 + len(" · ") + 1 + 2 + MEMORY_NAME_VIEW_MAX
+_MEMORY_ENTRY_OVERHEAD = 10 + _utf16_len(" · ") + 1 + 2 + _utf16_len("X" * MEMORY_NAME_VIEW_MAX)
 MEMORY_BODY_VIEW_MAX = (
-    PAGE_TEXT_LIMIT - len("Дневник двоих") - 2 - PAGE_SIZE * _MEMORY_ENTRY_OVERHEAD
+    PAGE_TEXT_LIMIT - _utf16_len("Общий дневник") - 2 - PAGE_SIZE * _MEMORY_ENTRY_OVERHEAD
 ) // PAGE_SIZE
 
 
@@ -56,14 +65,50 @@ def fit_entries(header: str, entries: list[str], limit: int = PAGE_TEXT_LIMIT) -
     наличие следующей страницы можно определять по реально выведенным записям.
     """
     rendered: list[str] = []
-    used = len(header) + 2  # "\n\n" между заголовком и первой записью
+    used = _utf16_len(header) + 2  # "\n\n" между заголовком и первой записью
     for entry in entries:
-        need = len(entry) + (2 if rendered else 0)
+        need = _utf16_len(entry) + (2 if rendered else 0)
         if used + need > limit:
             break
         rendered.append(entry)
         used += need
     return rendered
+
+
+def rich_list_item(prefix: str, title: object, suffix: str = "") -> str:
+    """Пункт списка отдельным блоком.
+
+    Разметка рендерится для заголовка целиком, поэтому цитата с первой строки
+    становится ``<blockquote>``, а не текстом «> » (в нумерованном списке
+    префикс занимал начало строки, и цитата не распознавалась). Префикс и
+    суффикс — обычный текст (номер, дата, имя автора) и экранируются.
+    """
+    return escape_html(prefix) + rich_to_html(title) + escape_html(suffix)
+
+
+def render_list_items(
+    items: list[tuple[str, object, str]], limit: int = PAGE_TEXT_LIMIT
+) -> str:
+    """Склеить пункты, не выходя за лимит сообщения.
+
+    Считаем видимую длину: теги в лимит Telegram не входят, а экранированный
+    символ остаётся одним видимым. Обрезаем «сырой» заголовок ДО рендера —
+    срез готового HTML разрубил бы тег и уронил editMessageText.
+    """
+    blocks: list[str] = []
+    used = 0
+    for prefix, title, suffix in items:
+        raw = "" if title is None else str(title)
+        need = _utf16_len(prefix) + _utf16_len(raw) + _utf16_len(suffix)
+        if used + need > limit:
+            room = limit - used - _utf16_len(prefix) - _utf16_len(suffix)
+            if room <= 0:
+                break
+            blocks.append(rich_list_item(prefix, raw[:room], suffix))
+            break
+        blocks.append(rich_list_item(prefix, raw, suffix))
+        used += need
+    return "\n".join(blocks)
 
 
 def memory_entries(rows: list) -> list[str]:
@@ -73,14 +118,23 @@ def memory_entries(rows: list) -> list[str]:
     раздувало бы запись, fit_entries выводил бы меньше восьми строк, а
     фиксированный offset следующей страницы навсегда терял недопоказанную.
     """
+    def _truncate_utf16(s: str, max_len: int) -> str:
+        """Обрезает строку до max_len UTF-16 единиц."""
+        if _utf16_len(s) <= max_len:
+            return s
+        # Кодируем в UTF-16 и обрезаем
+        encoded = s.encode("utf-16-le")
+        truncated = encoded[: max_len * 2].decode("utf-16-le", errors="ignore")
+        return truncated.rstrip() + "…"
+
     entries: list[str] = []
     for row in rows:
         body = row["body"] or ""
-        if len(body) > MEMORY_BODY_VIEW_MAX:
-            body = body[: MEMORY_BODY_VIEW_MAX - 1].rstrip() + "…"
+        if _utf16_len(body) > MEMORY_BODY_VIEW_MAX:
+            body = _truncate_utf16(body, MEMORY_BODY_VIEW_MAX - 1)
         display_name = row["display_name"] or "Один из вас"
-        if len(display_name) > MEMORY_NAME_VIEW_MAX:
-            display_name = display_name[: MEMORY_NAME_VIEW_MAX - 1].rstrip() + "…"
+        if _utf16_len(display_name) > MEMORY_NAME_VIEW_MAX:
+            display_name = _truncate_utf16(display_name, MEMORY_NAME_VIEW_MAX - 1)
         entries.append(f"{row['day']} · {display_name}\n{body}")
     return entries
 
@@ -112,13 +166,27 @@ def name_of(user) -> str:
 
 
 async def safe_edit(
-    message: Message | None, text: str, markup: InlineKeyboardMarkup | None = None
+    message: Message | None,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+    *,
+    html: bool = False,
 ) -> None:
-    """Редактировать сообщение, не падая на «message is not modified»."""
+    """Редактировать сообщение, не падая на «message is not modified».
+
+    ``html=True`` включает разбор разметки: текст должен быть уже собран через
+    :func:`duoplan.richtext.rich_to_html` (там же экранирование), иначе
+    Telegram вернёт 400 на первом же «<» из пользовательского ввода.
+    """
     if message is None:
         return
+    kwargs: dict = {"reply_markup": markup}
+    # parse_mode передаём только для HTML-текстов: обычные сообщения остаются
+    # plain-текстом, и «<» в них не ломает отправку.
+    if html:
+        kwargs["parse_mode"] = "HTML"
     try:
-        await message.edit_text(text, reply_markup=markup)
+        await message.edit_text(text, **kwargs)
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc).lower():
             return
@@ -429,27 +497,38 @@ async def tasks_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
     pair = await _guard_pair(call, service)
     if pair is None:
         return False
-    rows = await service.tasks(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
+    rows = await service.tasks(
+        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, viewer_id=call.from_user.id
+    )
     has_next = len(rows) > PAGE_SIZE
     rows = rows[:PAGE_SIZE]
 
     if rows:
-        lines = [f"{index + 1 + page * PAGE_SIZE}. {row['title']}" for index, row in enumerate(rows)]
-        text = "Наши планы\n\n" + "\n".join(lines)
+        items = [
+            (f"{index + 1 + page * PAGE_SIZE}. ", row["title"], "")
+            for index, row in enumerate(rows)
+        ]
+        text = "Наши планы\n\n" + render_list_items(items)
     elif page == 0:
         text = "Наши планы\n\nПока свободно. Добавьте первый общий шаг."
     else:
         text = "Наши планы\n\nНа этой странице планов нет."
 
     buttons = [
-        [button(f"Готово: {row['title'][:22]}", f"task:done:{row['id']}:{page}")] for row in rows
+        [button(f"Готово: {rich_to_plain(row['title'])[:22]}", f"task:done:{row['id']}:{page}")]
+        for row in rows
     ]
     buttons.append([button("Добавить план", "add:tasks")])
     pager = pager_row("tasks", page, page > 0, has_next)
     if pager:
         buttons.append(pager)
     buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(call.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await safe_edit(
+        call.message,
+        text,
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        html=True,
+    )
     return True
 
 
@@ -457,12 +536,15 @@ async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
     pair = await _guard_pair(call, service)
     if pair is None:
         return False
-    rows = await service.dates(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
+    rows = await service.dates(
+        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, viewer_id=call.from_user.id
+    )
     has_next = len(rows) > PAGE_SIZE
     rows = rows[:PAGE_SIZE]
 
     if rows:
-        text = "Значимые даты\n\n" + "\n".join(f"{row['day']} · {row['title']}" for row in rows)
+        items = [(f"{row['day']} · ", row["title"], "") for row in rows]
+        text = "Значимые даты\n\n" + render_list_items(items)
     elif page == 0:
         text = "Значимые даты\n\nДобавьте дату, которую хочется беречь."
     else:
@@ -473,7 +555,12 @@ async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
     if pager:
         buttons.append(pager)
     buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(call.message, text[:PAGE_TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=buttons))
+    await safe_edit(
+        call.message,
+        text,
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        html=True,
+    )
     return True
 
 
@@ -485,25 +572,32 @@ async def memories_view(call: CallbackQuery, service: DuoPlanService, page: int 
     has_next = len(rows) > PAGE_SIZE
     rows = rows[:PAGE_SIZE]
 
-    header = "Дневник двоих"
+    header = "Общий дневник"
     rendered = fit_entries(header, memory_entries(rows))
     has_next = has_next or len(rendered) < len(rows)
     if rendered:
-        text = header + "\n\n" + "\n\n".join(rendered)
+        # Каждая запись — отдельный блок: незакрытый маркер в одной записи
+        # не «протекает» в следующую, а цитата в теле остаётся цитатой.
+        text = header + "\n\n" + "\n\n".join(rich_to_html(entry) for entry in rendered)
     elif page == 0:
         text = (
-            "Дневник двоих\n\n"
+            "Общий дневник\n\n"
             "Здесь появятся ваши маленькие истории и важные моменты."
         )
     else:
-        text = "Дневник двоих\n\nНа этой странице записей нет."
+        text = "Общий дневник\n\nНа этой странице записей нет."
 
     buttons = [[button("Добавить запись", "add:memories")]]
     pager = pager_row("memories", page, page > 0, has_next)
     if pager:
         buttons.append(pager)
     buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(call.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await safe_edit(
+        call.message,
+        text,
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        html=True,
+    )
     return True
 
 
@@ -516,24 +610,32 @@ async def wishes_view(call: CallbackQuery, service: DuoPlanService, page: int = 
     rows = rows[:PAGE_SIZE]
 
     if rows:
-        text = "Вишлист\n\n" + "\n".join(
-            f"• {row['body']} — {row['display_name'] or 'Один из вас'}" for row in rows
-        )
+        items = [
+            ("• ", row["body"], f" — {row['display_name'] or 'Один из вас'}")
+            for row in rows
+        ]
+        text = "Вишлист\n\n" + render_list_items(items)
     elif page == 0:
         text = "Вишлист\n\nДобавьте желание — большое или совсем маленькое."
     else:
         text = "Вишлист\n\nНа этой странице желаний нет."
 
     buttons = [
-        [button(f"Исполнено: {row['body'][:19]}", f"wish:done:{row['id']}:{page}")]
+        [button(f"Исполнено: {rich_to_plain(row['body'])[:19]}", f"wish:done:{row['id']}:{page}")]
         for row in rows
+        if row.get("owner_id") == call.from_user.id
     ]
     buttons.append([button("Добавить желание", "add:wishes")])
     pager = pager_row("wishes", page, page > 0, has_next)
     if pager:
         buttons.append(pager)
     buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(call.message, text[:PAGE_TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=buttons))
+    await safe_edit(
+        call.message,
+        text,
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        html=True,
+    )
     return True
 
 
@@ -642,7 +744,7 @@ async def wish_done(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer("Кнопка устарела")
         return
     wish_id, page = parsed
-    done = await service.complete_wish(wish_id, pair["id"])
+    done = await service.complete_wish(wish_id, pair["id"], call.from_user.id)
     await call.answer("Желание исполнено" if done else "Желание уже закрыто")
     await wishes_view(call, service, page)
 

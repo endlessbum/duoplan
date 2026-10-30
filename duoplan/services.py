@@ -28,6 +28,7 @@ TASK_TITLE_MAX = 180
 DATE_TITLE_MAX = 120
 MEMORY_MAX = 2000
 WISH_MAX = 300
+WISH_URL_MAX = 2048
 
 DAILY_XP = 10
 
@@ -49,6 +50,13 @@ def _clean_text(value: object, limit: int, label: str) -> str:
     return text
 
 
+def _clean_optional_text(value: object, limit: int, label: str) -> str:
+    text = "" if value is None else str(value).strip()
+    if len(text) > limit:
+        raise ValidationError(f"{label}: не длинше {limit} символов (сейчас {len(text)}).")
+    return text
+
+
 def _page(limit: int, offset: int) -> tuple[int, int]:
     try:
         limit = int(limit)
@@ -56,6 +64,112 @@ def _page(limit: int, offset: int) -> tuple[int, int]:
     except (TypeError, ValueError) as exc:
         raise ValidationError("Некорректные параметры страницы.") from exc
     return max(1, min(limit, MAX_LIMIT)), max(0, offset)
+
+
+# Стабильный солвер ключей сортировки (worker: byRowId — сравнивает как строки).
+def _sort_key(value: object) -> object:
+    return value if isinstance(value, (int, float)) else str(value)
+
+
+MAX_DATE_TIME = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _time_parts(value: object) -> tuple[int, int]:
+    """``"HH:MM"`` -> ``(часы, минуты)``; иначе дефолт для даты — 12:00."""
+    raw = "" if value is None else str(value)
+    if len(raw) != 5 or raw.count(":") != 1:
+        return 12, 0
+    try:
+        return int(raw[:2]), int(raw[3:])
+    except ValueError:
+        return 12, 0
+
+
+def task_deadline(task: object, tz: tzinfo) -> float:
+    """Ближайший дедлайн задачи в UTC-метках (worker.taskTargetMs).
+
+    ``day`` + ``time`` задачи в часовом поясе пары; без корректного ``day``
+    возвращается ``inf`` — как ``Number.MAX_SAFE_INTEGER`` у worker'а, поэтому
+    такие задачи после сортировки по дедлайну оказываются в конце.
+    """
+    day = task["day"] if task is not None else None
+    if not day:
+        return float("inf")
+    parts = str(day).split("-")
+    if len(parts) != 3:
+        return float("inf")
+    try:
+        year, month, day_of_month = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return float("inf")
+    hours, minutes = _time_parts(task["time"] if task is not None else None)
+    try:
+        return datetime(year, month, day_of_month, hours, minutes, tzinfo=tz).timestamp()
+    except ValueError:
+        return float("inf")
+
+
+def next_date_occurrence(day: object, recurs: object, time: object, tz: tzinfo) -> datetime | None:
+    """Следующее наступление даты (worker.nextDateOccurrence).
+
+    У ежегодной даты — ближайший год из текущего..текущий+8, у разовой — сама
+    дата. У «невозможной» даты возвращается ``None`` (worker — ``Number.MAX_SAFE_INTEGER``).
+    """
+    raw_day = day if day is not None else None
+    if not raw_day:
+        return None
+    parts = str(raw_day).split("-")
+    if len(parts) != 3:
+        return None
+    try:
+        year, month, day_of_month = int(parts[0]), int(parts[1]), int(parts[2])
+        first = datetime(year, month, day_of_month, *_time_parts(time))
+        first = first.replace(tzinfo=tz)
+    except ValueError:
+        return None
+    if int(recurs or 0) == 0:
+        return first
+    today = datetime.now(tz).date()
+    for offset in range(9):
+        candidate_year = today.year + offset
+        try:
+            candidate = datetime(candidate_year, month, day_of_month, *_time_parts(time)).replace(tzinfo=tz)
+        except ValueError:
+            continue
+        if candidate.date() >= today:
+            return candidate
+    return None
+
+
+def sort_task_rows(rows: list[object], tz: tzinfo) -> list[object]:
+    """Сортировка планов по дедлайну (worker.sortByTaskDeadline): ближайший
+    дедлайн раньше, равные ключи — по id."""
+    decorated = sorted(
+        ((task_deadline(row, tz), row) for row in rows),
+        key=lambda item: (item[0], _sort_key(item[1]["id"])),
+    )
+    return [row for _, row in decorated]
+
+
+def sort_date_rows(rows: list[object], tz: tzinfo) -> list[object]:
+    """Сортировка дат для списка (worker.sortDateRows): будущие — по ближайшему
+    наступлению, затем прошедшие не-ежегодные от свежих к старым. Ежегодные
+    всегда попадают в будущую группу со своим следующим наступлением, поэтому
+    «одна и та же дата в году на несколько лет вперёд» не спамит — каждая запись
+    держит ровно одно следующее наступление."""
+    now_local = datetime.now(tz)
+    decorated: list[tuple[bool, float, object, object]] = []
+    for row in rows:
+        recurs = int(row["recurs"] or 0) == 1
+        occurrence = next_date_occurrence(row["day"], row["recurs"], row["time"], tz)
+        occurrence_ts = occurrence.timestamp() if occurrence is not None else float("inf")
+        past = (not recurs) and occurrence is not None and occurrence < now_local
+        # В будущей группе — по возрастанию наступления (ближайшее раньше);
+        # в прошедшей (не ежегодной) — от свежих к старым, т.е. убывание.
+        sort_ts = -occurrence_ts if past else occurrence_ts
+        decorated.append((past, sort_ts, _sort_key(row["id"]), row))
+    decorated.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in decorated]
 
 
 def normalize_code(raw: object) -> str:
@@ -209,20 +323,27 @@ class DuoPlanService:
             (pair_id, text, created_by, now()),
         )
 
-    async def tasks(self, pair_id: int, limit: int = 20, offset: int = 0):
+    async def tasks(self, pair_id: int, limit: int = 20, offset: int = 0, viewer_id: int | None = None):
         limit, offset = _page(limit, offset)
-        return await self.db.query(
-            "SELECT * FROM tasks WHERE pair_id = ? AND status = 'open' "
-            "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            (pair_id, limit, offset),
+        # Личный план (is_private=1) видит только автор — иначе партнёр прочитал
+        # бы сюрприз прямо в списке бота.
+        private_clause = " AND (is_private = 0 OR created_by = ?)" if viewer_id is not None else ""
+        params: tuple = (pair_id, viewer_id) if viewer_id is not None else (pair_id,)
+        rows = await self.db.query(
+            "SELECT * FROM tasks WHERE pair_id = ? AND status = 'open'"
+            f"{private_clause}",
+            params,
         )
+        sorted_rows = sort_task_rows(rows, self.tz)
+        return sorted_rows[offset : offset + limit]
 
     async def complete_task(self, task_id: int, pair_id: int, user_id: int) -> bool:
         """Условное завершение: повторный тап не перезаписывает ``completed_by``."""
         _, changes = await self.db.execute_row(
             "UPDATE tasks SET status = 'done', completed_by = ?, completed_at = ? "
-            "WHERE id = ? AND pair_id = ? AND status = 'open'",
-            (user_id, now(), task_id, pair_id),
+            "WHERE id = ? AND pair_id = ? AND status = 'open' "
+            "AND (is_private = 0 OR created_by = ?)",
+            (user_id, now(), task_id, pair_id, user_id),
         )
         return changes == 1
 
@@ -244,12 +365,17 @@ class DuoPlanService:
             (pair_id, text, parsed.isoformat(), recurs_value, now()),
         )
 
-    async def dates(self, pair_id: int, limit: int = 30, offset: int = 0):
+    async def dates(self, pair_id: int, limit: int = 30, offset: int = 0, viewer_id: int | None = None):
         limit, offset = _page(limit, offset)
-        return await self.db.query(
-            "SELECT * FROM dates WHERE pair_id = ? ORDER BY day, id LIMIT ? OFFSET ?",
-            (pair_id, limit, offset),
+        # Личная дата — зеркально личному плану: чужая не попадает в список.
+        private_clause = " AND (is_private = 0 OR created_by = ?)" if viewer_id is not None else ""
+        params: tuple = (pair_id, viewer_id) if viewer_id is not None else (pair_id,)
+        rows = await self.db.query(
+            f"SELECT * FROM dates WHERE pair_id = ?{private_clause}",
+            params,
         )
+        sorted_rows = sort_date_rows(rows, self.tz)
+        return sorted_rows[offset : offset + limit]
 
     # ------------------------------------------------------------------ дневник
 
@@ -271,11 +397,12 @@ class DuoPlanService:
 
     # ------------------------------------------------------------------ вишлист
 
-    async def add_wish(self, pair_id: int, owner_id: int, body: object) -> int:
+    async def add_wish(self, pair_id: int, owner_id: int, body: object, url: object = "") -> int:
         text = _clean_text(body, WISH_MAX, "Желание")
+        link = _clean_optional_text(url, WISH_URL_MAX, "Ссылка") if url is not None else ""
         return await self.db.execute(
-            "INSERT INTO wishes(pair_id, owner_id, body, created_at) VALUES(?, ?, ?, ?)",
-            (pair_id, owner_id, text, now()),
+            "INSERT INTO wishes(pair_id, owner_id, body, url, created_at) VALUES(?, ?, ?, ?, ?)",
+            (pair_id, owner_id, text, link, now()),
         )
 
     async def wishes(self, pair_id: int, limit: int = 20, offset: int = 0):
@@ -287,10 +414,14 @@ class DuoPlanService:
             (pair_id, limit, offset),
         )
 
-    async def complete_wish(self, wish_id: int, pair_id: int) -> bool:
+    async def complete_wish(self, wish_id: int, pair_id: int, owner_id: int) -> bool:
         _, changes = await self.db.execute_row(
-            "UPDATE wishes SET done = 1 WHERE id = ? AND pair_id = ? AND done = 0",
-            (wish_id, pair_id),
+            # done_at нужен календарю Mini App: звезда ставится в день вручения.
+            # Закрытие — личное дело каждого: только владелец желания закрывает
+            # его, UPDATE проверяет owner_id, иначе партнёр мог бы «исполнить»
+            # чужое желание вместо своего.
+            "UPDATE wishes SET done = 1, done_at = ? WHERE id = ? AND pair_id = ? AND owner_id = ? AND done = 0",
+            (now(), wish_id, pair_id, owner_id),
         )
         return changes == 1
 

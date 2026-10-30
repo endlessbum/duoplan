@@ -93,12 +93,18 @@ test("версии не опережают текущую дату и схема
   const schema = read("DB_SCHEMA_VERSION");
   ok(app && schema, "версии не найдены");
   const stamp = (value) => {
-    match(value, /^\d{4}\.\d{2}\.\d{2}$/);
+    // Суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка
+    // обязана отличаться от записанной в app_meta, иначе ensureSchema
+    // пропустит ALTER'ы (см. комментарий к DB_SCHEMA_VERSION в worker.js).
+    match(value, /^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/);
     return value.split(".").map(Number);
   };
   const appParts = stamp(app);
   const schemaParts = stamp(schema);
-  const today = new Date().toISOString().slice(0, 10).split("-").map(Number);
+  // Локальная календарная дата, как её выбирает разработчик при подъёме версии:
+  // UTC-дата на часовых поясах восточнее отстаёт от локальной на день.
+  const now = new Date();
+  const today = [now.getFullYear(), now.getMonth() + 1, now.getDate()];
   const compare = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
   ok(compare(schemaParts, today) <= 0, `DB_SCHEMA_VERSION ${schema} в будущем`);
   ok(compare(appParts, today) <= 0, `APP_VERSION ${app} в будущем`);

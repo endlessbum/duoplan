@@ -18,3 +18,4 @@ data/*.sql
 _cc.py
 _lv.py
 _smoke.py
+.kiro/

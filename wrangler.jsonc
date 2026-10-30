@@ -4,6 +4,9 @@
   "main": "worker.js",
   "compatibility_date": "2026-10-23",
   "observability": { "enabled": true },
+  // 15-минутный cron для уведомлений (sendDigests): персональное время сводок
+  // и напоминания о планах за 3 часа / за 1 час.
+  "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
     "APP_ORIGIN": "https://duoplan.stacheight.workers.dev"
   },

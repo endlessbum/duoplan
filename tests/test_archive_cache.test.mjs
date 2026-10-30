@@ -41,13 +41,15 @@ const load = new Function(
     extractBraced("function emptyArchiveEntry"),
     "const archiveCache = { tasks: emptyArchiveEntry(), dates: emptyArchiveEntry(), wishes: emptyArchiveEntry(), memories: emptyArchiveEntry(), done_tasks: emptyArchiveEntry(), done_wishes: emptyArchiveEntry() };",
     "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'] };",
+    extractBraced("function resetArchiveCache"),
     extractBraced("function syncArchiveCachePair"),
     extractBraced("function removeFromArchiveCache"),
     extractBraced("function patchArchiveItem"),
     extractBraced("async function loadArchivePage"),
+    extractBraced("async function revalidateArchiveCache"),
     extractBraced("function mergedArchive"),
     extractBraced("function archiveMoreHtml"),
-    "return { setAppState: (v) => { appState = v; }, archiveCache, syncArchiveCachePair, mergedArchive, archiveMoreHtml, removeFromArchiveCache, patchArchiveItem, loadArchivePage };"
+    "return { setAppState: (v) => { appState = v; }, archiveCache, syncArchiveCachePair, mergedArchive, archiveMoreHtml, removeFromArchiveCache, patchArchiveItem, loadArchivePage, revalidateArchiveCache };"
   ].join("\n")
 );
 
@@ -227,4 +229,207 @@ test("хвост активных планов скрывается, когда 
   // id 500 завершили: он уехал в completedTasks и из активного хвоста исчез.
   ctx.setAppState({ pair: { id: 1 }, tasks: base.slice(0, 199), completedTasks: [{ id: 500 }] });
   equal(ctx.mergedArchive("tasks", base.slice(0, 199)).length, 199);
+});
+
+// ------------------------------------------------------------------
+// revalidateArchiveCache: изменения партнёра доезжают в кэш страниц архива
+// ------------------------------------------------------------------
+test("перезагрузка убирает запись, удалённую партнёром, и обновляет правку", async () => {
+  const pages = {
+    0: [{ id: 100, body: "старая запись" }, { id: 101, body: "вторая" }],
+    1: [{ id: 102, body: "третья" }]
+  };
+  const calls = [];
+  const ctx = makeCtx(async (path) => {
+    calls.push(path);
+    const page = Number(new URL(path, "http://x").searchParams.get("page"));
+    return { items: pages[page] || [], hasMore: page < 1, page };
+  });
+  ctx.setAppState({ pair: { id: 1 }, memories: [] });
+  ctx.syncArchiveCachePair();
+  await ctx.loadArchivePage("memories");
+  await ctx.loadArchivePage("memories");
+  equal(ctx.archiveCache.memories.items.length, 3);
+  equal(ctx.archiveCache.memories.page, 1);
+
+  // Партнёр удалил id 100 и отредактировал id 102 — сервер отдаёт новый набор.
+  pages[0] = [{ id: 101, body: "вторая" }];
+  pages[1] = [{ id: 102, body: "исправленный текст" }];
+  await ctx.revalidateArchiveCache();
+
+  deepStrictEqual(ctx.archiveCache.memories.items, [
+    { id: 101, body: "вторая" },
+    { id: 102, body: "исправленный текст" }
+  ]);
+  // Страницы перечитаны все: список остаётся раскрытым на прежнюю глубину.
+  equal(ctx.archiveCache.memories.page, 1);
+  equal(ctx.archiveCache.memories.hasMore, false);
+  // Перечитаны ровно загруженные страницы, с нулевой.
+  deepStrictEqual(calls.filter(p => p.includes("revalidate") === false).length >= 2, true);
+});
+
+test("типы без загруженных страниц не запрашиваются", async () => {
+  const calls = [];
+  const ctx = makeCtx(async (path) => {
+    calls.push(path);
+    return { items: [{ id: 1 }], hasMore: false };
+  });
+  ctx.archiveCache.memories.page = 0;
+  ctx.archiveCache.memories.items.push({ id: 1 });
+  await ctx.revalidateArchiveCache();
+  // Единственный раскрытый тип — memories: одна страница, остальные (page=-1) не трогаем.
+  deepStrictEqual(calls.filter(p => p.includes("/api/archive")).length, 1);
+  deepStrictEqual(calls[0].includes("type=memories"), true);
+});
+
+test("раскрытый список остаётся с серверным hasMore (кнопка скрывается после опустошения)", async () => {
+  let serverEmpty = false;
+  const ctx = makeCtx(async () => ({ items: serverEmpty ? [] : [{ id: 50 }], hasMore: !serverEmpty }));
+  ctx.setAppState({ pair: { id: 1 }, completedTasks: [] });
+  ctx.syncArchiveCachePair();
+  await ctx.loadArchivePage("done_tasks");
+  equal(ctx.archiveMoreHtml("done_tasks", 10).includes("load-archive"), true);
+
+  serverEmpty = true; // партнёр всё удалил — архив опустел
+  await ctx.revalidateArchiveCache();
+  deepStrictEqual(ctx.archiveCache.done_tasks.items, []);
+  equal(ctx.archiveCache.done_tasks.hasMore, false);
+  equal(ctx.archiveMoreHtml("done_tasks", 10), "");
+});
+
+test("ошибка сети при перезагрузке сбрасывает тип: устаревший кэш не выживает", async () => {
+  let fail = false;
+  const ctx = makeCtx(async () => {
+    if (fail) throw new Error("network down");
+    return { items: [{ id: 100, body: "старая" }], hasMore: false };
+  });
+  ctx.setAppState({ pair: { id: 1 }, memories: [] });
+  ctx.syncArchiveCachePair();
+  await ctx.loadArchivePage("memories");
+  equal(ctx.archiveCache.memories.items.length, 1);
+
+  fail = true;
+  await ctx.revalidateArchiveCache();
+  deepStrictEqual(ctx.archiveCache.memories, { items: [], page: -1, hasMore: null });
+  // Остальные типы не задеты.
+  deepStrictEqual(ctx.archiveCache.done_tasks, { items: [], page: -1, hasMore: null });
+});
+
+test("загружаемый сейчас тип (loading) перезагрузка не трогает", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const ctx = makeCtx(async (path) => {
+    calls.push(path);
+    await gate;
+    return { items: [{ id: 1 }], hasMore: false };
+  });
+  const flight = ctx.loadArchivePage("memories"); // cache.loading = true
+  await ctx.revalidateArchiveCache();
+  release();
+  await flight;
+  // loading-тип пропущен: перезагрузка не дублирует запрос летящей страницы.
+  equal(calls.length, 1);
+  equal(ctx.archiveCache.memories.items.length, 1);
+});
+
+// ------------------------------------------------------------------
+// refreshState: связка «состояние изменилось → перезагрузка архива → рендер»
+// ------------------------------------------------------------------
+function loadRefreshState({ request, revalidateArchiveCache, render, handleRequestError }) {
+  return new Function(
+    "request", "revalidateArchiveCache", "render", "handleRequestError", "dialog",
+    [
+      "class HTMLInputElement {}",
+      "class HTMLTextAreaElement {}",
+      "const document = { activeElement: null };", // isTyping смотрит только activeElement
+      "let sessionExpired = false;",
+      "let refreshInProgress = false;",
+      "let appState = null;",
+      extractBraced("async function refreshState"),
+      "return { refreshState, setAppState: (v) => { appState = v; } };"
+    ].join("\n")
+  )(request, revalidateArchiveCache, render, handleRequestError, { open: false });
+}
+
+test("refreshState: изменившееся состояние перезагружает архив и рендерит дважды", async () => {
+  let fetches = 0;
+  let revalidations = 0;
+  let renders = 0;
+  const refresh = loadRefreshState({
+    request: async () => { fetches++; return { v: fetches }; },
+    revalidateArchiveCache: async () => { revalidations++; },
+    render: () => { renders++; },
+    handleRequestError: () => {}
+  });
+  refresh.setAppState({ v: 0 });
+  await refresh.refreshState();
+  equal(fetches, 1);
+  equal(revalidations, 1);
+  equal(renders, 2); // первое — сразу новое состояние, второе — после перезагрузки архива
+});
+
+test("refreshState: неизменившееся состояние — без перезагрузки и рендера", async () => {
+  let revalidations = 0;
+  let renders = 0;
+  const refresh = loadRefreshState({
+    request: async () => ({ v: 1 }),
+    revalidateArchiveCache: async () => { revalidations++; },
+    render: () => { renders++; },
+    handleRequestError: () => {}
+  });
+  refresh.setAppState({ v: 1 });
+  await refresh.refreshState();
+  equal(revalidations, 0);
+  equal(renders, 0);
+});
+
+test("refreshState: параллельный запуск блокируется, ошибки сети глотаются молча", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let fetches = 0;
+  let revalidations = 0;
+  const errors = [];
+  const refresh = loadRefreshState({
+    request: async () => {
+      fetches++;
+      if (fetches === 1) await gate; // первый запрос висит
+      return { v: fetches };
+    },
+    revalidateArchiveCache: async () => { revalidations++; },
+    render: () => {},
+    handleRequestError: (error) => { errors.push(error.message); }
+  });
+  refresh.setAppState({ v: 0 });
+  const first = refresh.refreshState();
+  const second = refresh.refreshState(); // refreshInProgress: выходит сразу
+  release();
+  await Promise.all([first, second]);
+  equal(fetches, 1);
+
+  // Сетевая ошибка (не 401) не выпадает наружу и не попадает в тосты.
+  const failing = loadRefreshState({
+    request: async () => { throw new Error("network down"); },
+    revalidateArchiveCache: async () => { revalidations++; },
+    render: () => {},
+    handleRequestError: (error) => { errors.push(error.message); }
+  });
+  failing.setAppState({ v: 0 });
+  await failing.refreshState();
+  deepStrictEqual(errors, []);
+  // Флаг снят в finally — следующий тик снова ходит в сеть.
+  failing.setAppState({ v: 1 });
+  await failing.refreshState();
+  equal(revalidations, 1);
+
+  // Истёкшая сессия (401) — единственная ошибка, о которой сообщают явно.
+  const expired = loadRefreshState({
+    request: async () => { const e = new Error("Сессия истекла"); e.status = 401; throw e; },
+    revalidateArchiveCache: async () => {},
+    render: () => {},
+    handleRequestError: (error) => { errors.push(error.message); }
+  });
+  expired.setAppState({ v: 0 });
+  await expired.refreshState();
+  deepStrictEqual(errors, ["Сессия истекла"]);
 });

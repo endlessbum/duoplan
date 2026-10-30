@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>DuoPlan · nav harness</title>
+<link rel="stylesheet" href="../public/app.css">
+<style>
+  body { margin: 0; min-height: 100vh; background: var(--bg); }
+  .harness-bg { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; gap: 14px; padding: 0 16px 56px; }
+  .harness-bg div { height: 74px; border-radius: 18px; }
+  .harness-bg div:nth-child(1) { background: #b85464; }
+  .harness-bg div:nth-child(2) { background: #55766a; }
+  .harness-bg div:nth-child(3) { background: #4a6f8f; }
+  .harness-bg::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 108px; background: linear-gradient(90deg, #b85464, #55766a 45%, #4a6f8f); }
+  #out { position: fixed; top: 0; left: 0; right: 0; margin: 0; padding: 8px; font: 11px/1.4 monospace; color: var(--ink); background: var(--surface); z-index: 999; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<pre id="out">running…</pre>
+<div class="harness-bg" aria-hidden="true"><div></div><div></div><div></div></div>
+
+<nav id="bottom-nav" class="bottom-nav" aria-label="Разделы пространства">
+      <svg id="nav-droplet" class="nav-droplet" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="nav-drop-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop class="nav-drop-stop-top" offset="0" />
+            <stop class="nav-drop-stop-mid" offset="0.62" />
+            <stop class="nav-drop-stop-bottom" offset="1" />
+          </linearGradient>
+        </defs>
+        <path id="nav-droplet-path" class="nav-droplet-path" d="" />
+      </svg>
+
+      <button class="nav-item is-active" type="button" data-tab="home" aria-current="page">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20.5s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/>
+          </svg>
+        </span>
+        <span class="nav-label">Главная</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="tasks">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m6 12.5 3.8 3.8L18.5 7.6"/>
+            <rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/>
+          </svg>
+        </span>
+        <span class="nav-label">Планы</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="dates">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/>
+            <path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/>
+          </svg>
+        </span>
+        <span class="nav-label">Даты</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="memories">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/>
+            <path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/>
+          </svg>
+        </span>
+        <span class="nav-label">Дневник</span>
+      </button>
+
+      <button class="nav-item" type="button" data-tab="wishes">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 3.4 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3.4Z"/>
+          </svg>
+        </span>
+        <span class="nav-label">Желания</span>
+      </button>
+    </nav>
+
+<script>
+  // headless --dump-dom не всегда прогоняет requestAnimationFrame, поэтому в
+  // тестовой странице кадры идут по таймеру: анимационный цикл навигации
+  // работает как обычно, но время двигается предсказуемо.
+  window.requestAnimationFrame = (cb) => window.setTimeout(() => cb(performance.now()), 16);
+  window.cancelAnimationFrame = (id) => window.clearTimeout(id);
+</script>
+<script src="../public/zoom-guard.js"></script>
+<script src="../public/nav.js"></script>
+<script>
+(async () => {
+  const results = [];
+  try {
+  const nav = document.getElementById("bottom-nav");
+  const svg = document.getElementById("nav-droplet");
+  const path = document.getElementById("nav-droplet-path");
+  const items = Array.from(nav.querySelectorAll(".nav-item[data-tab]"));
+  const commits = [];
+
+  const liquid = window.createLiquidNav({
+    nav, svg, path, items,
+    onCommit: (tab) => { commits.push(tab); liquid.setActive(tab, true); }
+  });
+
+  // Аналог обработчика клика из app.js.
+  nav.addEventListener("click", (e) => {
+    const btn = e.target.closest(".nav-item[data-tab]");
+    if (!btn) return;
+    commits.push("click:" + btn.dataset.tab);
+    liquid.setActive(btn.dataset.tab, true);
+  });
+
+  const item = (tab) => nav.querySelector(`.nav-item[data-tab="${tab}"]`);
+  const center = (tab) => {
+    const r = item(tab).getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  };
+  const ev = (type, x, y, target) => (target || window).dispatchEvent(new PointerEvent(type, {
+    pointerId: 1, clientX: x, clientY: y, bubbles: true, cancelable: true,
+    pointerType: "touch", isPrimary: true
+  }));
+  const down = (x, y, target) => ev("pointerdown", x, y, target || item("home"));
+  const move = (x, y) => ev("pointermove", x, y);
+  const up = (x, y) => ev("pointerup", x, y);
+  const cancel = (x, y) => ev("pointercancel", x, y);
+  // Такой click генерирует браузер после жеста: detail=1, координаты, pointerId.
+  // HTMLElement.click() даёт detail=0 — это клавиатурный сценарий, его нельзя
+  // подавлять, поэтому для проверок он не подходит.
+  const tapClick = (tab, x, y) => item(tab).dispatchEvent(new PointerEvent("click", {
+    bubbles: true, cancelable: true, detail: 1, pointerId: 1,
+    clientX: x, clientY: y, pointerType: "touch"
+  }));
+  const frames = async (n = 2) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 34)); };
+
+  const reset = (tab = "home") => {
+    commits.length = 0;
+    liquid.setActive(tab, false);
+  };
+  const check = (name, condition, detail) => results.push({ name, ok: Boolean(condition), detail: String(detail ?? "") });
+
+  const home = center("home");
+  const dates = center("dates");
+  const wishes = center("wishes");
+  const restingPath = path.getAttribute("d");
+
+  const params = new URLSearchParams(location.search);
+  if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
+  if (params.get("shot")) document.getElementById("out").style.display = "none";
+  if (params.get("shot") === "rest") {
+    liquid.setActive("home", false);
+    return;
+  }
+  if (params.get("shot") === "drag") {
+    // Замерший кадр жеста — для визуальной проверки деформации.
+    liquid.setActive("home", false);
+    down(home.x, home.y);
+    move(home.x + 60, home.y);
+    await frames(1);
+    move(dates.x + 40, home.y);
+    await frames(1);
+    document.getElementById("out").style.display = "none";
+    return;
+  }
+
+  // 1. Обычный тап по неактивной вкладке.
+  reset();
+  item("tasks").click();
+  check("тап переключает вкладку", commits.includes("click:tasks") && liquid.getState().active === "tasks", commits.join(","));
+
+  // 2. Перетаскивание home → dates.
+  reset();
+  const tasksWidth = item("tasks").getBoundingClientRect().width;
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  const tasksWidthDuringDrag = item("tasks").getBoundingClientRect().width;
+  check("рамки вкладок стабильны во время drag", Math.abs(tasksWidthDuringDrag - tasksWidth) < 0.5, `${tasksWidth} → ${tasksWidthDuringDrag}`);
+  move(dates.x - 40, home.y);
+  await frames(2);
+  move(dates.x, dates.y);
+  await frames(2);
+  const duringDragActive = liquid.getState().active;
+  const previewed = item("dates").classList.contains("is-preview-target");
+  const draggedPath = path.getAttribute("d");
+  up(dates.x, dates.y);
+  await frames(2);
+  check("во время drag страница не переключается", duringDragActive === "home", duringDragActive);
+  check("предпросмотр цели подсвечивается", previewed, previewed);
+  check("капля деформируется в движении", draggedPath !== restingPath, draggedPath.slice(0, 40));
+  check("drag home → dates открывает даты", liquid.getState().active === "dates" && commits[commits.length - 1] === "dates", commits.join(","));
+  check("после drag форма восстанавливается", liquid.getState().dragging === false, liquid.getState().dragging);
+
+  // 3. Палец уходит выше панели — капля продолжает движение по горизонтали.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(dates.x, 40);
+  await frames(2);
+  const posAbove = liquid.getState().pos;
+  up(dates.x, 40);
+  await frames(2);
+  check("drag за пределами панели работает", liquid.getState().active === "dates", commits.join(","));
+  check("капля остаётся на дорожке панели", posAbove > 0, posAbove);
+
+  // 4. Палец за правым краем — капля упирается в край.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 40, home.y);
+  await frames(2);
+  move(window.innerWidth + 300, home.y);
+  await frames(2);
+  const clampedPos = liquid.getState().pos;
+  const navRect = nav.getBoundingClientRect();
+  up(window.innerWidth + 300, home.y);
+  await frames(2);
+  check("за правым краем капля у последней вкладки", liquid.getState().active === "wishes", commits.join(","));
+  check("капля не выходит за панель", clampedPos <= navRect.right, `${clampedPos} <= ${navRect.right}`);
+
+  // 5. Отмена жеста: без переключения, возврат к активной.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(wishes.x, wishes.y);
+  await frames(2);
+  cancel(wishes.x, wishes.y);
+  await frames(2);
+  check("pointercancel не переключает вкладку", commits.length === 0 && liquid.getState().active === "home", commits.join(","));
+  check("после отмены цель — активная вкладка", Math.abs(liquid.getState().target - home.x) < 80, liquid.getState().target);
+
+  // 6. Клик после успешного drag подавляется один раз и адресно.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(dates.x, dates.y);
+  await frames(2);
+  up(dates.x, dates.y);
+  await frames(2);
+  const afterDrag = commits.length;
+  // Браузер генерирует click с detail=1, координатами и pointerId. Цель может
+  // оказаться другой вкладкой (капля и палец расходятся на границе), поэтому
+  // проверяем именно защиту, а не «клик по той же вкладке».
+  tapClick("memories", dates.x, dates.y);
+  check("синтетический click после drag подавлен", commits.length === afterDrag, commits.join(","));
+
+  // 6b. Клавиатурный клик (detail=0, без координат) не подавляется.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(dates.x, dates.y);
+  await frames(2);
+  up(dates.x, dates.y);
+  await frames(2);
+  item("memories").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 0 }));
+  await frames(2);
+  check("клавиатурный клик не подавляется", liquid.getState().active === "memories", commits.join(","));
+
+  // 6c. Click далеко от точки отпускания — самостоятельное событие.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(dates.x, dates.y);
+  await frames(2);
+  up(dates.x, dates.y);
+  await frames(2);
+  tapClick("tasks", dates.x + 200, dates.y);
+  await frames(2);
+  check("click в другой точке не подавляется", liquid.getState().active === "tasks", commits.join(","));
+
+  // 7. Следующий самостоятельный клик (со своим pointerdown) работает.
+  down(center("memories").x, center("memories").y, item("memories"));
+  tapClick("memories", center("memories").x, center("memories").y);
+  await frames(2);
+  check("следующий клик не блокируется", liquid.getState().active === "memories", commits.join(","));
+
+  // 8. pointercancel: без переключения и без защиты следующего клика.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(wishes.x, wishes.y);
+  await frames(2);
+  cancel(wishes.x, wishes.y);
+  await frames(2);
+  const afterCancel = commits.length;
+  // Клик в точке отмены без нового pointerdown: если бы защита ставилась,
+  // он был бы подавлен.
+  tapClick("dates", wishes.x, wishes.y);
+  await frames(2);
+  check("после отмены клик не подавляется", commits.length > afterCancel && liquid.getState().active === "dates", commits.join(","));
+
+  // 9. lostpointercapture: жест отменяется, капля возвращается, клик работает.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(dates.x, dates.y);
+  await frames(2);
+  nav.dispatchEvent(new PointerEvent("lostpointercapture", { pointerId: 1, bubbles: false }));
+  await frames(2);
+  const afterLost = commits.length;
+  check("lostpointercapture не переключает вкладку", afterLost === 0 && liquid.getState().active === "home", commits.join(","));
+  tapClick("memories", dates.x, dates.y);
+  await frames(2);
+  check("после lostpointercapture клик не подавляется", liquid.getState().active === "memories", commits.join(","));
+
+  // 10. Drag за пределы панели: одно переключение, затем обычный тап работает.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 40, home.y);
+  await frames(2);
+  move(window.innerWidth + 250, home.y);
+  await frames(2);
+  up(window.innerWidth + 250, home.y);
+  await frames(2);
+  const afterOutside = commits.length;
+  check("drag за пределами панели переключает один раз", afterOutside === 1 && liquid.getState().active === "wishes", commits.join(","));
+  down(center("tasks").x, center("tasks").y, item("tasks"));
+  tapClick("tasks", center("tasks").x, center("tasks").y);
+  await frames(2);
+  check("после drag вне панели обычный тап работает", liquid.getState().active === "tasks", commits.join(","));
+
+  // 11. Быстрое перещёлкивание вкладок не ломает состояние.
+  reset();
+  ["tasks", "dates", "memories", "wishes", "home"].forEach((tab) => item(tab).click());
+  await frames(2);
+  check("быстрые нажатия подряд", liquid.getState().active === "home", liquid.getState().active);
+
+  // 12. Смена размера окна пересчитывает цель.
+  reset();
+  liquid.refresh();
+  await frames(2);
+  check("после refresh цель совпадает с центром вкладки", Math.abs(liquid.getState().target - center("home").x) < 80, liquid.getState().target);
+
+  } catch (error) {
+    results.push({ name: "исключение в сценарии", ok: false, detail: String((error && error.stack) || error) });
+  }
+  document.getElementById("out").textContent = JSON.stringify(results, null, 1);
+})();
+</script>
+</body>
+</html>

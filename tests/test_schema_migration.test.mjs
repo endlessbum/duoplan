@@ -49,6 +49,7 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = 
     users: new Set(["tg_id", "display_name", "role", "pair_id", "points", "streak", "last_activity", "best_streak", "created_at", "updated_at"]),
     tasks: new Set(["id", "pair_id", "title", "status", "created_by", "created_at", "completed_by", "completed_at"]),
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
+    wishes: new Set(["id", "pair_id", "owner_id", "body", "done", "created_at"]),
     rate_limits: new Set(["bucket_key", "count"])
   };
   const failedOnce = new Set();
@@ -98,14 +99,20 @@ test("гонка isolate: duplicate column name обрабатывается п�
   deepStrictEqual(log.versionWrite, DB_SCHEMA_VERSION);
   // users.timezone упал с "duplicate column name" и был отработан,
   // pairs.timezone добавлен этим isolate штатно.
-  deepStrictEqual(log.alters.sort(), ["day", "expires_at", "gender", "time", "time", "timezone", "timezone"]);
+  deepStrictEqual(log.alters.sort(), [
+    "accent_color", "created_by", "dates_digest_enabled", "dates_digest_time", "day",
+    "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
+    "is_private", "time", "time", "timezone", "timezone", "url"
+  ]);
 });
 
 test("чистый проход миграции без гонки записывает версию схемы", async () => {
   const { db, log } = makeMockDb();
   await ensureSchemaOnce({ DB: db });
   deepStrictEqual(log.versionWrite, DB_SCHEMA_VERSION);
-  deepStrictEqual(log.alters.length, 7);
+  // time + is_private (tasks) + time/is_private/created_by (dates) + done_at (wishes)
+  // + url (wishes) + timezone (users, pairs) + expires_at (rate_limits) + 5 настроек (users)
+  deepStrictEqual(log.alters.length, 17);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

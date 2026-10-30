@@ -34,9 +34,11 @@ function extractBraced(declaration) {
 }
 
 const buildItemRoute = new Function(
-  "positiveId", "planSchedule", "textField", "validDate", "clean", "optionalTime", "now", "HttpError",
+  "positiveId", "planSchedule", "textField", "validDate", "clean", "optionalTime", "now", "HttpError", "wishUrl",
   [
     extractBraced("async function ensureWishOwner"),
+    extractBraced("async function ensureDateVisible"),
+    extractBraced("async function ensureTaskVisible"),
     extractBraced("async function itemRoute"),
     "return itemRoute;"
   ].join("\n")
@@ -69,7 +71,8 @@ function makeHarness({ ownerId = 1, wishExists = true, changes = 1 } = {}) {
     s => String(s).trim(),
     () => null,
     () => 1_700_000_000,
-    HttpError
+    HttpError,
+    v => String(v ?? "").trim()
   );
   return { route, env: { DB: db }, pair: { id: 10 }, user: { tg_id: 2 }, calls };
 }
@@ -98,6 +101,16 @@ test("автор может редактировать своё желание",
   equal(update.args[0], "Своё");
 });
 
+test("автор может обновить ссылку своего желания", async () => {
+  const { route, env, pair, user, calls } = makeHarness({ ownerId: 2 });
+  equal(
+    await route(env, pair, user, "PATCH", "/api/wishes/5", { body: "Своё", url: "https://example.com/gift" }),
+    true
+  );
+  const urlUpdate = calls.find((c) => c.sql.startsWith("UPDATE wishes SET url=?"));
+  equal(urlUpdate.args[0], "https://example.com/gift");
+});
+
 test("автор может удалить своё желание", async () => {
   const { route, env, pair, user, calls } = makeHarness({ ownerId: 2 });
   equal(await route(env, pair, user, "DELETE", "/api/wishes/5", {}), true);
@@ -123,6 +136,8 @@ test("несуществующее желание по-прежнему даёт
 test("проверка автора не задевает общие разделы (tasks)", async () => {
   const { route, env, pair, user, calls } = makeHarness({ ownerId: 1 });
   equal(await route(env, pair, user, "PATCH", "/api/tasks/5", { title: "План" }), true);
-  equal(calls.length, 1);
-  equal(calls[0].sql.startsWith("UPDATE tasks SET"), true);
+  // Первый запрос — guard видимости личного плана, второй — сам UPDATE.
+  equal(calls.length, 2);
+  equal(calls[0].sql.startsWith("SELECT is_private,created_by FROM tasks"), true);
+  equal(calls[1].sql.startsWith("UPDATE tasks SET"), true);
 });

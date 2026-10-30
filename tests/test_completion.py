@@ -30,5 +30,15 @@ async def test_wish_completion_is_idempotent(pair):
     service, pair_id, owner_id, _ = pair
     wish_id = await service.add_wish(pair_id, owner_id, "Поехать к морю")
 
-    assert await service.complete_wish(wish_id, pair_id) is True
-    assert await service.complete_wish(wish_id, pair_id) is False
+    assert await service.complete_wish(wish_id, pair_id, owner_id) is True
+    assert await service.complete_wish(wish_id, pair_id, owner_id) is False
+
+
+async def test_wish_of_partner_cannot_be_completed_by_other(pair):
+    service, pair_id, owner_id, partner_id = pair
+    wish_id = await service.add_wish(pair_id, owner_id, "Поехать к морю")
+
+    # Каждый закрывает своё желание: партнёру нельзя закрыть чужое.
+    assert await service.complete_wish(wish_id, pair_id, partner_id) is False
+    wish = await service.db.one("SELECT * FROM wishes WHERE id = ?", (wish_id,))
+    assert wish["done"] == 0
