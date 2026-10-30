@@ -92,15 +92,16 @@ def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str,
 
 def dump(source: Path) -> str:
     # Экранируем путь для SQLite URI: пробелы, ?, #, % и кириллица
-    # превращаются в %XX. Используем quote с safe='/\\:' для Windows-путей.
-    from urllib.parse import quote
+    # превращаются в %XX. Импортируем под своим именем: голый `quote` затенял
+    # модульную функцию SQL-квотирования и ронял dump() на первом же значении.
+    from urllib.parse import quote as urlquote
 
     resolved = Path(source).resolve()
     # Windows: C:\path -> /c:/path и экранируем
     posix_path = str(resolved).replace(chr(92), "/")
     if posix_path[1:3] == ":/":
         posix_path = "/" + posix_path  # /c:/path
-    source_uri = "file:" + quote(posix_path, safe="/\\:") + "?mode=ro"
+    source_uri = "file:" + urlquote(posix_path, safe="/\\:") + "?mode=ro"
     db = sqlite3.connect(source_uri, uri=True)
     db.row_factory = sqlite3.Row
     lines = ["PRAGMA foreign_keys=ON;", "BEGIN;"]
