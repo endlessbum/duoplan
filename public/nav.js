@@ -388,7 +388,17 @@
       // Новый жест отменяет незавершённую защиту клика: если прошлый drag
       // закончился вне панели, click туда не придёт и запись осталась бы висеть.
       state.clickGuard = null;
-      let item = event.target.closest ? event.target.closest(".nav-item[data-tab]") : null;
+      // closest() на SVG в некоторых WebView не поднимается до <button>,
+      // поэтому ищем вручную — надёжнее и не зависит от реализации closest.
+      let item = null;
+      let el = event.target;
+      while (el && el !== nav) {
+        if (el.classList && el.classList.contains("nav-item") && el.dataset && el.dataset.tab) {
+          item = el;
+          break;
+        }
+        el = el.parentNode;
+      }
       let tab = item ? item.dataset.tab : null;
       // Когда палец нажимает прямо на каплю (SVG), .nav-item через closest не находится,
       // но геометрия подсказывает, что это всё ещё активная вкладка: проверяем
@@ -639,6 +649,7 @@
       window.removeEventListener("pointercancel", onPointerCancel);
       nav.removeEventListener("lostpointercapture", onPointerCancel);
       nav.removeEventListener("click", onClickCapture, true);
+      nav.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("blur", onBlur);
       if (observer) observer.disconnect();
@@ -657,6 +668,13 @@
       if (state.press) finishDrag(false);
     }
 
+    // Fallback для WebView, где touch-action не отключает скролл:
+    // пока жест жив, preventDefault() гарантирует, что браузер
+    // не уведёт pointer в pointercancel из-за начавшегося скролла.
+    function onTouchMove(event) {
+      if (state.press || state.drag) event.preventDefault();
+    }
+
     nav.addEventListener("pointerdown", onPointerDown);
     // Слушатели на window: при pointer capture события всё равно всплывают сюда,
     // а если capture не сработал (старый webview) — жест не потеряется.
@@ -667,6 +685,8 @@
     nav.addEventListener("click", onClickCapture, true);
     window.addEventListener("resize", onResize);
     window.addEventListener("blur", onBlur);
+    // passive: false обязателен, иначе preventDefault() проигнорируется.
+    nav.addEventListener("touchmove", onTouchMove, { passive: false });
 
     let observer = null;
     if (window.ResizeObserver) {

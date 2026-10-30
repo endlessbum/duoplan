@@ -91,7 +91,9 @@
     check("html: touch-action = pan-x pan-y", rootAction === "pan-x pan-y", rootAction);
     const nav = document.getElementById("bottom-nav");
     const navAction = getComputedStyle(nav).touchAction;
-    check("панель: touch-action = pan-y", navAction === "pan-y", navAction);
+    // Панель не прокручивается: жест капли перехватывается кодом, а pan-y
+    // на родителе в части WebView уводил pointer в pointercancel.
+    check("панель: touch-action = none", navAction === "none", navAction);
 
     // Навигация под включённой защитой должна работать как раньше.
     const items = Array.from(nav.querySelectorAll(".nav-item[data-tab]"));

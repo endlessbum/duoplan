@@ -105,11 +105,9 @@ html, body {
 html {
   touch-action: pan-x pan-y;
   background-color: var(--bg);
-  /* Отскок за края документа открывал фон WebView — на iOS это давало
-     полосы другого цвета на верхней и нижней границе. Отключаем цепочку
-     overscroll там, где браузер это поддерживает; обычная прокрутка,
-     sticky-шапка и фиксированная навигация не страдают. */
-  overscroll-behavior-y: none;
+  /* Фон WebView совпадает с --bg (themeBackground → tg.setBackgroundColor),
+     поэтому нативный отскок (rubber-band) остаётся плавным и не даёт
+     полос чужого цвета на iOS. */
 }
 
 /* Корень всегда покрывает вьюпорт: при коротком содержимом под ним не
@@ -117,7 +115,6 @@ html {
 body {
   min-height: 100dvh;
   background-color: var(--bg);
-  overscroll-behavior-y: none;
 }
 
 .app-shell {
@@ -441,6 +438,10 @@ body.tg-fullscreen .tab-header {
   font: inherit;
   cursor: pointer;
   transition: color 0.2s ease, transform 0.18s ease;
+  /* Браузер не должен начинать скролл/пан при касании кнопки: капля
+     управляется кодом, а default touch-action на child перебивает
+     touch-action: none родителя (он не наследуется). */
+  touch-action: none;
 }
 
 .nav-item:active {

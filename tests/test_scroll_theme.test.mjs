@@ -73,12 +73,13 @@ test("цвет адресной строки обновляется тем же 
   equal(theme.includes('meta[name="theme-color"]'), true);
 });
 
-test("корень закрашивает всю область и не отдаёт overscroll", () => {
+test("корень закрашивает всю область и оставляет нативный отскок", () => {
   const htmlRule = appCss.match(/\nhtml\s*\{([^}]*)\}/);
   equal(Boolean(htmlRule), true);
   const body = htmlRule[1];
   equal(/background-color:\s*var\(--bg\)/.test(body), true);
-  equal(/overscroll-behavior-y:\s*none/.test(body), true);
+  // rubber-band включён — overscroll-behavior-y: none убран.
+  equal(/overscroll-behavior-y:\s*none/.test(body), false);
   // Прокрутка одним пальцем должна остаться.
   equal(/touch-action:\s*pan-x pan-y/.test(body), true);
 });
@@ -88,7 +89,8 @@ test("body не короче вьюпорта при коротком содер
   equal(Boolean(bodyRule), true);
   equal(/min-height:\s*100dvh/.test(bodyRule[1]), true);
   equal(/background-color:\s*var\(--bg\)/.test(bodyRule[1]), true);
-  equal(/overscroll-behavior-y:\s*none/.test(bodyRule[1]), true);
+  // rubber-band включён и на body.
+  equal(/overscroll-behavior-y:\s*none/.test(bodyRule[1]), false);
 });
 
 test("темы задают --bg и он совпадает у корня и оболочки", () => {

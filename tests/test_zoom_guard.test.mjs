@@ -133,8 +133,8 @@ test("корень не отдаёт pinch-zoom, но оставляет про�
   equal(rule[1].trim(), "pan-x pan-y");
 });
 
-test("панель навигации сохраняет свой touch-action", () => {
+test("панель навигации блокирует default pan/zoom", () => {
   const rule = appCss.match(/\.bottom-nav\s*\{[^}]*touch-action:\s*([^;]+);/);
   equal(Boolean(rule), true);
-  equal(rule[1].trim(), "pan-y");
+  equal(rule[1].trim(), "none");
 });

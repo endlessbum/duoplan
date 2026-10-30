@@ -25,6 +25,12 @@
 `_daily_action()` в `duoplan/services.py`; паритет держат
 `tests/test_daily_parity.*` на общих векторах из `tests/fixtures/daily_actions.json`.
 
+Файлы в `migrations/` — валидный SQL для SQLite: `ALTER TABLE ... ADD COLUMN
+IF NOT EXISTS` там недопустим (такого синтаксиса нет), на чистой базе миграция
+падает с ошибкой `near "EXISTS"`. Идемпотентность даёт не `IF NOT EXISTS`, а
+однократное применение: применённую миграцию нельзя редактировать — её текст
+уже записан в `d1_migrations`.
+
 Публичный адрес: `https://duoplan.stacheight.workers.dev`.
 
 ## Cloudflare
@@ -188,10 +194,21 @@ no-cache, поэтому свежая версия подхватывается 
   жеста (`pointercancel`, `lostpointercapture`) защиту не ставит, клавиатурные
   клики (`detail === 0`) не подавляются, а новый `pointerdown` сбрасывает
   запись.
+- **WebView-фолбэк.** На части WebView (старый WKWebView, Android WebView)
+  `touch-action` не отключает прокрутку: браузер начинал пан и уводил pointer
+  в `pointercancel`, из-за чего жест обрывался на первом движении. Поэтому
+  `touch-action: none` продублирован на самой вкладке (`.nav-item` — правило
+  родителя не наследуется, а `auto` на child перебивает `pan-y` панели), а
+  пока жив жест, `touchmove` отменяется (`{ passive: false }`). Цель жеста
+  ищется обходом предков, а не `closest()`: на SVG-капле часть WebView не
+  поднимается до `<button>`, и тап по капле не находил активную вкладку.
 - **Проверка.** `tests/test_nav_geometry.test.mjs` — геометрия и правило 50%;
+  `tests/test_nav_touch_guard.test.mjs` — статические гарантии фолбэка
+  (`touch-action: none`, `passive: false`, обход предков);
   `tests/nav-harness.html` — интерактивный прогон в браузере (тапы, drag,
-  выход за панель и за экран, отмена, подавление click). Harness открывается
-  как обычная страница; в headless Chrome кадры подменяются таймером.
+  выход за панель и за экран, отмена, подавление click, отмена `touchmove`
+  во время жеста, жест со SVG-капли). Harness открывается как обычная
+  страница; в headless Chrome кадры подменяются таймером.
 
 ### Масштаб интерфейса
 
@@ -202,8 +219,8 @@ Pinch-to-zoom в Mini App отключён на трёх уровнях, что�
   (плюс прежние `width=device-width`, `initial-scale=1`, `viewport-fit=cover`);
 - **CSS**: `html { touch-action: pan-x pan-y }` — прокрутка одним пальцем
   разрешена в обе стороны, pinch-zoom и double-tap-zoom выключены. Панель
-  навигации сохраняет свой `touch-action: pan-y`, поэтому горизонтальный drag
-  капли не страдает;
+  навигации и её вкладки задают `touch-action: none`: панель не прокручивается,
+  а жест капли перехватывает код (см. «Нижняя навигация»);
 - **`public/zoom-guard.js`**: отменяет `touchstart`/`touchmove` при двух и
   более касаниях (одиночные не трогает), Safari-события `gesturestart`,
   `gesturechange`, `gestureend` и `Ctrl+wheel`; все слушатели с
@@ -227,10 +244,10 @@ Telegram WebView, там масштабирование оставлено (до
   фактический hex в `tg.setBackgroundColor()` и `tg.setHeaderColor()`; тем же
   значением обновляется `<meta name="theme-color">`. Ключ `bg_color` остался
   только запасным вариантом, если `--bg` не hex.
-- `html`/`body` красятся `var(--bg)` и получают `overscroll-behavior-y: none`;
-  `body` имеет `min-height: 100dvh`, поэтому при коротком содержимом под ним не
-  остаётся незакрашенной области. Обычная прокрутка, sticky-шапка и нижняя
-  навигация не затронуты.
+- `html`/`body` красятся `var(--bg)`; `body` имеет `min-height: 100dvh`,
+  поэтому при коротком содержимом под ним не остаётся незакрашенной области.
+  `overscroll-behavior-y` не блокируется — нативный rubber-band на iOS остаётся
+  плавным, так как фон WebView уже совпадает с `--bg`.
 
 Проверка: `tests/test_scroll_theme.test.mjs`.
 

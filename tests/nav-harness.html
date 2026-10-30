@@ -117,6 +117,10 @@
     const r = item(tab).getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   };
+  // Состояние капли живёт в координатах панели (clientWidth/центры слотов),
+  // а center() отдаёт координаты окна. Без пересчёта проверка «цель совпадает
+  // с вкладкой» ловит смещение панели внутри окна, а не ошибку в коде.
+  const localX = (viewportX) => viewportX - nav.getBoundingClientRect().left;
   const ev = (type, x, y, target) => (target || window).dispatchEvent(new PointerEvent(type, {
     pointerId: 1, clientX: x, clientY: y, bubbles: true, cancelable: true,
     pointerType: "touch", isPrimary: true
@@ -217,7 +221,7 @@
   up(window.innerWidth + 300, home.y);
   await frames(2);
   check("за правым краем капля у последней вкладки", liquid.getState().active === "wishes", commits.join(","));
-  check("капля не выходит за панель", clampedPos <= navRect.right, `${clampedPos} <= ${navRect.right}`);
+  check("капля не выходит за панель", clampedPos <= navRect.width, `${clampedPos} <= ${navRect.width}`);
 
   // 5. Отмена жеста: без переключения, возврат к активной.
   reset();
@@ -229,7 +233,7 @@
   cancel(wishes.x, wishes.y);
   await frames(2);
   check("pointercancel не переключает вкладку", commits.length === 0 && liquid.getState().active === "home", commits.join(","));
-  check("после отмены цель — активная вкладка", Math.abs(liquid.getState().target - home.x) < 80, liquid.getState().target);
+  check("после отмены цель — активная вкладка", Math.abs(liquid.getState().target - localX(home.x)) < 2, `${liquid.getState().target} vs ${localX(home.x)}`);
 
   // 6. Клик после успешного drag подавляется один раз и адресно.
   reset();
@@ -336,7 +340,33 @@
   reset();
   liquid.refresh();
   await frames(2);
-  check("после refresh цель совпадает с центром вкладки", Math.abs(liquid.getState().target - center("home").x) < 80, liquid.getState().target);
+  check("после refresh цель совпадает с центром вкладки", Math.abs(liquid.getState().target - localX(center("home").x)) < 2, `${liquid.getState().target} vs ${localX(center("home").x)}`);
+
+  // 13. WebView, где touch-action не гасит скролл: пока жест жив, touchmove
+  //     отменяется, иначе браузер уводит pointer в pointercancel и жест рвётся.
+  reset();
+  const idleTouch = new TouchEvent("touchmove", { bubbles: true, cancelable: true });
+  nav.dispatchEvent(idleTouch);
+  check("в покое touchmove не отменяется", idleTouch.defaultPrevented === false, idleTouch.defaultPrevented);
+  down(home.x, home.y);
+  const dragTouch = new TouchEvent("touchmove", { bubbles: true, cancelable: true });
+  nav.dispatchEvent(dragTouch);
+  check("во время жеста touchmove отменяется", dragTouch.defaultPrevented === true, dragTouch.defaultPrevented);
+  up(home.x, home.y);
+  await frames(1);
+  const releasedTouch = new TouchEvent("touchmove", { bubbles: true, cancelable: true });
+  nav.dispatchEvent(releasedTouch);
+  check("после отпускания touchmove снова не отменяется", releasedTouch.defaultPrevented === false, releasedTouch.defaultPrevented);
+
+  // 14. Палец попадает в саму каплю (SVG): .nav-item не находится обходом
+  //     предков, цель определяется по геометрии.
+  reset();
+  down(home.x, home.y, path);
+  move(dates.x, dates.y);
+  await frames(2);
+  up(dates.x, dates.y);
+  await frames(2);
+  check("жест со SVG-капли работает", liquid.getState().active === "dates", commits.join(","));
 
   } catch (error) {
     results.push({ name: "исключение в сценарии", ok: false, detail: String((error && error.stack) || error) });
