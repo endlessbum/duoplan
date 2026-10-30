@@ -384,9 +384,25 @@
       // Новый жест отменяет незавершённую защиту клика: если прошлый drag
       // закончился вне панели, click туда не придёт и запись осталась бы висеть.
       state.clickGuard = null;
-      const item = event.target.closest ? event.target.closest(".nav-item[data-tab]") : null;
+      let item = event.target.closest ? event.target.closest(".nav-item[data-tab]") : null;
+      let tab = item ? item.dataset.tab : null;
+      // Когда палец нажимает прямо на каплю (SVG), .nav-item через closest не находится,
+      // но геометрия подсказывает, что это всё ещё активная вкладка: проверяем
+      // пересечение точки с прямоугольником активной вкладки из state.rects.
+      if (!tab && state.active && state.rects) {
+        const rect = state.rects.find(r => r.tab === state.active);
+        if (rect) {
+          const r = rect.rect;
+          const inRect = event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom;
+          if (inRect) {
+            tab = state.active;
+            // item остаётся null — это не настоящая кнопка, но захват разрешаем
+            item = { dataset: { tab } };
+          }
+        }
+      }
       if (!item) return;
-      const tab = item.dataset.tab;
+      tab = item.dataset.tab;
       // Захватить каплю можно только с активной вкладки: она лежит под ней.
       // Нажатие на неактивную — обычный тап, его обработает click.
       if (!isActiveTab(tab)) {

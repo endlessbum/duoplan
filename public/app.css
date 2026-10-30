@@ -351,7 +351,7 @@ body.tg-fullscreen .tab-header {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 12px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 20px);
   width: min(488px, calc(100% - 24px));
   height: 62px;
   padding: 5px;
@@ -395,20 +395,37 @@ body.tg-fullscreen .tab-header {
   z-index: 0;
 }
 
+/* Убираем градиент, делаем каплю прозрачной с легким ореолом */
+.nav-drop-stop-top { stop-color: transparent; }
+.nav-drop-stop-mid { stop-color: transparent; }
+.nav-drop-stop-bottom { stop-color: transparent; }
+
+/* Сама капля: контур полупрозрачный, цвет берется из акцентной палитры как тень */
 .nav-droplet-path {
-  fill: url(#nav-drop-fill);
+  fill: transparent;
   stroke: var(--droplet-border);
   stroke-width: 1;
   filter: drop-shadow(0 6px 14px var(--droplet-halo));
-  transition: fill 0.3s ease, stroke 0.3s ease;
+  transition: stroke 0.3s ease;
 }
 
-.nav-drop-stop-top { stop-color: var(--droplet-hi); }
-.nav-drop-stop-mid { stop-color: var(--droplet-fill, var(--droplet-bg)); }
-.nav-drop-stop-bottom { stop-color: var(--droplet-deep); }
+/* Живое стекло: иконка под каплей получает эффект преломления */
+.nav-item.is-active .nav-icon svg,
+.nav-item.is-preview-target .nav-icon svg {
+  filter: brightness(1.15) saturate(1.2);
+  transition: filter 0.15s ease;
+}
+
+/* Живое стекло: иконки под каплей получают преломляющий эффект */
+.nav-item.is-dragover .nav-icon {
+  -webkit-filter: saturate(1.2) brightness(1.1);
+  filter: saturate(1.2) brightness(1.1);
+  transition: filter 0.15s ease;
+}
 
 .bottom-nav.is-dragging {
   cursor: grabbing;
+  touch-action: none;
 }
 
 .nav-item {
@@ -443,11 +460,14 @@ body.tg-fullscreen .tab-header {
    состояние — страница до отпускания пальца не меняется. */
 .nav-item.is-preview-target {
   color: var(--berry);
-  opacity: 0.7;
+  opacity: 0.85;
 }
 
 .nav-item.is-preview-target .nav-icon {
-  transform: translateY(-1px) scale(1.04);
+  /* Превью без увеличения, только цвет */
+  transform: none;
+  color: var(--berry);
+  opacity: 0.85;
 }
 
 /* Во время жеста иконки не «догоняют» каплю transition-ами — иначе дёргаются.
@@ -457,6 +477,7 @@ body.tg-fullscreen .tab-header {
 .bottom-nav.is-dragging .nav-item,
 .bottom-nav.is-dragging .nav-item:active {
   transform: none;
+  touch-action: none;
 }
 
 .bottom-nav.is-dragging .nav-item,
@@ -469,11 +490,14 @@ body.tg-fullscreen .tab-header {
   height: 22px;
   display: grid;
   place-items: center;
-  transition: transform 0.28s cubic-bezier(0.22, 1.25, 0.36, 1);
+  /* Иконки статичны — не увеличиваются при активации/наведении. */
+  transform: none;
+  transition: color 0.2s ease;
 }
 
 .nav-item.is-active .nav-icon {
-  transform: translateY(-1px) scale(1.07);
+  /* Только цвет, без масштабирования */
+  color: var(--berry);
 }
 
 .nav-icon svg {
