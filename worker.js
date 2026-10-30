@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.31.1";
+const APP_VERSION = "2026.10.31.2";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.31.1";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.31.1";
+const DB_SCHEMA_VERSION = "2026.10.31.2";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -63,7 +63,7 @@ const ARCHIVE_QUERIES = {
     active: true,
     sort: "deadline",
     userScoped: true,
-    sql: "SELECT id,title,status,day,time,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?) ORDER BY created_at DESC"
+    sql: "SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?) ORDER BY created_at DESC"
   },
   dates: {
     active: true,
@@ -71,7 +71,7 @@ const ARCHIVE_QUERIES = {
     // Личные даты видит только создатель: фильтр в SQL, а не после запроса —
     // иначе приватная запись успевает попасть в сортируемый набор.
     userScoped: true,
-    sql: "SELECT id,title,day,time,recurs,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY day"
+    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY day"
   },
   wishes: {
     active: true,
@@ -538,8 +538,83 @@ function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
   return new Date(shifted);
 }
 
+// Ежемесячный повтор: запись происходит в тот же день месяца, когда такой
+// день существует (31-е пропускает короткие месяцы — как 29 февраля у ежегодных).
+function monthlyOccursOnDay(item, targetDay) {
+  return Number(item?.monthly) === 1 && String(item?.day || "").slice(8) === String(targetDay || "").slice(8);
+}
+
+// Ближайшее ежемесячное наступление: первый месяц, где день месяца существует
+// и локальная дата не раньше сегодняшней (день-уровень, не время — план на
+// сегодня с прошедшим временем всё ещё «сегодня»).
+function nextMonthlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
+  const parts = String(item?.day || "").split("-");
+  if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
+  const dayOfMonth = Number(parts[2]);
+  if (!Number.isFinite(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) return Number.MAX_SAFE_INTEGER;
+  const tz = timeZone || "UTC";
+  let hours = 12, minutes = 0;
+  if (item.time && /^\d{2}:\d{2}$/.test(item.time)) {
+    const [hh, mm] = String(item.time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  const now = new Date(nowMs);
+  const startY = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+  const startM = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit" }).format(now));
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
+  const keyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  for (let offset = 0; offset < 25; offset++) {
+    const absolute = startM - 1 + offset;
+    const year = startY + Math.floor(absolute / 12);
+    const month = absolute % 12;
+    const candidate = makeDateInTimeZone(year, month, dayOfMonth, hours, minutes, tz);
+    const cp = dayFmt.formatToParts(candidate);
+    const cm = Number(cp.find((p) => p.type === "month")?.value);
+    const cd = Number(cp.find((p) => p.type === "day")?.value);
+    // 31-го не существует в коротких месяцах — candidate уехал на соседний.
+    if (cm !== month + 1 || cd !== dayOfMonth) continue;
+    if (keyFmt.format(candidate) >= todayKey) return candidate.getTime();
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
+// Ближайшее ежегодное наступление плана: тот же месяц-день в текущем или
+// следующем году (29 февраля существует не в каждом году — пропускается).
+function nextYearlyOccurrenceMs(item, timeZone) {
+  const parts = String(item?.day || "").split("-");
+  if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
+  const month = Number(parts[1]) - 1;
+  const dayOfMonth = Number(parts[2]);
+  if (!Number.isFinite(month) || !Number.isFinite(dayOfMonth)) return Number.MAX_SAFE_INTEGER;
+  const tz = timeZone || "UTC";
+  let hours = 12, minutes = 0;
+  if (item.time && /^\d{2}:\d{2}$/.test(item.time)) {
+    const [hh, mm] = String(item.time).split(":").map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+  }
+  const now = new Date();
+  const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
+  for (let year = currentYear; year <= currentYear + 9; year++) {
+    const candidate = makeDateInTimeZone(year, month, dayOfMonth, hours, minutes, tz);
+    const cp = dayFmt.formatToParts(candidate);
+    const cm = Number(cp.find((q) => q.type === "month")?.value);
+    const cd = Number(cp.find((q) => q.type === "day")?.value);
+    if (cm !== month + 1 || cd !== dayOfMonth) continue;
+    if (new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(candidate) >= todayKey) {
+      return candidate.getTime();
+    }
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
 function taskTargetMs(item, timeZone) {
   if (!item || !item.day) return Number.MAX_SAFE_INTEGER;
+  // Повторяющийся план сортируется и напоминает по ближайшему наступлению.
+  if (Number(item.monthly) === 1) return nextMonthlyOccurrenceMs(item, timeZone);
+  if (Number(item.yearly) === 1) return nextYearlyOccurrenceMs(item, timeZone);
   const parts = String(item.day).split("-");
   if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
   const year = Number(parts[0]);
@@ -580,6 +655,8 @@ function sortByTaskDeadline(rows, timeZone) {
 
 function nextDateOccurrence(item, timeZone) {
   if (!item || !item.day) return Number.MAX_SAFE_INTEGER;
+  // Ежемесячная дата наступает каждый месяц — считаем ближайшее наступление.
+  if (Number(item.monthly) === 1) return nextMonthlyOccurrenceMs(item, timeZone);
   const parts = String(item.day).split("-");
   if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
   const month = Number(parts[1]) - 1;
@@ -620,7 +697,8 @@ function nextDateOccurrence(item, timeZone) {
 // прошедшие уже после полудня (12:00 — время по умолчанию), хотя интерфейс
 // подписывает её «Сегодня» (репорт 2026-10-29).
 function isPastDate(row, timeZone, nowMs) {
-  if (!row || row.recurs) return false;
+  // Ежемесячная дата — повторяющаяся: в «прошедшие» не попадает никогда.
+  if (!row || row.recurs || Number(row.monthly) === 1) return false;
   const day = String(row.day || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
   return day < localDay(timeZone || "UTC", nowMs);
@@ -650,12 +728,12 @@ async function state(env, userId) {
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
-    env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,monthly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
-    env.DB.prepare("SELECT id,title,day,time,recurs,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare(`SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
@@ -819,8 +897,8 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   }
   if (method === "PATCH") {
     const patchSchemas = {
-      tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, is_private: { type: "boolean" } },
-      dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, is_private: { type: "boolean" } },
+      tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
+      dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
       memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 } },
       wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } }
     };
@@ -831,6 +909,13 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       const { day, time } = planSchedule(body);
       fields.push("title=?", "day=?", "time=?");
       values.push(textField(body, "title", 180, "План"), day, time);
+      if (body.monthly !== undefined || body.yearly !== undefined) {
+        const monthly = body.monthly === true ? 1 : 0;
+        const yearly = monthly ? 0 : (body.yearly === true ? 1 : 0);
+        if ((monthly || yearly) && !day) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
+        fields.push("monthly=?", "yearly=?");
+        values.push(monthly, yearly);
+      }
       // Приватность переключает только автор (зеркально личным датам).
       if (body.is_private !== undefined && Number(taskRow?.created_by) === Number(user.tg_id)) {
         fields.push("is_private=?");
@@ -840,8 +925,15 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       fields.push("title=?");
       values.push(textField(body, "title", 120, "Название"));
       if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
+      // monthly перекрывает recurs: ежемесячная дата не может быть ежегодной.
+      const monthly = body.monthly !== undefined ? (body.monthly === true ? 1 : 0) : null;
+      const recurs = monthly === 1 ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1);
       fields.push("day=?", "recurs=?", "time=?");
-      values.push(clean(body.day), body.recurs === false || body.recurs === 0 ? 0 : 1, optionalTime(body.time));
+      values.push(clean(body.day), recurs, optionalTime(body.time));
+      if (monthly !== null) {
+        fields.push("monthly=?");
+        values.push(monthly);
+      }
       // Приватность переключает только автор: партнёр, пометивший чужую общую
       // дату личной, мгновенно терял бы её из своих списков, а у дат без автора
       // (созданы до миграции 0007, created_by=0) фильтр видимости совпадал бы
@@ -1019,22 +1111,29 @@ async function api(request, env, url) {
     return json({ ok: true });
   }
   if (request.method === "POST" && url.pathname === "/api/tasks") {
-    validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, is_private: { type: "boolean" } });
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } });
     const title = textField(body, "title", 180, "План");
     const { day, time } = planSchedule(body);
     const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
-    await env.DB.prepare("INSERT INTO tasks(pair_id,title,day,time,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?)")
-      .bind(pair.id, title, day, time, isPrivate, user.tg_id, now()).run();
+    // Повтор осмыслен только с датой; ежемесячный перекрывает ежегодный.
+    const monthly = body.monthly === true ? 1 : 0;
+    const yearly = monthly ? 0 : (body.yearly === true ? 1 : 0);
+    if ((monthly || yearly) && !day) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
+    await env.DB.prepare("INSERT INTO tasks(pair_id,title,day,time,monthly,yearly,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .bind(pair.id, title, day, time, monthly, yearly, isPrivate, user.tg_id, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/dates") {
-    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, is_private: { type: "boolean" } });
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } });
     const title = textField(body, "title", 120, "Название");
     if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
     const time = optionalTime(body.time);
     const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
-    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)")
-      .bind(pair.id, title, clean(body.day), time, body.recurs === false || body.recurs === 0 ? 0 : 1, isPrivate, user.tg_id, now()).run();
+    // Ежемесячный повтор и ежегодный взаимоисключающие: monthly перекрывает recurs.
+    const monthly = body.monthly === true ? 1 : 0;
+    const recurs = monthly ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1);
+    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,monthly,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .bind(pair.id, title, clean(body.day), time, recurs, monthly, isPrivate, user.tg_id, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
@@ -1262,7 +1361,8 @@ function dateOccursOnDay(item, targetDay) {
   const day = String(item?.day || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
   if (day === targetDay) return true;
-  return Boolean(item.recurs) && day.slice(5) === targetDay.slice(5);
+  if (monthlyOccursOnDay(item, targetDay)) return true;
+  return Boolean(item.recurs) && Number(item.monthly) !== 1 && day.slice(5) === targetDay.slice(5);
 }
 
 function parseTimeMinutes(value, fallbackMinutes = 9 * 60) {
@@ -1369,8 +1469,12 @@ const DIGEST_MAX_CHARS = 3400;
 function digestText(today, tomorrow, dates, tasks) {
   const todayDates = dates.filter(d => dateOccursOnDay(d, today));
   const tomorrowDates = dates.filter(d => dateOccursOnDay(d, tomorrow));
-  const todayTasks = tasks.filter(t => String(t.day) === today);
-  const tomorrowTasks = tasks.filter(t => String(t.day) === tomorrow);
+  const occurs = (task, day) =>
+    String(task.day) === day ||
+    monthlyOccursOnDay(task, day) ||
+    (Number(task.yearly) === 1 && String(task.day).slice(5) === String(day).slice(5));
+  const todayTasks = tasks.filter(t => occurs(t, today));
+  const tomorrowTasks = tasks.filter(t => occurs(t, tomorrow));
   if (!todayDates.length && !tomorrowDates.length && !todayTasks.length && !tomorrowTasks.length) return "";
   const dateLines = [
     ...todayDates.map(d => `• Сегодня — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}`),
@@ -1642,8 +1746,8 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
-    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
+    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,PRIMARY KEY (pair_id,day))`,  /* done_by/done_at removed: relic of pre-daily_completions schema */
@@ -1680,6 +1784,9 @@ async function ensureSchema(env) {
     ["wishes", "done_at", "INTEGER"],
     ["wishes", "url", "TEXT"],
     ["memories", "title", "TEXT"],
+    ["tasks", "monthly", "INTEGER NOT NULL DEFAULT 0"],
+    ["tasks", "yearly", "INTEGER NOT NULL DEFAULT 0"],
+    ["dates", "monthly", "INTEGER NOT NULL DEFAULT 0"],
     ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();

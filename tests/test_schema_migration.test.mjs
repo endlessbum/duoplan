@@ -51,6 +51,8 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = 
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
     wishes: new Set(["id", "pair_id", "owner_id", "body", "done", "created_at"]),
     memories: new Set(["id", "pair_id", "author_id", "body", "day", "created_at"]),
+    tasks: new Set(["id", "pair_id", "title", "status", "created_by", "created_at", "completed_by", "completed_at"]),
+    dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
     rate_limits: new Set(["bucket_key", "count"])
   };
   const failedOnce = new Set();
@@ -103,7 +105,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
   deepStrictEqual(log.alters.sort(), [
     "accent_color", "created_by", "dates_digest_enabled", "dates_digest_time", "day",
     "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
-    "is_private", "time", "time", "timezone", "timezone", "title", "url"
+    "is_private", "monthly", "monthly", "time", "time", "timezone", "timezone", "title", "url", "yearly"
   ]);
 });
 
@@ -113,7 +115,7 @@ test("чистый проход миграции без гонки записы�
   deepStrictEqual(log.versionWrite, DB_SCHEMA_VERSION);
   // time + is_private (tasks) + time/is_private/created_by (dates) + done_at (wishes)
   // + url (wishes) + timezone (users, pairs) + expires_at (rate_limits) + 5 настроек (users)
-  deepStrictEqual(log.alters.length, 18);
+  deepStrictEqual(log.alters.length, 21);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

@@ -88,7 +88,7 @@ def test_export_keeps_extended_schema_values(tmp_path):
     assert "'2026-10-04'" in sql and "'09:30'" in sql  # tasks.day, tasks.time
     assert "'18:00'" in sql  # dates.time
     assert (
-        "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, is_private, "
+        "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, monthly, yearly, is_private, "
         "created_by, created_at, completed_by, completed_at)"
     ) in sql
 
@@ -109,9 +109,9 @@ def test_export_substitutes_defaults_for_plain_schema(tmp_path):
     # Nullable колонки без источника остаются NULL, а NOT NULL с DEFAULT —
     # получают дефолт (is_private не должен молча раскрыть личную запись).
     assert (
-        "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, is_private, "
+        "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, monthly, yearly, is_private, "
         "created_by, created_at, completed_by, completed_at) "
-        "VALUES(1, 1, 'Поездка', 'open', NULL, NULL, 0, 10, 1, NULL, NULL);"
+        "VALUES(1, 1, 'Поездка', 'open', NULL, NULL, 0, 0, 0, 10, 1, NULL, NULL);"
     ) in sql
 
 
@@ -177,9 +177,9 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
     sql = dump(db)
 
     # Личный план остаётся личным.
-    assert "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, is_private, created_by, created_at, completed_by, completed_at) VALUES(1, 1, 'Сюрприз', 'open', '2026-12-01', '18:00', 1, 10, 1, NULL, NULL);" in sql
+    assert "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, completed_by, completed_at) VALUES(1, 1, 'Сюрприз', 'open', '2026-12-01', '18:00', 0, 0, 1, 10, 1, NULL, NULL);" in sql
     # Личная дата остаётся личной.
-    assert "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, is_private, created_by, created_at) VALUES(1, 1, 'Годовщина', '2026-12-01', '18:00', 0, 1, 10, 1);" in sql
+    assert "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, monthly, is_private, created_by, created_at) VALUES(1, 1, 'Годовщина', '2026-12-01', '18:00', 0, 0, 1, 10, 1);" in sql
     # Звёздочка в календаре (done_at) и ссылка на желание не теряются.
     assert "INSERT OR REPLACE INTO wishes(id, pair_id, owner_id, body, done, done_at, url, created_at) VALUES(1, 1, 10, 'Билеты', 1, '2026-12-02', 'https://example.com/tickets', 1);" in sql
     # Настройки пользователя (время сводок, акцент) переезжают вместе с ним.

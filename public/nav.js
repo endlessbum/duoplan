@@ -15,10 +15,30 @@
   "use strict";
 
   const TAP_SLOP = 6;          // px: меньше — это тап, а не перетаскивание
-  // Пружина намеренно недодемпфирована (ζ ≈ 0.48): капля приезжает с
-  // перелётом и пару раз качается, как желе, а не встаёт как вкопанная.
-  const SPRING_K = 280;        // жёсткость пружины возврата
-  const SPRING_C = 16;         // демпфирование (ζ ≈ 0.48 — живой доводчик)
+  // Пружина мягче прежней (ζ ≈ 0.46): капля едет неспешно и качается дольше.
+  const SPRING_K = 170;        // жёсткость пружины возврата
+  const SPRING_C = 12;         // демпфирование (ζ ≈ 0.46 — живой доводчик)
+  // Зона прилунения (доля слота) и доп. вязкость в ней: капля тормозит
+  // плавнее, чем «врезается», — подъезжает всё медленнее.
+  const ARRIVAL_ZONE = 0.16;
+  const ARRIVAL_DAMP = 7;
+  // Прилунение: в момент остановки капля сплющивается по вертикали —
+  // высота подрастает, ширина поджимается, затем форма отпускается.
+  const IMPACT_GAIN = 0.16;
+  const IMPACT_PINCH = 0.12;
+  const IMPACT_DECAY = 3.2;    // 1/с: скорость отпускания формы
+  const IMPACT_MIN_SPEED = 90; // px/s: тише — это не удар, а доезд
+  // Капля может слегка выйти за границы бара: резкой остановки у кромки нет.
+  const OVERHANG = 10;         // px допустимого выхода за внутреннюю область
+  // Вытяжение пальцем: тянешь каплю выше/ниже бара — она тянется вслед,
+  // плющась о кромку, показывая натяжение.
+  const STRETCH_ZONE = 8;      // px от кромки, где вытяжение начинается
+  const STRETCH_RANGE = 48;    // px хвоста вытяжения до максимума
+  const STRETCH_MAX = 0.4;     // доля высоты капли на максимуме вытяжения
+  const STRETCH_PINCH = 0.16;  // доля сужения ширины при вытяжении
+  // Капля крупнее слота (обе стороны пропорционально): SVG overflow: visible.
+  const SIZE_W = 1.08;
+  const SIZE_H = 1.12;
   const MAX_SPEED = 1100;      // px/s: скорость, при которой деформация максимальна
   const MAX_LEAD = 0.28;       // вытягивание переднего края, доля ширины капли
   const MAX_TRAIL = 0.18;      // поджатие заднего края
@@ -253,6 +273,8 @@
       svgRect: null,
       lastUnambiguous: null,
       previewTab: null,
+      // Прилунение: 0..1 — фаза вертикального приседания после остановки.
+      impact: 0,
       // Одноразовая запись о завершённом drag: { pointerId, x, y, time }.
       clickGuard: null,
       lastPreviewX: NaN,
@@ -405,7 +427,8 @@
       const geom = state.geom;
       if (!geom) return x;
       const half = (geom.slotW - 2) / 2;
-      return clamp(x, geom.inner.x + half, geom.inner.x + geom.inner.w - half);
+      // Капля может слегка выйти за кромку бара: без резкой остановки у края.
+      return clamp(x, geom.inner.x + half - OVERHANG, geom.inner.x + geom.inner.w - half + OVERHANG);
     }
 
     // ------------------------------------------------------------- форма
@@ -414,8 +437,9 @@
     // перекраске — горизонтальный отрезок, накрытый каплей.
     function dropletShape(centerX, speed, dir) {
       const geom = state.geom;
-      const w0 = geom.slotW - 2;
-      const h0 = geom.inner.h - 2;
+      // Капля крупнее слота пропорционально по обеим осям (SVG overflow: visible).
+      const w0 = (geom.slotW - 2) * SIZE_W;
+      const h0 = (geom.inner.h - 2) * SIZE_H;
       const raw = Math.min(Math.abs(speed) / MAX_SPEED, 1);
       // При reduced-motion форма почти не деформируется, но жест работает.
       const s = raw * (state.reduced ? 0.35 : 1);
@@ -423,30 +447,36 @@
       // В покое капля поджата (REST_NARROW), на скорости растягивается до
       // полной ширины слота плюс нос и хвост — это и читается как вода.
       const width = w0 * (REST_NARROW + (1 - REST_NARROW) * s);
+      // Прилунение: остановка растит каплю по вертикали и поджимает по ширине.
+      let drawnHeight = height * (1 + IMPACT_GAIN * state.impact);
+      let drawnWidth = width * (1 - IMPACT_PINCH * state.impact);
+      // Вытяжение пальцем: тянешь выше/ниже бара — капля тянется в ту сторону,
+      // плющась о кромку, и сужается, показывая натяжение.
+      let pullTop = 0;
+      let pullBottom = 0;
+      if (state.drag && typeof state.drag.dy === "number") {
+        const dy = state.drag.dy;
+        const t = Math.min(1, Math.max(0, (Math.abs(dy) - STRETCH_ZONE) / STRETCH_RANGE));
+        if (t > 0) {
+          if (dy < 0) pullTop = t * STRETCH_MAX * h0;
+          else pullBottom = t * STRETCH_MAX * h0;
+          drawnWidth *= 1 - STRETCH_PINCH * t;
+        }
+      }
       const lead = s * w0 * MAX_LEAD;
       const trail = s * w0 * MAX_TRAIL;
 
       const cx = centerX + dir * s * w0 * MAX_SHIFT;
-      let xL = cx - width / 2 + dir * trail;
-      let xR = cx + width / 2 + dir * lead;
-
-      // Капля не должна вылезать за внутреннюю область панели: сдвигаем обе
-      // границы, сохраняя ширину — так у края она «упирается», а не сплющивается.
-      const minX = geom.inner.x;
-      const maxX = geom.inner.x + geom.inner.w;
-      if (xL < minX) {
-        xR += minX - xL;
-        xL = minX;
-      }
-      if (xR > maxX) {
-        xL -= xR - maxX;
-        xR = maxX;
-      }
+      // Кромка бара не зажимает контур: капля слегка выходит за неё
+      // (допустимый выход ограничивает clampCenter через OVERHANG),
+      // поэтому у края нет резкой «упорной» остановки.
+      const xL = cx - drawnWidth / 2 + dir * trail;
+      const xR = cx + drawnWidth / 2 + dir * lead;
 
       const cy = geom.inner.y + geom.inner.h / 2;
-      const yT = cy - height / 2;
-      const yB = cy + height / 2;
-      const r = Math.min(height / 2, (xR - xL) / 2);
+      const yT = cy - drawnHeight / 2 - pullTop;
+      const yB = cy + drawnHeight / 2 + pullBottom;
+      const r = Math.min(drawnHeight / 2, (xR - xL) / 2);
       // Передняя дуга чуть «острее» задней — капля тянется носом вперёд.
       const kLead = 0.5523 + s * 0.1;
       const kTrail = 0.5523 - s * 0.06;
@@ -462,7 +492,7 @@
         "Z"
       ].join(" ");
 
-      return { d, cx, xL, xR, yT, yB, height, s, dir };
+      return { d, cx, xL, xR, yT, yB, height: drawnHeight, s, dir };
     }
 
     function render() {
@@ -558,12 +588,28 @@
         const accel = -SPRING_K * (state.pos - state.target) - SPRING_C * state.vel;
         state.vel += accel * dt;
         state.pos += state.vel * dt;
+        // Зона прилунения: подъезжая к цели, капля вязнет — скорость гаснет
+        // плавно, а не обрубается пружиной.
+        const zone = state.geom ? state.geom.slotW * ARRIVAL_ZONE : 24;
+        if (Math.abs(state.pos - state.target) < zone) {
+          state.vel *= Math.exp(-ARRIVAL_DAMP * dt);
+        }
+        const speedBefore = Math.abs(state.vel);
         if (Math.abs(state.pos - state.target) < 0.4 && Math.abs(state.vel) < 6) {
           state.pos = state.target;
           state.vel = 0;
+          // Прилунение: заметный доезд сплющивает каплю по вертикали.
+          if (speedBefore > IMPACT_MIN_SPEED) {
+            state.impact = Math.min(1, speedBefore / 420);
+          }
         } else {
           moving = true;
         }
+      }
+      // Форма отпускается после прилунения.
+      if (state.impact > 0) {
+        state.impact = Math.max(0, state.impact - IMPACT_DECAY * dt);
+        if (state.impact > 0) moving = true;
       }
 
       render();
@@ -654,7 +700,9 @@
         desired: state.pos,
         speed: 0,
         lastX: event.clientX,
-        lastT: event.timeStamp || performance.now()
+        lastT: event.timeStamp || performance.now(),
+        // Смещение пальца по вертикали от центра бара: вытяжение капли.
+        dy: event.clientY - (state.svgRect ? state.svgRect.top + state.svgRect.height / 2 : 0)
       };
       state.vel = 0;
       state.lastPreviewX = NaN;
@@ -677,6 +725,9 @@
       drag.speed = drag.speed * 0.7 + instant * 0.3;
       drag.lastX = event.clientX;
       drag.lastT = now;
+      if (state.svgRect) {
+        drag.dy = event.clientY - (state.svgRect.top + state.svgRect.height / 2);
+      }
       drag.desired = clampCenter(event.clientX - drag.grabOffset - state.svgRect.left);
       startLoop();
     }

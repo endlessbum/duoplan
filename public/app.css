@@ -16,6 +16,9 @@
   --cal-date: #c25550;
   --cal-wish: #d9a520;
   --cal-private: #948d86;
+  /* Просрочка: приглушённый янтарно-оранжевый, не тревожный красный. */
+  --overdue-ink: #a35f1f;
+  --overdue-bg: rgba(214, 140, 60, 0.18);
 
   /* Жидкое стекло Telegram (Light) */
   --glass-bg: rgba(255, 253, 249, 0.68);
@@ -57,6 +60,8 @@
   --cal-date: #e88a84;
   --cal-wish: #f0c24e;
   --cal-private: #9d958c;
+  --overdue-ink: #e2a35c;
+  --overdue-bg: rgba(226, 163, 92, 0.16);
 
   /* Жидкое стекло Telegram (Dark) */
   --glass-bg: rgba(34, 31, 30, 0.66);
@@ -291,7 +296,8 @@ body.tg-fullscreen .tab-header {
 ------------------------------------------------------------------- */
 .wish-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: auto auto;
+  width: max-content;
   padding: 5px;
   border-radius: 999px;
   background: var(--glass-bg);
@@ -300,7 +306,7 @@ body.tg-fullscreen .tab-header {
   backdrop-filter: blur(26px) saturate(200%);
   -webkit-backdrop-filter: blur(26px) saturate(200%);
   box-shadow: var(--glass-shadow);
-  margin: 0 0 14px;
+  margin: 0 auto 14px;
   user-select: none;
   /* Капля живёт внутри переключателя: контейнер — её система координат. */
   position: relative;
@@ -317,7 +323,7 @@ body.tg-fullscreen .tab-header {
   background: transparent;
   color: var(--nav-label, var(--muted));
   border-radius: 999px;
-  padding: 9px 10px;
+  padding: 8px 16px;
   font: inherit;
   font-size: 13.5px;
   font-weight: 600;
@@ -527,21 +533,22 @@ body.tg-fullscreen .tab-header {
 
 .stats-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
   margin-top: 12px;
 }
 
 .stat-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 11px;
+  gap: 5px;
+  padding: 5px 9px;
   border-radius: 999px;
   background: var(--surface);
   border: 1px solid var(--line);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 650;
+  white-space: nowrap;
 }
 
 .primary, .secondary {
@@ -589,10 +596,13 @@ body.tg-fullscreen .tab-header {
 
 .pair-exit {
   margin-top: 2px;
+  display: flex;
+  justify-content: center;
 }
 
 .pair-leave {
   color: var(--berry);
+  width: min(220px, 100%);
 }
 
 /* Запись дневника: в списке видно несколько строк, полный текст — по клику
@@ -917,6 +927,36 @@ body.tg-fullscreen .tab-header {
   color: var(--muted);
 }
 
+/* Дата + чип таймера колонкой, «В календаре» — справа: сдержанный ряд
+   без хаотичного переноса. */
+.item-meta.has-when {
+  justify-content: space-between;
+  align-items: flex-start;
+  /* Кнопка «В календаре» остаётся справа от колонки дата+чип;
+     на узких экранах дата усекается многоточием. */
+  flex-wrap: nowrap;
+}
+
+.item-when {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.item-when > span:first-of-type {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-meta.has-when .link-btn {
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+
 .day-chip {
   display: inline-flex;
   align-items: center;
@@ -934,8 +974,8 @@ body.tg-fullscreen .tab-header {
 }
 
 .day-chip.is-overdue {
-  background: rgba(184, 84, 100, 0.22);
-  color: var(--berry);
+  background: var(--overdue-bg);
+  color: var(--overdue-ink);
 }
 
 /* Просрочка старше недели: чип приглушается — событие давно позади,
@@ -1187,6 +1227,53 @@ input[type="checkbox"] {
   cursor: not-allowed;
   filter: grayscale(0.2);
   pointer-events: none;
+}
+
+.lock-card {
+  margin-top: 18vh;
+  text-align: center;
+}
+
+.lock-pin {
+  width: 132px;
+  margin: 0 auto;
+  text-align: center;
+  letter-spacing: 0.35em;
+  font-size: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+
+.theme-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.theme-option {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.theme-option.is-active {
+  background: var(--berry-soft);
+  color: var(--berry);
 }
 
 .toast {

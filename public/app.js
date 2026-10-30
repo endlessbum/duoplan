@@ -270,7 +270,11 @@
   let navRefreshHook = null;
 
   function applyTheme() {
-    const scheme = tg?.colorScheme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    // Выбранная тема перекрывает системную: "dark"/"light" форсируются.
+    const pref = themePref();
+    const scheme = pref === "system"
+      ? (tg?.colorScheme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"))
+      : pref;
     document.documentElement.dataset.theme = scheme === "dark" ? "dark" : "light";
     // Цвет читаем после смены темы: --bg уже пересчитан.
     const background = themeBackground();
@@ -311,6 +315,23 @@
   // Иконка на домашний экран (Bot API 8.0+) и закрытие в полноэкранном режиме
   // ------------------------------------------------------------------
   const HS_ADDED_KEY = "duoplan.homescreenAdded";
+  // Пароль на вход: 4 цифры, хранится только на этом устройстве.
+  const PIN_KEY = "duoplan.pin";
+  let appUnlocked = false;
+  function storedPin() {
+    try {
+      const value = String(localStorage.getItem(PIN_KEY) || "");
+      return /^\d{4}$/.test(value) ? value : "";
+    } catch { return ""; }
+  }
+  // Предпочтение темы: "system" | "dark" | "light" (по умолчанию — как в системе).
+  const THEME_KEY = "duoplan.theme";
+  function themePref() {
+    try {
+      const value = localStorage.getItem(THEME_KEY);
+      return value === "dark" || value === "light" ? value : "system";
+    } catch { return "system"; }
+  }
   let homeScreenStatus = null;
   function syncHomeScreenButton(status) {
     if (status) homeScreenStatus = status;
@@ -422,6 +443,12 @@
       return;
     }
     window.open(parsed.href, "_blank", "noopener");
+  }
+
+  // Даты всегда в виде дд/мм/гггг, независимо от ISO-хранения в базе.
+  function formatDay(value) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : String(value ?? "");
   }
 
   function firstLetter(name, fallback = "Д") {
@@ -647,8 +674,62 @@
     return new Date(makeDateInTimeZone(year, month - 1, day, 0, 0, timeZone));
   }
 
-  function planTarget(day, time) {
+  // Ближайшее ежемесячное наступление: первый месяц, где день существует
+  // и локальная дата не раньше сегодняшней (зеркало worker.nextMonthlyOccurrenceMs).
+  function monthlyNext(day, time) {
+    const parts = String(day || "").split("-");
+    if (parts.length !== 3) return null;
+    const dayOfMonth = Number(parts[2]);
+    if (!Number.isFinite(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) return null;
+    const tz = pairTimeZone();
+    let hours = 12, minutes = 0;
+    if (time && /^\d{2}:\d{2}$/.test(time)) {
+      const [hh, mm] = String(time).split(":").map(Number);
+      if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
+    }
+    const now = new Date();
+    const startY = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+    const startM = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit" }).format(now));
+    const keyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+    const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
+    const todayKey = keyFmt.format(now);
+    for (let offset = 0; offset < 25; offset++) {
+      const absolute = startM - 1 + offset;
+      const year = startY + Math.floor(absolute / 12);
+      const month = absolute % 12;
+      const candidate = makeDateInTimeZone(year, month, dayOfMonth, hours, minutes, tz);
+      const cp = dayFmt.formatToParts(candidate);
+      const cm = Number(cp.find((q) => q.type === "month")?.value);
+      const cd = Number(cp.find((q) => q.type === "day")?.value);
+      if (cm !== month + 1 || cd !== dayOfMonth) continue;
+      if (keyFmt.format(candidate) >= todayKey) return candidate;
+    }
+    return null;
+  }
+
+  // Какой повтор у записи: "month" | "year" | null.
+  function taskRepeat(item) {
+    if (Number(item?.monthly) === 1) return "month";
+    if (Number(item?.yearly) === 1) return "year";
+    return null;
+  }
+
+  // Ближайшее ежегодное наступление плана (29 февраля пропускается).
+  function yearlyNext(day, time) {
+    const tz = pairTimeZone();
+    const today = zonedToday(tz);
+    const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(new Date()));
+    for (let year = currentYear; year <= currentYear + 8; year++) {
+      const candidate = annualDate(day, year, time);
+      if (candidate && candidate >= today) return candidate;
+    }
+    return annualDate(day, currentYear, time);
+  }
+
+  function planTarget(day, time, repeat = null) {
     if (!day) return null;
+    if (repeat === "month") return monthlyNext(day, time);
+    if (repeat === "year") return yearlyNext(day, time);
     const [year, month, date] = String(day).split("-").map(Number);
     if (![year, month, date].every(Number.isFinite)) return null;
     const hhmm = time && /^\d{2}:\d{2}$/.test(time) ? time : "23:59";
@@ -668,7 +749,7 @@
   // Тай-брейк по id повторяет серверную sortByTaskDeadline, чтобы порядок
   // клиента совпадал с /api/state и архивными страницами.
   function sortByTaskDeadline(rows) {
-    const decorated = rows.map((row) => ({ row, at: planTarget(row.day, row.time)?.getTime() ?? Infinity }));
+    const decorated = rows.map((row) => ({ row, at: planTarget(row.day, row.time, taskRepeat(row))?.getTime() ?? Infinity }));
     decorated.sort((a, b) => a.at - b.at || byRowId(a.row.id, b.row.id));
     return decorated.map(({ row }) => row);
   }
@@ -706,6 +787,7 @@
 
   function nextOccurrence(item) {
     if (!item || !item.day) return null;
+    if (Number(item.monthly) === 1) return monthlyNext(item.day, item.time);
     const tz = pairTimeZone();
     const today = zonedToday(tz);
     if (!item.recurs) return dayTime(item.day, item.time, 12);
@@ -747,8 +829,8 @@
     return { overdue: false, text: `Через ${months} ${plural(months, "месяц", "месяца", "месяцев")}${restDays ? ` ${restDays} ${plural(restDays, "день", "дня", "дней")}` : ""}` };
   }
 
-  function countdownChip(day, time) {
-    const target = planTarget(day, time);
+  function countdownChip(day, time, repeat = null) {
+    const target = planTarget(day, time, repeat);
     if (!target) return "";
     const diff = target.getTime() - Date.now();
     if (diff <= 0) {
@@ -796,6 +878,40 @@
   // ------------------------------------------------------------------
   // Рендер экранов
   // ------------------------------------------------------------------
+  // Экран блокировки: спрашивает 4-значный пароль, если он задан в настройках.
+  function renderLock() {
+    return `
+      <section class="card lock-card">
+        <p class="eyebrow">DuoPlan заблокирован</p>
+        <h2>Введите пароль</h2>
+        <p>Четыре цифры, установленные в настройках приложения.</p>
+        <form id="lock-form" style="margin-top:14px; display:grid; gap:10px;">
+          <input id="lock-pin" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required>
+          <button class="primary full" type="submit">Войти</button>
+        </form>
+        <p class="settings-hint" id="lock-error" style="color:var(--berry);" hidden>Неверный пароль. Попробуйте ещё раз.</p>
+      </section>
+    `;
+  }
+
+  function mountLock() {
+    document.getElementById("lock-form")?.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const value = document.getElementById("lock-pin")?.value?.trim() || "";
+      if (value !== storedPin()) {
+        // Без тайм-аутов: просто повторная попытка.
+        const error = document.getElementById("lock-error");
+        if (error) error.hidden = false;
+        const input = document.getElementById("lock-pin");
+        if (input) { input.value = ""; input.focus(); }
+        return;
+      }
+      appUnlocked = true;
+      render();
+    });
+    setTimeout(() => document.getElementById("lock-pin")?.focus(), 50);
+  }
+
   function renderGenderGate() {
     // Пол обязателен: без него в приложение не пускаем — от него зависят
     // обращения в интерфейсе (подтверждения, список желаний).
@@ -868,10 +984,10 @@
       <section class="card hero-card">
         <p class="eyebrow">${pair.user_b ? "Ваша история" : "Ожидание партнёра"}</p>
         <h2>${pair.user_b ? `${esc(pair.name1)} и ${esc(pair.name2)}` : `Код пары: ${esc(pair.code)}`}</h2>
-        <p>${pair.user_b ? `Начало истории: ${esc(pair.started_at)}` : "Отправьте код партнёру, чтобы открыть ритуалы дня и общее пространство."}</p>
+        <p>${pair.user_b ? `Начало истории: ${esc(formatDay(pair.started_at))}` : "Отправьте код партнёру, чтобы открыть ритуалы дня и общее пространство."}</p>
         <div class="stats-row">
+          <span class="stat-pill">${FLAME_ICON} Серия ${user.streak || 0} дн.</span>
           <span class="stat-pill">✦ ${user.points || 0} XP</span>
-          <span class="stat-pill">🔥 Серия ${user.streak || 0} дн.</span>
           <span class="stat-pill">♥ Вместе ${pair.together_pts || 0} XP</span>
         </div>
       </section>
@@ -881,7 +997,6 @@
       ${previewTasks ? `
       <div class="section-head-inline">
         <h3>Ближайшие планы</h3>
-        <button class="link-btn" type="button" data-action="go-tab" data-tab="tasks">Все →</button>
       </div>
       ${previewTasks}
       ` : ""}
@@ -889,7 +1004,6 @@
       ${previewDates ? `
       <div class="section-head-inline">
         <h3>Значимые даты</h3>
-        <button class="link-btn" type="button" data-action="go-tab" data-tab="dates">Все →</button>
       </div>
       ${previewDates}
       ` : ""}
@@ -897,7 +1011,6 @@
       ${latestMemory ? `
         <div class="section-head-inline">
           <h3>Из дневника</h3>
-          <button class="link-btn" type="button" data-action="go-tab" data-tab="memories">Дневник →</button>
         </div>
         ${memoryItem(latestMemory)}
       ` : ""}
@@ -910,10 +1023,12 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
-            <div class="item-meta">
-              ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
-              ${item.day ? `<span>${esc(item.day)}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
-              ${countdownChip(item.day, item.time)}
+            <div class="item-meta has-when">
+              <div class="item-when">
+                ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
+                ${item.day ? `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
+                ${countdownChip(item.day, item.time, taskRepeat(item))}
+              </div>
               ${item.day ? `<button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>` : ""}
             </div>
           </div>
@@ -954,11 +1069,12 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
-            <div class="item-meta">
-              <span>${esc(item.day)}${item.time ? ` · ${esc(item.time)}` : ""}</span>
-              ${item.recurs ? `<span>· Ежегодно</span>` : ""}
-              ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
-              ${chip}
+            <div class="item-meta has-when">
+              <div class="item-when">
+                <span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}${Number(item.monthly) === 1 ? " · Ежемесячно" : item.recurs ? " · Ежегодно" : ""}</span>
+                ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
+                ${chip}
+              </div>
               <button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>
             </div>
           </div>
@@ -982,7 +1098,7 @@
             <p class="memory-body">${renderRichText(item.body)}</p>
             <div class="item-meta">
               <span>${esc(item.display_name || "Партнёр")}</span>
-              <span>· ${esc(item.day)}</span>
+              <span>· ${esc(formatDay(item.day))}</span>
             </div>
           </div>
           <div class="item-actions">
@@ -1029,6 +1145,10 @@
   // на мобильных он рендерится эмодзи и выпадает из стиля текстовых кнопок
   // ✓ (U+2713), ✎ (U+270E), ✕ (U+2715).
   const REOPEN_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"/></svg>';
+
+  // Монохромный огонёк серии: тонкий штрих в стиле иконок приложения вместо
+  // эмодзи 🔥, выбивавшегося из монохромных пилюль статистики.
+  const FLAME_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c1.2 3-2.6 4.6-2.6 7.6a3.6 3.6 0 0 0 3.7 3.5c1.8-.1 2.9-1.7 2.6-3.8 1.9 1.5 3.1 3.6 3.1 5.8A6.8 6.8 0 0 1 5.2 15C5.2 9.4 10.4 8 12 3Z"/></svg>';
 
   function completedTaskItem(item) {
     return `
@@ -1142,6 +1262,22 @@
     for (const task of tasks || []) {
       if (!task.day) continue;
       const [taskYear, taskMonth, taskDay] = String(task.day).split("-").map(Number);
+      if (Number(task.monthly) === 1) {
+        // Ежемесячный план — в каждом месяце, где такой день существует,
+        // и не раньше года создания.
+        if (year < taskYear) continue;
+        if (taskDay > calendarDaysInMonth(year, month)) continue;
+        push(calendarDayKey(year, month, taskDay), "tasks", task);
+        continue;
+      }
+      if (Number(task.yearly) === 1) {
+        // Ежегодный план — тот же месяц-день, не раньше года создания;
+        // 29 февраля в невисокосный год пропускается.
+        if (year < taskYear || taskMonth !== month) continue;
+        if (taskDay > calendarDaysInMonth(year, month)) continue;
+        push(calendarDayKey(year, month, taskDay), "tasks", task);
+        continue;
+      }
       if (taskYear !== year || taskMonth !== month) continue;
       push(calendarDayKey(year, month, taskDay), "tasks", task);
     }
@@ -1150,6 +1286,14 @@
       const [dateYear, dateMonth, dateDay] = String(date.day).split("-").map(Number);
       if (![dateYear, dateMonth, dateDay].every(Number.isFinite)) continue;
       const recurs = Number(date.recurs) === 1 || date.recurs === true;
+      const monthly = Number(date.monthly) === 1;
+      if (monthly) {
+        // Ежемесячная дата — как ежегодная, но каждый месяц того же дня.
+        if (year < dateYear) continue;
+        if (dateDay > calendarDaysInMonth(year, month)) continue;
+        push(calendarDayKey(year, month, dateDay), "dates", date);
+        continue;
+      }
       if (!recurs) {
         if (dateYear === year && dateMonth === month) {
           push(calendarDayKey(year, month, dateDay), "dates", date);
@@ -1399,14 +1543,31 @@
         </div>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" id="digest-enabled" ${user.digest_enabled ? "checked" : ""}> Утренняя сводка</span>
-          <input type="time" id="digest-time" value="${esc(user.digest_time || "09:00")}">
+          <input type="time" id="digest-time" lang="ru" value="${esc(user.digest_time || "09:00")}">
         </label>
         <p class="settings-hint">Планы и значимые даты на сегодня и завтра — личным сообщением от бота.</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" id="dates-digest-enabled" ${user.dates_digest_enabled ? "checked" : ""}> Даты за сутки</span>
-          <input type="time" id="dates-digest-time" value="${esc(user.dates_digest_time || "09:00")}">
+          <input type="time" id="dates-digest-time" lang="ru" value="${esc(user.dates_digest_time || "09:00")}">
         </label>
         <p class="settings-hint">Напомнит о завтрашних датах накануне в выбранное время. Кроме сводок бот предупреждает о плане с точным временем за 3 часа и за час.</p>
+        <div class="settings-row">
+          <span class="settings-label">Тема</span>
+          <div class="theme-switch">
+            ${[["system", "Как в системе"], ["dark", "Тёмная"], ["light", "Светлая"]].map(([value, label]) => `
+              <button class="theme-option${themePref() === value ? " is-active" : ""}" type="button" data-action="set-theme" data-theme="${value}">${label}</button>
+            `).join("")}
+          </div>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Пароль на вход</span>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" value="${storedPin()}">
+            <button class="secondary small" type="button" data-action="save-pin">Задать</button>
+            ${storedPin() ? `<button class="secondary small" type="button" data-action="clear-pin">Убрать</button>` : ""}
+          </div>
+        </div>
+        <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Хранится только на этом устройстве, без тайм-аутов при ошибке.</p>
         <div style="margin-top:14px; display:grid; gap:8px;">
           <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
           <button class="secondary full" type="button" data-action="export-diary">Выслать дневник сообщением</button>
@@ -1440,7 +1601,7 @@
       ${renderPairCalendar()}
       ${renderPairSettings()}
       <div class="pair-exit">
-        <button class="secondary full pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
+        <button class="secondary pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
       </div>
     `;
   }
@@ -1503,6 +1664,11 @@
     applyAccent();
     syncArchiveCachePair();
     syncTopControls();
+    if (!appUnlocked && storedPin()) {
+      appEl.innerHTML = renderLock();
+      mountLock();
+      return;
+    }
     if (!appState?.user?.gender) {
       appEl.innerHTML = renderGenderGate();
       return;
@@ -1706,11 +1872,18 @@
   // снимала бы required с даты, и форма уходила на сервер без неё.
   dialogFields.addEventListener("input", (e) => {
     const target = e.target;
-    if (!(target instanceof HTMLInputElement) || target.name !== "time") return;
-    if (!target.hasAttribute("data-requires-day")) return;
+    if (!(target instanceof HTMLInputElement)) return;
     const form = target.closest("form");
-    const dayInput = form?.querySelector('input[name="day"]');
-    if (dayInput) dayInput.required = Boolean(target.value);
+    // Повторы требуют дату: без неё повторять нечего.
+    if (target.hasAttribute("data-requires-day")) {
+      const dayInput = form?.querySelector('input[name="day"]');
+      if (dayInput) dayInput.required = Boolean(target.value);
+    }
+    // Ежемесячный и ежегодный повторы взаимоисключающие.
+    if (target.type === "checkbox" && target.dataset.excludes) {
+      const other = form?.querySelector(`input[name="${target.dataset.excludes}"]`);
+      if (other && target.checked) other.checked = false;
+    }
   });
   dialogForm.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1889,10 +2062,12 @@
           fields: `
             <label class="field"><span>Что запланируем?</span><input name="title" maxlength="180" required placeholder="Поехать за город на выходных"></label>
             <label class="field"><span>Дата (необязательно)</span><input type="date" name="day"></label>
-            <label class="field"><span>Время (необязательно)</span><input type="time" name="time" data-requires-day></label>
+            <label class="field"><span>Время (необязательно)</span><input type="time" name="time" data-requires-day lang="ru"></label>
+            <label class="field"><span><input type="checkbox" name="monthly" data-requires-day data-excludes="yearly"> Повторять каждый месяц</span></label>
+            <label class="field"><span><input type="checkbox" name="yearly" data-requires-day data-excludes="monthly"> Повторять каждый год</span></label>
             <label class="field"><span><input type="checkbox" name="is_private"> Личный — партнёр не увидит, в уведомлениях будет «Скрытый»</span></label>
           `,
-          onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), is_private: fd.get("is_private") === "on" } })
+          onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", yearly: fd.get("yearly") === "on", is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-date") {
         openDialog({
@@ -1900,10 +2075,12 @@
           fields: `
             <label class="field"><span>Название</span><input name="title" maxlength="120" required placeholder="День нашего знакомства"></label>
             <label class="field"><span>Дата</span><input type="date" name="day" required></label>
-            <label class="field"><span>Время (необязательно)</span><input type="time" name="time"></label>
+            <label class="field"><span>Время (необязательно)</span><input type="time" name="time" lang="ru"></label>
+            <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs"> Повторять каждый месяц</span></label>
+            <label class="field"><span><input type="checkbox" name="recurs" checked data-excludes="monthly"> Повторять каждый год</span></label>
             <label class="field"><span><input type="checkbox" name="is_private"> Личная — партнёр не увидит эту дату</span></label>
           `,
-          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), recurs: true, is_private: fd.get("is_private") === "on" } })
+          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-memory") {
         openDialog({
@@ -1974,7 +2151,7 @@
             <div class="memory-view-body">${renderRichText(item.body || "")}</div>
             <div class="item-meta" style="margin-top:12px;">
               <span>${esc(item.display_name || "Партнёр")}</span>
-              <span>· ${esc(item.day)}</span>
+              <span>· ${esc(formatDay(item.day))}</span>
             </div>
           `,
           submitLabel: null,
@@ -2002,11 +2179,13 @@
             fields: `
               <label class="field"><span>Что запланируем?</span><input name="title" maxlength="180" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Дата (необязательно)</span><input type="date" name="day" value="${esc(item.day || "")}"></label>
-              <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" data-requires-day></label>
+              <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" data-requires-day lang="ru"></label>
+              <label class="field"><span><input type="checkbox" name="monthly" data-requires-day data-excludes="yearly" ${Number(item.monthly) === 1 ? "checked" : ""}> Повторять каждый месяц</span></label>
+              <label class="field"><span><input type="checkbox" name="yearly" data-requires-day data-excludes="monthly" ${Number(item.monthly) !== 1 && item.yearly ? "checked" : ""}> Повторять каждый год</span></label>
               ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личный — партнёр не увидит, в уведомлениях будет «Скрытый»</span></label>` : ""}
             `,
             onSubmit: async (fd) => {
-              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
+              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", yearly: fd.get("yearly") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
               const state = await request(`/api/tasks/${id}`, { method: "PATCH", body });
               patchArchiveItem("tasks", id, body);
               return state;
@@ -2021,11 +2200,12 @@
             fields: `
               <label class="field"><span>Название</span><input name="title" maxlength="120" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Дата</span><input type="date" name="day" required value="${esc(item.day || "")}"></label>
-              <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}"></label>
-              <label class="field"><span><input type="checkbox" name="recurs" ${item.recurs ? "checked" : ""}> Повторять ежегодно</span></label>
+              <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" lang="ru"></label>
+              <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs" ${Number(item.monthly) === 1 ? "checked" : ""}> Повторять каждый месяц</span></label>
+              <label class="field"><span><input type="checkbox" name="recurs" data-excludes="monthly" ${Number(item.monthly) === 1 ? "" : item.recurs ? "checked" : ""}> Повторять каждый год</span></label>
               ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личная — партнёр не увидит эту дату</span></label>` : ""}
             `,
-            onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), recurs: fd.get("recurs") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined } })
+            onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined } })
           });
         } else if (type === "memories") {
           openDialog({
@@ -2118,6 +2298,25 @@
           }
         });
         showToast("Настройки сохранены");
+        render();
+      } else if (action === "set-theme") {
+        const value = btn.dataset.theme === "dark" || btn.dataset.theme === "light" ? btn.dataset.theme : "system";
+        try { localStorage.setItem(THEME_KEY, value); } catch {}
+        applyTheme();
+        render();
+      } else if (action === "save-pin") {
+        const value = document.getElementById("pin-input")?.value?.trim() || "";
+        if (!/^\d{4}$/.test(value)) {
+          showToast("Пароль — ровно 4 цифры");
+          return;
+        }
+        try { localStorage.setItem(PIN_KEY, value); } catch {}
+        appUnlocked = true; // только что заданный пароль не запирает текущую сессию
+        showToast("Пароль установлен");
+        render();
+      } else if (action === "clear-pin") {
+        try { localStorage.removeItem(PIN_KEY); } catch {}
+        showToast("Пароль убран");
         render();
       } else if (action === "export-diary") {
         btn.disabled = true;
@@ -2230,6 +2429,13 @@
     // Защита от нескольких одновременных запусков
     if (window.__duoplanInitInProgress) return;
     window.__duoplanInitInProgress = true;
+    // Пароль запрашиваем до сетевых запросов: приложение не грузится за замком.
+    if (!appUnlocked && storedPin()) {
+      appEl.innerHTML = renderLock();
+      mountLock();
+      window.__duoplanInitInProgress = false;
+      return;
+    }
 
     try {
       appState = await request("/api/state");

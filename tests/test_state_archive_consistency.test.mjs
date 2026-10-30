@@ -53,6 +53,8 @@ const load = new Function(
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function taskTargetMs"),
     extractBraced("function sortByTaskDeadline"),
+    extractBraced("function monthlyOccursOnDay"),
+    extractBraced("function nextMonthlyOccurrenceMs"),
     extractBraced("function nextDateOccurrence"),
     extractBraced("function isPastDate"),
     extractBraced("function sortDateRows"),

@@ -39,6 +39,8 @@ const load = new Function(
     extractBraced("function byRowId"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
+    extractBraced("function monthlyOccursOnDay"),
+    extractBraced("function nextMonthlyOccurrenceMs"),
     extractBraced("function nextDateOccurrence"),
     extractBraced("function isPastDate"),
     extractBraced("function sortDateRows")

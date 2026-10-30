@@ -42,6 +42,8 @@ const bundle = [
   extractLine("const REMINDER_1H"),
   extractBraced("function timeZoneOffsetMs("),
   extractBraced("function makeDateInTimeZone("),
+  extractBraced("function monthlyOccursOnDay("),
+  extractBraced("function nextMonthlyOccurrenceMs("),
   extractBraced("function taskTargetMs("),
   extractBraced("function planTaskReminders(")
 ].join("\n");

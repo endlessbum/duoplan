@@ -94,9 +94,11 @@ test("POST /api/dates с is_private пишет метку приватности
   });
   await api(request, env, new URL("https://duoplan.test/api/dates"));
   const insert = queries.find(q => q.sql.startsWith("INSERT INTO dates"));
-  deepStrictEqual(insert.args.length, 8);
-  equal(insert.args[5], 1); // is_private
-  equal(insert.args[6], 777); // created_by — автор
+  deepStrictEqual(insert.args.length, 9);
+  equal(insert.args[4], 1); // recurs
+  equal(insert.args[5], 0); // monthly не включён
+  equal(insert.args[6], 1); // is_private
+  equal(insert.args[7], 777); // created_by — автор
 });
 
 test("POST /api/dates без is_private остаётся общей, created_by всё равно пишется", async () => {
@@ -106,8 +108,9 @@ test("POST /api/dates без is_private остаётся общей, created_by 
   });
   await api(request, env, new URL("https://duoplan.test/api/dates"));
   const insert = queries.find(q => q.sql.startsWith("INSERT INTO dates"));
-  equal(insert.args[5], 0);
-  equal(insert.args[6], 777);
+  equal(insert.args[5], 0); // monthly
+  equal(insert.args[6], 0); // is_private — не передан
+  equal(insert.args[7], 777); // created_by
 });
 
 // ------------------------------------------------------------------
@@ -408,6 +411,8 @@ const loadDigest = new Function(
     extractBraced("function escapeHtml"),
     extractBraced("function richInline"),
     extractBraced("function richToHtml"),
+    extractBraced("function monthlyOccursOnDay"),
+    extractBraced("function nextMonthlyOccurrenceMs"),
     extractBraced("function dateOccursOnDay"),
     extractBraced("function digestText"),
     extractBraced("function datesDigestText"),
@@ -571,6 +576,8 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractBraced("function timeZoneOffsetMs"),
       extractBraced("function makeDateInTimeZone"),
       extractBraced("function taskTargetMs"),
+      extractBraced("function monthlyOccursOnDay"),
+      extractBraced("function nextMonthlyOccurrenceMs"),
       extractLine("const REMINDER_3H"),
       extractLine("const REMINDER_1H"),
       extractBraced("function planTaskReminders"),

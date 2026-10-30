@@ -43,6 +43,7 @@ const load = new Function(
     extractLine("  const RICH_TOKENS"),
     extractLine("  const REOPEN_ICON"),
     extractBraced("function esc"),
+    extractBraced("function formatDay"),
     extractBraced("function richInline"),
     extractBraced("function renderRichText"),
     extractBraced("function pairTimeZone"),
@@ -50,6 +51,9 @@ const load = new Function(
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function zonedToday"),
     extractBraced("function planTarget"),
+    extractBraced("function taskRepeat"),
+    extractBraced("function monthlyNext"),
+    extractBraced("function yearlyNext"),
     extractBraced("function byRowId"),
     extractBraced("function dayTime"),
     extractBraced("function annualDate"),
@@ -62,10 +66,10 @@ const load = new Function(
     extractBraced("function wishItem"),
     extractBraced("function completedTaskItem"),
     extractBraced("function completedWishItem"),
-    "return { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON };"
+    "return { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay };"
   ].join("\n")
 );
-const { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON } = load();
+const { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay } = load();
 
 test("у плана с датой есть «В календаре», у плана без даты — нет", () => {
   const withDay = taskItem({ id: 1, title: "План", day: "2026-11-05", time: "19:30", is_private: 0 });
@@ -155,6 +159,7 @@ test("memoryItem: заголовок, свёрнутое тело и клик-р
       'const document = { documentElement: { dataset: { theme: "dark" } }, querySelectorAll: () => [] };',
       extractLine("  const RICH_TOKENS"),
       extractBraced("function esc"),
+      extractBraced("function formatDay"),
       extractBraced("function richInline"),
       extractBraced("function renderRichText"),
       extractBraced("function memoryItem"),
@@ -174,4 +179,14 @@ test("memoryItem: заголовок, свёрнутое тело и клик-р
   // Старая запись без заголовка — без пустого h3.
   const noTitle = memoryItem({ id: 21, title: "", body: "Текст", day: "2026-09-20", display_name: "Игорь" });
   ok(!noTitle.includes("<h3"), "пустой заголовок отрисовался пустым h3");
+});
+
+
+test("formatDay: все даты приложения — дд/мм/гггг", () => {
+  equal(formatDay("2026-11-05"), "05/11/2026");
+  equal(formatDay("2020-02-29"), "29/02/2020");
+  // Мусор проходит как есть: чипы не должны показывать «undefined/NaN».
+  equal(formatDay(""), "");
+  equal(formatDay("мусор"), "мусор");
+  equal(formatDay(null), "");
 });

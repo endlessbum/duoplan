@@ -32,10 +32,10 @@ TABLES = {
         "dates_digest_time, dates_digest_enabled, accent_color, created_at, updated_at"
     ),
     "tasks": (
-        "id, pair_id, title, status, day, time, is_private, created_by, created_at, "
+        "id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, "
         "completed_by, completed_at"
     ),
-    "dates": "id, pair_id, title, day, time, recurs, is_private, created_by, created_at",
+    "dates": "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, created_at",
     "memories": "id, pair_id, author_id, title, body, day, created_at",
     "wishes": "id, pair_id, owner_id, body, done, done_at, url, created_at",
     "daily_rolls": "pair_id, day, daily_value",
@@ -50,6 +50,8 @@ NOT_NULL_FALLBACKS = {
     # NOT NULL DEFAULT 0/1 в D1: NULL из старой базы нарушил бы ограничение,
     # а для is_private ещё и молча раскрыл бы личную запись партнёру.
     "is_private": "0",
+    "monthly": "0",
+    "yearly": "0",
     "created_by": "0",
     "digest_enabled": "1",
     "dates_digest_enabled": "1",
