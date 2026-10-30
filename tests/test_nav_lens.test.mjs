@@ -126,13 +126,14 @@ test("при reduced-motion линза не увеличивает", () => {
   match(source, /const s = state\.reduced \? 0 : shape\.s;/);
 });
 
-test("перекраска идёт по доле накрытия и повторяется в линзе", () => {
-  match(source, /function applyTint\(shape\)/);
-  match(source, /coverageOf\(span, entry\.rect\)/);
-  match(source, /mixColor\(state\.palette\.idle, state\.palette\.accent, ratio\)/);
-  match(source, /items\[index\]\.style\.color = color/);
-  // Внутри капли копия держит полный акцент: под стеклом контент активен.
-  match(source, /lens\.clones\[index\]\.style\.color = mixColor\(state\.palette\.idle, state\.palette\.accent, 1\)/);
+test("цвет идёт по кромке капли, а не переключает вкладку целиком", () => {
+  // Базовый слой всегда обычный, копия в линзе — акцентная. Капля вырезает
+  // часть вкладки, поэтому акцент виден ровно там, где она накрыла контент.
+  match(source, /function applyColors\(\)/);
+  match(source, /items\[index\]\.style\.color = idle/);
+  match(source, /lens\.clones\[index\]\.style\.color = accent/);
+  // Доля накрытия остаётся — по ней считаются масштаб и наклон линзы.
+  match(source, /const ratio = coverageOf\(span, entry\.rect\)/);
 });
 
 test("цвета вкладок читаются из CSS-переменных панели", () => {

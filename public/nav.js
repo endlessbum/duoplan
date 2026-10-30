@@ -43,7 +43,6 @@
   const LENS_SCALE_SPEED = 0.10;  // добавка на максимальной скорости
   const LENS_TILT = 10;           // градусы перспективы у края капли
   const LENS_PERSPECTIVE = 200;   // px: меньше — резче искажение у краёв
-  const TINT_STEP = 0.01;         // шаг перекраски: мельче — лишние перерисовки
 
   // Уникальный id маски на каждую панель: на странице их может быть больше одной.
   let maskSeq = 0;
@@ -209,7 +208,8 @@
       reduced: false,
       // Цвета вкладок и текущая доля накрытия каждой из них каплей.
       palette: { idle: [118, 110, 104], accent: [184, 84, 100] },
-      tints: {}
+      tints: {},
+      colorsApplied: false
     };
 
     const motionQuery = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
@@ -337,6 +337,8 @@
       const accent = parseColor(cs.getPropertyValue("--berry"));
       if (idle) state.palette.idle = idle;
       if (accent) state.palette.accent = accent;
+      // Палитра могла измениться — перекрасим при следующем рендере.
+      state.colorsApplied = false;
     }
 
     function applyLens(shape) {
@@ -346,10 +348,16 @@
       // Прибавка к масштабу: в покое лёгкая, на скорости капля «надувает»
       // контент сильнее — вместе с деформацией контура это и есть жизнь.
       const boost = (LENS_SCALE - 1) + s * LENS_SCALE_SPEED;
+      const span = {
+        left: state.svgRect.left + shape.xL,
+        right: state.svgRect.left + shape.xR
+      };
       for (let index = 0; index < lens.clones.length; index += 1) {
         const clone = lens.clones[index];
         const entry = state.rects[index];
-        const ratio = state.tints[entry.tab] || 0;
+        // Доля накрытия: по ней считается и масштаб, и наклон.
+        const ratio = coverageOf(span, entry.rect);
+        state.tints[entry.tab] = ratio;
         if (ratio <= 0.001) {
           if (clone.style.transform) clone.style.transform = "";
           continue;
@@ -377,30 +385,18 @@
       }
     }
 
-    // Перекраска по доле накрытия: вкладка не «включается» целиком, а
-    // наливается цветом по мере того, как капля наезжает на неё. Внутри
-    // капли копия в линзе держит полный акцент — так под стеклом контент
-    // читается активным, а снаружи плавно уходит в обычный цвет.
-    function applyTint(shape) {
-      if (!state.rects || !state.svgRect) return;
-      const span = {
-        left: state.svgRect.left + shape.xL,
-        right: state.svgRect.left + shape.xR
-      };
-      for (let index = 0; index < state.rects.length; index += 1) {
-        const entry = state.rects[index];
-        const ratio = coverageOf(span, entry.rect);
-        const previous = state.tints[entry.tab];
-        if (previous !== undefined && Math.abs(ratio - previous) < TINT_STEP) continue;
-        state.tints[entry.tab] = ratio;
-        const color = mixColor(state.palette.idle, state.palette.accent, ratio);
-        // Цвет ставим на вкладку: иконка рисуется currentColor, подпись
-        // наследует цвет.
-        items[index].style.color = color;
-        if (lens && lens.clones[index]) {
-          lens.clones[index].style.color = mixColor(state.palette.idle, state.palette.accent, 1);
-        }
+    // Цвет: базовый слой всегда обычный, копия в линзе — акцентная. Поэтому
+    // вкладка красится не целиком, а ровно там, где её накрыла капля: граница
+    // цвета идёт по кромке стекла и едет вместе с ней.
+    function applyColors() {
+      if (state.colorsApplied) return;
+      const idle = mixColor(state.palette.idle, state.palette.accent, 0);
+      const accent = mixColor(state.palette.idle, state.palette.accent, 1);
+      for (let index = 0; index < items.length; index += 1) {
+        items[index].style.color = idle;
+        if (lens && lens.clones[index]) lens.clones[index].style.color = accent;
       }
+      state.colorsApplied = true;
     }
 
     // ------------------------------------------------------------- замеры
@@ -552,8 +548,8 @@
       const dir = state.vel < 0 ? -1 : 1;
       const shape = dropletShape(state.pos, state.vel, dir);
       path.setAttribute("d", shape.d);
-      // Сначала перекраска (линза берёт готовые доли накрытия), потом линза.
-      applyTint(shape);
+      // Цвет ставим один раз на палитру, линза — каждый кадр.
+      applyColors();
       applyLens(shape);
       if (state.drag) updatePreview();
     }
