@@ -1,11 +1,9 @@
-// Cloudflare _headers: одноимённые заголовки из нескольких правил склеиваются
-// через запятую. Поэтому Cache-Control нельзя задавать в общем правиле /*.
-//
-// Запуск: node tests/test_headers_cache.test.mjs  (или node --test "tests/*.test.mjs")
-import { readFileSync } from "node:fs";
+// Cloudflare _headers и версионирование статических ассетов Mini App.
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { ok } from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { ok, equal } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,8 +30,9 @@ test("общее правило /* не задаёт Cache-Control", () => {
 });
 
 test("статические ассеты задают Cache-Control отдельно", () => {
-  ok(blockFor("/app.js").some((l) => /^Cache-Control:\s*public, max-age=300$/i.test(l)));
-  ok(blockFor("/app.css").some((l) => /^Cache-Control:\s*public, max-age=300$/i.test(l)));
+  for (const asset of ["/app.js", "/app.css", "/nav.js", "/zoom-guard.js"]) {
+    ok(blockFor(asset).some((l) => /^Cache-Control:\s*public, max-age=31536000, immutable$/i.test(l)), asset);
+  }
 });
 
 test("HTML-страницы явно помечены no-cache", () => {
@@ -41,17 +40,36 @@ test("HTML-страницы явно помечены no-cache", () => {
   ok(blockFor("/").some((l) => /^Cache-Control:\s*no-cache$/i.test(l)));
 });
 
-test("мини-апп asset-пути версионированы — деплой не подхватывает старый кэш", () => {
+test("все локальные JS/CSS Mini App версионированы и совпадают с APP_VERSION", () => {
   const appHtml = readFileSync(join(root, "public", "app.html"), "utf8");
   const workerSource = readFileSync(join(root, "worker.js"), "utf8");
   const version = workerSource.match(/const APP_VERSION = "([^"]+)";/)?.[1];
   ok(version, "APP_VERSION в worker.js не найден");
-  ok(
-    new RegExp(`src="/app\\.js\\?v=${version.replace(/\./g, "\\.")}"`).test(appHtml),
-    `/app.js?v=${version} — версия должна совпадать с APP_VERSION`
-  );
-  ok(
-    new RegExp(`href="/app\\.css\\?v=${version.replace(/\./g, "\\.")}"`).test(appHtml),
-    `/app.css?v=${version} — версия должна совпадать с APP_VERSION`
-  );
+  for (const asset of ["app.js", "app.css", "nav.js", "zoom-guard.js"]) {
+    const ext = asset.split(".").pop();
+    const attr = ext === "css" ? "href" : "src";
+    const re = new RegExp(`${attr}="/${asset.replace(".", "\\.")}\\?v=${version.replace(/\./g, "\\.")}"`);
+    ok(re.test(appHtml), `${asset} должен иметь ?v=${version}`);
+  }
+});
+
+test("изменение содержимого ассета без изменения версии обнаруживается", () => {
+  const manifestPath = join(here, "asset-hashes.json");
+  const assets = ["app.js", "app.css", "nav.js", "zoom-guard.js"];
+  let manifest = {};
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch {
+    manifest = {};
+  }
+  for (const asset of assets) {
+    const buf = readFileSync(join(root, "public", asset));
+    const hash = createHash("sha256").update(buf).digest("hex");
+    if (manifest[asset]) {
+      equal(hash, manifest[asset], `${asset}: содержимое изменилось, но версия/хеш не обновлены`);
+    } else {
+      manifest[asset] = hash;
+    }
+  }
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 });

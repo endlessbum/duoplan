@@ -395,18 +395,18 @@ body.tg-fullscreen .tab-header {
   z-index: 0;
 }
 
-/* Убираем градиент, делаем каплю прозрачной с легким ореолом */
-.nav-drop-stop-top { stop-color: transparent; }
-.nav-drop-stop-mid { stop-color: transparent; }
-.nav-drop-stop-bottom { stop-color: transparent; }
+/* Объёмное стекло капли: полупрозрачный градиент с бликами. */
+.nav-drop-stop-top { stop-color: rgba(255, 255, 255, 0.55); }
+.nav-drop-stop-mid { stop-color: rgba(255, 255, 255, 0.22); }
+.nav-drop-stop-bottom { stop-color: rgba(255, 255, 255, 0.08); }
 
-/* Сама капля: контур полупрозрачный, цвет берется из акцентной палитры как тень */
+/* Сама капля: стеклянная линза с бликом и внутренним отражением. */
 .nav-droplet-path {
-  fill: transparent;
-  stroke: var(--droplet-border);
-  stroke-width: 1;
-  filter: drop-shadow(0 6px 14px var(--droplet-halo));
-  transition: stroke 0.3s ease;
+  fill: url(#nav-drop-fill);
+  stroke: var(--droplet-border, rgba(255, 255, 255, 0.45));
+  stroke-width: 1.2;
+  filter: drop-shadow(0 8px 18px var(--droplet-halo, rgba(0, 0, 0, 0.18)));
+  transition: stroke 0.3s ease, filter 0.3s ease;
 }
 
 /* Живое стекло: иконка под каплей получает эффект преломления */
@@ -454,6 +454,7 @@ body.tg-fullscreen .tab-header {
 .nav-item.is-active {
   color: var(--berry);
   font-weight: 700;
+  touch-action: none;
 }
 
 /* Предпросмотр цели во время перетаскивания: подсветка, но не активное

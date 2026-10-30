@@ -380,6 +380,10 @@
     }
 
     function onPointerDown(event) {
+      if (event.isPrimary === false) {
+        console.debug("[nav] pointerdown ignored: non-primary pointer");
+        return;
+      }
       if (event.pointerType === "mouse" && event.button !== 0) return;
       // Новый жест отменяет незавершённую защиту клика: если прошлый drag
       // закончился вне панели, click туда не придёт и запись осталась бы висеть.
@@ -470,6 +474,7 @@
     }
 
     function onPointerMove(event) {
+      if (event.isPrimary === false) return;
       const press = state.press;
       if (!press || event.pointerId !== press.pointerId) return;
       if (!press.dragging) {
@@ -537,6 +542,7 @@
     }
 
     function onPointerUp(event) {
+      if (event.isPrimary === false) return;
       const press = state.press;
       if (!press || event.pointerId !== press.pointerId) return;
       if (press.dragging) {
@@ -553,10 +559,13 @@
     }
 
     function onPointerCancel(event) {
+      if (event.isPrimary === false) return;
       const press = state.press;
       if (!press || event.pointerId !== press.pointerId) return;
-      if (press.dragging) finishDrag(false);
-      else state.press = null;
+      if (press.dragging) {
+        console.debug("[nav] drag cancelled: pointercancel/lostcapture");
+        finishDrag(false);
+      } else state.press = null;
     }
 
     // click после drag: гасим одноразово и только «свой» — тот же указатель,

@@ -4,20 +4,25 @@
   Permissions-Policy: geolocation=(), camera=(), microphone=()
   Content-Security-Policy: default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; base-uri 'none'; form-action 'self'
 
-# HTML-страницы не кэшируем: Cloudflare склеивает одноимённые заголовки
-# из нескольких правил через запятую, поэтому Cache-Control нельзя задавать
-# в общем правиле /* — иначе получится "no-cache, public, max-age=300".
+# HTML-страницы не кэшируем.
 /*.html
   Cache-Control: no-cache
 
 /
   Cache-Control: no-cache
 
+# Версионированные ассеты: долгое кэширование (URL меняется при изменении).
 /app.js
-  Cache-Control: public, max-age=300
+  Cache-Control: public, max-age=31536000, immutable
 
 /app.css
-  Cache-Control: public, max-age=300
+  Cache-Control: public, max-age=31536000, immutable
+
+/nav.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/zoom-guard.js
+  Cache-Control: public, max-age=31536000, immutable
 
 /favicon.svg
   Cache-Control: public, max-age=86400
