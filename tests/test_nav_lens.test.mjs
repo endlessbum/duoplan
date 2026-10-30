@@ -117,6 +117,19 @@ test("увеличенная вкладка не искажает замер р�
   match(source, /for \(const item of items\) item\.style\.transform = "";/);
 });
 
+test("капля «живая»: пружина недодемпфирована, в покое поджата", () => {
+  const num = (name) => Number(new RegExp(`const ${name} = ([\\d.]+);`).exec(source)?.[1]);
+  const k = num("SPRING_K");
+  const c = num("SPRING_C");
+  const zeta = c / (2 * Math.sqrt(k));
+  // ζ < 1 — капля приезжает с перелётом и качается; слишком малое ζ — звенит.
+  ok(zeta > 0.3 && zeta < 0.75, `ζ = ${zeta.toFixed(2)}`);
+  // В покое капля уже слота, в движении растягивается до полной ширины.
+  match(source, /const width = w0 \* \(REST_NARROW \+ \(1 - REST_NARROW\) \* s\);/);
+  const narrow = num("REST_NARROW");
+  ok(narrow > 0.85 && narrow < 1, `REST_NARROW = ${narrow}`);
+});
+
 test("цвета вкладок читаются из CSS-переменных панели", () => {
   match(source, /getPropertyValue\("--muted"\)/);
   match(source, /getPropertyValue\("--berry"\)/);

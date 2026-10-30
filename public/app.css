@@ -344,7 +344,7 @@ body.tg-fullscreen .tab-header {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 17px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 8px);
   width: min(488px, calc(100% - 24px));
   height: 62px;
   padding: 5px;
@@ -1132,7 +1132,7 @@ body.tg-fullscreen .tab-header {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 86px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 78px);
   transform: translateX(-50%);
   background: var(--glass-bg);
   color: var(--ink);
