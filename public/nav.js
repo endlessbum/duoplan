@@ -480,9 +480,10 @@
       if (!press.dragging) {
         const dx = event.clientX - press.startX;
         const dy = event.clientY - press.startY;
-        // Стартуем только на явно горизонтальном движении: вертикальный свайп
-        // должен прокручивать страницу, а не тащить каплю.
-        if (Math.abs(dx) < TAP_SLOP || Math.abs(dx) < Math.abs(dy)) return;
+        // Стартуем на горизонтальном или диагональном движении с достаточным
+        // горизонтальным смещением: вертикальный свайп прокручивает страницу.
+        if (Math.abs(dx) < TAP_SLOP) return;
+        if (Math.abs(dx) < Math.abs(dy) * 0.5) return;
         beginDrag(event, press);
         return;
       }
