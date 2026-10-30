@@ -67,14 +67,17 @@ test("партнёра нет — карточка приглашения с к�
   const html = render(PAIR);
   equal(html.includes("Приглашение партнёра"), true);
   equal(html.includes("Скопировать код: ABCD1234"), true);
-  equal(html.includes("(ожидание партнёра)"), true);
+  // Карточка «Участники пространства» удалена (п.5 улучшений 2026-10-30):
+  // имена и очки показывает главная, выход — отдельная кнопка под карточками.
+  equal(html.includes("Участники пространства"), false);
+  equal(html.includes("Выйти из пространства"), true);
 });
 
 test("партнёр присоединился — карточка приглашения скрыта", () => {
   const html = render({ ...PAIR, code: null, name2: "Аня", user_b: 2 });
   equal(html.includes("Приглашение партнёра"), false);
   equal(html.includes("Скопировать код"), false);
-  equal(html.includes("и Аня"), true);
+  equal(html.includes("Выйти из пространства"), true);
 });
 
 test("партнёр вышел — карточка приглашения возвращается", () => {

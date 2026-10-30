@@ -36,7 +36,7 @@ TABLES = {
         "completed_by, completed_at"
     ),
     "dates": "id, pair_id, title, day, time, recurs, is_private, created_by, created_at",
-    "memories": "id, pair_id, author_id, body, day, created_at",
+    "memories": "id, pair_id, author_id, title, body, day, created_at",
     "wishes": "id, pair_id, owner_id, body, done, done_at, url, created_at",
     "daily_rolls": "pair_id, day, daily_value",
     "daily_completions": "pair_id, tg_id, day, completed_at",

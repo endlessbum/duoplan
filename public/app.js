@@ -525,9 +525,9 @@
     const pair = appState?.pair;
     let subtitle = meta.sub || "";
     if (tabKey === "home" && pair) {
-      subtitle = pair.user_b
-        ? `${pair.name1} и ${pair.name2} · ${pair.together_pts || 0} XP вместе`
-        : `${pair.name1} · ожидание партнёра`;
+      // Только имена: очки пары уже показывает карточка ниже — дублировать
+      // их в подзаголовке незачем.
+      subtitle = pair.user_b ? `${pair.name1} и ${pair.name2}` : `${pair.name1} · ожидание партнёра`;
     }
     return `
       <header class="tab-header">
@@ -859,7 +859,8 @@
 
     const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
     // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
-    const previewDates = dates.slice(0, 2).map(dateItem).join("");
+    // На главной каждая группа — не больше трёх карточек, остальное за «Все →».
+    const previewDates = dates.slice(0, 3).map(dateItem).join("");
     const latestMemory = memories[0];
 
     return `
@@ -971,11 +972,14 @@
   }
 
   function memoryItem(item) {
+    // Карточка кликабельна целиком (open-memory): в списке видно несколько
+    // строк (line-clamp в CSS), полный текст — в диалоге чтения.
     return `
-      <article class="card">
+      <article class="card memory-card" data-action="open-memory" data-id="${item.id}" role="button" tabindex="0" aria-label="Открыть запись дневника">
         <div class="item-row">
           <div class="item-main">
-            <p style="color:var(--ink); white-space:pre-wrap; margin-bottom:6px;">${renderRichText(item.body)}</p>
+            ${item.title ? `<h3 class="item-title">${renderRichText(item.title)}</h3>` : ""}
+            <p class="memory-body">${renderRichText(item.body)}</p>
             <div class="item-meta">
               <span>${esc(item.display_name || "Партнёр")}</span>
               <span>· ${esc(item.day)}</span>
@@ -1020,6 +1024,12 @@
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
   }
 
+  // Иконка «вернуть» у завершённых записей: инлайн-SVG в стиле иконок
+  // приложения (stroke 1.9, как в app.html), а не текстовый глиф ↩ (U+21A9) —
+  // на мобильных он рендерится эмодзи и выпадает из стиля текстовых кнопок
+  // ✓ (U+2713), ✎ (U+270E), ✕ (U+2715).
+  const REOPEN_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"/></svg>';
+
   function completedTaskItem(item) {
     return `
       <article class="card" style="opacity:0.72;">
@@ -1029,7 +1039,7 @@
             <div class="item-meta"><span>Завершён</span></div>
           </div>
           <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="reopen-item" data-type="tasks" data-id="${item.id}" aria-label="Вернуть в планы">↩</button>
+            <button class="icon-btn" type="button" data-action="reopen-item" data-type="tasks" data-id="${item.id}" aria-label="Вернуть в планы">${REOPEN_ICON}</button>
             <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">✎</button>
             <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">✕</button>
           </div>
@@ -1041,7 +1051,7 @@
   function completedWishItem(item, editable = true) {
     const canEdit = editable && item.owner_id === appState.user.tg_id;
     const actions = canEdit ? `
-      <button class="icon-btn" type="button" data-action="reopen-item" data-type="wishes" data-id="${item.id}" aria-label="Вернуть в желания">↩</button>
+      <button class="icon-btn" type="button" data-action="reopen-item" data-type="wishes" data-id="${item.id}" aria-label="Вернуть в желания">${REOPEN_ICON}</button>
       <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">✎</button>
       <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">✕</button>
     ` : "";
@@ -1427,20 +1437,62 @@
     return `
       ${renderTabHeader("pair")}
       ${inviteBlock}
-      <section class="card">
-        <p class="eyebrow">Участники пространства</p>
-        <h3>${esc(pair.name1)} ${pair.user_b ? `и ${esc(pair.name2)}` : "(ожидание партнёра)"}</h3>
-        <p>Общие очки пары: ${pair.together_pts || 0} XP</p>
-        ${pair.user_b && pair.code ? `
-          <div style="margin-top:14px;">
-            <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
-          </div>
-        ` : ""}
-        <button class="secondary full pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
-      </section>
       ${renderPairCalendar()}
       ${renderPairSettings()}
+      <div class="pair-exit">
+        <button class="secondary full pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
+      </div>
     `;
+  }
+
+  // Списки вкладки «Вишлист» отдельно от переключателя: при смене вида
+  // перерисовывается только этот блок — экземпляр капли не пересоздаётся.
+  function renderWishLists() {
+    const wishDisabledClass = partnerMissing() ? " is-disabled" : "";
+    const myId = appState.user?.tg_id;
+    const isMine = wishView === "mine";
+    const allOpen = mergedArchive("wishes", appState.wishes || []);
+    const allDone = mergedArchive("done_wishes", appState.completedWishes || []);
+    const ownOpen = allOpen.filter((w) => Number(w.owner_id) === Number(myId));
+    const ownDone = allDone.filter((w) => Number(w.owner_id) === Number(myId));
+    const partnerOpen = allOpen.filter((w) => Number(w.owner_id) !== Number(myId));
+    const partnerDone = allDone.filter((w) => Number(w.owner_id) !== Number(myId));
+    const openWishes = isMine ? ownOpen : partnerOpen;
+    const doneWishes = isMine ? ownDone : partnerDone;
+    const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
+    let html = "";
+    if (isMine) {
+      if (openWishes.length || doneWishes.length) {
+        html += `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>`;
+        html += openWishes.map((item) => wishItem(item, true)).join("");
+      } else {
+        html += `
+          <section class="card">
+            <h3>Желание</h3>
+            <p>Поделитесь идеями подарков и маленькими мечтами.</p>
+            <div style="margin-top:12px;">
+              <button class="primary full${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>
+            </div>
+          </section>
+        `;
+      }
+    } else if (openWishes.length) {
+      html += openWishes.map((item) => wishItem(item, false)).join("");
+    } else {
+      html += `
+        <section class="card">
+          <h3>Пока пусто</h3>
+          <p>${partnerLabel === "Её" ? "Она" : "Он"} ещё не добавил${partnerLabel === "Её" ? "а" : ""} желаний в общий список.</p>
+        </section>
+      `;
+    }
+    if (doneWishes.length) {
+      html += `<div class="section-head-inline"><h3>Исполненные · ${doneWishes.length}</h3></div>`;
+      html += doneWishes.map((item) => completedWishItem(item, isMine)).join("");
+    }
+    html += archiveMoreHtml("done_wishes", (appState.completedWishes || []).length);
+    html += archiveMoreHtml("wishes", (appState.wishes || []).length);
+    return html;
   }
 
   function render() {
@@ -1499,19 +1551,9 @@
       const memoriesHtml = renderListTab("memories", mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem);
       appEl.innerHTML = memoriesHtml + archiveMoreHtml("memories", recentMemories.length);
     } else if (currentTab === "wishes") {
-      const wishDisabledClass = partnerMissing() ? " is-disabled" : "";
       const hasPartner = Boolean(appState.pair?.user_b);
       if (wishView === "partner" && !hasPartner) wishView = "mine";
-      const myId = appState.user?.tg_id;
       const isMine = wishView === "mine";
-      const allOpen = mergedArchive("wishes", appState.wishes || []);
-      const allDone = mergedArchive("done_wishes", appState.completedWishes || []);
-      const ownOpen = allOpen.filter((w) => Number(w.owner_id) === Number(myId));
-      const ownDone = allDone.filter((w) => Number(w.owner_id) === Number(myId));
-      const partnerOpen = allOpen.filter((w) => Number(w.owner_id) !== Number(myId));
-      const partnerDone = allDone.filter((w) => Number(w.owner_id) !== Number(myId));
-      const openWishes = isMine ? ownOpen : partnerOpen;
-      const doneWishes = isMine ? ownDone : partnerDone;
       const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
       let html = renderTabHeader("wishes");
       if (hasPartner) {
@@ -1522,39 +1564,10 @@
           </div>
         `;
       }
-      if (isMine) {
-        if (openWishes.length) {
-          html += `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>`;
-          html += openWishes.map((item) => wishItem(item, true)).join("");
-        } else if (doneWishes.length) {
-          html += `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>`;
-        } else {
-          html += `
-            <section class="card">
-              <h3>Желание</h3>
-              <p>Поделитесь идеями подарков и маленькими мечтами.</p>
-              <div style="margin-top:12px;">
-                <button class="primary full${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>
-              </div>
-            </section>
-          `;
-        }
-      } else if (openWishes.length) {
-        html += openWishes.map((item) => wishItem(item, false)).join("");
-      } else {
-        html += `
-          <section class="card">
-            <h3>Пока пусто</h3>
-            <p>${partnerLabel === "Её" ? "Она" : "Он"} ещё не добавил${partnerLabel === "Её" ? "а" : ""} желаний в общий список.</p>
-          </section>
-        `;
-      }
-      if (doneWishes.length) {
-        html += `<div class="section-head-inline"><h3>Исполненные · ${doneWishes.length}</h3></div>`;
-        html += doneWishes.map((item) => completedWishItem(item, isMine)).join("");
-      }
-      html += archiveMoreHtml("done_wishes", (appState.completedWishes || []).length);
-      html += archiveMoreHtml("wishes", (appState.wishes || []).length);
+      // Списки живут в отдельном контейнере: переключение «Мои / партнёр»
+      // перерисовывает только их, капля остаётся на живом экземпляре и
+      // доезжает плавно — как в главном баре.
+      html += `<div id="wish-lists">${renderWishLists()}</div>`;
       appEl.innerHTML = html;
     } else if (currentTab === "pair") {
       appEl.innerHTML = renderPair();
@@ -1597,7 +1610,16 @@
       onCommit: (view) => {
         if (view === wishView) return;
         wishView = view;
-        render();
+        // Капля уже на месте после перетаскивания: списки меняем точечно,
+        // экземпляр жив — доводим каплю пружиной, как в главном баре.
+        const lists = document.getElementById("wish-lists");
+        if (lists) {
+          lists.innerHTML = renderWishLists();
+          instance.setActive(view, true);
+          items.forEach((btn) => btn.setAttribute("aria-selected", String(btn.dataset.tab === view)));
+        } else {
+          render();
+        }
       }
     });
     if (!instance) return;
@@ -1618,7 +1640,12 @@
     dialogContext = config;
     dialogTitle.textContent = config.title;
     dialogFields.innerHTML = config.fields ?? "";
-    if (dialogSubmit) dialogSubmit.textContent = config.submitLabel ?? "Сохранить";
+    if (dialogSubmit) {
+      dialogSubmit.textContent = config.submitLabel ?? "Сохранить";
+      // submitLabel === null — режим чтения (просмотр дневника): без кнопки
+      // сохранения, только «Закрыть».
+      dialogSubmit.hidden = config.submitLabel === null;
+    }
     if (dialogCancel) dialogCancel.textContent = config.cancelLabel ?? "Отмена";
     dialog.showModal();
     // Focus trap для старых WebView, которые не поддерживают нативный <dialog> focus.
@@ -1881,8 +1908,9 @@
       } else if (action === "add-memory") {
         openDialog({
           title: "Запись в дневник",
-          fields: `<label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required placeholder="Сегодня был тёплый вечер…"></textarea></label>`,
-          onSubmit: (fd) => request("/api/memories", { method: "POST", body: { body: fd.get("body") } })
+          fields: `<label class="field"><span>Заголовок</span><input name="title" maxlength="180" required placeholder="Тёплый вечер у реки"></label>
+           <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required placeholder="Сегодня был тёплый вечер…"></textarea></label>`,
+          onSubmit: (fd) => request("/api/memories", { method: "POST", body: { title: fd.get("title"), body: fd.get("body") } })
         });
       } else if (action === "add-wish") {
         openDialog({
@@ -1902,16 +1930,57 @@
           throw error;
         }
       } else if (action === "done-item") {
-        appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}/done`, { method: "POST", body: {} });
-        render();
+        // Подтверждение в едином стиле: случайный тап по ✓ не завершает запись.
+        const typeNames = { tasks: "план", wishes: "желание" };
+        const name = typeNames[btn.dataset.type] || "запись";
+        const isWish = btn.dataset.type === "wishes";
+        openDialog({
+          title: isWish ? "Исполнено?" : "Выполнено?",
+          fields: `<p style="margin:2px 0 0;">Отметить ${name} как ${isWish ? "исполненное" : "выполненное"}? Запись переедет в завершённые.</p>`,
+          submitLabel: isWish ? "Да, исполнено" : "Да, выполнено",
+          onSubmit: async () => {
+            appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}/done`, { method: "POST", body: {} });
+            return appState;
+          }
+        });
       } else if (action === "delete-item") {
         const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание" };
-        if (!confirm(`Удалить ${typeNames[btn.dataset.type] || "запись"}? Это действие нельзя отменить.`)) return;
-        appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
-        // Из appState удалённая запись уходит сразу, но в кэше архива она
-        // осталась бы и продолжала отображаться (и повторное удаление дало бы 404).
-        removeFromArchiveCache(btn.dataset.type, btn.dataset.id);
-        render();
+        const name = typeNames[btn.dataset.type] || "запись";
+        // Родное confirm() заменено диалогом приложения — в едином стиле.
+        openDialog({
+          title: `Удалить ${name}?`,
+          fields: `<p style="margin:2px 0 0;">Это действие нельзя отменить.</p>`,
+          submitLabel: "Удалить",
+          onSubmit: async () => {
+            appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
+            // Из appState удалённая запись уходит сразу, но в кэше архива она
+            // осталась бы и продолжала отображаться (и повторное удаление дало бы 404).
+            removeFromArchiveCache(btn.dataset.type, btn.dataset.id);
+            return appState;
+          }
+        });
+      } else if (action === "open-memory") {
+        // Чтение дневника на весь экран: карточка кликабельна и из списка,
+        // и с главной. Кнопка сохранения скрыта — только «Закрыть».
+        const item = findItem("memories", btn.dataset.id);
+        if (!item) {
+          showToast("Запись не найдена");
+          return;
+        }
+        openDialog({
+          title: "Запись дневника",
+          fields: `
+            ${item.title ? `<h3 class="memory-view-title">${renderRichText(item.title)}</h3>` : ""}
+            <div class="memory-view-body">${renderRichText(item.body || "")}</div>
+            <div class="item-meta" style="margin-top:12px;">
+              <span>${esc(item.display_name || "Партнёр")}</span>
+              <span>· ${esc(item.day)}</span>
+            </div>
+          `,
+          submitLabel: null,
+          cancelLabel: "Закрыть",
+          onSubmit: async () => appState
+        });
       } else if (action === "reopen-item") {
         const type = btn.dataset.type;
         const id = btn.dataset.id;
@@ -1961,9 +2030,10 @@
         } else if (type === "memories") {
           openDialog({
             title: "Редактировать запись",
-            fields: `<label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required>${esc(item.body || "")}</textarea></label>`,
+            fields: `<label class="field"><span>Заголовок</span><input name="title" maxlength="180" placeholder="Без заголовка" value="${esc(item.title || "")}"></label>
+             <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required>${esc(item.body || "")}</textarea></label>`,
             onSubmit: async (fd) => {
-              const body = { body: fd.get("body") };
+              const body = { body: fd.get("body"), title: fd.get("title") };
               const state = await request(`/api/memories/${id}`, { method: "PATCH", body });
               patchArchiveItem("memories", id, body);
               return state;
@@ -2013,8 +2083,21 @@
       } else if (action === "leave-pair") {
         confirmLeaveSpace();
       } else if (action === "wish-view") {
-        wishView = btn.dataset.view === "partner" ? "partner" : "mine";
-        render();
+        const view = btn.dataset.view === "partner" ? "partner" : "mine";
+        if (view === wishView) return;
+        wishView = view;
+        // Тап по переключателю: точечная перерисовка списков + анимация капли
+        // на живом экземпляре — полное перерисование вкладки рвал бы движение.
+        const lists = document.getElementById("wish-lists");
+        if (lists && wishSwitch) {
+          wishSwitch.setActive(view, true);
+          lists.innerHTML = renderWishLists();
+          document.querySelectorAll(".wish-switch-btn[data-tab]").forEach((b) => {
+            b.setAttribute("aria-selected", String(b.dataset.tab === view));
+          });
+        } else {
+          render();
+        }
       } else if (action === "load-archive") {
         await loadArchivePage(btn.dataset.type, btn);
       } else if (action === "set-accent") {
@@ -2045,8 +2128,18 @@
           btn.disabled = false;
         }
       } else if (action === "set-gender") {
-        appState = await request("/api/gender", { method: "POST", body: { gender: btn.dataset.gender } });
-        render();
+        // Подтверждение выбора: случайный тап не фиксирует пол навсегда.
+        const gender = btn.dataset.gender === "female" ? "female" : "male";
+        const label = gender === "female" ? "Женщина" : "Мужчина";
+        openDialog({
+          title: "Ваш пол",
+          fields: `<p style="margin:2px 0 0;">Выбрано: <b>${label}</b>. Пол нужен для обращений в интерфейсе и подтверждениях.</p>`,
+          submitLabel: "Подтвердить",
+          onSubmit: async () => {
+            appState = await request("/api/gender", { method: "POST", body: { gender } });
+            return appState;
+          }
+        });
       }
     } catch (error) {
       handleRequestError(error);

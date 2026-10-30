@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal } from "node:assert/strict";
+import { deepStrictEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -34,7 +34,7 @@ function extractBraced(declaration) {
 }
 
 const load = new Function(
-  "request", "render", "STATE_RECENT_LIMIT", "STATE_ACTIVE_LIMIT",
+  "request", "render", "STATE_RECENT_LIMIT", "STATE_ACTIVE_LIMIT", "ARCHIVE_PAGE_SIZE",
   [
     "let appState = null;",
     "let archiveCachePairId = null;",
@@ -54,7 +54,7 @@ const load = new Function(
 );
 
 function makeCtx(requestMock = async () => ({ items: [], hasMore: false }), renderMock = () => {}) {
-  return load(requestMock, renderMock, 10, 200);
+  return load(requestMock, renderMock, 10, 200, 20);
 }
 
 test("смена пары сбрасывает кэш, та же пара — нет", () => {
@@ -217,6 +217,27 @@ test("кнопка «Показать ещё» у активных наборо�
   ctx.archiveCache.tasks.page = 0;
   ctx.archiveCache.tasks.hasMore = false;
   equal(ctx.archiveMoreHtml("tasks", 200), "");
+});
+
+test("кнопка «Показать ещё» подписана счётчиком remaining", () => {
+  const ctx = makeCtx();
+  ctx.setAppState({ pair: { id: 1 } });
+  ctx.syncArchiveCachePair();
+  // Остаток неизвестен (страрый ответ сервера) — кнопка без счётчика.
+  ctx.archiveCache.memories.page = 0;
+  ctx.archiveCache.memories.hasMore = true;
+  ctx.archiveCache.memories.remaining = null;
+  ok(!ctx.archiveMoreHtml("memories", 10).includes("из "), "null remaining не должен давать счётчик");
+  // Остаток 45: следующая страница покажет 20 из 45.
+  ctx.archiveCache.memories.remaining = 45;
+  const labelled = ctx.archiveMoreHtml("memories", 10);
+  ok(labelled.includes("Показать ещё (20 из 45)"), labelled);
+  // Остаток меньше страницы: «(7 из 7)».
+  ctx.archiveCache.memories.remaining = 7;
+  ok(ctx.archiveMoreHtml("memories", 10).includes("(7 из 7)"));
+  // hasMore=false — кнопки нет, счётчик не рисуется.
+  ctx.archiveCache.memories.hasMore = false;
+  equal(ctx.archiveMoreHtml("memories", 10), "");
 });
 
 test("хвост активных планов скрывается, когда запись завершили", () => {

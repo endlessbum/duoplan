@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.30.16";
+const APP_VERSION = "2026.10.31.1";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.30.16";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.30.16";
+const DB_SCHEMA_VERSION = "2026.10.31.1";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -43,7 +43,7 @@ const STATE_RECENT_LIMIT = 10;
 const ARCHIVE_PAGE_SIZE = 20;
 const ARCHIVE_QUERIES = {
   memories: {
-    sql: `SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
+    sql: `SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`
   },
   done_tasks: {
@@ -656,7 +656,7 @@ async function state(env, userId) {
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
     env.DB.prepare("SELECT id,title,day,time,recurs,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
-    env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
+    env.DB.prepare(`SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
@@ -821,7 +821,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     const patchSchemas = {
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, is_private: { type: "boolean" } },
       dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, is_private: { type: "boolean" } },
-      memories: { body: { type: "string", maxLength: 2000 } },
+      memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 } },
       wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } }
     };
     if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
@@ -854,6 +854,10 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     } else if (type === "memories") {
       fields.push("body=?");
       values.push(textField(body, "body", 2000, "Воспоминание"));
+      if (body.title !== undefined) {
+        fields.push("title=?");
+        values.push(clean(body.title) || null);
+      }
     } else {
       fields.push("body=?");
       values.push(textField(body, "body", 300, "Желание"));
@@ -1034,10 +1038,13 @@ async function api(request, env, url) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
-    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 } });
+    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 }, title: { type: "string", maxLength: 180 } });
     const text = textField(body, "body", 2000, "Воспоминание");
-    await env.DB.prepare("INSERT INTO memories(pair_id,author_id,body,day,created_at) VALUES(?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, text, localDay(pair.timezone), now()).run();
+    // Заголовок необязателен на сервере (у старых записей и записей из бота
+    // его нет), но клиент запрашивает его при создании.
+    const title = clean(body.title) || null;
+    await env.DB.prepare("INSERT INTO memories(pair_id,author_id,title,body,day,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, title, text, localDay(pair.timezone), now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/wishes") {
@@ -1637,7 +1644,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,PRIMARY KEY (pair_id,day))`,  /* done_by/done_at removed: relic of pre-daily_completions schema */
     `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL DEFAULT 0)`,
@@ -1672,6 +1679,7 @@ async function ensureSchema(env) {
     ["dates", "created_by", "INTEGER NOT NULL DEFAULT 0"],
     ["wishes", "done_at", "INTEGER"],
     ["wishes", "url", "TEXT"],
+    ["memories", "title", "TEXT"],
     ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();

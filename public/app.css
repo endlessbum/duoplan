@@ -587,9 +587,49 @@ body.tg-fullscreen .tab-header {
   margin-bottom: 14px;
 }
 
+.pair-exit {
+  margin-top: 2px;
+}
+
 .pair-leave {
   color: var(--berry);
-  margin-top: 10px;
+}
+
+/* Запись дневника: в списке видно несколько строк, полный текст — по клику
+   (диалог чтения). */
+.memory-card {
+  cursor: pointer;
+}
+
+.memory-body {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.memory-view-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.memory-view-body {
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Диалог чтения с длинным текстом: не выше вьюпорта, содержимое скроллится. */
+.sheet-form {
+  max-height: min(86dvh, 760px);
+  overflow-y: auto;
 }
 
 /* ------------------------------------------------------------------
@@ -1089,8 +1129,8 @@ body.tg-fullscreen .tab-header {
   color: var(--muted);
 }
 
-.field input,
-.field textarea {
+.field > input,
+.field > textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1108,10 +1148,24 @@ body.tg-fullscreen .tab-header {
   margin-top: 16px;
 }
 
+/* Экран загрузки по центру окна: карточка — единственный контент main-view
+   на момент старта. Отрицательный нижний отступ гасит padding-bottom
+   main-view (резерв под навигацию), иначе центр уезжает вверх на его высоту. */
 .loading-card {
-  padding: 64px 20px;
+  min-height: 100dvh;
+  margin-bottom: calc(-1 * (env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 104px));
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: 0 20px;
   text-align: center;
   color: var(--muted);
+}
+
+/* Нативные чекбоксы (диалоги создания и карточка настроек) красятся в
+   акцентный цвет приложения, а не в системный синий. */
+input[type="checkbox"] {
+  accent-color: var(--berry);
 }
 
 .spinner {

@@ -105,3 +105,42 @@ test("темы задают --bg и он совпадает у корня и о�
 test("в разметке есть theme-color, который обновляет applyTheme", () => {
   equal(/<meta name="theme-color" content="#[0-9a-f]{6}">/i.test(appHtml), true);
 });
+
+// ------------------------------------------------------------------
+// Акцентные свотчи: фон образца следует теме (в тёмной теме светлый
+// вариант палитры выглядел темнее фактического акцента).
+// ------------------------------------------------------------------
+test("свотчи акцента перекрашиваются вариантом текущей темы", () => {
+  const swatches = [
+    { dataset: { accent: "ocean" }, style: {} },
+    { dataset: { accent: "berry" }, style: {} }
+  ];
+  const makeDocument = (theme) => ({
+    documentElement: {
+      dataset: { theme },
+      style: { setProperty() {}, removeProperty() {} }
+    },
+    querySelectorAll: (selector) => (selector === ".swatch[data-accent]" ? swatches : [])
+  });
+  const run = (theme) => new Function(
+    "document",
+    [
+      'const appState = { user: { accent_color: "ocean" } };',
+      extractBraced(appJs, "const ACCENT_PALETTES"),
+      extractBraced(appJs, "function hexRgb"),
+      extractBraced(appJs, "function shadeHex"),
+      extractBraced(appJs, "function applyAccent"),
+      "applyAccent();"
+    ].join("\n")
+  )(makeDocument(theme));
+
+  // Тёмная тема: образцы показывают dark-варианты палитр.
+  run("dark");
+  equal(swatches[0].style.background, "#7fa3c0", "ocean.dark");
+  equal(swatches[1].style.background, "#d97383", "berry.dark");
+
+  // Светлая тема: light-варианты.
+  run("light");
+  equal(swatches[0].style.background, "#4a6f8f", "ocean.light");
+  equal(swatches[1].style.background, "#b85464", "berry.light");
+});
