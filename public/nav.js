@@ -48,6 +48,8 @@
   const LENS_TILT = 14;           // градусы перспективы у края капли
   const LENS_PERSPECTIVE = 200;   // px: меньше — резче искажение у краёв
   const LEADER_MIN = 0.05;        // доля накрытия, ниже которой акцент не включаем
+  // Уникальные id градиентов: на странице может быть несколько капель.
+  let maskSeq = 0;
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const round2 = (value) => Math.round(value * 100) / 100;
@@ -184,12 +186,59 @@
   }
 
   // ------------------------------------------------------------------
+  // Капля для контейнера без своей разметки
+  // ------------------------------------------------------------------
+
+  // Нижняя панель держит SVG в app.html, а переключателям в странице проще
+  // получить её из кода. Градиент заливки берётся общий (#nav-drop-fill из
+  // разметки панели) — он один на документ.
+  function buildDroplet(container) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("class", "nav-droplet");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    // Свой градиент, а не общий из разметки панели: переключатель не должен
+    // зависеть от того, есть ли на странице нижняя панель и видна ли она.
+    const gradientId = `nav-drop-fill-${(maskSeq += 1)}`;
+    const defs = document.createElementNS(ns, "defs");
+    const gradient = document.createElementNS(ns, "linearGradient");
+    gradient.setAttribute("id", gradientId);
+    gradient.setAttribute("x1", "0");
+    gradient.setAttribute("y1", "0");
+    gradient.setAttribute("x2", "0");
+    gradient.setAttribute("y2", "1");
+    for (const [cls, offset] of [["nav-drop-stop-top", "0"], ["nav-drop-stop-mid", "0.62"], ["nav-drop-stop-bottom", "1"]]) {
+      const stop = document.createElementNS(ns, "stop");
+      stop.setAttribute("class", cls);
+      stop.setAttribute("offset", offset);
+      gradient.appendChild(stop);
+    }
+    defs.appendChild(gradient);
+    svg.appendChild(defs);
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("class", "nav-droplet-path");
+    path.setAttribute("d", "");
+    // Инлайн-заливка перебивает url(#nav-drop-fill) из класса.
+    path.style.fill = `url(#${gradientId})`;
+    svg.appendChild(path);
+    container.insertBefore(svg, container.firstChild);
+    return { svg, path };
+  }
+
+  // ------------------------------------------------------------------
   // Модуль навигации
   // ------------------------------------------------------------------
 
   function createLiquidNav(options) {
-    const { nav, svg, path, items, onCommit } = options || {};
-    if (!nav || !svg || !path || !items || !items.length) return null;
+    const { nav, items, onCommit, idleVar, accentVar } = options || {};
+    if (!nav || !items || !items.length) return null;
+    // Капля нужна не только нижней панели: у переключателей в странице
+    // разметки с SVG нет, поэтому контейнер получает её сам.
+    const ownSvg = !(options.svg && options.path);
+    const droplet = ownSvg ? buildDroplet(nav) : { svg: options.svg, path: options.path };
+    const svg = droplet.svg;
+    const path = droplet.path;
 
     const state = {
       active: null,
@@ -232,8 +281,8 @@
     function readPalette() {
       if (!window.getComputedStyle) return;
       const cs = window.getComputedStyle(nav);
-      const idle = parseColor(cs.getPropertyValue("--muted"));
-      const accent = parseColor(cs.getPropertyValue("--berry"));
+      const idle = parseColor(cs.getPropertyValue(idleVar || "--muted"));
+      const accent = parseColor(cs.getPropertyValue(accentVar || "--berry"));
       if (idle) state.palette.idle = idle;
       if (accent) state.palette.accent = accent;
       state.lastColors.length = 0;
@@ -542,7 +591,7 @@
       let item = null;
       let el = event.target;
       while (el && el !== nav) {
-        if (el.classList && el.classList.contains("nav-item") && el.dataset && el.dataset.tab) {
+        if (el.dataset && el.dataset.tab) {
           item = el;
           break;
         }
@@ -800,6 +849,7 @@
 
     function destroy() {
       stopLoop();
+      if (ownSvg && svg.parentNode) svg.parentNode.removeChild(svg);
       nav.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);

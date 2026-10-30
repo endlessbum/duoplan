@@ -7,7 +7,7 @@
 //      не наследуется, а default `auto` перебивает `pan-y` панели;
 //   2) отменяет touchmove, пока жест жив, — это гарантирует отсутствие скролла
 //      даже там, где touch-action игнорируется;
-//   3) ищет .nav-item обходом предков, а не `closest()`: на SVG-капле часть
+//   3) ищет вкладку обходом предков по data-tab, а не `closest()`: на SVG-капле часть
 //      WebView не поднимается до <button>.
 //
 // Поведение в реальном браузере проверяет tests/nav-harness.html (сценарии
@@ -83,6 +83,8 @@ test("цель жеста ищется обходом предков, а не cl
   const body = functionBody("onPointerDown");
   ok(!/event\.target\.closest/.test(body), "closest() на SVG в WebView не поднимается до .nav-item");
   match(body, /let el = event\.target;/);
-  match(body, /el\.classList\.contains\("nav-item"\)/);
+  // Цель ищется по data-tab: так капля работает и в переключателях
+  // внутри страницы, где кнопки не имеют класса .nav-item.
+  match(body, /el\.dataset && el\.dataset\.tab/);
   match(body, /el = el\.parentNode/);
 });

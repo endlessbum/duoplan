@@ -131,6 +131,15 @@ test("капля «живая»: пружина недодемпфирована
 });
 
 test("цвета вкладок читаются из CSS-переменных панели", () => {
-  match(source, /getPropertyValue\("--muted"\)/);
-  match(source, /getPropertyValue\("--berry"\)/);
+  match(source, /getPropertyValue\(idleVar \|\| "--muted"\)/);
+  match(source, /getPropertyValue\(accentVar \|\| "--berry"\)/);
+});
+
+test("каплю можно поставить в любой контейнер со своими кнопками", () => {
+  // Переключатели в странице не имеют ни SVG, ни класса .nav-item:
+  // фабрика собирает каплю сама и ищет цель по data-tab.
+  match(source, /function buildDroplet\(container\)/);
+  match(source, /const ownSvg = !\(options\.svg && options\.path\);/);
+  match(source, /el\.dataset && el\.dataset\.tab/);
+  match(source, /if \(ownSvg && svg\.parentNode\) svg\.parentNode\.removeChild\(svg\)/);
 });

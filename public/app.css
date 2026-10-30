@@ -309,9 +309,16 @@ body.tg-fullscreen .tab-header {
   box-shadow: var(--glass-shadow);
   margin: 0 0 14px;
   user-select: none;
+  /* Капля живёт внутри переключателя: контейнер — её система координат. */
+  position: relative;
+  isolation: isolate;
+  touch-action: none;
 }
 
 .wish-switch-btn {
+  position: relative;
+  z-index: 1;
+  touch-action: none;
   appearance: none;
   border: 0;
   background: transparent;
@@ -323,16 +330,14 @@ body.tg-fullscreen .tab-header {
   font-weight: 600;
   letter-spacing: -0.01em;
   cursor: pointer;
-  transition: color 0.2s ease, background 0.25s ease, transform 0.18s ease;
+  /* В переключателе, как и в доке, меняется только цвет. */
+  transition: color 0.2s ease;
 }
 
-.wish-switch-btn:active {
-  transform: scale(0.96);
-}
-
+/* Подсветку даёт капля; фон активной кнопки убран, иначе он просвечивал бы
+   сквозь стекло вторым прямоугольником. */
 .wish-switch-btn.is-active {
   color: var(--berry);
-  background: var(--droplet-bg);
 }
 
 /* ------------------------------------------------------------------

@@ -1384,6 +1384,9 @@
   }
 
   function render() {
+    // Разметка ниже перезаписывается целиком — экземпляр капли снимаем заранее,
+    // иначе он остался бы висеть на window-слушателях.
+    destroyWishSwitch();
     // Акцент мог измениться (настройки/тема) — пере-применяем на каждом рендере.
     applyAccent();
     syncArchiveCachePair();
@@ -1454,8 +1457,8 @@
       if (hasPartner) {
         html += `
           <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
-            <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine">Мои</button>
-            <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="wish-view" data-view="partner">${partnerLabel}</button>
+            <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine" data-tab="mine">Мои</button>
+            <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>
           </div>
         `;
       }
@@ -1499,6 +1502,53 @@
       // страницы архива в фоне и перерисовывается сам.
       ensureCalendarArchive();
     }
+    mountWishSwitch();
+  }
+
+  // ------------------------------------------------------------------
+  // Переключатель «Мои / партнёр»: та же капля, что в нижней панели
+  // ------------------------------------------------------------------
+  // Разметка переключателя перерисовывается вместе с вкладкой, поэтому
+  // экземпляр живёт до следующего render(): старый снимаем в начале, новый
+  // создаём в конце. Вид запоминаем, чтобы капля приезжала с прежнего места,
+  // а не появлялась сразу на новом.
+  let wishSwitch = null;
+  let wishSwitchPrevView = null;
+
+  function destroyWishSwitch() {
+    if (!wishSwitch) return;
+    wishSwitch.destroy();
+    wishSwitch = null;
+  }
+
+  function mountWishSwitch() {
+    const container = document.querySelector(".wish-switch");
+    if (!container || !window.createLiquidNav) {
+      wishSwitchPrevView = null;
+      return;
+    }
+    const items = Array.from(container.querySelectorAll(".wish-switch-btn[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      // В переключателе обычный цвет — это цвет подписи на стекле.
+      idleVar: "--nav-label",
+      onCommit: (view) => {
+        if (view === wishView) return;
+        wishView = view;
+        render();
+      }
+    });
+    if (!instance) return;
+    if (wishSwitchPrevView && wishSwitchPrevView !== wishView) {
+      instance.setActive(wishSwitchPrevView, false);
+      instance.setActive(wishView, true);
+    } else {
+      instance.setActive(wishView, false);
+    }
+    wishSwitch = instance;
+    wishSwitchPrevView = wishView;
   }
 
   // ------------------------------------------------------------------
