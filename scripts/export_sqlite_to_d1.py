@@ -17,6 +17,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Список колонок обязан совпадать с текущей схемой: если колонки нет в списке,
+# она не попадает в INSERT, и D1 подставит DEFAULT. Для is_private это означало
+# бы, что личные планы и даты после переноса становятся общими (миграции
+# 0007-0011 добавляли их уже после того, как список был написан).
 TABLES = {
     "pairs": (
         "id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, "
@@ -24,22 +28,32 @@ TABLES = {
     ),
     "users": (
         "tg_id, username, display_name, role, gender, pair_id, points, streak, "
-        "last_activity, best_streak, timezone, created_at, updated_at"
+        "last_activity, best_streak, timezone, digest_time, digest_enabled, "
+        "dates_digest_time, dates_digest_enabled, accent_color, created_at, updated_at"
     ),
     "tasks": (
-        "id, pair_id, title, status, day, time, created_by, created_at, completed_by, "
-        "completed_at"
+        "id, pair_id, title, status, day, time, is_private, created_by, created_at, "
+        "completed_by, completed_at"
     ),
-    "dates": "id, pair_id, title, day, time, recurs, created_at",
+    "dates": "id, pair_id, title, day, time, recurs, is_private, created_by, created_at",
     "memories": "id, pair_id, author_id, body, day, created_at",
-    "wishes": "id, pair_id, owner_id, body, done, created_at",
+    "wishes": "id, pair_id, owner_id, body, done, done_at, url, created_at",
     "daily_rolls": "pair_id, day, daily_value, done_by, done_at",
+    "daily_completions": "pair_id, tg_id, day, completed_at",
 }
 
 # Колонки, которые в схеме D1 объявлены NOT NULL с DEFAULT. Если в исходной
 # SQLite колонки нет или значение NULL, вместо NULL подставляется DEFAULT,
 # иначе INSERT нарушит ограничение NOT NULL при импорте.
-NOT_NULL_FALLBACKS = {"timezone": "'Europe/Moscow'"}
+NOT_NULL_FALLBACKS = {
+    "timezone": "'Europe/Moscow'",
+    # NOT NULL DEFAULT 0/1 в D1: NULL из старой базы нарушил бы ограничение,
+    # а для is_private ещё и молча раскрыл бы личную запись партнёру.
+    "is_private": "0",
+    "created_by": "0",
+    "digest_enabled": "1",
+    "dates_digest_enabled": "1",
+}
 
 
 def quote(value: object) -> str:

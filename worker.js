@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.30.13";
+const APP_VERSION = "2026.10.30.14";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.30.13";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.30.13";
+const DB_SCHEMA_VERSION = "2026.10.30.14";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -44,15 +44,15 @@ const ARCHIVE_PAGE_SIZE = 20;
 const ARCHIVE_QUERIES = {
   memories: {
     sql: `SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
-      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT ? OFFSET ?`
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`
   },
   done_tasks: {
     userScoped: true,
-    sql: "SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC LIMIT ? OFFSET ?"
+    sql: "SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
   },
   done_wishes: {
     sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ? OFFSET ?`
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
   },
   // Активные наборы: продолжение списков /api/state после 200-й записи.
   // Порядок wishes совпадает со state (SQL). Для tasks/dates И state(), И эта
@@ -76,7 +76,7 @@ const ARCHIVE_QUERIES = {
   wishes: {
     active: true,
     sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT ? OFFSET ?`
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
   }
 };
 
@@ -648,17 +648,17 @@ async function state(env, userId) {
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
-    env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
     env.DB.prepare("SELECT id,title,day,time,recurs,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
-      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
@@ -828,13 +828,15 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     } else {
       fields.push("body=?");
       values.push(textField(body, "body", 300, "Желание"));
+      // Ссылка валидируется ДО UPDATE и пишется тем же запросом: иначе при
+      // некорректном URL текст уже был бы изменён, а клиент получил бы 400.
+      if (body.url !== undefined) {
+        fields.push("url=?");
+        values.push(wishUrl(body.url));
+      }
     }
     const result = await env.DB.prepare(`UPDATE ${table} SET ${fields.join(",")} WHERE id=? AND pair_id=?`)
       .bind(...values, id, pair.id).run();
-    // Если у желания передан URL, сохраняем его отдельно (owner уже проверен выше)
-    if (type === "wishes" && body.url !== undefined) {
-      await env.DB.prepare("UPDATE wishes SET url=? WHERE id=? AND pair_id=? AND owner_id=?").bind(wishUrl(body.url), id, pair.id, user.tg_id).run();
-    }
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
     return true;
   }
@@ -1283,7 +1285,7 @@ const maskTitle = (item) => (Number(item.is_private) === 1 ? RICH_MASKED : richT
 const DIGEST_MAX_ITEMS = 18;
 const DIGEST_MAX_CHARS = 3400;
 
-function digestText(timeZone, today, tomorrow, dates, tasks) {
+function digestText(today, tomorrow, dates, tasks) {
   const todayDates = dates.filter(d => dateOccursOnDay(d, today));
   const tomorrowDates = dates.filter(d => dateOccursOnDay(d, tomorrow));
   const todayTasks = tasks.filter(t => String(t.day) === today);
@@ -1366,6 +1368,25 @@ async function deliverNotification(env, member, day, kind, text) {
   }
 }
 
+// Окна напоминаний не пересекаются: задача, до которой меньше часа, получает
+// только «Через час». Раньше обе ветки срабатывали в одном тике, и на задачу
+// через 20 минут уходило два сообщения — одно с враньём про «через 3 часа».
+const REMINDER_3H = 3 * 3600000;
+const REMINDER_1H = 1 * 3600000;
+
+function planTaskReminders(tasks, timeZone, nowMs) {
+  const planned = [];
+  for (const task of tasks) {
+    if (!task.time || !/^\d{2}:\d{2}$/.test(task.time)) continue;
+    const target = taskTargetMs(task, timeZone);
+    if (!Number.isFinite(target) || target <= nowMs) continue;
+    const left = target - nowMs;
+    if (left <= REMINDER_1H) planned.push({ task, kind: `task1h:${task.id}`, lead: "Через час" });
+    else if (left <= REMINDER_3H) planned.push({ task, kind: `task3h:${task.id}`, lead: "Через 3 часа" });
+  }
+  return planned;
+}
+
 async function processPairNotifications(env, pair, stamp, budget) {
   // validTimeZone: битый/чужой tz в базе не должен ронять Intl исключением.
   const timeZone = validTimeZone(pair.timezone) || DEFAULT_TZ;
@@ -1388,14 +1409,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
   // Напоминания о планах с точным временем: за 3 часа и за 1 час. Условие
   // «первый тик, когда время пришло» + дедуп в журнале дают одну отправку.
   // Личные планы напоминают только их автору и со скрытым заголовком.
-  const reminders = [];
-  for (const task of tasks) {
-    if (!task.time || !/^\d{2}:\d{2}$/.test(task.time)) continue;
-    const target = taskTargetMs(task, timeZone);
-    if (!Number.isFinite(target) || target <= nowMs || target - nowMs > 3 * 3600000) continue;
-    reminders.push({ task, kind: `task3h:${task.id}`, lead: "Через 3 часа" });
-    if (nowMs >= target - 1 * 3600000) reminders.push({ task, kind: `task1h:${task.id}`, lead: "Через час" });
-  }
+  const reminders = planTaskReminders(tasks, timeZone, nowMs);
   for (const reminder of reminders) {
     for (const member of members) {
       if (budget.left < 2) return;
@@ -1413,7 +1427,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
     const visibleTasks = tasks.filter(t => Number(t.is_private) !== 1 || Number(t.created_by) === Number(member));
     // Утренняя сводка в персональное время (по умолчанию 09:00).
     if (Number(user?.digest_enabled ?? 1) === 1 && minutes >= parseTimeMinutes(user?.digest_time)) {
-      const text = digestText(timeZone, today, tomorrow, visibleDates, visibleTasks);
+      const text = digestText(today, tomorrow, visibleDates, visibleTasks);
       if (text) {
         if (budget.left < 2) return;
         budget.left -= 2;

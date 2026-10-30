@@ -390,6 +390,23 @@
     return out.join("\n");
   }
 
+  // Ссылка приходит из базы: сервер проверяет схему при записи, но старые
+  // записи и данные из бота могли попасть туда без проверки. Открываем только
+  // http(s) — javascript:/data: в window.open недопустимы.
+  function openExternal(url) {
+    let parsed = null;
+    try {
+      parsed = new URL(String(url || ""));
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+      showToast("Ссылка некорректна");
+      return;
+    }
+    window.open(parsed.href, "_blank", "noopener");
+  }
+
   function firstLetter(name, fallback = "Д") {
     const clean = String(name ?? "").trim();
     return clean ? Array.from(clean)[0].toUpperCase() : fallback;
@@ -419,17 +436,36 @@
     showToast(error.message);
   }
 
+  // Зависший запрос (плохая сеть, «спящий» воркер) раньше держал спиннер
+  // вечно: пользователь не понимал, идёт ли сохранение.
+  const REQUEST_TIMEOUT_MS = 20000;
+
   async function request(path, options = {}) {
     const headers = {
       "x-telegram-init-data": tg?.initData || "",
       "x-timezone": Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow",
       ...(options.body ? { "content-type": "application/json" } : {})
     };
-    const response = await fetch(path, {
-      method: options.method || "GET",
-      headers,
-      body: options.body ? JSON.stringify(options.body) : undefined
-    });
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
+    let response;
+    try {
+      response = await fetch(path, {
+        method: options.method || "GET",
+        headers,
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller ? controller.signal : undefined
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        const timeout = new Error("Сервер не ответил. Попробуйте ещё раз.");
+        timeout.status = 0;
+        throw timeout;
+      }
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const error = new Error(payload.error || payload.message || `Ошибка ${response.status}`);
@@ -1903,9 +1939,8 @@
           });
         }
       } else if (action === "open-url") {
-    const url = btn.dataset.url;
-    if (url) window.open(url, "_blank");
-  } else if (action === "copy-code") {
+        openExternal(btn.dataset.url);
+      } else if (action === "copy-code") {
         const code = btn.dataset.code || "";
         if (navigator.clipboard?.writeText) {
           try {
@@ -1974,6 +2009,9 @@
     const isTyping = () => document.activeElement instanceof HTMLInputElement
       || document.activeElement instanceof HTMLTextAreaElement;
     if (isTyping()) return;
+    // Жест по капле в разгаре: перерисовка пересоздала бы переключатель и
+    // оборвала движение. Пропускаем тик — данные придут на следующем.
+    if (liquidNav?.getState?.().dragging || wishSwitch?.getState?.().dragging) return;
     refreshInProgress = true;
     try {
       const next = await request("/api/state");

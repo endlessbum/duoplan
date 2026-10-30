@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 import sqlite3
 from datetime import date
@@ -32,6 +33,8 @@ WISH_URL_MAX = 2048
 
 DAILY_XP = 10
 
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 MAX_LIMIT = 100
 
 
@@ -53,7 +56,7 @@ def _clean_text(value: object, limit: int, label: str) -> str:
 def _clean_optional_text(value: object, limit: int, label: str) -> str:
     text = "" if value is None else str(value).strip()
     if len(text) > limit:
-        raise ValidationError(f"{label}: не длинше {limit} символов (сейчас {len(text)}).")
+        raise ValidationError(f"{label}: не длиннее {limit} символов (сейчас {len(text)}).")
     return text
 
 
@@ -158,12 +161,21 @@ def sort_date_rows(rows: list[object], tz: tzinfo) -> list[object]:
     «одна и та же дата в году на несколько лет вперёд» не спамит — каждая запись
     держит ровно одно следующее наступление."""
     now_local = datetime.now(tz)
+    today = now_local.date().isoformat()
     decorated: list[tuple[bool, float, object, object]] = []
     for row in rows:
         recurs = int(row["recurs"] or 0) == 1
         occurrence = next_date_occurrence(row["day"], row["recurs"], row["time"], tz)
         occurrence_ts = occurrence.timestamp() if occurrence is not None else float("inf")
-        past = (not recurs) and occurrence is not None and occurrence < now_local
+        # Дата — событие дня, а не момента (worker.isPastDate): не-ежегодная
+        # запись прошедшая только когда прошёл её календарный день. Сравнение
+        # по времени отправляло «сегодня» в прошедшие уже после полудня.
+        day_text = str(row["day"] or "")
+        past = (
+            not recurs
+            and bool(_DAY_RE.match(day_text))
+            and day_text < today
+        )
         # В будущей группе — по возрастанию наступления (ближайшее раньше);
         # в прошедшей (не ежегодной) — от свежих к старым, т.е. убывание.
         sort_ts = -occurrence_ts if past else occurrence_ts

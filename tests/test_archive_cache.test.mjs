@@ -346,6 +346,10 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       "let sessionExpired = false;",
       "let refreshInProgress = false;",
       "let appState = null;",
+      // Капли (нижняя панель и переключатель желаний): refreshState
+      // пропускает тик, пока идёт жест по переключателю.
+      "let liquidNav = null;",
+      "let wishSwitch = null;",
       extractBraced("async function refreshState"),
       "return { refreshState, setAppState: (v) => { appState = v; } };"
     ].join("\n")

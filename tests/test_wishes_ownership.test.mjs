@@ -101,14 +101,18 @@ test("автор может редактировать своё желание",
   equal(update.args[0], "Своё");
 });
 
-test("автор может обновить ссылку своего желания", async () => {
+test("автор обновляет текст и ссылку одним UPDATE", async () => {
   const { route, env, pair, user, calls } = makeHarness({ ownerId: 2 });
   equal(
     await route(env, pair, user, "PATCH", "/api/wishes/5", { body: "Своё", url: "https://example.com/gift" }),
     true
   );
-  const urlUpdate = calls.find((c) => c.sql.startsWith("UPDATE wishes SET url=?"));
-  equal(urlUpdate.args[0], "https://example.com/gift");
+  // Ссылка пишется в том же UPDATE, что и текст: иначе при неверном URL
+  // текст уже изменился бы, а клиент получил бы ошибку.
+  const updates = calls.filter((c) => c.sql.startsWith("UPDATE wishes SET"));
+  equal(updates.length, 1, "ссылка и текст должны обновляться одним запросом");
+  equal(updates[0].sql.includes("url=?"), true);
+  equal(updates[0].args.includes("https://example.com/gift"), true);
 });
 
 test("автор может удалить своё желание", async () => {

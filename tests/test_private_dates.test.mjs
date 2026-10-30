@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal, rejects } from "node:assert/strict";
+import { deepStrictEqual, equal, match, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -423,9 +423,13 @@ test("dateOccursOnDay: ежегодная совпадает по месяцу-�
   equal(dateOccursOnDay(null, "2026-06-12"), false);
 });
 
+test("digestText не принимает неиспользуемый timeZone", () => {
+  // Параметр был мёртвым: часовой пояс и так берётся из даты наступления.
+  match(source, /function digestText\(today, tomorrow, dates, tasks\)/);
+});
+
 test("digestText: два абзаца — даты и планы, внутри каждого сегодня/завтра", () => {
   const text = digestText(
-    TZ,
     "2026-03-01",
     "2026-03-02",
     [
@@ -453,7 +457,7 @@ test("digestText: два абзаца — даты и планы, внутри �
 });
 
 test("digestText: абзац планов без дат — заголовок дат не печатается", () => {
-  const text = digestText(TZ, "2026-03-01", "2026-03-02", [], [
+  const text = digestText("2026-03-01", "2026-03-02", [], [
     { id: 10, title: "Только план", day: "2026-03-01", time: null }
   ]);
   equal(text.includes("📅 Значимые даты"), false);
@@ -476,7 +480,7 @@ test("datesDigestText без завтрашних дат возвращает п
 });
 
 test("digestText без событий возвращает пустую строку — дайджест не отправляется", () => {
-  const text = digestText(TZ, "2026-03-01", "2026-03-02", [{ id: 1, title: "Далеко", day: "2030-01-01", recurs: 0 }], []);
+  const text = digestText("2026-03-01", "2026-03-02", [{ id: 1, title: "Далеко", day: "2030-01-01", recurs: 0 }], []);
   equal(text, "");
 });
 
@@ -484,7 +488,7 @@ test("digestText обрезает длинный список: не больше
   const dates = Array.from({ length: 25 }, (_, i) => ({
     id: i + 1, title: `Событие ${i + 1}`, day: "2020-03-01", time: null, recurs: 1
   }));
-  const text = digestText(TZ, "2026-03-01", "2026-03-02", dates, []);
+  const text = digestText("2026-03-01", "2026-03-02", dates, []);
   const itemLines = text.split("\n").filter(l => l.startsWith("• "));
   equal(itemLines.length, 18);
   equal(text.includes("…и ещё 7 — полный список в приложении"), true);
@@ -494,7 +498,7 @@ test("digestText обрезает длинный список: не больше
   const longTasks = Array.from({ length: 30 }, (_, i) => ({
     id: 100 + i, title: "П".repeat(180), day: "2026-03-01", time: "23:59"
   }));
-  const capped = digestText(TZ, "2026-03-01", "2026-03-02", [], longTasks);
+  const capped = digestText("2026-03-01", "2026-03-02", [], longTasks);
   equal([...capped].length <= 4096, true);
 });
 
@@ -565,6 +569,9 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractBraced("function timeZoneOffsetMs"),
       extractBraced("function makeDateInTimeZone"),
       extractBraced("function taskTargetMs"),
+      extractLine("const REMINDER_3H"),
+      extractLine("const REMINDER_1H"),
+      extractBraced("function planTaskReminders"),
       extractBraced("function dateOccursOnDay"),
       extractBraced("function parseTimeMinutes"),
       extractBraced("function localMinutesOfDay"),
@@ -651,13 +658,15 @@ test("напоминание о плане за 3 часа: уходит обо�
   equal(h.sent.some(s => s.text.startsWith("⏰ Через час")), false);
 });
 
-test("за час до плана уходят оба напоминания (дедуп — дело журнала)", async () => {
+test("за час до плана уходит только «через час» — «через 3 часа» больше не врёт", async () => {
   const h = notificationHarness({
     tasks: [{ id: 5, title: "Купить билеты", day: PAIR_TODAY, time: "14:00" }],
-    stamp: STAMP_NOON // 12:05 MSK: внутри обоих окон
+    stamp: STAMP_NOON // 13:05 MSK: до цели 55 минут
   });
   await h.run();
-  equal(h.sent.filter(s => s.text.startsWith("⏰ Через 3 часа")).length, 2);
+  // Окна не пересекаются: событие через 55 минут не должно получать
+  // сообщение «Через 3 часа» — раньше приходили оба, и первое врало.
+  equal(h.sent.filter(s => s.text.startsWith("⏰ Через 3 часа")).length, 0);
   equal(h.sent.filter(s => s.text.startsWith("⏰ Через час")).length, 2);
 });
 

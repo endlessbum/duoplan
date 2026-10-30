@@ -44,6 +44,8 @@ router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
 
 PAGE_SIZE = 8
+# Код приглашения — 4 байта в hex (worker.createPair).
+CODE_LENGTH = 8
 PAGE_TEXT_LIMIT = 3900
 # full_name складывается из имени и фамилии и длиннее «максимума Telegram»
 # для одного имени (64 символа ~ 128 UTF-16 единиц, если там эмодзи),
@@ -424,8 +426,10 @@ async def join_pair(call: CallbackQuery, service: DuoPlanService, state: FSMCont
 @router.message(StateFilter(Form.join_code), F.text)
 async def receive_code(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     code = normalize_code(message.text)
-    if len(code) < 4:
-        await message.answer("Код слишком короткий. Пришлите код из приглашения или /cancel.")
+    if len(code) != CODE_LENGTH:
+        await message.answer(
+            f"Код состоит из {CODE_LENGTH} символов. Пришлите код из приглашения или /cancel."
+        )
         return
     if await service.join_pair(message.from_user.id, name_of(message.from_user), code):
         await state.clear()
@@ -623,7 +627,7 @@ async def wishes_view(call: CallbackQuery, service: DuoPlanService, page: int = 
     buttons = [
         [button(f"Исполнено: {rich_to_plain(row['body'])[:19]}", f"wish:done:{row['id']}:{page}")]
         for row in rows
-        if row.get("owner_id") == call.from_user.id
+        if row["owner_id"] == call.from_user.id
     ]
     buttons.append([button("Добавить желание", "add:wishes")])
     pager = pager_row("wishes", page, page > 0, has_next)

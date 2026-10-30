@@ -26,9 +26,6 @@ DEFAULT_FSM_TTL = 7 * 24 * 60 * 60
 log = logging.getLogger(__name__)
 
 
-BOT_USERNAME = "duoplanbot"  # Telegram username без @, например duoplanbot, задается в .env
-
-
 def parse_env_file(text: str) -> dict[str, str]:
     """Разобрать содержимое ``.env``. Мусорные строки молча пропускаются."""
     values: dict[str, str] = {}
