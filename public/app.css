@@ -136,7 +136,7 @@ body {
      или --tg-safe-area-inset-top нельзя (статус-бар учтётся дважды).
      max() выбирает бо́льший из вариантов: в Telegram — контентную площадь,
      в обычном браузере — системный отступ под «челку». */
-  top: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 10px);
+  top: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 54px);
   left: 50%;
   transform: translateX(-50%);
   width: min(520px, 100%);
@@ -260,7 +260,7 @@ body.tg-fullscreen #fullscreen-close {
   /* 10px — отступ стеклянного бара сверху, 70px = 10 + 48 (кнопка «Наша пара»)
      + 12 (нижний внутренний отступ): контент шапки центрируется ровно в полосу
      высотой 48px, т.е. на уровне плавающих кнопок. */
-  padding: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 10px) 148px 12px 16px;
+  padding: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 54px) 148px 12px 16px;
   background: var(--sticky-fade);
   backdrop-filter: blur(16px) saturate(160%);
   -webkit-backdrop-filter: blur(16px) saturate(160%);
@@ -268,7 +268,7 @@ body.tg-fullscreen #fullscreen-close {
   flex-direction: column;
   justify-content: center;
   gap: 2px;
-  min-height: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 70px);
+  min-height: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 114px);
 }
 
 /* В полноэкранном режиме слева висит кнопка закрытия — заголовок уходит правее. */
