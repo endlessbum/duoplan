@@ -175,12 +175,13 @@
 
   // 2. Перетаскивание home → dates.
   reset();
-  const tasksWidth = item("tasks").getBoundingClientRect().width;
+  const tasksLayout = item("tasks").offsetWidth;
   down(home.x, home.y);
   move(home.x + 30, home.y);
   await frames(2);
-  const tasksWidthDuringDrag = item("tasks").getBoundingClientRect().width;
-  check("рамки вкладок стабильны во время drag", Math.abs(tasksWidthDuringDrag - tasksWidth) < 0.5, `${tasksWidth} → ${tasksWidthDuringDrag}`);
+  const tasksLayoutDuringDrag = item("tasks").offsetWidth;
+  // Увеличение под каплей — это transform, раскладка при этом не меняется.
+  check("раскладка вкладок не меняется во время drag", tasksLayoutDuringDrag === tasksLayout, `${tasksLayout} → ${tasksLayoutDuringDrag}`);
   move(dates.x - 40, home.y);
   await frames(2);
   move(dates.x, dates.y);
@@ -392,23 +393,20 @@
   await frames(2);
   check("жест со SVG-капли работает", liquid.getState().active === "dates", commits.join(","));
 
-  // 16. Линза и перекраска: копия контента под каплей + цвет по доле накрытия.
+  // 16. Линза и перекраска: вкладка под каплей увеличена и акцентная,
+  //     остальные — обычные.
   reset();
   await frames(2);
-  const lensLayer = nav.querySelector(".nav-lens");
-  const baseLayer = nav.querySelector(".nav-base");
   const restTints = liquid.getState().tints;
-  check("слой линзы и базовый слой построены", Boolean(lensLayer && baseLayer), `${Boolean(lensLayer)}/${Boolean(baseLayer)}`);
-  check("под каплей вкладка окрашена целиком", restTints.home > 0.9, restTints.home);
-  check("соседняя вкладка ещё не окрашена", restTints.tasks < 0.1, restTints.tasks);
-  const lensClone = lensLayer && lensLayer.querySelector(".nav-lens-track .nav-item");
-  check(
-    "копия в линзе увеличена",
-    Boolean(lensClone) && /scale\(1\.[0-9]+\)/.test(lensClone.style.transform),
-    lensClone && lensClone.style.transform
-  );
+  check("под каплей вкладка накрыта целиком", restTints.home > 0.9, restTints.home);
+  check("соседняя вкладка не накрыта", restTints.tasks < 0.1, restTints.tasks);
+  const activeTransform = item("home").style.transform;
+  check("вкладка под каплей увеличена", /scale\(1\.[0-9]+\)/.test(activeTransform), activeTransform);
+  const accentColor = item("home").style.color;
+  const idleColor = item("tasks").style.color;
+  check("акцент только у вкладки под каплей", accentColor && accentColor !== idleColor, `${accentColor} vs ${idleColor}`);
 
-  // 17. Промежуточное накрытие даёт промежуточный цвет, а не «включение» целиком.
+  // 17. Промежуточное накрытие: акцент не переключается на соседа целиком.
   reset();
   down(home.x, home.y);
   move(home.x + 30, home.y);
@@ -418,6 +416,8 @@
   const midTints = liquid.getState().tints;
   const partial = Object.values(midTints).filter((ratio) => ratio > 0.08 && ratio < 0.92);
   check("есть вкладка с частичным накрытием", partial.length > 0, JSON.stringify(midTints));
+  const tintedCount = items.filter((node) => node.style.color !== idleColor).length;
+  check("акцентная вкладка одна", tintedCount <= 1, tintedCount);
   up(dates.x - 26, home.y);
   await frames(2);
 

@@ -87,53 +87,34 @@ test("переходы только по цвету", () => {
 
 // --------------------------------------------------------------- линза
 
-test("слой линзы объявлен и не ловит события", () => {
-  const rule = ruleFor(".nav-lens");
-  match(rule, /pointer-events:\s*none/);
-  match(rule, /overflow:\s*hidden/);
-  // Без поддержки mask: url(#…) линза накрыла бы всю панель.
-  match(appCss, /@supports \(mask: url\(#a\)\) or \(-webkit-mask: url\(#a\)\)/);
+test("линза сделана трансформацией вкладки, без копии контента", () => {
+  // Копия + SVG-маска ломались в WebView: маска не применялась, слой накрывал
+  // панель и красил все вкладки акцентом. Теперь копии нет вообще.
+  ok(!/cloneNode/.test(source), "копии контента быть не должно");
+  ok(!/\.style\.mask/.test(source), "маски быть не должно");
+  ok(!/nav-lens/.test(source));
+  ok(!/nav-lens/.test(appCss), "правил .nav-lens быть не должно");
 });
 
-test("копия в линзе не участвует в жизни панели", () => {
-  const rule = ruleFor(".nav-lens-track .nav-item");
-  match(rule, /pointer-events:\s*none/);
-  match(rule, /transition:\s*none/);
-});
-
-test("линза увеличивает контент и наклоняет его у краёв капли", () => {
-  match(source, /function applyLens\(shape\)/);
+test("вкладка под каплей увеличивается, у краёв ловится перспектива", () => {
+  match(source, /function applyItems\(shape\)/);
   match(source, /const scale = 1 \+ boost \* ratio;/);
-  match(source, /perspective\(\$\{LENS_PERSPECTIVE\}px\) rotateY\(\$\{round2\(tilt\)\}deg\)/);
-  // Масштаб от центра вкладки: контент растёт на месте, а не уезжает из капли.
-  match(source, /const center = entry\.rect\.left \+ entry\.rect\.width \/ 2 - state\.svgRect\.left;/);
+  match(source, /const tilt = -offset \* LENS_TILT \* ratio/);
+  match(source, /perspective\(\$\{LENS_PERSPECTIVE\}px\) rotateY/);
+  // В покое — чистый 2D-scale: иначе 3D-контекст мылит иконку.
+  match(source, /Math\.abs\(tilt\) < 0\.05/);
 });
 
-test("базовый слой вырезается под каплей, линза проявляется там же", () => {
-  match(source, /baseMask\.hole\.setAttribute\("d", shape\.d\)/);
-  match(source, /baseMask\.lensPath\.setAttribute\("d", shape\.d\)/);
-  // Мягкая кромка: без blur контур рубит подпись по живому.
-  match(source, /feGaussianBlur/);
-  match(source, /stdDeviation/);
+test("акцент получает только вкладка под каплей", () => {
+  match(source, /const isLeader = index === leader && leaderRatio > LEADER_MIN;/);
+  match(source, /const color = isLeader\s*\? mixColor\(state\.palette\.idle, state\.palette\.accent, ratio\)\s*: idle;/);
+  match(source, /const idle = mixColor\(state\.palette\.idle, state\.palette\.accent, 0\);/);
 });
 
-test("маска получает явную область — иначе гасит всё содержимое", () => {
-  match(source, /maskNode\.setAttribute\("x", box\.x\)/);
-  match(source, /maskUnits/);
-});
-
-test("при reduced-motion линза не увеличивает", () => {
-  match(source, /const s = state\.reduced \? 0 : shape\.s;/);
-});
-
-test("цвет идёт по кромке капли, а не переключает вкладку целиком", () => {
-  // Базовый слой всегда обычный, копия в линзе — акцентная. Капля вырезает
-  // часть вкладки, поэтому акцент виден ровно там, где она накрыла контент.
-  match(source, /function applyColors\(\)/);
-  match(source, /items\[index\]\.style\.color = idle/);
-  match(source, /lens\.clones\[index\]\.style\.color = accent/);
-  // Доля накрытия остаётся — по ней считаются масштаб и наклон линзы.
-  match(source, /const ratio = coverageOf\(span, entry\.rect\)/);
+test("увеличенная вкладка не искажает замер рамок", () => {
+  // Перед замером трансформация снимается, иначе getBoundingClientRect()
+  // вернул бы увеличенный прямоугольник и сбил расчёт накрытия.
+  match(source, /for \(const item of items\) item\.style\.transform = "";/);
 });
 
 test("цвета вкладок читаются из CSS-переменных панели", () => {

@@ -405,59 +405,9 @@ body.tg-fullscreen .tab-header {
   transition: stroke 0.3s ease, filter 0.3s ease;
 }
 
-/* Базовый слой вкладок: занимает все колонки панели и раскладывает вкладки
-   таким же grid'ом. Маска вырезает его ровно под каплей, чтобы обычная
-   подпись не просвечивала сквозь увеличенную копию в линзе. */
-.nav-base {
-  grid-column: 1 / -1;
-  display: grid;
-  align-items: stretch;
-  min-width: 0;
-}
-
-/* Контейнер определений маски: сам ничего не рисует. */
-.nav-mask {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-/* Линза капли: копия иконок и подписей, обрезанная по контуру капли и
-   увеличенная. Внутри капли контент крупнее, у краёв ловится перспектива.
-   Базовая панель при этом стоит на месте — у неё меняется только цвет. */
-.nav-lens {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-  overflow: hidden;
-  /* Без поддержки mask: url(#…) линза накрыла бы всю панель — не показываем. */
-  display: none;
-}
-
-@supports (mask: url(#a)) or (-webkit-mask: url(#a)) {
-  .nav-lens {
-    display: block;
-  }
-}
-
-.nav-lens-track {
-  position: absolute;
-  display: grid;
-  align-items: stretch;
-  transform-origin: 50% 50%;
-}
-
-/* Копия декоративная: ни нажатий, ни фокуса, ни анимаций цвета —
-   иначе линза «отставала» бы от пальца. */
-.nav-lens-track .nav-item {
-  pointer-events: none;
-  transition: none;
-  cursor: default;
-}
-
+/* Вкладка под каплей увеличивается трансформацией — копии контента и масок
+   нет: в WebView, где SVG-маска на HTML-элементе не применяется, слой-копия
+   накрывал всю панель и красил её акцентным цветом целиком. */
 .bottom-nav.is-dragging {
   cursor: grabbing;
   touch-action: none;
