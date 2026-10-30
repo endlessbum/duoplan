@@ -1860,7 +1860,7 @@
         }
       } else if (action === "copy-link") {
         const code = btn.dataset.code || "";
-        const link = `https://t.me/${appState?.pair?.bot_name || "DuoPlan"}?start=${encodeURIComponent(code)}`;
+        const link = `https://t.me/${appState?.pair?.bot_username || "duoplanbot"}?start=${encodeURIComponent(code)}`;
         if (navigator.clipboard?.writeText) {
           try {
             await navigator.clipboard.writeText(link);
@@ -1953,52 +1953,58 @@
 
   if (tg?.BackButton?.onClick) tg.BackButton.onClick(goBack);
 
-  // Инициализация — отдельная функция, чтобы её можно было вызвать повторно
+  // Инициализация — вызываем один раз при старте
+  // и при нажатии кнопки «Повторить» при ошибке.
   async function initApp() {
-    let initOk = false;
-    while (!initOk) {
-      try {
-        appState = await request("/api/state");
-        render();
-        updateDroplet("home", false);
-        initOk = true;
-      } catch (error) {
-        // Сетевые ошибки и истекшие сессии показываем с кнопкой повтора
-        if (error?.status === 401) {
-          sessionExpired = true;
-          // Сеанс истёк — пытаемся обновить и показываем ошибку
-          try {
-            appState = await request("/api/state");
-            render();
-            updateDroplet("home", false);
-            initOk = true;
-          } catch (e) {
-            appEl.innerHTML = `
-              ${renderTabHeader("home")}
-              <section class="card">
-                <h3>Сессия истекла</h3>
-                <p>${esc(e.message)}</p>
-                <button id="retry-btn" class="primary">Повторить</button>
-              </section>
-            `;
-            document.getElementById("retry-btn").addEventListener("click", initApp);
-            return;
-          }
-        } else {
-          appEl.innerHTML = `
-            ${renderTabHeader("home")}
-            <section class="card">
-              <h3>Не удалось загрузить пространство</h3>
-              <p>${esc(error.message)}</p>
-              <button id="retry-btn" class="primary">Повторить</button>
-            </section>
-          `;
-          document.getElementById("retry-btn").addEventListener("click", initApp);
-        }
+    // Защита от нескольких одновременных запусков
+    if (window.__duoplanInitInProgress) return;
+    window.__duoplanInitInProgress = true;
+
+    try {
+      appState = await request("/api/state");
+      render();
+      updateDroplet("home", false);
+      // Успешная загрузка — сбрасываем состояние ошибки
+      sessionExpired = false;
+    } catch (error) {
+      // Сетевые ошибки и истекшие сессии показываем карточку с кнопкой повторногоtry
+      if (error?.status === 401) {
+        sessionExpired = true;
+        appEl.innerHTML = `
+          ${renderTabHeader("home")}
+          <section class="card">
+            <h3>Сессия истекла</h3>
+            <p>Токен авторизации Telegram истек. <a href="#" id="reauth-link" class="secondary">Переоткрыть приложение</a></p>
+            <button id="retry-btn" class="primary">Повторить загрузку</button>
+          </section>
+        `;
+        document.getElementById("retry-btn").addEventListener("click", () => {
+          window.__duoplanInitInProgress = false;
+          initApp();
+        });
+        document.getElementById("reauth-link").addEventListener("click", (e) => {
+          e.preventDefault();
+          tg?.initData && location.reload();
+        });
+      } else {
+        appEl.innerHTML = `
+          ${renderTabHeader("home")}
+          <section class="card">
+            <h3>Не удалось загрузить пространство</h3>
+            <p>${esc(error.message)}</p>
+            <button id="retry-btn" class="primary">Повторить загрузку</button>
+          </section>
+        `;
+        document.getElementById("retry-btn").addEventListener("click", () => {
+          window.__duoplanInitInProgress = false;
+          initApp();
+        });
       }
+    } finally {
+      window.__duoplanInitInProgress = false;
     }
   }
 
-  // Точка входа инициализации
+  // Точка входа инициализации — одна попытка
   initApp();
 })();

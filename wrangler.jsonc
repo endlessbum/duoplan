@@ -8,7 +8,8 @@
   // и напоминания о планах за 3 часа / за 1 час.
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
-    "APP_ORIGIN": "https://duoplan.stacheight.workers.dev"
+    "APP_ORIGIN": "https://duoplan.stacheight.workers.dev",
+    "BOT_USERNAME": "duoplanbot"
   },
   "assets": {
     "directory": "./public",

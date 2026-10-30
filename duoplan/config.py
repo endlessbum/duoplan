@@ -26,8 +26,23 @@ DEFAULT_FSM_TTL = 7 * 24 * 60 * 60
 log = logging.getLogger(__name__)
 
 
+BOT_USERNAME = "duoplanbot"  # Telegram username без @, например duoplanbot
+
+
+BOT_USERNAME = "duoplanbot"  # Telegram username без @, например duoplanbot, задается в .env
+
+
 def parse_env_file(text: str) -> dict[str, str]:
     """Разобрать содержимое ``.env``. Мусорные строки молча пропускаются."""
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
     values: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -80,6 +95,7 @@ class Settings:
     admin_chat_id: int | None
     db_path: Path
     bot_name: str
+    bot_username: str  # Telegram username без @, для ссылок в Mini App
     tz_name: str
     tz: tzinfo = field(default=timezone.utc)
     # Добавлено в конец, чтобы не сдвигать позиционные аргументы старого API.
@@ -104,6 +120,8 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
     if raw_chat.lstrip("-").isdigit():
         admin_chat_id = int(raw_chat)
 
+    bot_username = get("BOT_USERNAME", "duoplanbot")
+
     db_raw = get("DB_PATH", str(PROJECT_ROOT / "data" / "duoplan.db"))
     db_path = Path(db_raw)
     if not db_path.is_absolute():
@@ -115,6 +133,7 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         admin_chat_id=admin_chat_id,
         db_path=db_path,
         bot_name=get("BOT_NAME", "DuoPlan") or "DuoPlan",
+        bot_username=bot_username,
         tz_name=tz_name,
         fsm_ttl=_parse_ttl(get("FSM_TTL", str(DEFAULT_FSM_TTL))),
         tz=tz,

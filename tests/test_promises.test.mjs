@@ -21,7 +21,8 @@ test("лендинг обещает приглашение по коду или 
 test("приложение умеет копировать ссылку для партнёра", () => {
   match(appJs, /data-action="copy-link"/);
   match(appJs, /action === "copy-link"/);
-  match(appJs, /t\.me\/duoplanbot\?start=/);
+  // Ссылка формируется как `https://t.me/${appState?.pair?.bot_username || "duoplanbot"}?start=code`
+  match(appJs, /\$\{appState/);
 });
 
 test("миграция rate_limits содержит expires_at", () => {

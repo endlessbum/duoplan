@@ -656,9 +656,9 @@ async function state(env, userId) {
     env.DB.prepare(`SELECT m.id,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
@@ -679,7 +679,8 @@ async function state(env, userId) {
       together_pts: pair.together_pts,
       timezone: pair.timezone,
       partner_gender: partnerUser?.gender || null,
-      bot_name: env.BOT_NAME || "DuoPlan"
+      bot_name: env.BOT_NAME || "DuoPlan",
+      bot_username: env.BOT_USERNAME || "duoplanbot"
     },
     tasks: sortByTaskDeadline(tasks.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT),
     completedTasks: completedTasks.results,
@@ -1621,8 +1622,6 @@ export default {
           service: "duoplan",
           version: APP_VERSION,
           database,
-          bot_token: Boolean(env.BOT_TOKEN),
-          webhook_secret: Boolean(env.WEBHOOK_SECRET)
         }, database ? 200 : 503);
       }
       if (url.pathname === "/api/setup" && request.method === "POST") return await setup(request, env, url);
@@ -1630,9 +1629,30 @@ export default {
       if (url.pathname === "/telegram/webhook" && request.method === "POST") return await webhook(request, env, url);
       return env.ASSETS.fetch(request);
     } catch (error) {
-      if (error instanceof HttpError) return json({ error: error.message, code: error.code }, error.status);
-      console.error(error);
-      return json({ error: "Не получилось выполнить запрос. Попробуйте ещё раз.", code: "INTERNAL_ERROR" }, 500);
+      // HttpError обрабатываем первыми, так как у них есть код и статус
+      if (error instanceof HttpError) {
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        console.error(`[DuoPlan HttpError] requestId=${requestId} code=${error.code}`, error);
+        return json({ error: error.message, code: error.code, requestId }, error.status);
+      }
+
+      // Для остальных ошибок генерируем ID запроса для трассировки
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      // Безопасная диагностика: собираем информацию для логов, но не раскрываем секреты
+      const errorInfo = {
+        requestId,
+        method: request.method,
+        endpoint: url.pathname.startsWith("/api/") ? url.pathname : "assets",
+        exception: error.constructor?.name || "Error",
+        message: error.message || "Unknown error",
+      };
+
+      // Полный стек трейс пишем в консоль (internal logs), но не отправляем пользователю
+      console.error(`[DuoPlan error] ${JSON.stringify(errorInfo)}`, error);
+
+      // Пользовательское сообщение без стека/подробностей (скрываем initData, BOT_TOKEN и прочее)
+      return json({ error: "Не получилось выполнить запрос. Попробуйте ещё раз.", code: "INTERNAL_ERROR", requestId }, 500);
     }
   },
   // Cron (wrangler.jsonc → triggers.crons): сводки и напоминания о планах.
