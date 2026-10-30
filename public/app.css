@@ -30,14 +30,14 @@
   /* Подписи вкладок лежат на стекле поверх контента — им нужен запас контраста. */
   --nav-label: rgba(41, 37, 36, 0.84);
   --glass-inner: inset 0 1px 0.5px rgba(255, 255, 255, 0.9), inset 0 -1px 0.5px rgba(41, 37, 36, 0.05);
-  --droplet-bg: rgba(184, 84, 100, 0.15);
-  --droplet-border: rgba(184, 84, 100, 0.24);
-  --droplet-glow: inset 0 1px 1.5px rgba(255, 255, 255, 0.8), 0 4px 14px rgba(184, 84, 100, 0.16);
-  /* Градиент капли: светлое стекло сверху, акцент в середине, тень снизу. */
-  --droplet-hi: rgba(255, 255, 255, 0.58);
-  --droplet-fill: rgba(184, 84, 100, 0.30);
-  --droplet-deep: rgba(184, 84, 100, 0.16);
-  --droplet-halo: rgba(184, 84, 100, 0.22);
+  /* Жидкая капля — прозрачное стекло с преломлением света */
+  --droplet-bg: transparent;
+  --droplet-border: rgba(255, 255, 255, 0.35);
+  --droplet-glow: inset 0 1px 1.5px rgba(255, 255, 255, 0.9), 0 4px 14px rgba(255, 255, 255, 0.18);
+  --droplet-hi: rgba(255, 255, 255, 0.65);
+  --droplet-fill: rgba(255, 255, 255, 0.08);
+  --droplet-deep: rgba(255, 255, 255, 0.05);
+  --droplet-halo: rgba(255, 255, 255, 0.15);
   --sticky-fade: rgba(247, 243, 237, 0.84);
 }
 
@@ -67,13 +67,13 @@
   --nav-glass-bg: rgba(28, 26, 25, 0.72);
   --nav-label: rgba(245, 240, 234, 0.88);
   --glass-inner: inset 0 1px 0.5px rgba(255, 255, 255, 0.18), inset 0 -1px 0.5px rgba(0, 0, 0, 0.3);
-  --droplet-bg: rgba(217, 115, 131, 0.22);
-  --droplet-border: rgba(255, 255, 255, 0.16);
-  --droplet-glow: inset 0 1px 1px rgba(255, 255, 255, 0.22), 0 4px 16px rgba(217, 115, 131, 0.22);
-  --droplet-hi: rgba(255, 255, 255, 0.22);
-  --droplet-fill: rgba(217, 115, 131, 0.38);
-  --droplet-deep: rgba(217, 115, 131, 0.18);
-  --droplet-halo: rgba(217, 115, 131, 0.30);
+  --droplet-bg: rgba(217, 115, 131, 0.08);
+  --droplet-border: rgba(255, 255, 255, 0.28);
+  --droplet-glow: inset 0 1px 2px rgba(255, 255, 255, 0.25), 0 4px 16px rgba(217, 115, 131, 0.18);
+  --droplet-hi: rgba(255, 255, 255, 0.18);
+  --droplet-fill: rgba(217, 115, 131, 0.08);
+  --droplet-deep: rgba(217, 115, 131, 0.12);
+  --droplet-halo: rgba(217, 115, 131, 0.22);
   --sticky-fade: rgba(22, 21, 20, 0.84);
 }
 

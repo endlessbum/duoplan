@@ -26,23 +26,11 @@ DEFAULT_FSM_TTL = 7 * 24 * 60 * 60
 log = logging.getLogger(__name__)
 
 
-BOT_USERNAME = "duoplanbot"  # Telegram username без @, например duoplanbot
-
-
 BOT_USERNAME = "duoplanbot"  # Telegram username без @, например duoplanbot, задается в .env
 
 
 def parse_env_file(text: str) -> dict[str, str]:
     """Разобрать содержимое ``.env``. Мусорные строки молча пропускаются."""
-    result = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            key, value = line.split("=", 1)
-            result[key.strip()] = value.strip().strip('"').strip("'")
-    return result
     values: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
