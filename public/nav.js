@@ -35,6 +35,19 @@
   const CLICK_GUARD_TTL = 700;    // мс: click приходит сразу после pointerup
   const CLICK_GUARD_RADIUS = 14;  // px: та же точка, где отпустили палец
 
+  // Линза капли: копия контента, обрезанная по форме капли. Внутри капли
+  // иконки и подписи крупнее, а на скорости край подхватывает перспективу —
+  // вместе с деформацией контура это и даёт ощущение жидкого стекла.
+  // Базовая панель при этом не двигается вообще: у неё меняется только цвет.
+  const LENS_SCALE = 1.06;        // увеличение под каплей в покое
+  const LENS_SCALE_SPEED = 0.10;  // добавка на максимальной скорости
+  const LENS_TILT = 10;           // градусы перспективы у края капли
+  const LENS_PERSPECTIVE = 200;   // px: меньше — резче искажение у краёв
+  const TINT_STEP = 0.01;         // шаг перекраски: мельче — лишние перерисовки
+
+  // Уникальный id маски на каждую панель: на странице их может быть больше одной.
+  let maskSeq = 0;
+
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const round2 = (value) => Math.round(value * 100) / 100;
 
@@ -127,6 +140,49 @@
   }
 
   // ------------------------------------------------------------------
+  // Цвет под каплей: перекраска по мере накрытия вкладки
+  // ------------------------------------------------------------------
+
+  // Разбор цвета из CSS-переменной. Нужны только hex и rgb()/rgba():
+  // ровно так заданы --muted и --berry в app.css.
+  function parseColor(value) {
+    const text = String(value == null ? "" : value).trim();
+    if (!text) return null;
+    const hexMatch = /^#([0-9a-f]{3,8})$/i.exec(text);
+    if (hexMatch) {
+      let hex = hexMatch[1];
+      if (hex.length === 3 || hex.length === 4) {
+        hex = hex.split("").map((char) => char + char).join("");
+      }
+      const num = parseInt(hex.slice(0, 6), 16);
+      if (Number.isNaN(num)) return null;
+      return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+    }
+    const rgbMatch = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i.exec(text);
+    if (rgbMatch) {
+      return [rgbMatch[1], rgbMatch[2], rgbMatch[3]].map((part) => clamp(Math.round(Number(part)), 0, 255));
+    }
+    return null;
+  }
+
+  // Линейная интерполяция цвета: 0 — обычный, 1 — активный.
+  function mixColor(from, to, ratio) {
+    const t = clamp(Number(ratio) || 0, 0, 1);
+    const channel = (index) => Math.round(from[index] + (to[index] - from[index]) * t);
+    return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+  }
+
+  // Какая доля вкладки накрыта каплей: 0 — мимо, 1 — целиком внутри.
+  // Именно доля, а не «попал/не попал»: подпись перекрашивается постепенно,
+  // по мере того как капля наезжает на неё.
+  function coverageOf(span, rect) {
+    if (!span || !rect || !(rect.width > 0)) return 0;
+    const left = Math.max(span.left, rect.left);
+    const right = Math.min(span.right, rect.right);
+    return clamp((right - left) / rect.width, 0, 1);
+  }
+
+  // ------------------------------------------------------------------
   // Модуль навигации
   // ------------------------------------------------------------------
 
@@ -150,7 +206,10 @@
       // Одноразовая запись о завершённом drag: { pointerId, x, y, time }.
       clickGuard: null,
       lastPreviewX: NaN,
-      reduced: false
+      reduced: false,
+      // Цвета вкладок и текущая доля накрытия каждой из них каплей.
+      palette: { idle: [118, 110, 104], accent: [184, 84, 100] },
+      tints: {}
     };
 
     const motionQuery = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
@@ -161,6 +220,187 @@
     if (motionQuery) {
       if (motionQuery.addEventListener) motionQuery.addEventListener("change", syncReduced);
       else if (motionQuery.addListener) motionQuery.addListener(syncReduced);
+    }
+
+    // ------------------------------------------------------------- линза
+
+    const baseMaskId = `nav-base-mask-${(maskSeq += 1)}`;
+    // Слой-линза строится сразу: он живёт рядом с вкладками и повторяет их
+    // раскладку, поэтому дальше остаётся только обрезать его по контуру капли.
+    const lens = buildLens();
+    // Базовый слой под каплей вырезается маской: иначе обычная подпись
+    // просвечивала бы сквозь увеличенную копию и давала «двоение».
+    const baseMask = buildBaseMask();
+
+    function buildBaseMask() {
+      if (typeof document === "undefined" || !document.createElement) return null;
+      // Вкладки переезжают в обёртку, чтобы её можно было вырезать целиком:
+      // раскладка не меняется — обёртка занимает все колонки панели и сама
+      // раскладывает вкладки таким же grid'ом.
+      const base = document.createElement("div");
+      base.className = "nav-base";
+      base.style.gridTemplateColumns = `repeat(${items.length}, 1fr)`;
+      nav.insertBefore(base, items[0]);
+      for (const item of items) base.appendChild(item);
+
+      const ns = "http://www.w3.org/2000/svg";
+      const holder = document.createElementNS(ns, "svg");
+      holder.setAttribute("class", "nav-mask");
+      holder.setAttribute("aria-hidden", "true");
+      const defs = document.createElementNS(ns, "defs");
+
+      // Мягкая кромка: без размытия контур капли рубит подпись по живому и
+      // на границе видно «разрыв». С blur базовый слой гаснет, а линза
+      // проявляется — переход читается как кромка стекла.
+      const filter = document.createElementNS(ns, "filter");
+      filter.setAttribute("id", `${baseMaskId}-soft`);
+      filter.setAttribute("filterUnits", "userSpaceOnUse");
+      const blur = document.createElementNS(ns, "feGaussianBlur");
+      blur.setAttribute("stdDeviation", "1.2");
+      filter.appendChild(blur);
+      defs.appendChild(filter);
+
+      const mask = document.createElementNS(ns, "mask");
+      mask.setAttribute("id", `${baseMaskId}-base`);
+      mask.setAttribute("maskUnits", "userSpaceOnUse");
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("fill", "#fff");
+      const hole = document.createElementNS(ns, "path");
+      hole.setAttribute("fill", "#000");
+      hole.setAttribute("filter", `url(#${baseMaskId}-soft)`);
+      mask.appendChild(rect);
+      mask.appendChild(hole);
+      defs.appendChild(mask);
+
+      // Обратная маска для линзы: внутри капли — белое, снаружи — чёрное.
+      const lensMask = document.createElementNS(ns, "mask");
+      lensMask.setAttribute("id", `${baseMaskId}-lens`);
+      lensMask.setAttribute("maskUnits", "userSpaceOnUse");
+      const lensRect = document.createElementNS(ns, "rect");
+      lensRect.setAttribute("fill", "#000");
+      const lensPath = document.createElementNS(ns, "path");
+      lensPath.setAttribute("fill", "#fff");
+      lensPath.setAttribute("filter", `url(#${baseMaskId}-soft)`);
+      lensMask.appendChild(lensRect);
+      lensMask.appendChild(lensPath);
+      defs.appendChild(lensMask);
+
+      holder.appendChild(defs);
+      nav.appendChild(holder);
+
+      base.style.mask = `url(#${baseMaskId}-base)`;
+      base.style.webkitMask = `url(#${baseMaskId}-base)`;
+      // Линза обрезается не clip-path, а такой же мягкой маской: жёсткий
+      // clip давал «обрубленный» край у подписи на кромке капли.
+      if (lens) {
+        lens.layer.style.mask = `url(#${baseMaskId}-lens)`;
+        lens.layer.style.webkitMask = `url(#${baseMaskId}-lens)`;
+        lens.layer.style.clipPath = "none";
+      }
+      return { base, holder, mask, rect, hole, lensMask, lensRect, lensPath, filter };
+    }
+
+    // Копия иконок и подписей поверх капли. Слой обрезается по контуру капли
+    // и увеличивается — внутри капли контент крупнее, у краёв ловится
+    // перспектива. Базовая панель при этом остаётся нетронутой.
+    function buildLens() {
+      if (typeof document === "undefined" || !document.createElement) return null;
+      const layer = document.createElement("div");
+      layer.className = "nav-lens";
+      layer.setAttribute("aria-hidden", "true");
+      const track = document.createElement("div");
+      track.className = "nav-lens-track";
+      track.style.gridTemplateColumns = `repeat(${items.length}, 1fr)`;
+      for (const item of items) {
+        const clone = item.cloneNode(true);
+        // Копия декоративная: она не должна участвовать ни в фокусе, ни в
+        // кликах, ни в поиске по data-tab (иначе querySelector найдёт двойника).
+        clone.removeAttribute("data-tab");
+        clone.removeAttribute("id");
+        clone.removeAttribute("aria-current");
+        clone.setAttribute("aria-hidden", "true");
+        clone.setAttribute("tabindex", "-1");
+        clone.classList.remove("is-active", "is-preview-target", "is-dragover");
+        track.appendChild(clone);
+      }
+      layer.appendChild(track);
+      nav.appendChild(layer);
+      return { layer, track, clones: Array.from(track.children) };
+    }
+
+    // Цвета читаем из CSS-переменных панели: акцентная палитра меняется на
+    // :root, поэтому при смене темы/акцента refresh() перечитывает их.
+    function readPalette() {
+      if (!window.getComputedStyle) return;
+      const cs = window.getComputedStyle(nav);
+      const idle = parseColor(cs.getPropertyValue("--muted"));
+      const accent = parseColor(cs.getPropertyValue("--berry"));
+      if (idle) state.palette.idle = idle;
+      if (accent) state.palette.accent = accent;
+    }
+
+    function applyLens(shape) {
+      if (!lens || !state.rects) return;
+      // При reduced-motion линза не увеличивает: контент остаётся как есть.
+      const s = state.reduced ? 0 : shape.s;
+      // Прибавка к масштабу: в покое лёгкая, на скорости капля «надувает»
+      // контент сильнее — вместе с деформацией контура это и есть жизнь.
+      const boost = (LENS_SCALE - 1) + s * LENS_SCALE_SPEED;
+      for (let index = 0; index < lens.clones.length; index += 1) {
+        const clone = lens.clones[index];
+        const entry = state.rects[index];
+        const ratio = state.tints[entry.tab] || 0;
+        if (ratio <= 0.001) {
+          if (clone.style.transform) clone.style.transform = "";
+          continue;
+        }
+        // Каждый элемент растёт на своём месте: масштаб от центра вкладки,
+        // поэтому контент не «уезжает» из капли, как при зуме всего слоя.
+        const center = entry.rect.left + entry.rect.width / 2 - state.svgRect.left;
+        const offset = clamp((center - shape.cx) / (state.geom.slotW * 0.5), -1, 1);
+        // Перспектива: у краёв капли элемент наклоняется от центра — край
+        // поджимается, и картинка читается как преломление в стекле.
+        const tilt = -offset * LENS_TILT * ratio * (0.35 + 0.65 * s);
+        const scale = 1 + boost * ratio;
+        // В покое перспективы нет — чистый 2D-scale перерисовывается резко,
+        // а perspective()/rotateY() включили бы 3D-контекст и мыло иконку.
+        clone.style.transform = Math.abs(tilt) < 0.05
+          ? `scale(${round2(scale)})`
+          : `perspective(${LENS_PERSPECTIVE}px) rotateY(${round2(tilt)}deg) scale(${round2(scale)})`;
+      }
+      // Тот же контур с мягкой кромкой вырезает базовый слой и проявляет
+      // линзу: под каплей остаётся только увеличенная копия, а на границе
+      // подпись не рвётся, а плавно уступает место преломлённой.
+      if (baseMask) {
+        baseMask.hole.setAttribute("d", shape.d);
+        baseMask.lensPath.setAttribute("d", shape.d);
+      }
+    }
+
+    // Перекраска по доле накрытия: вкладка не «включается» целиком, а
+    // наливается цветом по мере того, как капля наезжает на неё. Внутри
+    // капли копия в линзе держит полный акцент — так под стеклом контент
+    // читается активным, а снаружи плавно уходит в обычный цвет.
+    function applyTint(shape) {
+      if (!state.rects || !state.svgRect) return;
+      const span = {
+        left: state.svgRect.left + shape.xL,
+        right: state.svgRect.left + shape.xR
+      };
+      for (let index = 0; index < state.rects.length; index += 1) {
+        const entry = state.rects[index];
+        const ratio = coverageOf(span, entry.rect);
+        const previous = state.tints[entry.tab];
+        if (previous !== undefined && Math.abs(ratio - previous) < TINT_STEP) continue;
+        state.tints[entry.tab] = ratio;
+        const color = mixColor(state.palette.idle, state.palette.accent, ratio);
+        // Цвет ставим на вкладку: иконка рисуется currentColor, подпись
+        // наследует цвет.
+        items[index].style.color = color;
+        if (lens && lens.clones[index]) {
+          lens.clones[index].style.color = mixColor(state.palette.idle, state.palette.accent, 1);
+        }
+      }
     }
 
     // ------------------------------------------------------------- замеры
@@ -203,6 +443,40 @@
         tab: item.dataset.tab,
         rect: item.getBoundingClientRect()
       }));
+      // Копия в линзе повторяет раскладку панели: та же внутренняя область,
+      // тот же grid. Ставим её по пикселям, чтобы не зависеть от padding.
+      if (lens) {
+        lens.track.style.left = `${round2(inner.x)}px`;
+        lens.track.style.top = `${round2(inner.y)}px`;
+        lens.track.style.width = `${round2(inner.w)}px`;
+        lens.track.style.height = `${round2(inner.h)}px`;
+      }
+      // Маска базового слоя живёт в координатах самой обёртки: она начинается
+      // на внутреннем отступе панели, поэтому контур капли сдвигаем на него.
+      if (baseMask) {
+        const pad = 24;
+        const box = { x: -pad, y: -pad, width: width + pad * 2, height: height + pad * 2 };
+        for (const node of [baseMask.rect, baseMask.lensRect]) {
+          node.setAttribute("x", box.x);
+          node.setAttribute("y", box.y);
+          node.setAttribute("width", box.width);
+          node.setAttribute("height", box.height);
+        }
+        // Область самой маски: у maskUnits="userSpaceOnUse" проценты по
+        // умолчанию считаются от рамки элемента и для HTML дают пустоту —
+        // тогда маска гасит всё содержимое.
+        for (const maskNode of [baseMask.mask, baseMask.lensMask]) {
+          maskNode.setAttribute("x", box.x);
+          maskNode.setAttribute("y", box.y);
+          maskNode.setAttribute("width", box.width);
+          maskNode.setAttribute("height", box.height);
+        }
+        baseMask.hole.setAttribute("transform", `translate(${round2(-inner.x)} ${round2(-inner.y)})`);
+        // Область фильтра должна покрывать размытие по краям контура.
+        for (const key of ["x", "y", "width", "height"]) {
+          baseMask.filter.setAttribute(key, box[key]);
+        }
+      }
       return state.geom;
     }
 
@@ -221,7 +495,9 @@
 
     // ------------------------------------------------------------- форма
 
-    function buildPath(centerX, speed, dir) {
+    // Возвращает не только путь, но и геометрию: линзе нужен центр и границы,
+    // перекраске — горизонтальный отрезок, накрытый каплей.
+    function dropletShape(centerX, speed, dir) {
       const geom = state.geom;
       const w0 = geom.slotW - 2;
       const h0 = geom.inner.h - 2;
@@ -257,7 +533,7 @@
       const kLead = 0.5523 + s * 0.1;
       const kTrail = 0.5523 - s * 0.06;
 
-      return [
+      const d = [
         `M${round2(xL + r)},${round2(yT)}`,
         `L${round2(xR - r)},${round2(yT)}`,
         `C${round2(xR - r + kLead * r)},${round2(yT)} ${round2(xR)},${round2(yT + r - kLead * r)} ${round2(xR)},${round2(yT + r)}`,
@@ -267,12 +543,18 @@
         `C${round2(xL)},${round2(yT + r - kTrail * r)} ${round2(xL + r - kTrail * r)},${round2(yT)} ${round2(xL + r)},${round2(yT)}`,
         "Z"
       ].join(" ");
+
+      return { d, cx, xL, xR, yT, yB, height, s, dir };
     }
 
     function render() {
       if (!state.geom) return;
       const dir = state.vel < 0 ? -1 : 1;
-      path.setAttribute("d", buildPath(state.pos, state.vel, dir));
+      const shape = dropletShape(state.pos, state.vel, dir);
+      path.setAttribute("d", shape.d);
+      // Сначала перекраска (линза берёт готовые доли накрытия), потом линза.
+      applyTint(shape);
+      applyLens(shape);
       if (state.drag) updatePreview();
     }
 
@@ -635,6 +917,8 @@
       const previousTarget = state.target;
       measure();
       if (!state.geom) return;
+      // Тема и акцентная палитра могли смениться — перечитываем цвета.
+      readPalette();
       const center = centerOf(state.active);
       state.target = center === null ? previousTarget : center;
       if (!state.drag) {
@@ -649,6 +933,8 @@
 
     function destroy() {
       stopLoop();
+      if (lens && lens.layer.parentNode) lens.layer.parentNode.removeChild(lens.layer);
+      if (baseMask && baseMask.holder.parentNode) baseMask.holder.parentNode.removeChild(baseMask.holder);
       nav.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
@@ -701,6 +987,7 @@
     }
 
     measure();
+    readPalette();
     render();
 
     return {
@@ -711,7 +998,9 @@
         active: state.active,
         pos: state.pos,
         target: state.target,
-        dragging: Boolean(state.drag)
+        dragging: Boolean(state.drag),
+        // Доля накрытия каждой вкладки каплей: 0 — вне, 1 — целиком внутри.
+        tints: { ...state.tints }
       })
     };
   }
@@ -726,4 +1015,6 @@
     isMajority,
     pickTarget
   };
+  // Линза и перекраска: чистые функции для юнит-тестов.
+  createLiquidNav.lens = { parseColor, mixColor, coverageOf };
 })();

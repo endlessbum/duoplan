@@ -392,6 +392,35 @@
   await frames(2);
   check("жест со SVG-капли работает", liquid.getState().active === "dates", commits.join(","));
 
+  // 16. Линза и перекраска: копия контента под каплей + цвет по доле накрытия.
+  reset();
+  await frames(2);
+  const lensLayer = nav.querySelector(".nav-lens");
+  const baseLayer = nav.querySelector(".nav-base");
+  const restTints = liquid.getState().tints;
+  check("слой линзы и базовый слой построены", Boolean(lensLayer && baseLayer), `${Boolean(lensLayer)}/${Boolean(baseLayer)}`);
+  check("под каплей вкладка окрашена целиком", restTints.home > 0.9, restTints.home);
+  check("соседняя вкладка ещё не окрашена", restTints.tasks < 0.1, restTints.tasks);
+  const lensClone = lensLayer && lensLayer.querySelector(".nav-lens-track .nav-item");
+  check(
+    "копия в линзе увеличена",
+    Boolean(lensClone) && /scale\(1\.[0-9]+\)/.test(lensClone.style.transform),
+    lensClone && lensClone.style.transform
+  );
+
+  // 17. Промежуточное накрытие даёт промежуточный цвет, а не «включение» целиком.
+  reset();
+  down(home.x, home.y);
+  move(home.x + 30, home.y);
+  await frames(2);
+  move(dates.x - 26, home.y);
+  await frames(2);
+  const midTints = liquid.getState().tints;
+  const partial = Object.values(midTints).filter((ratio) => ratio > 0.08 && ratio < 0.92);
+  check("есть вкладка с частичным накрытием", partial.length > 0, JSON.stringify(midTints));
+  up(dates.x - 26, home.y);
+  await frames(2);
+
   } catch (error) {
     results.push({ name: "исключение в сценарии", ok: false, detail: String((error && error.stack) || error) });
   }

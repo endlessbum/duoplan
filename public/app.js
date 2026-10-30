@@ -247,6 +247,11 @@
     return /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(value) ? value : null;
   }
 
+  // Тема и акцент меняют CSS-переменные, а капля читает их при refresh().
+  // Крючок нужен потому, что applyTheme вызывается раньше, чем создаётся
+  // liquidNav (обращение к const до инициализации — ReferenceError).
+  let navRefreshHook = null;
+
   function applyTheme() {
     const scheme = tg?.colorScheme || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = scheme === "dark" ? "dark" : "light";
@@ -264,6 +269,7 @@
       if (meta) meta.setAttribute("content", background);
     }
     applyAccent();
+    navRefreshHook?.();
   }
 
   if (tg) {
@@ -454,6 +460,9 @@
     if (!liquidNav) return;
     liquidNav.setActive(targetTab, animate);
   }
+
+  // Смена темы/акцента перечитывает цвета вкладок внутри nav.js.
+  navRefreshHook = () => liquidNav?.refresh();
 
   // ------------------------------------------------------------------
   // Встроенная шапка вкладки (прямо над элементами на странице)

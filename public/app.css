@@ -362,6 +362,9 @@ body.tg-fullscreen .tab-header {
   z-index: 45;
   user-select: none;
   -webkit-user-select: none;
+  /* Нажатие не должно давать ни подсветки, ни вспышки: в доке меняется
+     только цвет. */
+  -webkit-tap-highlight-color: transparent;
   touch-action: none;
   isolation: isolate;
 }
@@ -402,18 +405,57 @@ body.tg-fullscreen .tab-header {
   transition: stroke 0.3s ease, filter 0.3s ease;
 }
 
-/* Живое стекло: иконка под каплей получает эффект преломления */
-.nav-item.is-active .nav-icon svg,
-.nav-item.is-preview-target .nav-icon svg {
-  filter: brightness(1.15) saturate(1.2);
-  transition: filter 0.15s ease;
+/* Базовый слой вкладок: занимает все колонки панели и раскладывает вкладки
+   таким же grid'ом. Маска вырезает его ровно под каплей, чтобы обычная
+   подпись не просвечивала сквозь увеличенную копию в линзе. */
+.nav-base {
+  grid-column: 1 / -1;
+  display: grid;
+  align-items: stretch;
+  min-width: 0;
 }
 
-/* Живое стекло: иконки под каплей получают преломляющий эффект */
-.nav-item.is-dragover .nav-icon {
-  -webkit-filter: saturate(1.2) brightness(1.1);
-  filter: saturate(1.2) brightness(1.1);
-  transition: filter 0.15s ease;
+/* Контейнер определений маски: сам ничего не рисует. */
+.nav-mask {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Линза капли: копия иконок и подписей, обрезанная по контуру капли и
+   увеличенная. Внутри капли контент крупнее, у краёв ловится перспектива.
+   Базовая панель при этом стоит на месте — у неё меняется только цвет. */
+.nav-lens {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+  /* Без поддержки mask: url(#…) линза накрыла бы всю панель — не показываем. */
+  display: none;
+}
+
+@supports (mask: url(#a)) or (-webkit-mask: url(#a)) {
+  .nav-lens {
+    display: block;
+  }
+}
+
+.nav-lens-track {
+  position: absolute;
+  display: grid;
+  align-items: stretch;
+  transform-origin: 50% 50%;
+}
+
+/* Копия декоративная: ни нажатий, ни фокуса, ни анимаций цвета —
+   иначе линза «отставала» бы от пальца. */
+.nav-lens-track .nav-item {
+  pointer-events: none;
+  transition: none;
+  cursor: default;
 }
 
 .bottom-nav.is-dragging {
@@ -437,44 +479,28 @@ body.tg-fullscreen .tab-header {
   gap: 2px;
   font: inherit;
   cursor: pointer;
-  transition: color 0.2s ease, transform 0.18s ease;
+  /* В доке меняется только цвет: ни масштаба, ни сдвигов, ни фильтров.
+     Геометрия вкладки должна оставаться неизменной всегда — иначе подпись
+     «прыгает» при переключении, а площадь под каплей считается по сжатым
+     прямоугольникам. */
+  transition: color 0.2s ease;
   /* Браузер не должен начинать скролл/пан при касании кнопки: капля
      управляется кодом, а default touch-action на child перебивает
      touch-action: none родителя (он не наследуется). */
   touch-action: none;
 }
 
-.nav-item:active {
-  transform: scale(0.93);
-}
-
 .nav-item.is-active {
   color: var(--berry);
-  font-weight: 700;
   touch-action: none;
 }
 
-/* Предпросмотр цели во время перетаскивания: подсветка, но не активное
-   состояние — страница до отпускания пальца не меняется. */
-.nav-item.is-preview-target {
-  color: var(--berry);
-  opacity: 0.85;
-}
+/* Предпросмотр цели во время перетаскивания: класс остаётся для состояния,
+   но визуально ничего не добавляет — вкладку красит перекраска по доле
+   накрытия, чтобы цвет шёл за каплей, а не включался целиком. */
 
-.nav-item.is-preview-target .nav-icon {
-  /* Превью без увеличения, только цвет */
-  transform: none;
-  color: var(--berry);
-  opacity: 0.85;
-}
-
-/* Во время жеста иконки не «догоняют» каплю transition-ами — иначе дёргаются.
-   Заодно снимаем :active-масштаб: getBoundingClientRect() вкладок должен
-   оставаться стабильным, иначе площадь пересечения считается по сжатым
-   прямоугольникам. */
-.bottom-nav.is-dragging .nav-item,
-.bottom-nav.is-dragging .nav-item:active {
-  transform: none;
+/* Во время жеста подписи не «догоняют» каплю transition-ами — иначе дёргаются. */
+.bottom-nav.is-dragging .nav-item {
   touch-action: none;
 }
 
@@ -488,14 +514,11 @@ body.tg-fullscreen .tab-header {
   height: 22px;
   display: grid;
   place-items: center;
-  /* Иконки статичны — не увеличиваются при активации/наведении. */
+  /* Иконка статична: размер и положение заданы раз и навсегда, цвет приходит
+     от вкладки через currentColor. */
   transform: none;
+  color: inherit;
   transition: color 0.2s ease;
-}
-
-.nav-item.is-active .nav-icon {
-  /* Только цвет, без масштабирования */
-  color: var(--berry);
 }
 
 .nav-icon svg {

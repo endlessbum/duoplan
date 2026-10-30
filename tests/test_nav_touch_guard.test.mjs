@@ -25,7 +25,9 @@ const appCss = readFileSync(join(root, "public", "app.css"), "utf8");
 
 const ruleFor = (selector) => {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = appCss.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+  // Якорь на начало строки: иначе `.nav-item` совпадёт с хвостом
+  // `.nav-lens-track .nav-item`, у которого своих правил нет.
+  const match = appCss.match(new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, "m"));
   return match ? match[1] : "";
 };
 
