@@ -1975,7 +1975,7 @@
           <section class="card">
             <h3>Сессия истекла</h3>
             <p>Токен авторизации Telegram истек. <a href="#" id="reauth-link" class="secondary">Переоткрыть приложение</a></p>
-            <button id="retry-btn" class="primary">Повторить загрузку</button>
+            <button id="retry-btn" class="primary" style="display:block;margin:16px auto 0;max-width:260px;">Повторить загрузку</button>
           </section>
         `;
         document.getElementById("retry-btn").addEventListener("click", () => {
@@ -1992,7 +1992,7 @@
           <section class="card">
             <h3>Не удалось загрузить пространство</h3>
             <p>${esc(error.message)}</p>
-            <button id="retry-btn" class="primary">Повторить загрузку</button>
+            <button id="retry-btn" class="primary" style="display:block;margin:16px auto 0;max-width:260px;">Повторить загрузку</button>
           </section>
         `;
         document.getElementById("retry-btn").addEventListener("click", () => {
