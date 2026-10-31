@@ -1348,11 +1348,11 @@
     return `${name.charAt(0).toUpperCase()}${name.slice(1)} ${year}`;
   }
 
+  // Единый формат дд/мм/гггг и в календарных подписях (правило п.7 из батча
+  // 2026.10.31: «дата в приложении всегда дд/мм/гггг» — длинный «8 марта»
+  // нарушал его в заголовке событий выбранного дня).
   function calendarLongDate(key) {
-    const [year, month, day] = String(key).split("-").map(Number);
-    return new Intl.DateTimeFormat("ru-RU", {
-      day: "numeric", month: "long", year: "numeric", timeZone: "UTC"
-    }).format(new Date(Date.UTC(year, month - 1, day)));
+    return formatDay(String(key ?? ""));
   }
 
   // Календарный ключ момента в поясе пары (а не по поясу устройства).

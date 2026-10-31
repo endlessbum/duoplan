@@ -40,6 +40,7 @@ const calendar = new Function(
     extractBraced("function calendarEventIndex"),
     extractBraced("function calendarMonthTitle"),
     extractBraced("function calendarLongDate"),
+    extractBraced("function formatDay"),
     extractBraced("function calendarKeyFromDate"),
     extractBraced("function calendarTodayKey"),
     extractBraced("function calendarEventRows"),
@@ -112,8 +113,9 @@ test("название месяца по-русски и с заглавной �
 });
 
 test("полная дата выбранного дня — русская", () => {
-  equal(calendarLongDate("2026-05-15").includes("мая 2026"), true);
-  equal(calendarLongDate("2026-01-01").includes("января 2026"), true);
+  // Единый формат дд/мм/гггг (правило п.7 батча 2026.10.31).
+  equal(calendarLongDate("2026-05-15"), "15/05/2026");
+  equal(calendarLongDate("2026-01-01"), "01/01/2026");
 });
 
 test("«сегодня» — ключ YYYY-MM-DD в поясе пары", () => {
