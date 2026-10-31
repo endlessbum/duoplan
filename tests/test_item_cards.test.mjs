@@ -190,3 +190,18 @@ test("formatDay: все даты приложения — дд/мм/гггг", (
   equal(formatDay("мусор"), "мусор");
   equal(formatDay(null), "");
 });
+
+test("чип таймера кодирует repeat в data-countdown — тик не теряет контекст", () => {
+  // Регрессия аудита 2026-10-31: refreshCountdowns пересобирает чип из
+  // data-countdown каждые 30 секунд; без repeat внутри атрибута чип
+  // ежемесячного плана «мигал» оранжевым «Время пришло».
+  const chip = countdownChip("2026-11-05", "19:30", "month");
+  ok(/data-countdown="2026-11-05\|19:30\|month"/.test(chip), "repeat не попал в атрибут");
+  // Обратный путь тика: split("|") и повторный вызов сохраняют месячную цель.
+  const m = /data-countdown="([^"]+)"/.exec(chip)[1].split("|");
+  const reparsed = countdownChip(m[0], m[1], m[2] || null);
+  equal(reparsed, chip, "пересборка чипа изменила контекст повтора");
+  // Разовые планы — пустой repeat: обратная совместимость формата.
+  const plain = countdownChip("2027-01-01", "", null);
+  ok(/data-countdown="2027-01-01\|\|"/.test(plain), "разовый чип без repeat");
+});

@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.31.3";
+const APP_VERSION = "2026.10.31.4";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.31.3";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.31.3";
+const DB_SCHEMA_VERSION = "2026.10.31.4";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -581,7 +581,7 @@ function nextMonthlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
 
 // Ближайшее ежегодное наступление плана: тот же месяц-день в текущем или
 // следующем году (29 февраля существует не в каждом году — пропускается).
-function nextYearlyOccurrenceMs(item, timeZone) {
+function nextYearlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
   const parts = String(item?.day || "").split("-");
   if (parts.length !== 3) return Number.MAX_SAFE_INTEGER;
   const month = Number(parts[1]) - 1;
@@ -593,7 +593,7 @@ function nextYearlyOccurrenceMs(item, timeZone) {
     const [hh, mm] = String(item.time).split(":").map(Number);
     if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
   }
-  const now = new Date();
+  const now = new Date(nowMs);
   const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
   const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
   const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
@@ -728,7 +728,7 @@ async function state(env, userId) {
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
-    env.DB.prepare("SELECT id,title,status,day,time,monthly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
@@ -1636,8 +1636,8 @@ async function processPairNotifications(env, pair, stamp, budget) {
   budget.left -= 3; // пользователи + даты + планы
   const [userRows, dateRows, taskRows] = await Promise.all([
     env.DB.prepare(`SELECT * FROM users WHERE tg_id IN (${members.map(() => "?").join(",")})`).bind(...members).all(),
-    env.DB.prepare("SELECT id,title,day,time,recurs,is_private,created_by FROM dates WHERE pair_id=?").bind(pair.id).all(),
-    env.DB.prepare("SELECT id,title,day,time,is_private,created_by FROM tasks WHERE pair_id=? AND status='open' AND day IS NOT NULL").bind(pair.id).all()
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by FROM dates WHERE pair_id=?").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,day,time,monthly,yearly,is_private,created_by FROM tasks WHERE pair_id=? AND status='open' AND day IS NOT NULL").bind(pair.id).all()
   ]);
   const users = userRows.results || [];
   const dates = dateRows.results || [];

@@ -241,3 +241,31 @@ test("минутный тик синхронизации работает и п�
   run(tick, null, { visibilityState: "visible" }, () => { calls += 1; });
   equal(calls, 2, "в браузере видимая вкладка тикает");
 });
+
+test("разблокировка PIN запускает полную загрузку состояния (initApp)", () => {
+  // Регрессия аудита 2026-10-31: mountLock делал render() с appState=null —
+  // после верного пароля пользователь до минуты видел гейт пола.
+  const braced = (d) => {
+    const start = source.indexOf(d);
+    if (start === -1) throw new Error(`${d} не найдено`);
+    let depth = 0;
+    for (let j = source.indexOf("{", start); j < source.length; j++) {
+      if (source[j] === "{") depth++;
+      else if (source[j] === "}") {
+        depth--;
+        if (depth === 0) return source.slice(start, j + 1);
+      }
+    }
+    throw new Error(`незакрытый блок: ${d}`);
+  };
+  const mountLock = braced("function mountLock()");
+  // initApp выходит ранним выходом за замком, не загрузив данные...
+  ok(/if \(!appUnlocked && storedPin\(\)\) \{[\s\S]{0,200}?return;/.test(source),
+    "ранний выход initApp за замком исчез");
+  // ...поэтому разблокировка обязана вызвать initApp(), а не только render().
+  ok(mountLock.includes("initApp();"), "mountLock не запускает initApp после разблокировки");
+  ok(!mountLock.includes("render();"), "mountLock не должен рендерить пустое состояние");
+  // Замок рисуется до первого сетевого запроса состояния.
+  ok(source.indexOf("renderLock()") < source.indexOf('request("/api/state")'),
+    "замок должен рисоваться до запроса состояния");
+});

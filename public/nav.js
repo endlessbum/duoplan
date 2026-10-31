@@ -455,6 +455,9 @@
       // Вытяжение пальцем: тянешь выше/ниже бара — капля сплющивается и
       // тянется к пальцу, растекаясь по ширине. Сдвиг ограничен кромкой бара:
       // за пределы она не выходит, натяжение читается по деформации.
+      // Базовый центр по вертикали — ДО блока вытяжения: лимит сдвига считается
+      // от него, а финальный cy = baseCy + squashShift (объявление ниже).
+      const baseCy = geom.inner.y + geom.inner.h / 2;
       let squashShift = 0;
       if (state.drag && typeof state.drag.dy === "number") {
         const dy = state.drag.dy;
@@ -463,7 +466,7 @@
           drawnHeight *= 1 - SQUASH_H * t;
           drawnWidth *= 1 + SQUASH_W * t;
           const halfH = drawnHeight / 2;
-          const limit = dy < 0 ? cy - halfH : geom.height - cy - halfH;
+          const limit = dy < 0 ? baseCy - halfH : geom.height - baseCy - halfH;
           squashShift = clamp(PULL_SHIFT * t, 0, Math.max(0, limit)) * (dy < 0 ? -1 : 1);
         }
       }
@@ -477,7 +480,7 @@
       const xL = cx - drawnWidth / 2 + dir * trail;
       const xR = cx + drawnWidth / 2 + dir * lead;
 
-      const cy = geom.inner.y + geom.inner.h / 2 + squashShift;
+      const cy = baseCy + squashShift;
       const yT = cy - drawnHeight / 2;
       const yB = cy + drawnHeight / 2;
       const r = Math.min(drawnHeight / 2, (xR - xL) / 2);

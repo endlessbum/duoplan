@@ -843,18 +843,21 @@
     const target = planTarget(day, time, repeat);
     if (!target) return "";
     const diff = target.getTime() - Date.now();
+    // Repeat кодируется в атрибуте: 30-секундный тик пересобирает чип из него
+    // и не теряет ежемесячный/ежегодный контекст (иначе чип «мигал» просрочкой).
+    const ctx = `${esc(day)}|${esc(time || "")}|${repeat || ""}`;
     if (diff <= 0) {
       const stale = -diff > 7 * 86400000;
-      return `<span class="day-chip is-overdue${stale ? " is-stale" : ""}" data-countdown="${esc(day)}|${esc(time || "")}">Время пришло</span>`;
+      return `<span class="day-chip is-overdue${stale ? " is-stale" : ""}" data-countdown="${ctx}">Время пришло</span>`;
     }
     const hours = Math.floor(diff / 3600000);
     const mins = Math.max(1, Math.floor((diff % 3600000) / 60000));
     if (hours < 24) {
       const label = hours > 0 ? `Через ${hours} ч ${mins} мин` : `Через ${mins} мин`;
-      return `<span class="day-chip is-countdown" data-countdown="${esc(day)}|${esc(time || "")}">${esc(label)}</span>`;
+      return `<span class="day-chip is-countdown" data-countdown="${ctx}">${esc(label)}</span>`;
     }
     const days = Math.ceil(diff / 86400000);
-    return `<span class="day-chip" data-countdown="${esc(day)}|${esc(time || "")}">Через ${days} дн.</span>`;
+    return `<span class="day-chip" data-countdown="${ctx}">Через ${days} дн.</span>`;
   }
 
   function refreshCountdowns() {
@@ -862,9 +865,9 @@
     document.querySelectorAll("[data-countdown]").forEach((node) => {
       const raw = node.getAttribute("data-countdown") || "";
       if (raw.includes("|")) {
-        const [day, time] = raw.split("|");
+        const [day, time, repeat] = raw.split("|");
         const wrapper = document.createElement("span");
-        wrapper.innerHTML = countdownChip(day, time);
+        wrapper.innerHTML = countdownChip(day, time, repeat || null);
         const next = wrapper.firstElementChild;
         if (next) node.replaceWith(next);
         return;
@@ -917,7 +920,9 @@
         return;
       }
       appUnlocked = true;
-      render();
+      // Состояние ещё не загружено: initApp вышел ранним выходом за замком.
+      // Полная инициализация грузит /api/state и рендерит пространство.
+      initApp();
     });
     setTimeout(() => document.getElementById("lock-pin")?.focus(), 50);
   }
@@ -1576,7 +1581,7 @@
         <div class="settings-row">
           <span class="settings-label">Пароль на вход</span>
           <div style="display:flex; gap:8px; align-items:center;">
-            <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" value="${storedPin()}">
+            <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
             <button class="secondary small" type="button" data-action="save-pin">Задать</button>
             ${storedPin() ? `<button class="secondary small" type="button" data-action="clear-pin">Убрать</button>` : ""}
           </div>

@@ -76,6 +76,15 @@ test("yearly: следующий год с существующим днём (29
   equal(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)), "2028-02-29");
 });
 
+test("yearly: nowMs параметр делает солвер детерминированным", () => {
+  // Фиксированное «сейчас» — 2026-10-31: ближайшее 29 февраля — 2028 (високосный).
+  const ms = nextYearlyOccurrenceMs({ day: "2020-02-29", time: "", yearly: 1 }, TZ, NOW);
+  equal(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)), "2028-02-29");
+  // Годовая дата, чей день в текущем году ещё впереди, — в этом же году.
+  const ms2 = nextYearlyOccurrenceMs({ day: "2024-12-31", time: "", yearly: 1 }, TZ, NOW);
+  equal(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms2)), "2026-12-31");
+});
+
 test("monthlyOccursOnDay: совпадает по дню месяца, 31-е не «размазывается»", () => {
   const item = { day: "2026-01-31", monthly: 1 };
   equal(monthlyOccursOnDay(item, "2026-11-30"), false, "30-е не 31-е");
