@@ -42,6 +42,9 @@ const load = new Function(
     'const document = { documentElement: { dataset: { theme: "dark" } }, querySelectorAll: () => [] };',
     extractLine("  const RICH_TOKENS"),
     extractLine("  const REOPEN_ICON"),
+    extractLine("  const DONE_ICON"),
+    extractLine("  const EDIT_ICON"),
+    extractLine("  const DELETE_ICON"),
     extractBraced("function esc"),
     extractBraced("function formatDay"),
     extractBraced("function richInline"),
@@ -133,9 +136,9 @@ test("у чужого исполненного желания кнопок не�
   ok(!readonly.includes('data-action="reopen-item"'), "read-only вид отрисовывает кнопки");
 });
 
-test("приватная запись помечается чипом «Личная»", () => {
-  ok(taskItem({ id: 14, title: "x", day: "2026-11-05", time: "", is_private: 1 }).includes(">Личная</span>"));
-  ok(dateItem({ id: 15, title: "x", day: "2026-11-05", time: "", recurs: 0, is_private: 1 }).includes(">Личная</span>"));
+test("приватная запись помечается чипом «Личное»", () => {
+  ok(taskItem({ id: 14, title: "x", day: "2026-11-05", time: "", is_private: 1 }).includes(">Личное</span>"));
+  ok(dateItem({ id: 15, title: "x", day: "2026-11-05", time: "", recurs: 0, is_private: 1 }).includes(">Личное</span>"));
 });
 
 test("wishItem: у желания партнёра нет кнопок, у своего — полный набор", () => {
@@ -158,6 +161,9 @@ test("memoryItem: заголовок, свёрнутое тело и клик-р
       'const appState = { pair: { timezone: "Europe/Moscow", user_b: 1 }, user: { tg_id: 1 } };',
       'const document = { documentElement: { dataset: { theme: "dark" } }, querySelectorAll: () => [] };',
       extractLine("  const RICH_TOKENS"),
+      extractLine("  const DONE_ICON"),
+      extractLine("  const EDIT_ICON"),
+      extractLine("  const DELETE_ICON"),
       extractBraced("function esc"),
       extractBraced("function formatDay"),
       extractBraced("function richInline"),

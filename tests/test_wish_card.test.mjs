@@ -34,6 +34,9 @@ const loadWishItem = new Function(
   "appState",
   [
     "const RICH_TOKENS = " + appSource.match(/const RICH_TOKENS = (\[\[.*\]\]);/)?.[1] + ";",
+    "const DONE_ICON = " + appSource.match(/const DONE_ICON = ('.*');/)?.[1] + ";",
+    "const EDIT_ICON = " + appSource.match(/const EDIT_ICON = ('.*');/)?.[1] + ";",
+    "const DELETE_ICON = " + appSource.match(/const DELETE_ICON = ('.*');/)?.[1] + ";",
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function richInline"),
     extractBraced(appSource, "function renderRichText"),

@@ -282,7 +282,7 @@ test("archivePage('dates') фильтрует приватные даты по u
   deepStrictEqual(datesQuery.args, [PAIR.id, USER_ID]);
 });
 
-test("строки дат в state несут is_private — интерфейс рисует метку «Личная»", async () => {
+test("строки дат в state несут is_private — интерфейс рисует метку «Личное»", async () => {
   const { env } = makeStateDb();
   const result = await state(env, USER_ID);
   deepStrictEqual(result.dates.map(d => Boolean(d.is_private)), [false, true]);

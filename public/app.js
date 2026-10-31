@@ -24,7 +24,7 @@
 
   const TAB_ORDER = ["home", "tasks", "dates", "memories", "wishes"];
   const TAB_META = {
-    home: { title: "Наше пространство", isHome: false },
+    home: { title: "Наше пространство" },
     tasks: { title: "Наши планы", sub: "Общие дела, свидания и идеи" },
     dates: { title: "Значимые даты", sub: "Важные дни вашей истории" },
     memories: { title: "Общий дневник", sub: "Тёплые моменты и заметки" },
@@ -230,7 +230,7 @@
       const palette = ACCENT_PALETTES[el.dataset.accent];
       if (palette) el.style.background = palette[dark ? "dark" : "light"];
     });
-    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-bg", "--droplet-border", "--droplet-glow", "--droplet-hi", "--droplet-fill", "--droplet-deep", "--droplet-halo", "--berry-shadow"];
+    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-bg", "--droplet-border", "--droplet-glow", "--droplet-hi", "--droplet-fill", "--droplet-deep", "--droplet-halo"];
     const hex = ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
     // Палитра капли (цвет подписей) читается из CSS-переменных только в
     // refresh(): хук обязан сработать ПОСЛЕ установки переменных, иначе бары
@@ -256,7 +256,6 @@
     root.style.setProperty("--droplet-fill", rgba(dark ? 0.38 : 0.30));
     root.style.setProperty("--droplet-deep", rgba(dark ? 0.18 : 0.16));
     root.style.setProperty("--droplet-halo", rgba(dark ? 0.30 : 0.22));
-    root.style.setProperty("--berry-shadow", `0 8px 20px ${rgba(0.24)}`);
     finish();
   }
 
@@ -568,7 +567,7 @@
     }
     return `
       <header class="tab-header">
-        <h1 class="tab-header-title ${meta.isHome ? "is-home" : ""}">${esc(meta.title)}</h1>
+        <h1 class="tab-header-title">${esc(meta.title)}</h1>
         ${subtitle ? `<p class="tab-header-sub">${esc(subtitle)}</p>` : ""}
       </header>
     `;
@@ -1002,8 +1001,8 @@
         <p>${pair.user_b ? `Начало истории: ${esc(formatDay(pair.started_at))}` : "Отправьте код партнёру, чтобы открыть ритуалы дня и общее пространство."}</p>
         <div class="stats-row">
           <span class="stat-pill">${FLAME_ICON} Серия ${user.streak || 0} дн.</span>
-          <span class="stat-pill">✦ ${user.points || 0} XP</span>
-          <span class="stat-pill">♥ Вместе ${pair.together_pts || 0} XP</span>
+          <span class="stat-pill">${user.points || 0} XP</span>
+          <span class="stat-pill">Вместе ${pair.together_pts || 0} XP</span>
         </div>
       </section>
 
@@ -1040,8 +1039,9 @@
             <h3 class="item-title">${renderRichText(item.title)}</h3>
             <div class="item-meta">
               <div class="item-when">
-                ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
-                ${item.day ? `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
+                ${item.is_private
+                  ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span>${item.day ? `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}</div>`
+                  : item.day ? `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
                 <div class="item-when-row">
                   ${countdownChip(item.day, item.time, taskRepeat(item))}
                   ${item.day ? `<button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>` : ""}
@@ -1050,9 +1050,9 @@
             </div>
           </div>
           <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="done-item" data-type="tasks" data-id="${item.id}" aria-label="Выполнено">✓</button>
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">✎</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">✕</button>
+            <button class="icon-btn" type="button" data-action="done-item" data-type="tasks" data-id="${item.id}" aria-label="Выполнено">${DONE_ICON}</button>
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
           </div>
         </div>
       </article>
@@ -1081,6 +1081,7 @@
     else if (days === 1) label = "Завтра";
     else label = `Через ${days} ${plural(days, "день", "дня", "дней")}`;
     const chip = label ? `<span class="day-chip ${chipClass}"${dataCountdown}>${esc(label)}</span>` : "";
+    const whenText = `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}${Number(item.monthly) === 1 ? " · Ежемесячно" : item.recurs ? " · Ежегодно" : ""}</span>`;
     return `
       <article class="card">
         <div class="item-row">
@@ -1088,8 +1089,7 @@
             <h3 class="item-title">${renderRichText(item.title)}</h3>
             <div class="item-meta">
               <div class="item-when">
-                <span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}${Number(item.monthly) === 1 ? " · Ежемесячно" : item.recurs ? " · Ежегодно" : ""}</span>
-                ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
+                ${item.is_private ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span>${whenText}</div>` : whenText}
                 <div class="item-when-row">
                   ${chip}
                   <button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>
@@ -1098,8 +1098,8 @@
             </div>
           </div>
           <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="dates" data-id="${item.id}" aria-label="Редактировать">✎</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="dates" data-id="${item.id}" aria-label="Удалить">✕</button>
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="dates" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="dates" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
           </div>
         </div>
       </article>
@@ -1121,8 +1121,8 @@
             </div>
           </div>
           <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="memories" data-id="${item.id}" aria-label="Редактировать">✎</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="memories" data-id="${item.id}" aria-label="Удалить">✕</button>
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="memories" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="memories" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
           </div>
         </div>
       </article>
@@ -1132,9 +1132,9 @@
   function wishItem(item, editable = true) {
     const canEdit = editable && item.owner_id === appState.user.tg_id;
     const actions = canEdit ? `
-      <button class="icon-btn" type="button" data-action="done-item" data-type="wishes" data-id="${item.id}" aria-label="Исполнено">✓</button>
-      <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">✎</button>
-      <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">✕</button>
+      <button class="icon-btn" type="button" data-action="done-item" data-type="wishes" data-id="${item.id}" aria-label="Исполнено">${DONE_ICON}</button>
+      <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+      <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
     ` : "";
     return `
       <article class="card">
@@ -1159,15 +1159,22 @@
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
   }
 
-  // Иконка «вернуть» у завершённых записей: инлайн-SVG в стиле иконок
-  // приложения (stroke 1.9, как в app.html), а не текстовый глиф ↩ (U+21A9) —
-  // на мобильных он рендерится эмодзи и выпадает из стиля текстовых кнопок
-  // ✓ (U+2713), ✎ (U+270E), ✕ (U+2715).
+  // Иконки действий карточек: инлайн-SVG в стиле иконок приложения
+  // (stroke 1.9, как в app.html), а не текстовые глифы ↩ ✓ ✎ ✕ —
+  // на мобильных глифы рендерятся шрифтом платформы (↩ даже эмодзи)
+  // и выпадают из стиля кнопок.
   const REOPEN_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"/></svg>';
+  const DONE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
+  const EDIT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4.5L19.5 9a2.1 2.1 0 0 0-3-3L5.5 17 4 20Z"/><path d="M13.5 7.5 16.5 10.5"/></svg>';
+  const DELETE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></svg>';
 
   // Монохромный огонёк серии: тонкий штрих в стиле иконок приложения вместо
   // эмодзи 🔥, выбивавшегося из монохромных пилюль статистики.
   const FLAME_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c1.2 3-2.6 4.6-2.6 7.6a3.6 3.6 0 0 0 3.7 3.5c1.8-.1 2.9-1.7 2.6-3.8 1.9 1.5 3.1 3.6 3.1 5.8A6.8 6.8 0 0 1 5.2 15C5.2 9.4 10.4 8 12 3Z"/></svg>';
+
+  // Звезда — вручённое желание в календаре: заливной SVG вместо текстового
+  // глифа ★ (U+2605), который рендерится шрифтом платформы.
+  const STAR_ICON = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none" aria-hidden="true"><path d="m12 3 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3Z"/></svg>';
 
   function completedTaskItem(item) {
     return `
@@ -1179,8 +1186,8 @@
           </div>
           <div class="item-actions">
             <button class="icon-btn" type="button" data-action="reopen-item" data-type="tasks" data-id="${item.id}" aria-label="Вернуть в планы">${REOPEN_ICON}</button>
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">✎</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">✕</button>
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
           </div>
         </div>
       </article>
@@ -1191,8 +1198,8 @@
     const canEdit = editable && item.owner_id === appState.user.tg_id;
     const actions = canEdit ? `
       <button class="icon-btn" type="button" data-action="reopen-item" data-type="wishes" data-id="${item.id}" aria-label="Вернуть в желания">${REOPEN_ICON}</button>
-      <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">✎</button>
-      <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">✕</button>
+      <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+      <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
     ` : "";
     return `
       <article class="card" style="opacity:0.72;">
@@ -1437,7 +1444,7 @@
       const dots = [];
       // Звезда — вручённое желание, точки — планы и даты. Личные записи
       // (is_private) помечаем серым, чтобы не путать с общими.
-      if (bucket?.wishes.length) dots.push('<span class="cal-star">★</span>');
+      if (bucket?.wishes.length) dots.push(`<span class="cal-star">${STAR_ICON}</span>`);
       if (cellTasks.length) {
         dots.push(`<i class="cal-dot ${cellTasks.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-task"}"></i>`);
       }
@@ -1472,7 +1479,7 @@
           ${rows.length ? rows.map((row) => `
             <div class="cal-event">
               ${row.kind === "wish"
-                ? '<span class="cal-star" aria-hidden="true">★</span>'
+                ? `<span class="cal-star" aria-hidden="true">${STAR_ICON}</span>`
                 : `<i class="cal-dot ${row.isPrivate ? "is-private" : row.kind === "task" ? "is-task" : "is-date"}" aria-hidden="true"></i>`}
               <div class="cal-event-body">
                 <span class="cal-event-title">${renderRichText(row.title)}</span>
@@ -1497,7 +1504,7 @@
         <div class="cal-legend">
           <span><i class="cal-dot is-task" aria-hidden="true"></i> Планы</span>
           <span><i class="cal-dot is-date" aria-hidden="true"></i> Значимые даты</span>
-          <span><span class="cal-star" aria-hidden="true">★</span> Желания</span>
+          <span><span class="cal-star" aria-hidden="true">${STAR_ICON}</span> Желания</span>
           <span><i class="cal-dot is-private" aria-hidden="true"></i> Личное</span>
         </div>
         ${details}
@@ -2119,7 +2126,7 @@
         btn.disabled = true;
         try {
           appState = await request("/api/daily/done", { method: "POST", body: {} });
-          showToast(appState?.awarded === false ? "Ритуал уже отмечен сегодня" : "Ритуал выполнен · +10 XP!");
+          showToast(appState?.awarded === false ? "Ритуал уже отмечен сегодня" : "Ритуал выполнен · +10 XP");
           render();
         } catch (error) {
           btn.disabled = false;

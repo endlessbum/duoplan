@@ -177,7 +177,7 @@ body {
   gap: 8px;
   font: inherit;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 500;
   cursor: pointer;
   transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), background 0.18s ease;
 }
@@ -223,7 +223,7 @@ body {
   place-items: center;
   background: var(--berry-soft);
   color: var(--berry);
-  font-weight: 750;
+  font-weight: 600;
   font-size: 13px;
   border: 1.5px solid var(--surface);
 }
@@ -277,14 +277,6 @@ body.tg-fullscreen .tab-header {
   color: var(--ink);
 }
 
-.tab-header-title.is-home {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
 .tab-header-sub {
   margin: 0;
   font-size: 12.5px;
@@ -327,7 +319,6 @@ body.tg-fullscreen .tab-header {
   font: inherit;
   font-size: 13.5px;
   font-weight: 600;
-  letter-spacing: -0.01em;
   cursor: pointer;
   /* В переключателе, как и в доке, меняется только цвет. */
   transition: color 0.2s ease;
@@ -483,7 +474,6 @@ body.tg-fullscreen .tab-header {
 .nav-label {
   font-size: 10.5px;
   line-height: 1.1;
-  letter-spacing: -0.01em;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -512,11 +502,9 @@ body.tg-fullscreen .tab-header {
 
 .eyebrow {
   margin: 0 0 6px;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--berry);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
 }
 
 .card h2, .card h3 {
@@ -541,13 +529,13 @@ body.tg-fullscreen .tab-header {
 .stat-pill {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 9px;
-  border-radius: 999px;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
   background: var(--surface);
   border: 1px solid var(--line);
   font-size: 11.5px;
-  font-weight: 650;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -560,7 +548,7 @@ body.tg-fullscreen .tab-header {
   padding: 0 18px;
   font: inherit;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -573,7 +561,6 @@ body.tg-fullscreen .tab-header {
   border: 0;
   background: var(--berry);
   color: #fff;
-  box-shadow: 0 8px 20px var(--berry-shadow, rgba(184, 84, 100, 0.24));
 }
 
 .secondary {
@@ -663,7 +650,7 @@ body.tg-fullscreen .tab-header {
 .cal-title {
   margin: 0;
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
   text-align: center;
 }
@@ -740,11 +727,11 @@ body.tg-fullscreen .tab-header {
 .cal-day.is-selected {
   background: var(--berry-soft);
   color: var(--berry);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .cal-day.has-events .cal-num {
-  font-weight: 650;
+  font-weight: 500;
 }
 
 .cal-dots {
@@ -804,7 +791,7 @@ body.tg-fullscreen .tab-header {
 .cal-events-date {
   margin: 0;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 500;
 }
 
 .cal-event {
@@ -858,7 +845,7 @@ body.tg-fullscreen .tab-header {
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 500;
 }
 
 .settings-hint {
@@ -915,7 +902,7 @@ body.tg-fullscreen .tab-header {
 }
 
 .item-title {
-  font-weight: 650;
+  font-weight: 600;
   font-size: 15px;
   margin: 0 0 4px;
   word-break: break-word;
@@ -946,6 +933,27 @@ body.tg-fullscreen .tab-header {
   white-space: nowrap;
 }
 
+/* Личная карточка: капсула «Личная» и дата (с временем и повтором) —
+   в одной строке, дата справа от капсулы. */
+.item-when-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.item-when-line .day-chip {
+  flex-shrink: 0;
+}
+
+.item-when-line > span:not(.day-chip) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .item-when-row {
   display: flex;
   align-items: center;
@@ -962,10 +970,10 @@ body.tg-fullscreen .tab-header {
   align-items: center;
   white-space: nowrap;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 8px;
   background: var(--sage-soft);
   color: var(--sage);
-  font-weight: 650;
+  font-weight: 500;
   font-size: 11.5px;
 }
 
@@ -1087,7 +1095,11 @@ body.tg-fullscreen .tab-header {
   display: grid;
   place-items: center;
   cursor: pointer;
-  font-size: 14px;
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
 }
 
 .section-head-inline {
@@ -1100,20 +1112,23 @@ body.tg-fullscreen .tab-header {
 .section-head-inline h3 {
   margin: 0;
   font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  font-weight: 600;
   color: var(--muted);
 }
 
 .link-btn {
   border: 0;
   background: none;
-  color: var(--berry);
+  color: var(--muted);
   font: inherit;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 500;
   cursor: pointer;
   padding: 2px 4px;
+}
+
+.link-btn:active {
+  color: var(--berry);
 }
 
 .sheet-dialog {
@@ -1155,6 +1170,8 @@ body.tg-fullscreen .tab-header {
   background: var(--surface-2);
   color: var(--ink);
   cursor: pointer;
+  display: grid;
+  place-items: center;
 }
 
 .field {
@@ -1168,7 +1185,7 @@ body.tg-fullscreen .tab-header {
 
 .field span {
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 500;
   color: var(--muted);
 }
 
@@ -1291,7 +1308,7 @@ input[type="checkbox"] {
   padding: 6px 10px;
   font: inherit;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -1315,6 +1332,6 @@ input[type="checkbox"] {
   padding: 10px 16px;
   border-radius: 999px;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 500;
   z-index: 60;
 }
