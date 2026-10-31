@@ -33,6 +33,12 @@ class EnsureUserMiddleware(BaseMiddleware):
             name = user.full_name or user.first_name or "Без имени"
             try:
                 await service.ensure_user(user.id, user.username, name)
-            except Exception:  # pragma: no cover - защита от падения апдейта
+            except Exception:
+                # Сбой регистрации не глотаем: обработчик апдейта не выполняется
+                # без записи пользователя, а исключение уходит в единый
+                # обработчик ошибок (dp.errors), который залогирует причину
+                # и сообщит в админ-чат — вторичная ошибка в бизнес-логике
+                # не маскирует исходный сбой БД.
                 log.exception("Не удалось зарегистрировать пользователя %s", user.id)
+                raise
         return await handler(event, data)

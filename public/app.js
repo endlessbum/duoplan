@@ -983,7 +983,7 @@
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
         <p>${daily.done ? `Вы отметили ритуал · +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP.")}</p>
-        ${daily.done ? "" : `<div style="margin-top:12px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это · +10 XP</button></div>`}
+        ${daily.done ? "" : `<div style="margin-top:12px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это +10 XP</button></div>`}
       </section>
     ` : "";
 

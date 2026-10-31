@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.31.8";
+const APP_VERSION = "2026.10.31.9";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.31.8";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.31.8";
+const DB_SCHEMA_VERSION = "2026.10.31.9";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -1685,8 +1685,45 @@ async function processPairNotifications(env, pair, stamp, budget) {
 
 // Free-план Workers даёт 50 подзапросов на вызов: бюджет считаем явно
 // (3 запроса на пару + 2 на каждую отправку) и останавливаемся на пороге.
+// Два подзапроса тика съедает сам курсор очереди (чтение + запись).
 const DIGEST_MAX_PAIRS = 10;
 const DIGEST_BUDGET = 44;
+
+// Страница очереди тика по устойчивому курсору: следующие после курсора пары
+// по возрастанию id; хвост исчерпан — начинаем с начала. В отличие от прежней
+// ротации «по минутам суток» обход доходит до каждой пары за
+// ceil(N / DIGEST_MAX_PAIRS) тиков при любом N, а разница числа посещений
+// пар за любое окно тиков не превышает 1. Чистая функция — покрывается
+// тестом tests/test_notification_queue.test.mjs.
+function queuePage(sortedPairs, cursorId, max = DIGEST_MAX_PAIRS) {
+  const after = sortedPairs.filter((p) => p.id > cursorId);
+  return after.length ? after.slice(0, max) : sortedPairs.slice(0, max);
+}
+
+async function nextNotificationQueue(env, pairs) {
+  const sorted = [...pairs].sort((a, b) => a.id - b.id);
+  let cursor = 0;
+  try {
+    const row = await env.DB.prepare("SELECT value FROM app_meta WHERE key='notification_cursor'").first();
+    const parsed = Number(row?.value);
+    if (Number.isFinite(parsed)) cursor = parsed;
+  } catch (error) {
+    console.error("notification cursor read failed", error);
+  }
+  const page = queuePage(sorted, cursor);
+  const last = page[page.length - 1];
+  if (last) {
+    try {
+      await env.DB.prepare("INSERT INTO app_meta(key,value) VALUES('notification_cursor',?) " +
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(String(last.id)).run();
+    } catch (error) {
+      // Курсор не продвинется: следующий тик повторит ту же страницу.
+      // Дедуп через notification_log не даст задвоить уже отправленное.
+      console.error("notification cursor write failed", error);
+    }
+  }
+  return page;
+}
 
 async function sendDigests(env) {
   await ensureSchemaOnce(env);
@@ -1707,11 +1744,8 @@ async function sendDigests(env) {
   if (!pairs.length) return;
   console.log(`[metric] active_pairs=${pairs.length}`);
   const stamp = new Date();
-  // Ротация по минутам двигает очередь между 15-минутными тиками, чтобы
-  // при большом числе пар все дожидались своего тика, а не только первые.
-  const rotation = (stamp.getUTCHours() * 60 + stamp.getUTCMinutes()) % pairs.length;
-  const queue = pairs.slice(rotation).concat(pairs.slice(0, rotation)).slice(0, DIGEST_MAX_PAIRS);
-  const budget = { left: DIGEST_BUDGET };
+  const queue = await nextNotificationQueue(env, pairs);
+  const budget = { left: DIGEST_BUDGET - 2 };
   for (const pair of queue) {
     if (budget.left < 4) break;
     try {
