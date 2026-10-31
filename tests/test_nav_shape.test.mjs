@@ -99,3 +99,17 @@ test("прилунение (impact) поднимает каплю по верт�
   ok(ext.bottom - ext.top > geom.inner.h, "impact не увеличил высоту");
   ok(ext.bottom - ext.top < geom.height * 1.1, "impact раздул каплю за пределы бара");
 });
+
+test("refresh() не снапает каплю в полёте — анимация тапа выживает (регрессия акцент-хука)", () => {
+  // Репорт: applyAccent дёргает navRefreshHook на каждом рендере; безусловный
+  // `state.pos = state.target` внутри refresh() гасил пружину на первом кадре.
+  const snap = /if \(!state\.drag\) \{\s*state\.pos = state\.target;/m;
+  ok(!snap.test(source), "refresh() всё ещё безусловно снапает позицию");
+  ok(/const inFlight = state\.raf !== 0 \|\| Math\.abs\(state\.pos - state\.target\) > 0\.5;/.test(source),
+    "inFlight-гвард исчез из refresh()");
+  ok(/if \(!inFlight\) \{\s*state\.pos = state\.target;\s*state\.vel = 0;\s*\} else \{\s*startLoop\(\);/.test(source),
+    "ветка полёта не продолжает анимацию через startLoop()");
+  // Снап разрешён только в покое; в полёте — только обновление цели.
+  const refreshBody = extractBraced("function refresh()");
+  ok(refreshBody.includes("startLoop()"), "refresh() потерял продолжение полёта");
+});

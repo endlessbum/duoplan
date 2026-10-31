@@ -896,8 +896,18 @@
       const center = centerOf(state.active);
       state.target = center === null ? previousTarget : center;
       if (!state.drag) {
-        state.pos = state.target;
-        state.vel = 0;
+        // Капля в полёте (тап по вкладке запустил пружину) — рвать анимацию
+        // рывком pos = target нельзя: applyAccent дёргает refresh() на каждом
+        // рендере, и анимация гасла на первом же кадре. Обновляем геометрию и
+        // цель, позицию не трогаем. Рывок нужен только когда капля стоит
+        // (ресайз, показ панели, смена темы).
+        const inFlight = state.raf !== 0 || Math.abs(state.pos - state.target) > 0.5;
+        if (!inFlight) {
+          state.pos = state.target;
+          state.vel = 0;
+        } else {
+          startLoop();
+        }
         render();
       } else {
         // Размер изменился во время жеста — пересчитываем точку захвата.
