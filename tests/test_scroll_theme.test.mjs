@@ -126,6 +126,7 @@ test("свотчи акцента перекрашиваются вариант�
     "document",
     [
       'const appState = { user: { accent_color: "ocean" } };',
+      'let navRefreshHook = null;', // applyAccent дёргает хук — в тесте он пустой
       extractBraced(appJs, "const ACCENT_PALETTES"),
       extractBraced(appJs, "function hexRgb"),
       extractBraced(appJs, "function shadeHex"),

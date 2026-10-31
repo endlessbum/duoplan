@@ -296,7 +296,7 @@ body.tg-fullscreen .tab-header {
 ------------------------------------------------------------------- */
 .wish-switch {
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: 1fr 1fr;
   width: max-content;
   padding: 5px;
   border-radius: 999px;
@@ -927,16 +927,7 @@ body.tg-fullscreen .tab-header {
   color: var(--muted);
 }
 
-/* Дата + чип таймера колонкой, «В календаре» — справа: сдержанный ряд
-   без хаотичного переноса. */
-.item-meta.has-when {
-  justify-content: space-between;
-  align-items: flex-start;
-  /* Кнопка «В календаре» остаётся справа от колонки дата+чип;
-     на узких экранах дата усекается многоточием. */
-  flex-wrap: nowrap;
-}
-
+/* Дата колонкой, под ней таймер и «В календаре» в одной строке. */
 .item-when {
   display: flex;
   flex-direction: column;
@@ -952,14 +943,21 @@ body.tg-fullscreen .tab-header {
   white-space: nowrap;
 }
 
-.item-meta.has-when .link-btn {
+.item-when-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.item-when-row .link-btn {
   flex-shrink: 0;
-  align-self: flex-start;
 }
 
 .day-chip {
   display: inline-flex;
   align-items: center;
+  white-space: nowrap;
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--sage-soft);
@@ -1179,6 +1177,20 @@ body.tg-fullscreen .tab-header {
   color: var(--ink);
   font: inherit;
   font-size: 15px;
+}
+
+/* Дата и время не шире текстовых полей: нативные контролы держат
+   собственный минимальный размер — гасим, чтобы не было горизонтального
+   скролла в диалогах создания. */
+.field {
+  min-width: 0;
+}
+
+.field > input[type="date"],
+.field > input[type="time"] {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .sheet-actions {

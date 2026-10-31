@@ -232,8 +232,13 @@
     });
     const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-bg", "--droplet-border", "--droplet-glow", "--droplet-hi", "--droplet-fill", "--droplet-deep", "--droplet-halo", "--berry-shadow"];
     const hex = ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
+    // Палитра капли (цвет подписей) читается из CSS-переменных только в
+    // refresh(): хук обязан сработать ПОСЛЕ установки переменных, иначе бары
+    // видят старый акцент до перезапуска. Обе ветки выхода завершаются хуком.
+    const finish = () => navRefreshHook?.();
     if (key === "berry" || !hex) {
       for (const name of names) root.style.removeProperty(name);
+      finish();
       return;
     }
     const rgb = hexRgb(hex);
@@ -252,6 +257,7 @@
     root.style.setProperty("--droplet-deep", rgba(dark ? 0.18 : 0.16));
     root.style.setProperty("--droplet-halo", rgba(dark ? 0.30 : 0.22));
     root.style.setProperty("--berry-shadow", `0 8px 20px ${rgba(0.24)}`);
+    finish();
   }
 
   // Фон WebView в Telegram — это то, что видно за краями документа при
@@ -541,8 +547,12 @@
     liquidNav.setActive(targetTab, animate);
   }
 
-  // Смена темы/акцента перечитывает цвета вкладок внутри nav.js.
-  navRefreshHook = () => liquidNav?.refresh();
+  // Смена темы/акцента перечитывает цвета вкладок внутри nav.js —
+  // и в главном баре, и в переключателе вишлиста.
+  navRefreshHook = () => {
+    liquidNav?.refresh();
+    wishSwitch?.refresh();
+  };
 
   // ------------------------------------------------------------------
   // Встроенная шапка вкладки (прямо над элементами на странице)
@@ -1023,13 +1033,15 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
-            <div class="item-meta has-when">
+            <div class="item-meta">
               <div class="item-when">
                 ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
                 ${item.day ? `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}</span>` : ""}
-                ${countdownChip(item.day, item.time, taskRepeat(item))}
+                <div class="item-when-row">
+                  ${countdownChip(item.day, item.time, taskRepeat(item))}
+                  ${item.day ? `<button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>` : ""}
+                </div>
               </div>
-              ${item.day ? `<button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>` : ""}
             </div>
           </div>
           <div class="item-actions">
@@ -1069,13 +1081,15 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
-            <div class="item-meta has-when">
+            <div class="item-meta">
               <div class="item-when">
                 <span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}${Number(item.monthly) === 1 ? " · Ежемесячно" : item.recurs ? " · Ежегодно" : ""}</span>
                 ${item.is_private ? `<span class="day-chip is-private">Личная</span>` : ""}
-                ${chip}
+                <div class="item-when-row">
+                  ${chip}
+                  <button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>
+                </div>
               </div>
-              <button class="link-btn" type="button" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">В календаре</button>
             </div>
           </div>
           <div class="item-actions">

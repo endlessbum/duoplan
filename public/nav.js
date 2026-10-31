@@ -30,15 +30,17 @@
   const IMPACT_MIN_SPEED = 90; // px/s: тише — это не удар, а доезд
   // Капля может слегка выйти за границы бара: резкой остановки у кромки нет.
   const OVERHANG = 10;         // px допустимого выхода за внутреннюю область
-  // Вытяжение пальцем: тянешь каплю выше/ниже бара — она тянется вслед,
-  // плющась о кромку, показывая натяжение.
-  const STRETCH_ZONE = 8;      // px от кромки, где вытяжение начинается
-  const STRETCH_RANGE = 48;    // px хвоста вытяжения до максимума
-  const STRETCH_MAX = 0.4;     // доля высоты капли на максимуме вытяжения
-  const STRETCH_PINCH = 0.16;  // доля сужения ширины при вытяжении
+  // Вытяжение пальцем: тянешь каплю выше/ниже бара — она сплющивается,
+  // тянется к пальцу и растекается по ширине, оставаясь в границах бара.
+  const STRETCH_ZONE = 8;      // px от кромки, где натяжение начинается
+  const STRETCH_RANGE = 48;    // px хвоста натяжения до максимума
+  const SQUASH_H = 0.22;       // сплющивание высоты на максимуме
+  const SQUASH_W = 0.10;       // растекание ширины на максимуме
+  const PULL_SHIFT = 9;        // px сдвига к пальцу (ограничен кромкой бара)
   // Капля крупнее слота (обе стороны пропорционально): SVG overflow: visible.
   const SIZE_W = 1.08;
   const SIZE_H = 1.12;
+  const SIZE_EXTRA_W = 8;      // px сверх слота: +4px с каждой стороны
   const MAX_SPEED = 1100;      // px/s: скорость, при которой деформация максимальна
   const MAX_LEAD = 0.28;       // вытягивание переднего края, доля ширины капли
   const MAX_TRAIL = 0.18;      // поджатие заднего края
@@ -438,7 +440,7 @@
     function dropletShape(centerX, speed, dir) {
       const geom = state.geom;
       // Капля крупнее слота пропорционально по обеим осям (SVG overflow: visible).
-      const w0 = (geom.slotW - 2) * SIZE_W;
+      const w0 = (geom.slotW - 2) * SIZE_W + SIZE_EXTRA_W;
       const h0 = (geom.inner.h - 2) * SIZE_H;
       const raw = Math.min(Math.abs(speed) / MAX_SPEED, 1);
       // При reduced-motion форма почти не деформируется, но жест работает.
@@ -450,17 +452,19 @@
       // Прилунение: остановка растит каплю по вертикали и поджимает по ширине.
       let drawnHeight = height * (1 + IMPACT_GAIN * state.impact);
       let drawnWidth = width * (1 - IMPACT_PINCH * state.impact);
-      // Вытяжение пальцем: тянешь выше/ниже бара — капля тянется в ту сторону,
-      // плющась о кромку, и сужается, показывая натяжение.
-      let pullTop = 0;
-      let pullBottom = 0;
+      // Вытяжение пальцем: тянешь выше/ниже бара — капля сплющивается и
+      // тянется к пальцу, растекаясь по ширине. Сдвиг ограничен кромкой бара:
+      // за пределы она не выходит, натяжение читается по деформации.
+      let squashShift = 0;
       if (state.drag && typeof state.drag.dy === "number") {
         const dy = state.drag.dy;
         const t = Math.min(1, Math.max(0, (Math.abs(dy) - STRETCH_ZONE) / STRETCH_RANGE));
         if (t > 0) {
-          if (dy < 0) pullTop = t * STRETCH_MAX * h0;
-          else pullBottom = t * STRETCH_MAX * h0;
-          drawnWidth *= 1 - STRETCH_PINCH * t;
+          drawnHeight *= 1 - SQUASH_H * t;
+          drawnWidth *= 1 + SQUASH_W * t;
+          const halfH = drawnHeight / 2;
+          const limit = dy < 0 ? cy - halfH : geom.height - cy - halfH;
+          squashShift = clamp(PULL_SHIFT * t, 0, Math.max(0, limit)) * (dy < 0 ? -1 : 1);
         }
       }
       const lead = s * w0 * MAX_LEAD;
@@ -473,9 +477,9 @@
       const xL = cx - drawnWidth / 2 + dir * trail;
       const xR = cx + drawnWidth / 2 + dir * lead;
 
-      const cy = geom.inner.y + geom.inner.h / 2;
-      const yT = cy - drawnHeight / 2 - pullTop;
-      const yB = cy + drawnHeight / 2 + pullBottom;
+      const cy = geom.inner.y + geom.inner.h / 2 + squashShift;
+      const yT = cy - drawnHeight / 2;
+      const yB = cy + drawnHeight / 2;
       const r = Math.min(drawnHeight / 2, (xR - xL) / 2);
       // Передняя дуга чуть «острее» задней — капля тянется носом вперёд.
       const kLead = 0.5523 + s * 0.1;
