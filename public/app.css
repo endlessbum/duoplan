@@ -640,6 +640,9 @@ body.tg-fullscreen .tab-header {
 .sheet-form {
   max-height: min(86dvh, 760px);
   overflow-y: auto;
+  /* Страховка: сколько бы ни занял нативный контрол, горизонтального
+     скролла в диалоге не бывает — содержимое подрезается по ширине формы. */
+  overflow-x: hidden;
 }
 
 /* ------------------------------------------------------------------
@@ -1159,6 +1162,8 @@ body.tg-fullscreen .tab-header {
   flex-direction: column;
   gap: 5px;
   margin-bottom: 12px;
+  min-width: 0;
+  width: 100%;
 }
 
 .field span {
@@ -1188,9 +1193,17 @@ body.tg-fullscreen .tab-header {
 
 .field > input[type="date"],
 .field > input[type="time"] {
+  /* Нативные дата/время держат собственный минимальный размер и на мобильных
+     WebView вылезают за диалог горизонтальным скроллом. Гасим всё: ширина
+     ровно как у текстового поля названия, нативная геометрия отключена. */
+  width: 100%;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-flex: 1 1 100%;
+  flex: 1 1 100%;
 }
 
 .sheet-actions {

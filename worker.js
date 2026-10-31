@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.31.4";
+const APP_VERSION = "2026.10.31.5";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.31.4";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.31.4";
+const DB_SCHEMA_VERSION = "2026.10.31.5";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -1502,8 +1502,8 @@ function digestText(today, tomorrow, dates, tasks) {
     lines.push("");
     used += 1;
   };
-  pushParagraph("📅 Значимые даты", dateLines);
-  pushParagraph("✅ Планы", taskLines);
+  pushParagraph("Значимые даты", dateLines);
+  pushParagraph("Планы", taskLines);
   if (hidden) lines.push(`…и ещё ${hidden} — полный список в приложении`);
   return lines.join("\n").trim();
 }
@@ -1515,7 +1515,7 @@ function datesDigestText(timeZone, tomorrow, dates) {
   if (!tomorrowDates.length) return "";
   const [year, month, date] = tomorrow.split("-").map(Number);
   const noon = new Date(makeDateInTimeZone(year, month - 1, date, 12, 0, timeZone || DEFAULT_TZ));
-  const lines = [`📅 Завтра · ${fmt.format(noon)}`];
+  const lines = [`Завтра · ${fmt.format(noon)}`];
   let shown = 0;
   let hidden = 0;
   let used = lines[0].length + 30;
@@ -1552,7 +1552,7 @@ function cutUtf16(text, max) {
 
 function diaryExportMessages(rows) {
   const blocks = (rows || []).map((row) =>
-    `📅 ${row.day} · ${escapeHtml(clean(row.display_name) || "Партнёр")}\n${richToHtml(row.body || "")}`
+    `${row.day} · ${escapeHtml(clean(row.display_name) || "Партнёр")}\n${richToHtml(row.body || "")}`
   );
   if (!blocks.length) return ["В вашем дневнике пока нет записей."];
   const messages = [];
@@ -1653,7 +1653,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
       if (Number(reminder.task.is_private) === 1 && Number(reminder.task.created_by) !== Number(member)) continue;
       budget.left -= 2;
       const title = Number(reminder.task.is_private) === 1 ? RICH_MASKED : richToHtml(reminder.task.title);
-      await deliverNotification(env, member, today, reminder.kind, `⏰ ${reminder.lead}: ${title} (${reminder.task.time})`);
+      await deliverNotification(env, member, today, reminder.kind, `${reminder.lead}: ${title} (${reminder.task.time})`);
     }
   }
 

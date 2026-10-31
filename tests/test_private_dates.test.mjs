@@ -451,24 +451,24 @@ test("digestText: два абзаца — даты и планы, внутри �
     ]
   );
   equal(text.includes("Доброе утро!"), true);
-  equal(text.includes("📅 Значимые даты"), true);
+  equal(text.includes("Значимые даты"), true);
   equal(text.includes("• Сегодня — День знакомства (14:00)"), true);
   equal(text.includes("• Завтра — Годовщина"), true);
-  equal(text.includes("✅ Планы"), true);
+  equal(text.includes("Планы"), true);
   equal(text.includes("• Сегодня, до 19:30 — Купить билеты"), true);
   equal(text.includes("• Сегодня — План без времени"), true);
   equal(text.includes("• Завтра, до 09:00 — Завтрашний план"), true);
   equal(text.includes("Не в эти дни"), false);
   // Даты и планы — раздельные абзацы: заголовок дат идёт раньше плана.
-  equal(text.indexOf("📅 Значимые даты") < text.indexOf("✅ Планы"), true);
+  equal(text.indexOf("Значимые даты") < text.indexOf("Планы"), true);
 });
 
 test("digestText: абзац планов без дат — заголовок дат не печатается", () => {
   const text = digestText("2026-03-01", "2026-03-02", [], [
     { id: 10, title: "Только план", day: "2026-03-01", time: null }
   ]);
-  equal(text.includes("📅 Значимые даты"), false);
-  equal(text.includes("✅ Планы"), true);
+  equal(text.includes("Значимые даты"), false);
+  equal(text.includes("Планы"), true);
 });
 
 test("datesDigestText: сводка о датах за сутки — только завтрашние", () => {
@@ -477,7 +477,7 @@ test("datesDigestText: сводка о датах за сутки — тольк
     { id: 2, title: "Не завтра", day: "2020-03-05", recurs: 1 }
   ]);
   equal(text.startsWith("Напоминаю: завтра значимые даты:"), true);
-  equal(text.includes("📅 Завтра · 2 марта"), true);
+  equal(text.includes("Завтра · 2 марта"), true);
   equal(text.includes("• Годовщина (18:00)"), true);
   equal(text.includes("Не завтра"), false);
 });
@@ -615,7 +615,7 @@ test("утренняя сводка: каждый видит только сво
   const digests = h.sent.filter(s => s.text.startsWith("Доброе утро!"));
   deepStrictEqual(digests.map(s => s.chatId), [111, 222]);
   for (const s of digests) {
-    equal(s.text.includes("📅 Значимые даты"), true);
+    equal(s.text.includes("Значимые даты"), true);
     equal(s.text.includes("• Сегодня — Общая дата (10:00)"), true);
     equal(s.text.includes("• Завтра — Завтрашняя общая (18:00)"), true);
   }
@@ -654,17 +654,17 @@ test("сводка о датах за сутки: завтрашние даты 
   await h.run();
   const datesDigest = h.sent.filter(s => s.text.startsWith("Напоминаю: завтра значимые даты:"));
   deepStrictEqual(datesDigest.map(s => s.chatId), [111]);
-  equal(datesDigest[0].text.includes("📅 Завтра · 3 марта"), true);
+  equal(datesDigest[0].text.includes("Завтра · 3 марта"), true);
   equal(datesDigest[0].text.includes("• Завтрашняя общая (18:00)"), true);
 });
 
 test("напоминание о плане за 3 часа: уходит обоим в окне [цель-3ч, цель)", async () => {
   const h = notificationHarness({ tasks: [{ id: 5, title: "Купить билеты", day: PAIR_TODAY, time: "14:00" }] });
   await h.run(); // 11:05 MSK, цель 14:00 → 3 часа уже «наступили», час — нет
-  const reminders = h.sent.filter(s => s.text.startsWith("⏰ Через 3 часа"));
+  const reminders = h.sent.filter(s => s.text.startsWith("Через 3 часа"));
   deepStrictEqual(reminders.map(s => s.chatId), [111, 222]);
   equal(reminders[0].text.includes("Купить билеты (14:00)"), true);
-  equal(h.sent.some(s => s.text.startsWith("⏰ Через час")), false);
+  equal(h.sent.some(s => s.text.startsWith("Через час")), false);
 });
 
 test("за час до плана уходит только «через час» — «через 3 часа» больше не врёт", async () => {
@@ -675,8 +675,8 @@ test("за час до плана уходит только «через час�
   await h.run();
   // Окна не пересекаются: событие через 55 минут не должно получать
   // сообщение «Через 3 часа» — раньше приходили оба, и первое врало.
-  equal(h.sent.filter(s => s.text.startsWith("⏰ Через 3 часа")).length, 0);
-  equal(h.sent.filter(s => s.text.startsWith("⏰ Через час")).length, 2);
+  equal(h.sent.filter(s => s.text.startsWith("Через 3 часа")).length, 0);
+  equal(h.sent.filter(s => s.text.startsWith("Через час")).length, 2);
 });
 
 test("план с временем без времени/прошедший не напоминается", async () => {
@@ -688,7 +688,7 @@ test("план с временем без времени/прошедший не
     stamp: STAMP_AFTER // 15:05 MSK — цель 14:00 позади
   });
   await h.run();
-  equal(h.sent.some(s => s.text.startsWith("⏰")), false);
+  equal(h.sent.some(s => /\p{Extended_Pictographic}/u.test(s.text)), false, "эмодзи в уведомлениях недопустимы");
 });
 
 test("журнал уже отмечен — повторной отправки нет", async () => {
@@ -764,10 +764,10 @@ test("напоминание о личном плане: только автор
     tasks: [{ id: 31, title: "Купить кольцо", day: PAIR_TODAY, time: "14:00", is_private: 1, created_by: 111 }]
   });
   await h.run();
-  const reminders = h.sent.filter(s => s.text.startsWith("⏰ Через 3 часа"));
+  const reminders = h.sent.filter(s => s.text.startsWith("Через 3 часа"));
   deepStrictEqual(reminders.map(s => s.chatId), [111]);
   equal(reminders[0].text.includes("Купить кольцо"), false);
-  equal(reminders[0].text.includes("⏰ Через 3 часа: <tg-spoiler>Скрытый</tg-spoiler> (14:00)"), true);
+  equal(reminders[0].text.includes("Через 3 часа: <tg-spoiler>Скрытый</tg-spoiler> (14:00)"), true);
 });
 
 test("публичный план с разметкой уходит в Telegram как HTML", async () => {
@@ -775,7 +775,7 @@ test("публичный план с разметкой уходит в Telegram
     tasks: [{ id: 32, title: "**Важное** и ||секретик||", day: PAIR_TODAY, time: "14:00", is_private: 0, created_by: 111 }]
   });
   await h.run();
-  const reminders = h.sent.filter(s => s.text.startsWith("⏰ Через 3 часа"));
+  const reminders = h.sent.filter(s => s.text.startsWith("Через 3 часа"));
   equal(reminders.length, 2);
   for (const r of reminders) {
     equal(r.text.includes("<b>Важное</b>"), true);
