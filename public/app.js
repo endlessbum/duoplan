@@ -200,6 +200,15 @@
   // Палитры под светлую/тёмную тему; «berry» — дефолт из CSS, он снимает
   // инлайн-переопределения переменных на :root.
   // ------------------------------------------------------------------
+  // Последний выбранный акцент — локально, без ожидания /api/state: кружок
+  // загрузки при следующем запуске красится в акцент сразу, а не в berry.
+  const ACCENT_KEY = "duoplan.accent";
+  function storedAccent() {
+    try {
+      const value = localStorage.getItem(ACCENT_KEY);
+      return ACCENT_PALETTES[value] ? value : "";
+    } catch { return ""; }
+  }
   const ACCENT_PALETTES = {
     berry: { light: "#b85464", dark: "#d97383" },
     sage: { light: "#55766a", dark: "#7ba394" },
@@ -225,7 +234,14 @@
   function applyAccent() {
     const root = document.documentElement;
     const dark = root.dataset.theme === "dark";
-    const key = appState?.user?.accent_color || "berry";
+    // При старте state ещё не загружен: берём последний выбор из localStorage,
+    // чтобы анимация загрузки (кружок над «Открываем ваше пространство…») была
+    // в акценте пользователя, а не стандартном berry.
+    const key = appState?.user?.accent_color || storedAccent() || "berry";
+    if (appState?.user) {
+      // Запоминаем актуальный выбор: спиннер следующего запуска стартует в нём.
+      try { localStorage.setItem(ACCENT_KEY, key); } catch {}
+    }
     // Свотчи в настройках показывают актуальный для темы вариант палитры:
     // в тёмной теме светлый образец выглядел темнее фактического акцента.
     // Синхронизация здесь — applyAccent вызывается и из applyTheme
@@ -239,7 +255,7 @@
     // Палитра капли (цвет подписей) читается из CSS-переменных только в
     // refresh(): хук обязан сработать ПОСЛЕ установки переменных, иначе бары
     // видят старый акцент до перезапуска. Обе ветки выхода завершаются хуком.
-    const finish = () => navRefreshHook?.();
+    const finish = () => { applyAvatarColors(); navRefreshHook?.(); };
     if (key === "berry" || !hex) {
       for (const name of names) root.style.removeProperty(name);
       finish();
@@ -253,6 +269,36 @@
     root.style.setProperty("--droplet-border", dark ? "rgba(255, 255, 255, 0.16)" : rgba(0.24));
     root.style.setProperty("--droplet-halo", rgba(dark ? 0.30 : 0.22));
     finish();
+  }
+
+  // Аватары в кнопке пары: у каждого — свой выбранный акцент. Мой цвет — из
+  // appState.user, цвет партнёра — из appState.pair.partner_accent (workers
+  // state(): users.accent_color). Когда один партнёр меняет акцент, у второго
+  // его аватар перекрашивается при следующем обновлении данных — синхронно.
+  // themeChanged тоже проходит здесь: applyAccent → applyAvatarColors.
+  function paintAvatar(el, key) {
+    if (!el) return;
+    const dark = document.documentElement.dataset.theme === "dark";
+    const hex = key && ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
+    if (!hex) {
+      // Нет палитры — возвращаем дефолт из CSS (убираем инлайн-стили).
+      el.style.removeProperty("background");
+      el.style.removeProperty("color");
+      return;
+    }
+    const rgb = hexRgb(hex);
+    el.style.background = `rgba(${rgb.join(", ")}, ${dark ? 0.18 : 0.14})`;
+    el.style.color = hex;
+  }
+
+  function applyAvatarColors() {
+    const myAccent = appState?.user?.accent_color || "berry";
+    const partnerKey = appState?.pair?.partner_accent || "";
+    // Слева аватар владельца (name1, role a), справа — партнёра (name2).
+    // Если я role b — аватар слева это партнёр, справа я сам.
+    const iAmOwner = appState?.pair?.role !== "b";
+    paintAvatar(avatarA, iAmOwner ? myAccent : partnerKey);
+    paintAvatar(avatarB, iAmOwner ? partnerKey : myAccent);
   }
 
   // Фон WebView в Telegram — это то, что видно за краями документа при
@@ -445,10 +491,10 @@
     window.open(parsed.href, "_blank", "noopener");
   }
 
-  // Даты всегда в виде дд/мм/гггг, независимо от ISO-хранения в базе.
+  // Даты всегда в виде дд.мм.гггг, независимо от ISO-хранения в базе.
   function formatDay(value) {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
-    return m ? `${m[3]}/${m[2]}/${m[1]}` : String(value ?? "");
+    return m ? `${m[3]}.${m[2]}.${m[1]}` : String(value ?? "");
   }
 
   function firstLetter(name, fallback = "Д") {
@@ -977,7 +1023,7 @@
       <section class="card">
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
-        <p>${daily.done ? `Вы отметили ритуал · +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP.")}</p>
+        <p>${daily.done ? `Вы отметили ритуал +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP.")}</p>
         ${daily.done ? "" : `<div style="margin-top:12px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это +10 XP</button></div>`}
       </section>
     ` : "";
@@ -2166,7 +2212,7 @@
         btn.disabled = true;
         try {
           appState = await request("/api/daily/done", { method: "POST", body: {} });
-          showToast(appState?.awarded === false ? "Ритуал уже отмечен сегодня" : "Ритуал выполнен · +10 XP");
+          showToast(appState?.awarded === false ? "Ритуал уже отмечен сегодня" : "Ритуал выполнен +10 XP");
           render();
         } catch (error) {
           btn.disabled = false;

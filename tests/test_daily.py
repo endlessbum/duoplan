@@ -37,7 +37,8 @@ async def test_concurrent_daily_charges_xp_once(tmp_path, monkeypatch):
         pair_after = await owner.pair_for(1)
         assert owner_user["points"] == DAILY_XP
         assert partner_user["points"] == DAILY_XP
-        assert pair_after["together_pts"] == DAILY_XP * 2
+        # «Вместе XP» — сумма личных очков обоих партнёров, а не счётчик пары.
+        assert await owner.together_points(pair_after["id"]) == DAILY_XP * 2
         completions = await owner.db.one(
             "SELECT COUNT(*) AS n FROM daily_completions WHERE pair_id = ? AND day = ?",
             (pair["id"], fixed.isoformat()),
@@ -102,9 +103,9 @@ async def test_second_daily_tap_does_not_double_xp(pair, monkeypatch):
     assert await service.complete_daily(pair_id, owner_id) is False
 
     user = await service.user(owner_id)
-    current = await service.pair_for(owner_id)
     assert user["points"] == DAILY_XP
-    assert current["together_pts"] == DAILY_XP
+    # «Вместе XP» — сумма личных очков обоих партнёров.
+    assert await service.together_points(pair_id) == DAILY_XP
 
 
 async def test_daily_uses_local_day_and_streak(pair, monkeypatch):

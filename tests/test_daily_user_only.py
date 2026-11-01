@@ -14,17 +14,17 @@ async def test_daily_awards_only_pressing_user(pair, monkeypatch):
 
     owner = await service.user(owner_id)
     partner = await service.user(partner_id)
-    current = await service.pair_for(owner_id)
 
     assert owner["points"] == DAILY_XP
     assert partner["points"] == 0
-    assert current["together_pts"] == DAILY_XP
+    # «Вместе XP» — сумма личных очков обоих партнёров, а не счётчик пары.
+    assert await service.together_points(pair_id) == DAILY_XP
 
     # Партнёр тоже может отметить ритуал в тот же день — и получает XP.
     assert await service.complete_daily(pair_id, partner_id) is True
     partner_after = await service.user(partner_id)
     assert partner_after["points"] == DAILY_XP
-    assert (await service.pair_for(owner_id))["together_pts"] == DAILY_XP * 2
+    assert await service.together_points(pair_id) == DAILY_XP * 2
 
 
 async def test_daily_done_is_per_user_not_per_pair(pair, monkeypatch):

@@ -122,4 +122,5 @@ async def test_both_partners_can_mark_and_both_get_xp(pair, monkeypatch):
 
     assert (await service.user(owner_id))["points"] == DAILY_XP
     assert (await service.user(partner_id))["points"] == DAILY_XP
-    assert (await service.pair_for(owner_id))["together_pts"] == DAILY_XP * 2
+    # «Вместе XP» — сумма личных очков обоих партнёров, а не счётчик пары.
+    assert await service.together_points(pair_id) == DAILY_XP * 2

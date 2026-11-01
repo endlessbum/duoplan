@@ -1,11 +1,12 @@
 const DAILY_ACTIONS = [
-  "Выделите 15 минут только друг для друга — без телефонов и дел.",
-  "Назовите друг другу три вещи, за которые вы благодарны этой неделе.",
-  "Запланируйте маленькое совместное удовольствие на ближайшие выходные.",
-  "Поделитесь воспоминанием, к которому хочется возвращаться.",
-  "Сделайте друг другу неожиданный комплимент — конкретный и честный.",
-  "Выберите общее дело и сделайте первый маленький шаг вместе.",
-  "Устройте мини-свидание: чай, прогулка или любимый фильм."
+  "Выделите 15 минут только друг для друга — без телефонов и дел",
+  "Назовите друг другу три вещи, за которые вы благодарны этой неделе",
+  "Запланируйте маленькое совместное удовольствие на ближайшие выходные",
+  "Поделитесь воспоминанием, к которому хочется возвращаться",
+  "Сделайте друг другу неожиданный комплимент — конкретный и честный",
+  "Выберите общее дело и сделайте первый маленький шаг вместе",
+  "Устройте мини-свидание: чай, прогулка или любимый фильм",
+  "Отправьте партнёру пять эмодзи, которые описывают ваш день, — пусть угадает"
 ];
 
 // Действие дня детерминировано парой и датой, чтобы одна и та же пара получала
@@ -20,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.01.7";
+const APP_VERSION = "2026.11.01.9";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +29,7 @@ const APP_VERSION = "2026.11.01.7";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.01.7";
+const DB_SCHEMA_VERSION = "2026.11.01.9";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -743,8 +744,10 @@ async function state(env, userId) {
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
-    // Пол партнёра — для обращений «Его/Её желания» в вишлисте.
-    partnerId ? env.DB.prepare("SELECT gender FROM users WHERE tg_id=?").bind(partnerId).first() : null
+    // Пол партнёра — для обращений «Его/Её желания» в вишлисте; очки — для
+    // «Вместе XP»; accent_color — чтобы аватар партнёра в кнопке пары был
+    // его выбранным акцентом (смена видна партнёру после обновления state).
+    partnerId ? env.DB.prepare("SELECT gender, points, accent_color FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
   return {
@@ -757,7 +760,10 @@ async function state(env, userId) {
       user_b: pair.user_b,
       role: pair.role,
       started_at: pair.started_at,
-      together_pts: pair.together_pts,
+      // «Вместе XP»: сумма личных XP обоих партнёров за всё время отметок.
+      together_pts: (Number(user.points) || 0) + (Number(partnerUser?.points) || 0),
+      // Выбранный акцент партнёра для раскраски его аватара на этом устройстве.
+      partner_accent: partnerUser?.accent_color || null,
       timezone: pair.timezone,
       partner_gender: partnerUser?.gender || null,
       bot_name: env.BOT_NAME || "DuoPlan",
@@ -1223,12 +1229,10 @@ async function api(request, env, url) {
         updated_at = ?
         WHERE tg_id = ?
           AND (SELECT changes()) > 0`)
-        .bind(daily.day, daily.day, daily.day, daily.day, daily.day, stamp, user.tg_id),
-      env.DB.prepare(`UPDATE pairs SET together_pts=together_pts+10,updated_at=?
-        WHERE id = ?
-          AND (SELECT changes()) > 0`)
-        .bind(stamp, pair.id)
+        .bind(daily.day, daily.day, daily.day, daily.day, daily.day, stamp, user.tg_id)
     ]);
+    // Отдельного счётчика у пары больше нет: «Вместе XP» — сумма личных очков
+    // обоих партнёров (points), считается на выводе из users, а не в pairs.
     const captured = Number(batchResults?.[0]?.meta?.changes || 0) > 0;
     if (!captured) {
       // Ритуал уже был отмечен — повторный запрос полностью идемпотентен.

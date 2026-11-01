@@ -127,10 +127,17 @@ test("свотчи акцента перекрашиваются вариант�
     [
       'const appState = { user: { accent_color: "ocean" } };',
       'let navRefreshHook = null;', // applyAccent дёргает хук — в тесте он пустой
+      // Зависимости applyAccent: кэш акцента (стартовая раскраска спиннера)
+      // и раскраска аватаров по акцентам обоих партнёров.
+      'const localStorage = { getItem: () => null, setItem: () => {} };',
       extractBraced(appJs, "const ACCENT_PALETTES"),
+      extractBraced(appJs, "function storedAccent"),
       extractBraced(appJs, "function hexRgb"),
       extractBraced(appJs, "function shadeHex"),
       extractBraced(appJs, "function applyAccent"),
+      extractBraced(appJs, "function paintAvatar"),
+      extractBraced(appJs, "function applyAvatarColors"),
+      "const avatarA = null, avatarB = null;",
       "applyAccent();"
     ].join("\n")
   )(makeDocument(theme));

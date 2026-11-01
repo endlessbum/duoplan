@@ -37,7 +37,7 @@ def test_long_bodies_are_capped_with_ellipsis():
 
 def test_short_bodies_pass_through_untouched():
     rows = [{"day": "2026-10-28", "display_name": None, "body": "Маленькая история"}]
-    assert memory_entries(rows) == ["2026-10-28 · Один из вас\nМаленькая история"]
+    assert memory_entries(rows) == ["28.10.2026 · Один из вас\nМаленькая история"]
 
 
 def test_fit_entries_stops_before_exceeding_limit():
@@ -72,7 +72,7 @@ def test_long_full_name_is_capped_with_ellipsis():
     assert head.endswith("…")
     # Короткое имя не трогается.
     short = memory_entries([{"day": "2026-10-28", "display_name": "Аня", "body": "х"}])[0]
-    assert short.startswith("2026-10-28 · Аня\n")
+    assert short.startswith("28.10.2026 · Аня\n")
 
 
 def test_eight_entries_with_overlong_names_fit_into_one_page():
@@ -84,4 +84,4 @@ def test_eight_entries_with_overlong_names_fit_into_one_page():
     text = "Общий дневник\n\n" + "\n\n".join(rendered)
     assert len(text) <= PAGE_TEXT_LIMIT
     # Восьмая запись страницы остаётся на ней же, а не «переезжает» на следующую.
-    assert rendered[-1].startswith("2026-10-28 · ")
+    assert rendered[-1].startswith("28.10.2026 · ")

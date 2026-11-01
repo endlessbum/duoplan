@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.11.01.7">
+  <link rel="stylesheet" href="/app.css?v=2026.11.01.9">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -21,7 +21,9 @@
             <path d="M12 14.5v6.2"/>
           </svg>
         </button>
-        <button id="pair-button" class="glass-btn pair-pill" type="button" aria-label="Наша пара">
+        <!-- Скрыта до загрузки состояния: в момент «Открываем ваше пространство…»
+             кнопку аватаров не показываем, syncTopControls() покажет её с данными. -->
+        <button id="pair-button" class="glass-btn pair-pill" type="button" aria-label="Наша пара" hidden>
           <span class="pair-avatars" aria-hidden="true">
             <span id="avatar-a" class="mini-avatar">Д</span>
             <span id="avatar-b" class="mini-avatar is-second">П</span>
@@ -138,8 +140,8 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.11.01.7" defer></script>
-  <script src="/nav.js?v=2026.11.01.7" defer></script>
-  <script src="/app.js?v=2026.11.01.7" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.01.9" defer></script>
+  <script src="/nav.js?v=2026.11.01.9" defer></script>
+  <script src="/app.js?v=2026.11.01.9" defer></script>
 </body>
 </html>

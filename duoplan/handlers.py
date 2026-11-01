@@ -134,6 +134,18 @@ def render_list_items(
     return "\n".join(blocks)
 
 
+def format_day(value: object) -> str:
+    """дд.мм.гггг для вывода дат, которые хранятся как гггг-мм-дд.
+
+    Всё, что не похожее на ISO-дату (пустота, мусор), проходит как есть —
+    как и formatDay в worker'е, чтобы в сообщении не всплыли «None/NaN».
+    """
+    text = str(value or "")
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return f"{text[8:]}.{text[5:7]}.{text[:4]}"
+    return text
+
+
 def memory_entries(rows: list) -> list[str]:
     """Форматирует записи дневника, ограничивая тело и имя лимитом страницы.
 
@@ -150,7 +162,7 @@ def memory_entries(rows: list) -> list[str]:
         display_name = row["display_name"] or "Один из вас"
         if _utf16_len(display_name) > MEMORY_NAME_VIEW_MAX:
             display_name = _truncate_utf16(display_name, MEMORY_NAME_VIEW_MAX)
-        entries.append(f"{row['day']} · {display_name}\n{body}")
+        entries.append(f"{format_day(row['day'])} · {display_name}\n{body}")
     return entries
 
 
@@ -507,14 +519,15 @@ async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer()
         return
     user = await service.user(call.from_user.id)
-    level, _, _ = level_for(pair["together_pts"])
+    together = await service.together_points(pair["id"])
+    level, _, _ = level_for(together)
     title, symbol = title_for(level)
     streak = display_streak(user, service.local_today())
     await safe_edit(
         call.message,
         f"{pair['name1']} и {pair['name2']}\n\n"
-        f"Вместе в DuoPlan с {pair['started_at']}\n"
-        f"Общий запас: {pair['together_pts']} XP\n"
+        f"Вместе в DuoPlan с {format_day(pair['started_at'])}\n"
+        f"Общий запас: {together} XP\n"
         f"{symbol} Общий уровень: {level} · {title}\n"
         f"Личная серия: {streak} дн.",
         HOME_MENU,
@@ -583,7 +596,7 @@ async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
     rows = rows[:PAGE_SIZE]
 
     if rows:
-        items = [(f"{row['day']} · ", row["title"], "") for row in rows]
+        items = [(f"{format_day(row['day'])} · ", row["title"], "") for row in rows]
         text = "Значимые даты\n\n" + render_list_items(items)
     elif page == 0:
         text = "Значимые даты\n\nДобавьте дату, которую хочется беречь."
@@ -721,7 +734,7 @@ async def game(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer("Сначала соедините пространство")
         return
     daily = await service.daily(pair["id"], call.from_user.id)
-    text = f"Ритуал дня · {daily['day']}\n\n{daily['action']}"
+    text = f"Ритуал дня · {format_day(daily['day'])}\n\n{daily['action']}"
     if daily["done"]:
         text += "\n\nСегодняшний ритуал уже отмечен. До завтра!"
     elif daily["partner_done"]:
@@ -743,13 +756,13 @@ async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
     if completed:
         # Кнопка и текст отражают фактический результат, а не ожидание.
         await call.answer("+10 XP · ритуал отмечен")
-        tail = "Сегодняшний ритуал отмечен. +10 XP в личную копилку и в общий запас."
+        tail = "Сегодняшний ритуал отмечен. +10 XP в вашу личную копилку."
     else:
         await call.answer("Сегодня уже отмечено")
         tail = "Сегодняшний ритуал уже отмечен. До завтра!"
     await safe_edit(
         call.message,
-        f"Ритуал дня · {daily['day']}\n\n{daily['action']}\n\n{tail}",
+        f"Ритуал дня · {format_day(daily['day'])}\n\n{daily['action']}\n\n{tail}",
         HOME_MENU,
     )
 
