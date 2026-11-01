@@ -141,7 +141,10 @@ body {
   padding: 0 16px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  /* flex-end, а не space-between: после удаления собственной кнопки закрытия
+     в баре остался только правый блок (аватарки) — space-between прижал бы
+     его к левому краю (репорт 2026-11-01). */
+  justify-content: flex-end;
   pointer-events: none;
   z-index: 40;
 }
