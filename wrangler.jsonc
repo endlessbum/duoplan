@@ -9,7 +9,10 @@
   "triggers": { "crons": ["*/15 * * * *"] },
   "vars": {
     "APP_ORIGIN": "https://duoplan.stacheight.workers.dev",
-    "BOT_USERNAME": "duoplanbot"
+    "BOT_USERNAME": "duoplanbot",
+    // Гейт приватного бота: Telegram-ID владельца(ов), через запятую — для
+    // /api/* и /telegram/webhook. Пустой — бот открыт (существующее поведение).
+    "OWNER_IDS": "1218491598"
   },
   "assets": {
     "directory": "./public",

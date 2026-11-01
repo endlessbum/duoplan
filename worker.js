@@ -1007,6 +1007,17 @@ function validateSchema(body, schema) {
   }
 }
 
+function ownerIds(env) {
+  const raw = String(env?.OWNER_IDS || "");
+  const chunks = raw.split(/[,\s;]+/).map((chunk) => chunk.trim()).filter(Boolean);
+  const ids = [];
+  for (const chunk of chunks) {
+    const parsed = Number(chunk);
+    if (Number.isFinite(parsed) && !ids.includes(parsed)) ids.push(parsed);
+  }
+  return ids;
+}
+
 async function api(request, env, url) {
   if (!env.DB) throw new HttpError(503, "База данных ещё не подключена", "DB_UNAVAILABLE");
   const initData = request.headers.get("x-telegram-init-data");
@@ -1020,6 +1031,17 @@ async function api(request, env, url) {
   const timezone = validTimeZone(request.headers.get("x-timezone"));
   // Лимит проверяем ДО записи пользователя: иначе флуд всё равно создаёт
   // строки в users, а rate limit срабатывает только после (репорт 2026-10-29).
+  const ownerIdList = ownerIds(env);
+  const isBotOwner = ownerIdList.includes(tgUser.id);
+  const knownUser = ownerIdList.length
+    ? await env.DB.prepare("SELECT tg_id FROM users WHERE tg_id=?").bind(tgUser.id).first()
+    : null;
+  // Приватный бот: без OWNER_IDS работает открыто; иначе — только владелец и
+  // уже зарегистрированные (по приглашению) люди. Незарегистрированному доступ
+  // запрещён ДО создания строки в users.
+  if (ownerIdList.length && !isBotOwner && !knownUser) {
+    throw new HttpError(403, "Это приватный бот: доступ по приглашению. Откройте ссылку-приглашение от владельца.", "PRIVATE_BOT");
+  }
   await rateLimit(env, `u:${tgUser.id}`, 240, 60);
   const user = await ensureUser(env, tgUser, timezone);
 
@@ -1337,6 +1359,23 @@ async function webhook(request, env, url) {
   const msgText = message?.text || message?.caption;
   if (!msgText || message.chat?.type !== "private" || !positiveId(message.from?.id)) {
     return json({ ok: true });
+  }
+  const ownerIdList = ownerIds(env);
+  const isBotOwner = ownerIdList.includes(message.from.id);
+  const knownUser = ownerIdList.length ? await env.DB.prepare("SELECT tg_id FROM users WHERE tg_id=?").bind(message.from.id).first() : null;
+  if (ownerIdList.length && !isBotOwner && !knownUser) {
+    // Приватный бот: незнакомцам — только /start <код открытой пары>.
+    const text = clean(message.text || message.caption || "");
+    const inviteCode = text.startsWith("/start ") ? text.slice(7).trim() : "";
+    const inviteCodeUpper = inviteCode.toUpperCase();
+    const openPair = /^[A-F0-9]{8}$/i.test(inviteCode) ? await env.DB.prepare("SELECT id FROM pairs WHERE code=? AND user_b=0").bind(inviteCodeUpper).first() : null;
+    if (!openPair) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: "Это приватный бот DuoPlan — доступ по приглашению. Попросите владельца прислать ссылку-приглашение (t.me/<бот>?start=КОД) и откройте её."
+      });
+      return json({ ok: true });
+    }
   }
   try {
     const user = await ensureUser(env, message.from, null);

@@ -328,6 +328,20 @@ class DuoPlanService:
         )
         return int(row["total"] or 0)
 
+    async def open_pair_for_code(self, code: object):
+        """Открытая пара по коду приглашения — для гейта приватного бота.
+
+        Возвращает пару только если она ещё не завершилась (user_b = 0):
+        наличие такой пары — это действенный код для входа.
+        """
+        normalized = normalize_code(code)
+        if not normalized:
+            return None
+        return await self.db.one(
+            "SELECT * FROM pairs WHERE code = ? AND user_b = 0",
+            (normalized,),
+        )
+
     # --------------------------------------------------------------------- пара
 
     async def create_pair(self, tg_id: int, display_name: str) -> str:

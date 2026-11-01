@@ -14,6 +14,7 @@ from duoplan.db.base import connect_database
 from duoplan.fsm import SQLiteStorage
 from duoplan.handlers import router
 from duoplan.middlewares import EnsureUserMiddleware
+from duoplan.middlewares import PrivateBotMiddleware
 from duoplan.services import DuoPlanService
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,10 @@ async def main() -> int:
         dp = Dispatcher(storage=storage)
         dp["service"] = service
         dp["settings"] = settings
+        # Приватный гейт (OWNER_IDS + код приглашения) — первым: отказ уже
+        # не доходит до ensure_user, т.е. чужие не пишут в users.
+        dp.message.outer_middleware(PrivateBotMiddleware())
+        dp.callback_query.outer_middleware(PrivateBotMiddleware())
         dp.message.outer_middleware(EnsureUserMiddleware())
         dp.callback_query.outer_middleware(EnsureUserMiddleware())
         dp.include_router(router)

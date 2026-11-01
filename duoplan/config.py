@@ -85,6 +85,9 @@ class Settings:
     tz: tzinfo = field(default=timezone.utc)
     # Добавлено в конец, чтобы не сдвигать позиционные аргументы старого API.
     fsm_ttl: int = DEFAULT_FSM_TTL
+    # Telegram-ID владельца (или владельцев, через запятую) — гейт приватного
+    # бота. Пустой — режим открытого бота (как раньше).
+    owner_ids: tuple[int, ...] = field(default_factory=tuple)
 
     @property
     def is_configured(self) -> bool:
@@ -113,6 +116,15 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         db_path = PROJECT_ROOT / db_path
 
     tz, tz_name = resolve_timezone(get("TZ", DEFAULT_TZ) or DEFAULT_TZ)
+    owner_ids: tuple[int, ...] = ()
+    raw_owner_ids = get("OWNER_IDS")
+    for chunk in raw_owner_ids.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk.isdigit():
+            continue
+        owner_id = int(chunk)
+        if owner_id not in owner_ids:
+            owner_ids = (*owner_ids, owner_id)
     return Settings(
         bot_token=get("BOT_TOKEN"),
         admin_chat_id=admin_chat_id,
@@ -120,6 +132,7 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         bot_name=get("BOT_NAME", "DuoPlan") or "DuoPlan",
         bot_username=bot_username,
         tz_name=tz_name,
-        fsm_ttl=_parse_ttl(get("FSM_TTL", str(DEFAULT_FSM_TTL))),
         tz=tz,
+        fsm_ttl=_parse_ttl(get("FSM_TTL", str(DEFAULT_FSM_TTL))),
+        owner_ids=owner_ids,
     )
