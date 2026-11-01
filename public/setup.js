@@ -23,7 +23,11 @@ form.addEventListener("submit", async event => {
     try { data = raw ? JSON.parse(raw) : {}; }
     catch { throw new Error("Сервер вернул некорректный ответ"); }
     if (!response.ok) throw new Error(data.error || "Ошибка настройки");
-    result.textContent = "Готово. База обновлена, webhook и кнопка Mini App активированы.";
+    // has_main_web_app = false значит, что кнопка «ОТКРЫТЬ» в списке чатов ещё
+    // не задана в BotFather — не отчитываемся об успехе, как о полной активации.
+    result.textContent = data.has_main_web_app === false
+      ? "Готово: база и webhook обновлены. Но кнопка «ОТКРЫТЬ» не появится, пока Main Mini App не задана в @BotFather (/mybots → Bot Settings → Mini Apps)."
+      : "Готово. База обновлена, webhook и кнопка Mini App активированы.";
     intro.textContent = "DuoPlan подключён к Telegram.";
     form.hidden = true;
     botLink.classList.remove("hidden");

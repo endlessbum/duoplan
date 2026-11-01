@@ -189,22 +189,33 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
 
 
 def test_export_covers_every_column_of_current_schema():
-    """Список колонок обязан совпадать со схемой бота.
+    """Список колонок обязан совпадать с production-схемой D1.
 
-    Любая колонка вне списка молча теряется при импорте: для is_private это
-    ещё и тихая смена приватности, для остальных — потеря данных.
+    Источник истины — миграции + ensureSchema (worker.js), а не legacy-схема
+    бота: колонка, добавленная в D1 и пропущенная в экспортёре, молча теряется
+    при импорте (для is_private — тихая смена приватности). Сверка с Python
+    SCHEMA не ловила этот класс регрессии (аудит 2026-11-01).
     """
-    con = sqlite3.connect(":memory:")
-    for sql in SCHEMA:
-        con.execute(sql)
+    from test_schema_parity import _d1_migrations
+    from test_schema_parity import _worker_schema
+
+    merged: dict[str, set[str]] = {}
+    for source in (_d1_migrations(), _worker_schema()):
+        for table, columns in source.items():
+            merged.setdefault(table, set()).update(name for name, _ in columns)
+
+    problems: list[str] = []
     for table, columns in TABLES.items():
         listed = {part.strip() for part in columns.split(",") if part.strip()}
-        actual = {str(row[1]) for row in con.execute(f"PRAGMA table_info({table})")}
-        assert actual == listed, (
-            f"{table}: в схеме есть {sorted(actual - listed)}, "
-            f"в списке экспорта лишние {sorted(listed - actual)}"
-        )
-    con.close()
+        actual = merged.get(table)
+        if actual is None:
+            problems.append(f"{table}: таблицы нет в схеме D1 (миграции + ensureSchema)")
+        elif actual != listed:
+            problems.append(
+                f"{table}: в схеме есть {sorted(actual - listed)}, "
+                f"в списке экспорта лишние {sorted(listed - actual)}"
+            )
+    assert not problems, "\n".join(problems)
 
 
 def test_export_refuses_duplicate_pair_codes(tmp_path):

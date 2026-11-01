@@ -130,6 +130,30 @@ def test_shared_tables_have_same_columns_everywhere():
     assert not mismatches, "\n".join(mismatches)
 
 
+def test_worker_tables_all_exist_in_migrations():
+    """ensureSchema не должен знать таблиц, которых нет в миграциях.
+
+    База, поднятая только `wrangler d1 migrations apply` (задокументированный
+    путь), обязана совпадать с базой после /api/setup. Раньше notification_log
+    и idx_telegram_updates_received_at существовали только в worker.js —
+    тест сравнивал пересечение источников и был к этому слеп (аудит 2026-11-01).
+    """
+    d1 = _d1_migrations()
+    worker = _worker_schema()
+    only_worker = sorted(set(worker) - set(d1))
+    only_migrations = sorted(set(d1) - set(worker))
+    assert not only_worker, f"таблицы только в worker.js: {only_worker}"
+    assert not only_migrations, f"таблицы только в миграциях: {only_migrations}"
+
+
+def test_notification_log_and_updates_index_in_migrations():
+    """Регресс аудита 2026-11-01: журнал уведомлений и индекс telegram_updates
+    обязаны появляться и в миграциях, а не только в ensureSchema."""
+    migration_text = "\n".join(path.read_text(encoding="utf-8") for path in sorted(MIGRATIONS.glob("*.sql")))
+    assert "CREATE TABLE IF NOT EXISTS notification_log" in migration_text
+    assert "CREATE INDEX IF NOT EXISTS idx_telegram_updates_received_at" in migration_text
+
+
 def test_no_daily_kind_anywhere():
     """Колонка удалена из всех источников, включая SQL в сервисах."""
     for path in [WORKER, *MIGRATIONS.glob("*.sql"), *ROOT.glob("duoplan/**/*.py")]:

@@ -35,6 +35,8 @@ const loadRenderPair = new Function(
   "renderTabHeader",
   "renderPairCalendar",
   "renderPairSettings",
+  "renderPairTimezone",
+  "renderPairExport",
   [
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function partnerMissing"),
@@ -46,6 +48,8 @@ const loadRenderPair = new Function(
 function render(pair) {
   const renderPair = loadRenderPair(
     { pair },
+    () => "",
+    () => "",
     () => "",
     () => "",
     () => ""

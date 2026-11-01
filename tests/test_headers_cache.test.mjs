@@ -40,6 +40,13 @@ test("HTML-страницы явно помечены no-cache", () => {
   ok(blockFor("/").some((l) => /^Cache-Control:\s*no-cache$/i.test(l)));
 });
 
+test("Mini App URL /app и setup-ассеты тоже без кэша", () => {
+  // /app — реальный URL Mini App (без расширения), setup-ассеты не версионированы.
+  for (const path of ["/app", "/setup.css", "/setup.js"]) {
+    ok(blockFor(path).some((l) => /^Cache-Control:\s*no-cache$/i.test(l)), path);
+  }
+});
+
 test("все локальные JS/CSS Mini App версионированы и совпадают с APP_VERSION", () => {
   const appHtml = readFileSync(join(root, "public", "app.html"), "utf8");
   const workerSource = readFileSync(join(root, "worker.js"), "utf8");

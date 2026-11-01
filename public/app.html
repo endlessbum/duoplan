@@ -6,20 +6,13 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.10.31.9">
+  <link rel="stylesheet" href="/app.css?v=2026.11.01.4">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div class="app-shell">
     <!-- Парящие стеклянные кнопки вверху окна в стиле Telegram -->
     <div class="top-glass-bar" role="region" aria-label="Быстрые действия">
-      <div class="top-glass-left">
-        <button id="fullscreen-close" class="glass-btn glass-icon-btn" type="button" aria-label="Закрыть приложение">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
-            <path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>
-          </svg>
-        </button>
-      </div>
       <div class="top-glass-right">
         <button id="homescreen-button" class="glass-btn glass-icon-btn" type="button" aria-label="Добавить на главный экран" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -121,7 +114,7 @@
           </svg>
         </button>
       </div>
-      <div id="dialog-fields" class="sheet-fields"></div>
+      <div id="dialog-fields"></div>
       <div class="sheet-actions">
         <button type="button" id="dialog-cancel" class="secondary" data-action="close-dialog">Отмена</button>
         <button type="submit" id="dialog-submit" class="primary">Сохранить</button>
@@ -145,8 +138,8 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.10.31.9" defer></script>
-  <script src="/nav.js?v=2026.10.31.9" defer></script>
-  <script src="/app.js?v=2026.10.31.9" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.01.4" defer></script>
+  <script src="/nav.js?v=2026.11.01.4" defer></script>
+  <script src="/app.js?v=2026.11.01.4" defer></script>
 </body>
 </html>

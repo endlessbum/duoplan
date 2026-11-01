@@ -178,6 +178,16 @@ ALL_FORMS = StateFilter(
 # --------------------------------------------------------------------- утилиты
 
 
+def _button_label(text: object, limit: int) -> str:
+    """Подпись inline-кнопки: плоский текст без переносов строк.
+
+    Telegram отклоняет ``\n`` в тексте кнопки (BUTTON_TEXT_INVALID), а название
+    записи перевод строк содержать может — иначе весь экран списка падал бы
+    неисправимо (аудит 2026-11-01).
+    """
+    return " ".join(rich_to_plain(text).split())[:limit]
+
+
 def name_of(user) -> str:
     return user.full_name or user.first_name or "Без имени"
 
@@ -545,7 +555,7 @@ async def tasks_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
         text = "Наши планы\n\nНа этой странице планов нет."
 
     buttons = [
-        [button(f"Готово: {rich_to_plain(row['title'])[:22]}", f"task:done:{row['id']}:{page}")]
+        [button(f"Готово: {_button_label(row['title'], 22)}", f"task:done:{row['id']}:{page}")]
         for row in rows
     ]
     buttons.append([button("Добавить план", "add:tasks")])
@@ -651,7 +661,7 @@ async def wishes_view(call: CallbackQuery, service: DuoPlanService, page: int = 
         text = "Вишлист\n\nНа этой странице желаний нет."
 
     buttons = [
-        [button(f"Исполнено: {rich_to_plain(row['body'])[:19]}", f"wish:done:{row['id']}:{page}")]
+        [button(f"Исполнено: {_button_label(row['body'], 19)}", f"wish:done:{row['id']}:{page}")]
         for row in rows
         if row["owner_id"] == call.from_user.id
     ]
@@ -821,7 +831,7 @@ async def receive_date_title(message: Message, state: FSMContext) -> None:
     if not title:
         await message.answer("Название не может быть пустым. Попробуйте ещё раз или /cancel.")
         return
-    if len(title) > DATE_TITLE_MAX:
+    if _utf16_len(title) > DATE_TITLE_MAX:
         await message.answer(
             f"Название длиннее {DATE_TITLE_MAX} символов. Сократите его или /cancel."
         )
@@ -864,7 +874,6 @@ async def receive_date_day(message: Message, service: DuoPlanService, state: FSM
         )
         return
 
-    data = await state.get_data()
     pair = await service.pair_for(message.from_user.id)
     if not pair:
         await state.clear()

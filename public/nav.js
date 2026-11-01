@@ -631,10 +631,7 @@
     }
 
     function onPointerDown(event) {
-      if (event.isPrimary === false) {
-        console.debug("[nav] pointerdown ignored: non-primary pointer");
-        return;
-      }
+      if (event.isPrimary === false) return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
       // Новый жест отменяет незавершённую защиту клика: если прошлый drag
       // закончился вне панели, click туда не придёт и запись осталась бы висеть.
@@ -836,7 +833,6 @@
       const press = state.press;
       if (!press || event.pointerId !== press.pointerId) return;
       if (press.dragging) {
-        console.debug("[nav] drag cancelled: pointercancel/lostcapture");
         finishDrag(false);
       } else state.press = null;
     }
@@ -861,14 +857,10 @@
     // ------------------------------------------------------------ публичное
 
     function setActive(tab, animate = true) {
-      const center = centerOf(tab);
-      if (center === null) {
-        // Панель скрыта — запомним вкладку, каплю поставим при refresh().
-        state.active = tab;
-        return;
-      }
       state.active = tab;
-      state.lastUnambiguous = tab;
+      // Подсветка вкладок не зависит от геометрии: синхронизируем до раннего
+      // выхода при скрытой панели, иначе классы остались бы на старой вкладке
+      // (аудит 2026-11-01, латентная рассинхронизация).
       for (const item of items) {
         const active = item.dataset.tab === tab;
         item.classList.toggle("is-active", active);
@@ -876,6 +868,12 @@
         else item.removeAttribute("aria-current");
         if (active) item.classList.remove("is-preview-target");
       }
+      const center = centerOf(tab);
+      if (center === null) {
+        // Панель скрыта — каплю поставим при refresh().
+        return;
+      }
+      state.lastUnambiguous = tab;
       state.target = center;
       if (!animate || state.reduced) {
         stopLoop();

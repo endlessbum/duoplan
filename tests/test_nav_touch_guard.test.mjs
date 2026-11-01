@@ -50,8 +50,11 @@ test("вкладка сама гасит touch-action: родительское 
   match(ruleFor(".nav-item"), /touch-action:\s*none/);
 });
 
-test("во время жеста панель тоже не отдаёт прокрутку", () => {
-  match(ruleFor(".bottom-nav.is-dragging"), /touch-action:\s*none/);
+test("панель не отдаёт прокрутку — в том числе во время жеста", () => {
+  // touch-action не наследуется: задаём и на панели, и на каждой вкладке,
+  // поэтому панель не скроллится и в состоянии is-dragging. Отдельное
+  // правило-дубль для .is-dragging удалено (аудит 2026-11-01).
+  match(ruleFor(".bottom-nav"), /touch-action:\s*none/);
 });
 
 test("touchmove слушается с passive: false, иначе preventDefault игнорируется", () => {

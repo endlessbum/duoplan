@@ -4,6 +4,7 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const root = process.cwd();
@@ -88,7 +89,9 @@ if (forbiddenFound.length) {
 }
 
 // Создаём ZIP через Python zipfile (zip/unzip могут отсутствовать).
-const listFile = path.join(root, ".package-list.tmp");
+// Листинг — во временном каталоге ОС: мусор в корне репозитория не появится,
+// даже если процесс оборвётся между записью и удалением.
+const listFile = path.join(os.tmpdir(), ".package-list.tmp");
 fs.writeFileSync(listFile, files.join("\n"), "utf8");
 
 const python = process.platform === "win32" ? "python" : "python3";
@@ -119,7 +122,8 @@ bad = []
 with zipfile.ZipFile(${JSON.stringify(zipName)}) as z:
     for n in z.namelist():
         low = n.lower()
-        if (low == ".env" or low.endswith("/.env") or ".env/" in low or low == ".dev.vars" or low.endswith(".pyc")
+        if (low == ".env" or low.endswith("/.env") or ".env/" in low or low == ".dev.vars"
+            or low.endswith("/.dev.vars") or ".dev.vars/" in low or low.endswith(".pyc")
             or "__pycache__" in low or ".pytest_cache" in low or ".workbuddy-ai" in low or ".venv" in low
             or "node_modules" in low or ".wrangler" in low or low.endswith(".db") or low.endswith(".db-wal")
             or low.endswith(".db-shm") or low.endswith(".db-journal")):

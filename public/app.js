@@ -7,7 +7,6 @@
   const pairButton = document.getElementById("pair-button");
   const avatarA = document.getElementById("avatar-a");
   const avatarB = document.getElementById("avatar-b");
-  const fullscreenClose = document.getElementById("fullscreen-close");
   const homeScreenButton = document.getElementById("homescreen-button");
   const dialog = document.getElementById("item-dialog");
   const dialogForm = document.getElementById("item-form");
@@ -230,7 +229,7 @@
       const palette = ACCENT_PALETTES[el.dataset.accent];
       if (palette) el.style.background = palette[dark ? "dark" : "light"];
     });
-    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-bg", "--droplet-border", "--droplet-glow", "--droplet-hi", "--droplet-fill", "--droplet-deep", "--droplet-halo"];
+    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-border", "--droplet-halo"];
     const hex = ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
     // Палитра капли (цвет подписей) читается из CSS-переменных только в
     // refresh(): хук обязан сработать ПОСЛЕ установки переменных, иначе бары
@@ -246,15 +245,7 @@
     root.style.setProperty("--berry", hex);
     root.style.setProperty("--berry-dark", shadeHex(hex, 0.82));
     root.style.setProperty("--berry-soft", rgba(dark ? 0.18 : 0.14));
-    root.style.setProperty("--droplet-bg", rgba(dark ? 0.22 : 0.15));
     root.style.setProperty("--droplet-border", dark ? "rgba(255, 255, 255, 0.16)" : rgba(0.24));
-    root.style.setProperty("--droplet-glow", dark
-      ? `inset 0 1px 1px rgba(255, 255, 255, 0.22), 0 4px 16px ${rgba(0.22)}`
-      : `inset 0 1px 1.5px rgba(255, 255, 255, 0.8), 0 4px 14px ${rgba(0.16)}`);
-    // Капля — SVG-градиент: светлая кромка сверху, акцент в середине, тень снизу.
-    root.style.setProperty("--droplet-hi", dark ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.58)");
-    root.style.setProperty("--droplet-fill", rgba(dark ? 0.38 : 0.30));
-    root.style.setProperty("--droplet-deep", rgba(dark ? 0.18 : 0.16));
     root.style.setProperty("--droplet-halo", rgba(dark ? 0.30 : 0.22));
     finish();
   }
@@ -364,7 +355,6 @@
       safeTg(() => tg.checkHomeScreenStatus((data) => syncHomeScreenButton(data?.status)));
     });
   }
-  fullscreenClose?.addEventListener("click", () => tg?.close?.());
 
   function esc(value) {
     return String(value ?? "")
@@ -1589,16 +1579,59 @@
           <span class="settings-label">Пароль на вход</span>
           <div style="display:flex; gap:8px; align-items:center;">
             <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
-            <button class="secondary small" type="button" data-action="save-pin">Задать</button>
-            ${storedPin() ? `<button class="secondary small" type="button" data-action="clear-pin">Убрать</button>` : ""}
+            ${storedPin()
+              ? `<button class="secondary small" type="button" data-action="clear-pin">Удалить</button>`
+              : `<button class="secondary small" type="button" data-action="save-pin">Задать</button>`}
           </div>
         </div>
-        <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Хранится только на этом устройстве, без тайм-аутов при ошибке.</p>
+        <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Это локальная блокировка экрана: она не шифрует данные и не защищает их при входе в ваш Telegram-аккаунт с другого устройства. Без тайм-аутов при ошибке.</p>
         <div style="margin-top:14px; display:grid; gap:8px;">
           <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
-          <button class="secondary full" type="button" data-action="export-diary">Выслать дневник сообщением</button>
         </div>
-        <p class="settings-hint">«Выслать дневник» — бот отправит все записи дневника пары личным сообщением: резервная копия на случай, если захочется перечитать всё сразу.</p>
+      </section>
+    `;
+  }
+
+  // Резервная копия — отдельная карточка под настройками: кнопка с пояснением
+  // слишком значима, чтобы прятать её внутри персональных настроек.
+  function renderPairExport() {
+    return `
+      <section class="card">
+        <p class="eyebrow">Резервная копия</p>
+        <h3>Экспорт данных</h3>
+        <button class="secondary full" type="button" data-action="export-data">Экспортировать</button>
+        <p class="settings-hint">Бот пришлёт два файла: «Архив» — все записи дневника пары и значимые даты, «Личные даты» — только ваши личные даты (их нет в «Архиве» партнёра). Удобно хранить вне приложения.</p>
+      </section>
+    `;
+  }
+
+  // Часовой пояс — общая настройка пары: от него считается календарь,
+  // локальный день ритуала и расписание напоминаний у обоих партнёров.
+  const COMMON_TIMEZONES = [
+    "Europe/Moscow", "Europe/Kaliningrad", "Europe/Samara", "Asia/Yekaterinburg",
+    "Asia/Novosibirsk", "Asia/Krasnoyarsk", "Asia/Irkutsk", "Asia/Vladivostok",
+    "Europe/Kyiv", "Europe/Minsk", "Europe/Riga", "Europe/Vilnius", "Europe/Tallinn",
+    "Europe/Warsaw", "Europe/Berlin", "Europe/Prague", "Europe/Istanbul",
+    "Asia/Almaty", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Yerevan", "Asia/Baku",
+    "Europe/London", "America/New_York", "America/Chicago", "America/Los_Angeles", "UTC"
+  ];
+
+  function renderPairTimezone() {
+    const device = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    const current = appState.pair?.timezone || device || "UTC";
+    const zones = [...new Set([current, device, ...COMMON_TIMEZONES])].filter(Boolean);
+    const options = zones.map((zone) => `
+      <option value="${esc(zone)}"${zone === current ? " selected" : ""}>${esc(zone.replace(/_/g, " "))}</option>`).join("");
+    return `
+      <section class="card">
+        <p class="eyebrow">Общее</p>
+        <h3>Часовой пояс</h3>
+        <div class="settings-row">
+          <span class="settings-label">Пояс пары</span>
+          <select id="pair-timezone" class="settings-select">${options}</select>
+        </div>
+        <p class="settings-hint">Общий для календаря, ритуала дня и напоминаний у обоих партнёров. При смене пояса пересчитываются «сегодня/завтра» — граница суток сдвинется.</p>
+        <button class="secondary small" type="button" data-action="save-pair-timezone">Сохранить пояс</button>
       </section>
     `;
   }
@@ -1625,7 +1658,9 @@
       ${renderTabHeader("pair")}
       ${inviteBlock}
       ${renderPairCalendar()}
+      ${renderPairTimezone()}
       ${renderPairSettings()}
+      ${renderPairExport()}
       <div class="pair-exit">
         <button class="secondary pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
       </div>
@@ -2344,14 +2379,23 @@
         try { localStorage.removeItem(PIN_KEY); } catch {}
         showToast("Пароль убран");
         render();
-      } else if (action === "export-diary") {
+      } else if (action === "export-data") {
         btn.disabled = true;
         try {
-          await request("/api/diary/export", { method: "POST", body: {} });
-          showToast("Дневник выслан сообщениями от бота");
+          await request("/api/data/export", { method: "POST", body: {} });
+          showToast("Файлы высланы от бота: «Архив» и «Личные даты»");
         } finally {
           btn.disabled = false;
         }
+      } else if (action === "save-pair-timezone") {
+        const value = document.getElementById("pair-timezone")?.value || "";
+        if (!value) {
+          showToast("Выберите пояс из списка");
+          return;
+        }
+        appState = await request("/api/pair/timezone", { method: "POST", body: { timezone: value } });
+        showToast("Часовой пояс сохранён");
+        render();
       } else if (action === "set-gender") {
         // Подтверждение выбора: случайный тап не фиксирует пол навсегда.
         const gender = btn.dataset.gender === "female" ? "female" : "male";

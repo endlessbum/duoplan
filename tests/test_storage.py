@@ -47,3 +47,26 @@ async def test_storage_ttl_expires_state(db):
     assert await storage.get_data(key) == {}
 
     assert await storage.cleanup() == 1
+
+
+async def test_storage_transition_keeps_form_data(db):
+    """Контракт флоу даты: данные переживают переход set_state.
+
+    receive_date_day пишет day, затем делает set_state(Form.date_recurs),
+    и receive_date_recurs читает title+day из данных. «Воскрешение»
+    просроченной строки при этом не проблема: каждый шаг флоу перезаписывает
+    своё поле до чтения (аудит 2026-11-01 — поведение зафиксировано как есть).
+    """
+    storage = SQLiteStorage(db, ttl=600)
+    key = make_key()
+
+    await storage.set_state(key, "Form:date_title")
+    # update_data в хендлерах мержит (aiogram-прокси), set_data заменяет целиком.
+    await storage.set_data(key, {"title": "Годовщина"})
+    await storage.set_state(key, "Form:date_day")  # переход после update_data(title)
+    stored = await storage.get_data(key)
+    await storage.set_data(key, {**stored, "day": "2027-03-08"})
+    await storage.set_state(key, "Form:date_recurs")
+
+    assert await storage.get_data(key) == {"title": "Годовщина", "day": "2027-03-08"}
+    assert await storage.get_state(key) == "Form:date_recurs"

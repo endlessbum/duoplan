@@ -20,7 +20,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.10.31.9";
+const APP_VERSION = "2026.11.01.4";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -28,7 +28,7 @@ const APP_VERSION = "2026.10.31.9";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.10.31.9";
+const DB_SCHEMA_VERSION = "2026.11.01.4";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -1097,18 +1097,54 @@ async function api(request, env, url) {
     await leavePair(env, pair, url);
     return json(await state(env, user.tg_id));
   }
-  // Резервная копия дневника: записи пары высылаются сообщениями от бота
-  // запрашивающему партнёру. Дневник общий — выгружаются все записи, включая
-  // записи партнёра: он их и так видит во вкладке «Дневник».
-  if (request.method === "POST" && url.pathname === "/api/diary/export") {
-    await rateLimit(env, `diary:${user.tg_id}`, 5, 3600);
-    const rows = (await env.DB.prepare(`SELECT m.body,m.day,u.display_name FROM memories m
+  // Часовой пояс пары общий: от него считаются календарь, локальный день
+  // ритуала и расписание напоминаний (users.timezone — только личная база).
+  if (request.method === "POST" && url.pathname === "/api/pair/timezone") {
+    validateSchema(body, { timezone: { type: "string", required: true, maxLength: 64 } });
+    if (!validTimeZone(clean(body.timezone))) throw new HttpError(400, "Неизвестный часовой пояс", "INVALID_TIMEZONE");
+    await env.DB.prepare("UPDATE pairs SET timezone=?, updated_at=? WHERE id=?")
+      .bind(clean(body.timezone), now(), pair.id).run();
+    return json(await state(env, user.tg_id));
+  }
+  // Экспорт данных: бот запрашивающему партнёру высылаются два JSON-файла —
+  // «Архив» (все записи дневника пары + значимые даты, видимые ему, включая
+  // его собственные личные) и «Личные даты» (только его личные даты).
+  // Личные даты партнёра не включаются ни в один файл — фильтры как в UI.
+  if (request.method === "POST" && url.pathname === "/api/data/export") {
+    await rateLimit(env, `export:${user.tg_id}`, 5, 3600);
+    const memories = (await env.DB.prepare(`SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name AS author FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at ASC, m.id ASC`)
       .bind(pair.id).all()).results || [];
-    for (const text of diaryExportMessages(rows)) {
-      await telegram(env, "sendMessage", { chat_id: user.tg_id, text, parse_mode: "HTML" });
+    const dates = (await env.DB.prepare(`SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.created_at,u.display_name AS author FROM dates d
+      LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND (d.is_private=0 OR d.created_by=?)
+      ORDER BY d.day ASC, d.id ASC`)
+      .bind(pair.id, user.tg_id).all()).results || [];
+    const privateDates = (await env.DB.prepare(`SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.created_at,u.display_name AS author FROM dates d
+      LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.is_private=1 AND d.created_by=?
+      ORDER BY d.day ASC, d.id ASC`)
+      .bind(pair.id, user.tg_id).all()).results || [];
+    const form = new FormData();
+    form.append("chat_id", String(user.tg_id));
+    form.append("caption", `Архив — записи дневника: ${memories.length}, значимые даты: ${dates.length}.`);
+    form.append("document", new Blob([dataExportFile(memories, dates)], { type: "application/json" }), "Архив.json");
+    try {
+      await telegramForm(env, "sendDocument", form);
+    } catch (error) {
+      // Отказ выгрузки не должен выглядеть успехом — показываем ошибку явно.
+      console.error("data export archive failed", error);
+      throw new HttpError(502, "Telegram не принял файл «Архив». Попробуйте позже.", "EXPORT_FAILED");
     }
-    return json({ ok: true });
+    const privateForm = new FormData();
+    privateForm.append("chat_id", String(user.tg_id));
+    privateForm.append("caption", `Личные даты — только ваши личные значимые даты: ${privateDates.length}.`);
+    privateForm.append("document", new Blob([privateDatesExportFile(privateDates)], { type: "application/json" }), "Личные даты.json");
+    try {
+      await telegramForm(env, "sendDocument", privateForm);
+    } catch (error) {
+      console.error("data export private dates failed", error);
+      throw new HttpError(502, "Telegram не принял файл «Личные даты». Попробуйте позже — файл «Архив» уже выслан.", "EXPORT_FAILED");
+    }
+    return json({ ok: true, memories: memories.length, dates: dates.length, private_dates: privateDates.length });
   }
   if (request.method === "POST" && url.pathname === "/api/tasks") {
     validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } });
@@ -1529,51 +1565,86 @@ function datesDigestText(timeZone, tomorrow, dates) {
 }
 
 // ------------------------------------------------------------------
-// Резервная копия дневника (POST /api/diary/export): записи пары рендерятся
-// через richToHtml (экранирование внутри) и режутся на сообщения по блокам —
-// Telegram принимает не больше 4096 символов на сообщение, а разметка и
-// экранирование раздувают строку (запись «<"×2000» превращается в ~8000).
+// Экспорт данных (POST /api/data/export): записи дневника и значимые даты
+// пары собираются в один JSON-файл и отправляются sendDocument'ом — без
+// потолка сообщений и без резки текста (файл — предпочтительный формат
+// резервной копии по аудиту 2026-11-01). Приватность — как в интерфейсе:
+// SQL запроса дат не включает личные даты партнёра.
 // ------------------------------------------------------------------
-const DIARY_EXPORT_MESSAGE_LIMIT = 3800;
-const DIARY_EXPORT_MAX_MESSAGES = 20;
 
-// Обрезка по UTF-16 единицам (как считает Telegram), без разрыва суррогатных пар.
-function cutUtf16(text, max) {
-  let out = "";
-  let used = 0;
-  for (const ch of String(text ?? "")) {
-    const width = ch.codePointAt(0) > 0xffff ? 2 : 1;
-    if (used + width > max) break;
-    out += ch;
-    used += width;
-  }
-  return out;
+// Тело файла выгрузки: машиночитаемый JSON с полными текстами. created_at —
+// unix-секунды как в базе, флаги приведены к булевым, пустой заголовок — null.
+function exportMemoryRow(row) {
+  return {
+    id: row.id,
+    day: row.day,
+    author: clean(row.author) || "Партнёр",
+    title: clean(row.title) || null,
+    body: row.body ?? "",
+    created_at: row.created_at
+  };
 }
 
-function diaryExportMessages(rows) {
-  const blocks = (rows || []).map((row) =>
-    `${row.day} · ${escapeHtml(clean(row.display_name) || "Партнёр")}\n${richToHtml(row.body || "")}`
-  );
-  if (!blocks.length) return ["В вашем дневнике пока нет записей."];
-  const messages = [];
-  let current = "";
-  for (const block of blocks) {
-    const chunk = cutUtf16(block, DIARY_EXPORT_MESSAGE_LIMIT);
-    if (current && current.length + 2 + chunk.length > DIARY_EXPORT_MESSAGE_LIMIT) {
-      messages.push(current);
-      current = "";
-    }
-    current = current ? `${current}\n\n${chunk}` : chunk;
+function exportDateRow(row) {
+  return {
+    id: row.id,
+    day: row.day,
+    time: row.time || null,
+    title: row.title,
+    recurs: Number(row.recurs) === 1,
+    monthly: Number(row.monthly) === 1,
+    is_private: Number(row.is_private) === 1,
+    author: clean(row.author) || "Партнёр",
+    created_at: row.created_at
+  };
+}
+
+// «Архив» — полный файл: дневник + значимые даты, видимые запросившему
+// партнёру (включая его собственные личные).
+function dataExportFile(memories, dates) {
+  return JSON.stringify({
+    app: "duoplan",
+    version: APP_VERSION,
+    exported_at: new Date().toISOString(),
+    memories: (memories || []).map(exportMemoryRow),
+    dates: (dates || []).map(exportDateRow)
+  }, null, 2);
+}
+
+// «Личные даты» — отдельный файл только с личными датами запросившего.
+function privateDatesExportFile(dates) {
+  return JSON.stringify({
+    app: "duoplan",
+    version: APP_VERSION,
+    exported_at: new Date().toISOString(),
+    dates: (dates || []).map(exportDateRow)
+  }, null, 2);
+}
+
+// Отправка файла: multipart/form-data — fetch сам ставит boundary, поэтому
+// content-type не задаём. sendDocument не идемпотентен: сетевые ошибки не
+// ретраим (иначе дубль файла в чате), 429 — ретраим (Telegram ничего не
+// отправил, retry_after из ответа).
+async function telegramForm(env, method, form, attempt = 0) {
+  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+    method: "POST",
+    body: form,
+    signal: AbortSignal.timeout(30000)
+  });
+  const raw = await response.text();
+  let result;
+  try {
+    result = JSON.parse(raw);
+  } catch {
+    throw new Error(`Telegram вернул не JSON (${response.status})`);
   }
-  if (current) messages.push(current);
-  messages[0] = `Общий дневник — резервная копия, записей: ${rows.length}\n\n${messages[0]}`;
-  // Кап сообщений: не высылаем бесконечный поток, хвост подскажет, что в
-  // выгрузку попала только часть.
-  if (messages.length > DIARY_EXPORT_MAX_MESSAGES) {
-    messages.length = DIARY_EXPORT_MAX_MESSAGES - 1;
-    messages.push("…выслана только часть дневника — остальные записи откройте в приложении.");
+  if (result.error_code === 429 && attempt < 2) {
+    const wait = Math.min(3000, Math.max(500, Number(result.parameters?.retry_after || 1) * 1000));
+    await new Promise(resolve => setTimeout(resolve, wait));
+    return telegramForm(env, method, form, attempt + 1);
   }
-  return messages;
+  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram API ${response.status}`);
+  return result.result;
 }
 
 async function deliverNotification(env, member, day, kind, text) {
@@ -1763,9 +1834,9 @@ async function ensureSchema(env) {
       try {
         await env.DB.batch([
           env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
-            SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0`),
+            SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_a)`),
           env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
-            SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0`)
+            SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`)
         ]);
       } catch (repairError) {
         console.error("pair_members repair failed", repairError);

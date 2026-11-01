@@ -42,14 +42,25 @@ class ValidationError(ValueError):
     """Пользовательский ввод не прошёл проверку; текст безопасно показать в чате."""
 
 
-def _clean_text(value: object, limit: int, label: str) -> str:
+def _utf16_len(text: str) -> int:
+    """Длина в UTF-16 единицах — так меряет validateSchema в worker.js.
+
+    Заголовки планов и дат worker проверяет дважды: validateSchema по UTF-16
+    и textField по кодпоинтам, эффективный лимит — UTF-16. Бот обязан применять
+    тот же лимит, иначе запишет заголовок, который PATCH в приложении отклонит.
+    """
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
+def _clean_text(value: object, limit: int, label: str, utf16: bool = False) -> str:
     if value is None:
         raise ValidationError(f"{label}: пришлите текст сообщением.")
     text = str(value).strip()
     if not text:
         raise ValidationError(f"{label}: текст не может быть пустым.")
-    if len(text) > limit:
-        raise ValidationError(f"{label}: не длиннее {limit} символов (сейчас {len(text)}).")
+    length = _utf16_len(text) if utf16 else len(text)
+    if length > limit:
+        raise ValidationError(f"{label}: не длиннее {limit} символов (сейчас {length}).")
     return text
 
 
@@ -74,30 +85,91 @@ def _sort_key(value: object) -> object:
     return value if isinstance(value, (int, float)) else str(value)
 
 
-MAX_DATE_TIME = datetime.max.replace(tzinfo=timezone.utc)
+def _time_parts(value: object, default: tuple[int, int] = (12, 0)) -> tuple[int, int]:
+    """``"HH:MM"`` -> ``(часы, минуты)``; без корректного времени — дефолт.
 
-
-def _time_parts(value: object) -> tuple[int, int]:
-    """``"HH:MM"`` -> ``(часы, минуты)``; иначе дефолт для даты — 12:00."""
+    12:00 — для событий-дат и повторяющихся планов (worker.nextDateOccurrence /
+    nextMonthlyOccurrenceMs); 23:59 — для обычного плана без времени
+    (worker.taskTargetMs, worker.js:624)."""
     raw = "" if value is None else str(value)
     if len(raw) != 5 or raw.count(":") != 1:
-        return 12, 0
+        return default
     try:
-        return int(raw[:2]), int(raw[3:])
+        hours, minutes = int(raw[:2]), int(raw[3:])
     except ValueError:
-        return 12, 0
+        return default
+    return (hours, minutes) if 0 <= hours <= 23 and 0 <= minutes <= 59 else default
+
+
+def _monthly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | None:
+    """Ближайшее ежемесячное наступление (worker.nextMonthlyOccurrenceMs):
+    первый месяц, где такой день месяца существует и локальная дата не раньше
+    сегодняшней. 31-е пропускает короткие месяцы, время без значения — 12:00."""
+    parts = str(day or "").split("-")
+    if len(parts) != 3:
+        return None
+    try:
+        day_of_month = int(parts[2])
+    except ValueError:
+        return None
+    if not 1 <= day_of_month <= 31:
+        return None
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    for offset in range(25):
+        month_index = now_local.month - 1 + offset
+        year = now_local.year + month_index // 12
+        month = month_index % 12 + 1
+        try:
+            candidate = datetime(year, month, day_of_month, *_time_parts(time)).replace(tzinfo=tz)
+        except ValueError:
+            continue
+        if candidate.date() >= today:
+            return candidate
+    return None
+
+
+def _yearly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | None:
+    """Ближайшее ежегодное наступление (worker.nextYearlyOccurrenceMs): тот же
+    месяц-день в текущем или следующем году; 29 февраля пропускается."""
+    parts = str(day or "").split("-")
+    if len(parts) != 3:
+        return None
+    try:
+        month, day_of_month = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    for offset in range(10):
+        try:
+            candidate = datetime(now_local.year + offset, month, day_of_month, *_time_parts(time)).replace(tzinfo=tz)
+        except ValueError:
+            continue
+        if candidate.date() >= today:
+            return candidate
+    return None
 
 
 def task_deadline(task: object, tz: tzinfo) -> float:
     """Ближайший дедлайн задачи в UTC-метках (worker.taskTargetMs).
 
-    ``day`` + ``time`` задачи в часовом поясе пары; без корректного ``day``
-    возвращается ``inf`` — как ``Number.MAX_SAFE_INTEGER`` у worker'а, поэтому
-    такие задачи после сортировки по дедлайну оказываются в конце.
+    Повторяющийся план сортируется по ближайшему наступлению (worker.js:616–617),
+    обычный — по дню со временем или 23:59; без корректного ``day`` возвращается
+    ``inf`` — как ``Number.MAX_SAFE_INTEGER`` у worker'а, поэтому такие задачи
+    после сортировки по дедлайну оказываются в конце.
     """
-    day = task["day"] if task is not None else None
+    if task is None:
+        return float("inf")
+    day = task["day"]
     if not day:
         return float("inf")
+    if int(task["monthly"] or 0) == 1:
+        occurrence = _monthly_occurrence(day, task["time"], tz)
+        return occurrence.timestamp() if occurrence is not None else float("inf")
+    if int(task["yearly"] or 0) == 1:
+        occurrence = _yearly_occurrence(day, task["time"], tz)
+        return occurrence.timestamp() if occurrence is not None else float("inf")
     parts = str(day).split("-")
     if len(parts) != 3:
         return float("inf")
@@ -105,22 +177,27 @@ def task_deadline(task: object, tz: tzinfo) -> float:
         year, month, day_of_month = int(parts[0]), int(parts[1]), int(parts[2])
     except ValueError:
         return float("inf")
-    hours, minutes = _time_parts(task["time"] if task is not None else None)
+    hours, minutes = _time_parts(task["time"], default=(23, 59))
     try:
         return datetime(year, month, day_of_month, hours, minutes, tzinfo=tz).timestamp()
     except ValueError:
         return float("inf")
 
 
-def next_date_occurrence(day: object, recurs: object, time: object, tz: tzinfo) -> datetime | None:
+def next_date_occurrence(
+    day: object, recurs: object, time: object, tz: tzinfo, monthly: object = 0
+) -> datetime | None:
     """Следующее наступление даты (worker.nextDateOccurrence).
 
-    У ежегодной даты — ближайший год из текущего..текущий+8, у разовой — сама
-    дата. У «невозможной» даты возвращается ``None`` (worker — ``Number.MAX_SAFE_INTEGER``).
+    Ежемесячная — ближайший месяц, где день существует; у ежегодной — ближайший
+    год из текущего..текущий+8, у разовой — сама дата. У «невозможной» даты
+    возвращается ``None`` (worker — ``Number.MAX_SAFE_INTEGER``).
     """
     raw_day = day if day is not None else None
     if not raw_day:
         return None
+    if int(monthly or 0) == 1:
+        return _monthly_occurrence(raw_day, time, tz)
     parts = str(raw_day).split("-")
     if len(parts) != 3:
         return None
@@ -165,14 +242,17 @@ def sort_date_rows(rows: list[object], tz: tzinfo) -> list[object]:
     decorated: list[tuple[bool, float, object, object]] = []
     for row in rows:
         recurs = int(row["recurs"] or 0) == 1
-        occurrence = next_date_occurrence(row["day"], row["recurs"], row["time"], tz)
+        monthly = int(row["monthly"] or 0) == 1
+        occurrence = next_date_occurrence(row["day"], row["recurs"], row["time"], tz, monthly)
         occurrence_ts = occurrence.timestamp() if occurrence is not None else float("inf")
         # Дата — событие дня, а не момента (worker.isPastDate): не-ежегодная
         # запись прошедшая только когда прошёл её календарный день. Сравнение
         # по времени отправляло «сегодня» в прошедшие уже после полудня.
+        # Ежемесячная — повторяющаяся: в «прошедшие» не попадает никогда.
         day_text = str(row["day"] or "")
         past = (
             not recurs
+            and not monthly
             and bool(_DAY_RE.match(day_text))
             and day_text < today
         )
@@ -329,7 +409,7 @@ class DuoPlanService:
     # ------------------------------------------------------------------- планы
 
     async def add_task(self, pair_id: int, title: object, created_by: int) -> int:
-        text = _clean_text(title, TASK_TITLE_MAX, "План")
+        text = _clean_text(title, TASK_TITLE_MAX, "План", utf16=True)
         return await self.db.execute(
             "INSERT INTO tasks(pair_id, title, created_by, created_at) VALUES(?, ?, ?, ?)",
             (pair_id, text, created_by, now()),
@@ -362,7 +442,7 @@ class DuoPlanService:
     # -------------------------------------------------------------------- даты
 
     async def add_date(self, pair_id: int, title: object, day: object, recurs: int = 1) -> int:
-        text = _clean_text(title, DATE_TITLE_MAX, "Дата")
+        text = _clean_text(title, DATE_TITLE_MAX, "Дата", utf16=True)
         raw_day = _clean_text(day, 10, "Дата события")
         try:
             parsed = date.fromisoformat(raw_day)
@@ -411,7 +491,11 @@ class DuoPlanService:
 
     async def add_wish(self, pair_id: int, owner_id: int, body: object, url: object = "") -> int:
         text = _clean_text(body, WISH_MAX, "Желание")
-        link = _clean_optional_text(url, WISH_URL_MAX, "Ссылка") if url is not None else ""
+        link = _clean_optional_text(url, WISH_URL_MAX, "Ссылка")
+        # Схему проверяет и worker (wishUrl, worker.js:134–148): не-http(s)
+        # ссылки через window.open недопустимы.
+        if link and not link.startswith(("http://", "https://")):
+            raise ValidationError("Ссылка: только адреса http или https")
         return await self.db.execute(
             "INSERT INTO wishes(pair_id, owner_id, body, url, created_at) VALUES(?, ?, ?, ?, ?)",
             (pair_id, owner_id, text, link, now()),

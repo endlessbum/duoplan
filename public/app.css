@@ -33,13 +33,10 @@
   /* Подписи вкладок лежат на стекле поверх контента — им нужен запас контраста. */
   --nav-label: rgba(41, 37, 36, 0.84);
   --glass-inner: inset 0 1px 0.5px rgba(255, 255, 255, 0.9), inset 0 -1px 0.5px rgba(41, 37, 36, 0.05);
-  /* Жидкая капля — прозрачное стекло с преломлением света */
-  --droplet-bg: transparent;
+  /* Жидкая капля — прозрачное стекло с преломлением света. Потребляются
+     только border и halo (app.css ниже); остальные «палитровые» переменные
+     из applyAccent удалены как мёртвые (аудит 2026-11-01). */
   --droplet-border: rgba(255, 255, 255, 0.35);
-  --droplet-glow: inset 0 1px 1.5px rgba(255, 255, 255, 0.9), 0 4px 14px rgba(255, 255, 255, 0.18);
-  --droplet-hi: rgba(255, 255, 255, 0.65);
-  --droplet-fill: rgba(255, 255, 255, 0.08);
-  --droplet-deep: rgba(255, 255, 255, 0.05);
   --droplet-halo: rgba(255, 255, 255, 0.15);
   --sticky-fade: rgba(247, 243, 237, 0.84);
 }
@@ -72,12 +69,7 @@
   --nav-glass-bg: rgba(28, 26, 25, 0.72);
   --nav-label: rgba(245, 240, 234, 0.88);
   --glass-inner: inset 0 1px 0.5px rgba(255, 255, 255, 0.18), inset 0 -1px 0.5px rgba(0, 0, 0, 0.3);
-  --droplet-bg: rgba(217, 115, 131, 0.08);
   --droplet-border: rgba(255, 255, 255, 0.28);
-  --droplet-glow: inset 0 1px 2px rgba(255, 255, 255, 0.25), 0 4px 16px rgba(217, 115, 131, 0.18);
-  --droplet-hi: rgba(255, 255, 255, 0.18);
-  --droplet-fill: rgba(217, 115, 131, 0.08);
-  --droplet-deep: rgba(217, 115, 131, 0.12);
   --droplet-halo: rgba(217, 115, 131, 0.22);
   --sticky-fade: rgba(22, 21, 20, 0.84);
 }
@@ -98,7 +90,7 @@ html, body {
   min-height: 100%;
   background: var(--bg);
   color: var(--ink);
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
@@ -125,6 +117,9 @@ body {
 .app-shell {
   max-width: 520px;
   margin: 0 auto;
+  /* Фолбэк до dvh: на WebView без поддержки объявление с dvh отбрасывается
+     целиком — без vh-строки терялся бы min-height (аудит 2026-11-01). */
+  min-height: 100vh;
   min-height: 100dvh;
   position: relative;
 }
@@ -151,7 +146,6 @@ body {
   z-index: 40;
 }
 
-.top-glass-left,
 .top-glass-right {
   display: flex;
   align-items: center;
@@ -195,11 +189,6 @@ body {
 .glass-icon-btn svg {
   width: 20px;
   height: 20px;
-}
-
-/* Кнопка закрытия скрыта: используются системные кнопки окна приложения. */
-#fullscreen-close {
-  display: none !important;
 }
 
 .pair-pill {
@@ -262,10 +251,8 @@ body {
   min-height: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 114px);
 }
 
-/* В полноэкранном режиме слева висит кнопка закрытия — заголовок уходит правее. */
-body.tg-fullscreen .tab-header {
-  padding-left: 66px;
-}
+/* В полноэкранном режиме системные кнопки окна — собственной кнопки закрытия
+   больше нет, отступ под неё не резервируется. */
 
 .tab-header-title {
   margin: 0;
@@ -405,7 +392,6 @@ body.tg-fullscreen .tab-header {
    накрывал всю панель и красил её акцентным цветом целиком. */
 .bottom-nav.is-dragging {
   cursor: grabbing;
-  touch-action: none;
 }
 
 .nav-item {
@@ -437,7 +423,6 @@ body.tg-fullscreen .tab-header {
 
 .nav-item.is-active {
   color: var(--berry);
-  touch-action: none;
 }
 
 /* Предпросмотр цели во время перетаскивания: класс остаётся для состояния,
@@ -445,10 +430,6 @@ body.tg-fullscreen .tab-header {
    накрытия, чтобы цвет шёл за каплей, а не включался целиком. */
 
 /* Во время жеста подписи не «догоняют» каплю transition-ами — иначе дёргаются. */
-.bottom-nav.is-dragging .nav-item {
-  touch-action: none;
-}
-
 .bottom-nav.is-dragging .nav-item,
 .bottom-nav.is-dragging .nav-icon {
   transition: none;
@@ -625,6 +606,7 @@ body.tg-fullscreen .tab-header {
 
 /* Диалог чтения с длинным текстом: не выше вьюпорта, содержимое скроллится. */
 .sheet-form {
+  max-height: min(86vh, 760px);
   max-height: min(86dvh, 760px);
   overflow-y: auto;
   /* Страховка: сколько бы ни занял нативный контрол, горизонтального
@@ -879,7 +861,8 @@ body.tg-fullscreen .tab-header {
   outline-offset: 2px;
 }
 
-.settings-row input[type="time"] {
+.settings-row input[type="time"],
+.settings-row select {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 8px 10px;
@@ -887,6 +870,10 @@ body.tg-fullscreen .tab-header {
   color: var(--ink);
   font: inherit;
   font-size: 14px;
+}
+
+.settings-row select {
+  max-width: 100%;
 }
 
 .item-row {
@@ -1234,6 +1221,7 @@ body.tg-fullscreen .tab-header {
    на момент старта. Отрицательный нижний отступ гасит padding-bottom
    main-view (резерв под навигацию), иначе центр уезжает вверх на его высоту. */
 .loading-card {
+  min-height: 100vh;
   min-height: 100dvh;
   margin-bottom: calc(-1 * (env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 104px));
   display: grid;

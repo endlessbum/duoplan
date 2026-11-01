@@ -162,8 +162,15 @@ async def test_code_of_correct_length_is_checked():
 # ------------------------------------------------ «прошедшие» даты — по дню
 
 
-def _row(day: str, recurs: int = 0, time: str | None = None) -> dict:
-    return {"id": abs(hash(day)) % 1000, "day": day, "recurs": recurs, "time": time, "title": day}
+def _row(day: str, recurs: int = 0, time: str | None = None, monthly: int = 0) -> dict:
+    return {
+        "id": abs(hash(day)) % 1000,
+        "day": day,
+        "recurs": recurs,
+        "time": time,
+        "title": day,
+        "monthly": monthly,
+    }
 
 
 def test_today_without_time_stays_in_the_future():
@@ -219,3 +226,112 @@ def test_no_dead_bot_username_constant():
     # Константа модуля удалена; остаётся только поле настроек.
     assert "BOT_USERNAME = " not in source, "мёртвая константа вернулась"
     assert "bot_username" in source
+
+
+# --------------------------------------- аудит 2026-11-01: рассинхроны с worker
+
+
+def test_monthly_date_is_never_past():
+    """Ежемесячная дата — повторяющаяся: в «прошедшие» не попадает никогда
+    (worker.isPastDate пропускает recurs и monthly)."""
+    rows = sort_date_rows([_row("2020-01-10", monthly=1)], TZ)
+    assert len(rows) == 1  # осталась в списке, а не уехала в прошедшие
+
+
+def test_monthly_date_occurrence_is_next_existing_day():
+    from duoplan.services import next_date_occurrence
+
+    occurrence = next_date_occurrence("2020-01-15", 0, None, TZ, monthly=1)
+    assert occurrence is not None
+    today = datetime.now(TZ).date()
+    assert occurrence.date() >= today
+    assert occurrence.day == 15  # тот же день месяца
+
+
+def test_monthly_task_deadline_skips_short_months():
+    """Ежемесячный план на 31-е: дедлайн — ближайшее 31-е число, где оно
+    существует (worker.nextMonthlyOccurrenceMs), а не прошёл год назад."""
+    from duoplan.services import task_deadline
+
+    task = {"id": 1, "day": "2020-01-31", "time": None, "monthly": 1, "yearly": 0}
+    deadline = task_deadline(task, TZ)
+    assert deadline != float("inf")
+    moment = datetime.fromtimestamp(deadline, TZ)
+    today = datetime.now(TZ).date()
+    assert moment.date() >= today
+    assert moment.day == 31
+
+
+def test_yearly_task_deadline_skips_feb_29():
+    from duoplan.services import task_deadline
+
+    task = {"id": 2, "day": "2020-02-29", "time": None, "monthly": 0, "yearly": 1}
+    deadline = task_deadline(task, TZ)
+    assert deadline != float("inf")
+    moment = datetime.fromtimestamp(deadline, TZ)
+    assert (moment.month, moment.day) == (2, 29)
+    assert moment.year >= datetime.now(TZ).year
+
+
+def test_plain_task_without_time_deadline_is_end_of_day():
+    """Обычный план без времени — 23:59 (worker.taskTargetMs), а не полдень."""
+    from datetime import time as dt_time
+    from datetime import timedelta
+
+    from duoplan.services import task_deadline
+
+    day = (datetime.now(TZ).date() + timedelta(days=7)).isoformat()
+    task = {"id": 3, "day": day, "time": None, "monthly": 0, "yearly": 0}
+    deadline = task_deadline(task, TZ)
+    moment = datetime.fromtimestamp(deadline, TZ)
+    assert moment.date().isoformat() == day
+    assert moment.time() == dt_time(23, 59)
+
+
+def test_task_deadline_garbage_is_infinity():
+    from duoplan.services import task_deadline
+
+    inf = float("inf")
+    assert task_deadline(None, TZ) == inf
+    assert task_deadline({"day": None, "monthly": 0, "yearly": 0}, TZ) == inf
+    assert task_deadline({"day": "мусор", "monthly": 0, "yearly": 0}, TZ) == inf
+
+
+def test_utf16_limit_matches_worker_validation():
+    """Эффективный лимит заголовков в worker — UTF-16 (validateSchema), а не
+    кодпоинты: бот не должен записывать заголовок, который PATCH отклонит."""
+    import pytest
+
+    from duoplan.services import _clean_text
+    from duoplan.services import _utf16_len
+
+    assert _utf16_len("🎁") == 2
+    emoji_title = "🎁" * 95  # 95 кодпоинтов = 190 UTF-16 > 180
+    with pytest.raises(ValueError, match="План"):
+        _clean_text(emoji_title, 180, "План", utf16=True)
+    # Для memory/wish worker меряет кодпоинтами (textField) — флаг не включается.
+    assert _clean_text(emoji_title, 180, "Запись") == emoji_title
+
+
+def test_button_label_flattens_newlines():
+    """Перенос строки в тексте inline-кнопки даёт BUTTON_TEXT_INVALID."""
+    from duoplan.handlers import _button_label
+
+    label = _button_label("Первая строка\nвторая **жирная**", 22)
+    assert "\n" not in label
+    assert "**" not in label
+    assert label.startswith("Первая строка вторая")
+
+
+@pytest.mark.asyncio
+async def test_add_wish_rejects_non_http_url(pair):
+    """Схему ссылки проверяет и worker (wishUrl): javascript: в wishes не проходит."""
+    service, pair_id, owner, _partner = pair
+
+    with pytest.raises(ValueError, match="http"):
+        await service.add_wish(pair_id, owner, "Мечта", url="javascript:alert(1)")
+
+    wish_id = await service.add_wish(pair_id, owner, "Мечта", url="https://example.com")
+    wish = await service.wish_for(wish_id) if hasattr(service, "wish_for") else None
+    if wish is not None:
+        assert wish["url"] == "https://example.com"
