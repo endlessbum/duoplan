@@ -1182,6 +1182,12 @@ body {
 .field > input,
 .field > textarea {
   width: 100%;
+  /* Единая высота строк диалога: на iOS -webkit-appearance:none у дата/время
+     (лекарство от горизонтального переполнения) схлопывает высоту нативного
+     контрола до строки шрифта без вертикальных паддингов — минимальная высота
+     выравнивает их с полем названия (репорт 2026-11-01). */
+  min-height: 48px;
+  box-sizing: border-box;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 11px 12px;

@@ -11,8 +11,13 @@
   const dialog = document.getElementById("item-dialog");
   const dialogForm = document.getElementById("item-form");
 
-  // Очищаем контекст диалога при любом закрывании (Escape, backdrop, programmatic)
+  // Очищаем контекст диалога при любом закрывании (Escape, backdrop, programmatic).
+  // Гард dialog.open обязателен: close-событие от предыдущего close() прилетает
+  // из отдельной задачи и обнулял контекст УЖЕ ОТКРЫТОГО следующего диалога
+  // цепочки — сабмит второго шага («Вы точно уверены?») молча умирал на гейте
+  // !dialogContext, и выйти из пространства было невозможно (репорт 2026-11-01).
   dialog.addEventListener("close", () => {
+    if (dialog.open) return;
     dialogContext = null;
   });
   const dialogTitle = document.getElementById("dialog-title");

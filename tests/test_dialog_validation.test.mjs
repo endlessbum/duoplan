@@ -28,3 +28,11 @@ test("submit-обработчик явно проверяет форму пер�
   ok(handler.length > 0, "не найден submit-обработчик диалога");
   match(handler, /if \(!dialogForm\.reportValidity\(\)\) return;/);
 });
+
+test("close-обработчик не затирает контекст уже открытого диалога цепочки", () => {
+  // Репорт 2026-11-01: close-событие от close() первого диалога выхода
+  // прилетало из отдельной задачи после открытия второго («Вы точно
+  // уверены?») и обнуляло его dialogContext — сабмит второго шага молча
+  // умирал на гейте !dialogContext, выйти из пространства было нельзя.
+  match(app, /addEventListener\("close", \(\) => \{\s*\n\s*if \(dialog\.open\) return;\s*\n\s*dialogContext = null;/);
+});
