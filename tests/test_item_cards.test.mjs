@@ -47,6 +47,7 @@ const load = new Function(
     extractLine("  const DELETE_ICON"),
     extractBraced("function esc"),
     extractBraced("function formatDay"),
+    extractBraced("function formatTimestamp"),
     extractBraced("function richInline"),
     extractBraced("function renderRichText"),
     extractBraced("function pairTimeZone"),

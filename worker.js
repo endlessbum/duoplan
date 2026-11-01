@@ -49,7 +49,7 @@ const ARCHIVE_QUERIES = {
   },
   done_tasks: {
     userScoped: true,
-    sql: "SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
+    sql: "SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
   },
   done_wishes: {
     sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
@@ -730,7 +730,7 @@ async function state(env, userId) {
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
-    env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.

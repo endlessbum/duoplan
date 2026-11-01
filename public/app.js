@@ -497,6 +497,17 @@
     return m ? `${m[3]}.${m[2]}.${m[1]}` : String(value ?? "");
   }
 
+  // Unix timestamp (seconds) → дд.мм.гггг
+  function formatTimestamp(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    const d = new Date(n * 1000);
+    const day = String(d.getDate()).padStart(2, "0");
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const year = d.getFullYear();
+    return `${day}.${month}.${year}`;
+  }
+
   function firstLetter(name, fallback = "Д") {
     const clean = String(name ?? "").trim();
     return clean ? Array.from(clean)[0].toUpperCase() : fallback;
@@ -1218,12 +1229,15 @@
   const STAR_ICON = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none" aria-hidden="true"><path d="m12 3 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3Z"/></svg>';
 
   function completedTaskItem(item) {
+    const created = formatTimestamp(item.created_at);
+    const completed = formatTimestamp(item.completed_at);
     return `
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.title)}</h3>
-            <div class="item-meta"><span>Завершён</span></div>
+            ${created ? `<div class="item-meta">${esc(created)}</div>` : ""}
+            <div class="item-meta" style="justify-content:space-between;"><span>Завершён</span>${completed ? `<span>${esc(completed)}</span>` : ""}</div>
           </div>
           <div class="item-actions">
             <button class="icon-btn" type="button" data-action="reopen-item" data-type="tasks" data-id="${item.id}" aria-label="Вернуть в планы">${REOPEN_ICON}</button>
@@ -1242,13 +1256,16 @@
       <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
       <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
     ` : "";
+    const created = formatTimestamp(item.created_at);
+    const completed = formatTimestamp(item.done_at);
     return `
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
             ${item.url ? `<button class="secondary small" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
-            <div class="item-meta"><span>Исполнено</span></div>
+            ${created ? `<div class="item-meta">${esc(created)}</div>` : ""}
+            <div class="item-meta" style="justify-content:space-between;"><span>Исполнено</span>${completed ? `<span>${esc(completed)}</span>` : ""}</div>
           </div>
           ${actions ? `<div class="item-actions">${actions}</div>` : ""}
         </div>
