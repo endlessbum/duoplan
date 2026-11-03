@@ -39,7 +39,7 @@ function extractLine(prefix) {
 
 const buildApi = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
-  "rateLimit", "readJson", "state", "membership",
+  "rateLimit", "readJson", "state", "membership", "ownerIds",
   [
     extractBraced("class HttpError"),
     extractLine("const now = "),
@@ -50,6 +50,7 @@ const buildApi = new Function(
     extractBraced("function validDate"),
     extractBraced("function optionalTime"),
     extractBraced("function validTimeZone"),
+    extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
   ].join("\n")

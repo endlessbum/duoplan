@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from duoplan.config import Settings
 from duoplan.db.base import connect_database

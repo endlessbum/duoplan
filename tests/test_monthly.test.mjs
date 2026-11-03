@@ -106,7 +106,7 @@ test("dateOccursOnDay: monthly-дата совпадает по дню меся�
 // ------------------------------------------------------------------
 const buildApi = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
-  "rateLimit", "readJson", "state", "membership",
+  "rateLimit", "readJson", "state", "membership", "ownerIds",
   [
     extractBraced("class HttpError"),
     extractLine("const now = "),
@@ -123,6 +123,7 @@ const buildApi = new Function(
     extractBraced("async function ensureDateVisible"),
     extractBraced("async function ensureTaskVisible"),
     extractBraced("async function itemRoute"),
+    extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
   ].join("\n")

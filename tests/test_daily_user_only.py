@@ -1,9 +1,6 @@
-import asyncio
 from datetime import date
 
-from duoplan.db.base import connect_database
 from duoplan.services import DAILY_XP
-from duoplan.services import DuoPlanService
 
 
 async def test_daily_awards_only_pressing_user(pair, monkeypatch):

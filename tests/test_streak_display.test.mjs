@@ -38,8 +38,9 @@ const buildPublicUser = new Function(
   ].join("\n")
 );
 
-// Сегодня в «часовом поясе пользователя» фиксируем, чтобы тест не зависел от даты запуска.
-const { displayStreak, publicUser } = buildPublicUser(() => "2026-10-29");
+// Сегодня фиксируем, чтобы тест не зависел от даты запуска: localDay возвращает
+// дату в зависимости от пояса — в Auckland уже 30-е, в Москве ещё 29-е.
+const { displayStreak, publicUser } = buildPublicUser((tz) => (tz === "Pacific/Auckland" ? "2026-10-30" : "2026-10-29"));
 
 function user(overrides = {}) {
   return {
@@ -65,6 +66,15 @@ test("серия сохраняется, если ритуал отмечен в
 
 test("серия обнуляется после пропущенного дня", () => {
   equal(displayStreak(user({ last_activity: "2026-10-27" })), 0);
+});
+
+test("серия считается в поясе пары, которым писался last_activity (репорт 2026-11-03, B-8)", () => {
+  // Ритуал отметили, когда в поясе пары (Auckland) уже наступило 30-е:
+  // last_activity записан как 2026-10-30, и по поясу пары серия жива.
+  equal(displayStreak(user({ last_activity: "2026-10-30" }), "Pacific/Auckland"), 7);
+  // По личному поясу пользователя (Москва, ещё 29-е) отметка выглядела бы
+  // «завтрашней» — до фикса серия ошибочно показывалась как 0.
+  equal(displayStreak(user({ last_activity: "2026-10-30" })), 0);
 });
 
 test("серия обнуляется, если активности не было вовсе", () => {

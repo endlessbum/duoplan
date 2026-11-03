@@ -1,7 +1,6 @@
 from datetime import date
 
 from duoplan.services import DAILY_XP
-from duoplan.services import DuoPlanService
 
 
 async def test_daily_same_day_press_preserves_streak(pair, monkeypatch):

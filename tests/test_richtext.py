@@ -12,8 +12,6 @@ import pytest
 
 from duoplan.handlers import dates_view
 from duoplan.handlers import memories_view
-from duoplan.handlers import render_list_items
-from duoplan.handlers import render_list_items
 from duoplan.handlers import tasks_view
 from duoplan.handlers import wishes_view
 from duoplan.richtext import escape_html
@@ -259,92 +257,3 @@ async def test_real_service_roundtrip_renders_saved_markup(pair):
     assert call.message.calls[0]["parse_mode"] == "HTML"
     assert "<b>Купить</b> кольцо <tg-spoiler>тайком</tg-spoiler>" in text
 
-
-@pytest.mark.asyncio
-async def test_real_service_roundtrip_renders_saved_markup(pair):
-    """План с разметкой, сохранённый сервисом, приходит в список уже HTML-ом."""
-    service, pair_id, owner_id, _ = pair
-    await service.add_task(pair_id, "**Купить** кольцо ||тайком||", owner_id)
-
-    call = FakeCall()
-    assert await tasks_view(call, service) is True
-
-    text = call.message.calls[0]["text"]
-    assert call.message.calls[0]["parse_mode"] == "HTML"
-    assert "<b>Купить</b> кольцо <tg-spoiler>тайком</tg-spoiler>" in text
-
-
-# ------------------------------------------------- пункты списков как блоки
-
-
-def test_list_item_renders_quote_as_block():
-    html = render_list_items([("1. ", "> не забудь про ||сюрприз||", "")])
-    assert html == "1. <blockquote>не забудь про <tg-spoiler>сюрприз</tg-spoiler></blockquote>"
-    # Литерального «>» в тексте больше нет — цитата стала блоком.
-    assert "&gt;" not in html
-
-
-def test_list_item_keeps_numbering_and_multiline_titles():
-    html = render_list_items([("2. ", "обычный\n> цитата\nхвост", "")])
-    assert html == "2. обычный\n<blockquote>цитата</blockquote>\nхвост"
-
-
-def test_list_item_escapes_prefix_and_suffix():
-    assert render_list_items([("<", "x", ">")]) == "&lt;x&gt;"
-
-
-def test_list_items_truncate_raw_text_before_rendering():
-    html = render_list_items([("1. ", "**" + "я" * 100, "")], limit=20)
-    # Тег закрыт: обрезка не разрубила разметку.
-    assert html.startswith("1. <b>")
-    assert html.endswith("</b>")
-
-
-@pytest.mark.asyncio
-async def test_tasks_view_renders_quote_title_as_block():
-    call = FakeCall()
-    service = FakeService(tasks=[{"id": 1, "title": "> не забудь про ||сюрприз||"}])
-
-    assert await tasks_view(call, service) is True
-
-    text = call.message.calls[0]["text"]
-    assert "1. <blockquote>не забудь про <tg-spoiler>сюрприз</tg-spoiler></blockquote>" in text
-    assert "&gt;" not in text
-
-
-# ------------------------------------------------- пункты списков как блоки
-
-
-def test_list_item_renders_quote_as_block():
-    html = render_list_items([("1. ", "> не забудь про ||сюрприз||", "")])
-    assert html == "1. <blockquote>не забудь про <tg-spoiler>сюрприз</tg-spoiler></blockquote>"
-    # Литерального «>» в тексте больше нет — цитата стала блоком.
-    assert "&gt;" not in html
-
-
-def test_list_item_keeps_numbering_and_multiline_titles():
-    html = render_list_items([("2. ", "обычный\n> цитата\nхвост", "")])
-    assert html == "2. обычный\n<blockquote>цитата</blockquote>\nхвост"
-
-
-def test_list_item_escapes_prefix_and_suffix():
-    assert render_list_items([("<", "x", ">")]) == "&lt;x&gt;"
-
-
-def test_list_items_truncate_raw_text_before_rendering():
-    html = render_list_items([("1. ", "**" + "я" * 100, "")], limit=20)
-    # Тег закрыт: обрезка не разрубила разметку.
-    assert html.startswith("1. <b>")
-    assert html.endswith("</b>")
-
-
-@pytest.mark.asyncio
-async def test_tasks_view_renders_quote_title_as_block():
-    call = FakeCall()
-    service = FakeService(tasks=[{"id": 1, "title": "> не забудь про ||сюрприз||"}])
-
-    assert await tasks_view(call, service) is True
-
-    text = call.message.calls[0]["text"]
-    assert "1. <blockquote>не забудь про <tg-spoiler>сюрприз</tg-spoiler></blockquote>" in text
-    assert "&gt;" not in text

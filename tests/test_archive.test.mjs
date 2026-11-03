@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal, rejects } from "node:assert/strict";
+import { deepStrictEqual, equal, ok, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -46,10 +46,18 @@ const TOTAL = 50; // 10 последних в /api/state, остальные 40 
 
 function makeMockDb(total = TOTAL) {
   const db = {
-    prepare(_sql) {
+    prepare(sql) {
       return {
         bind(...params) {
-          const [, limit, offset] = params;
+          // Число bind-аргументов обязано совпадать с числом «?» в SQL:
+          // рассинхрон (репорт 2026-11-03, A-1) на живом D1 падает с 500.
+          const placeholders = (sql.match(/\?/g) || []).length;
+          if (placeholders !== params.length) {
+            throw new Error(`bind-аргументов ${params.length}, плейсхолдеров ${placeholders}: ${sql}`);
+          }
+          // LIMIT/OFFSET — последние два аргумента (у userScoped SQL впереди
+          // ещё pair.id и created_by; COUNT лимита не содержит).
+          const [limit, offset] = params.slice(-2);
           return {
             async all() {
               const rows = [];
@@ -106,6 +114,32 @@ test("последняя страница возвращает остаток и
   const third = await archivePage({ DB: db }, { id: 1 }, "done_wishes", 2);
   deepStrictEqual(third.items, []);
   deepStrictEqual(third.hasMore, false);
+});
+
+// Репорт 2026-11-03, A-1: SQL done_tasks содержит created_by=?, а не-sort путь
+// биндил только [pairId, limit, offset] — D1 отвечал «not enough parameters»,
+// архив «Завершённые» падал с 500 после 10 завершённых планов.
+test("userScoped SQL (done_tasks) биндит userId и на SELECT, а не только в COUNT", async () => {
+  const seen = [];
+  const spyDb = {
+    prepare(sql) {
+      return {
+        bind(...params) {
+          seen.push({ sql, params });
+          return {
+            async all() { return { results: [] }; },
+            async first() { return { n: 0 }; }
+          };
+        }
+      };
+    }
+  };
+  await archivePage({ DB: spyDb }, { id: 7 }, "done_tasks", 0, 42);
+  const main = seen.find((b) => b.sql.includes("SELECT"));
+  ok(main, "SELECT-запрос не выполнен");
+  deepStrictEqual(main.params, [7, 42, ARCHIVE_PAGE_SIZE + 1, STATE_RECENT_LIMIT]);
+  const count = seen.find((b) => b.sql.includes("COUNT"));
+  deepStrictEqual(count.params, [7, 42]);
 });
 
 test("неизвестный тип архива отклоняется", async () => {

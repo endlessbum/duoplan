@@ -1,6 +1,5 @@
 import pytest
 import sqlite3
-import tempfile
 from pathlib import Path
 
 from duoplan.db.schema import SCHEMA

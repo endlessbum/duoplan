@@ -126,7 +126,7 @@ test("тело — валидный JSON без потерь юникода", ()
 // ------------------------------------------------------------------
 const buildApi = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
-  "rateLimit", "readJson", "state", "membership", "telegramForm",
+  "rateLimit", "readJson", "state", "membership", "ownerIds", "telegramForm",
   [
     extractBraced("class HttpError"),
     extractLine("const now = "),
@@ -144,6 +144,7 @@ const buildApi = new Function(
     extractBraced("function exportDateRow"),
     extractBraced("function dataExportFile"),
     extractBraced("function privateDatesExportFile"),
+    extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
   ].join("\n")
@@ -178,6 +179,7 @@ function makeApiEnv({ pair, memories, dates, privateDates, tgId = 777 }) {
     async () => ({}),
     async () => ({ user: { tg_id: tgId }, pair }),
     async () => pair,
+    async () => [],
     async (env, method, form) => {
       uploads.push({ env, method, form });
       return { ok: true };

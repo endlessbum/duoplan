@@ -24,6 +24,7 @@ def _truncate_utf16(s: str, max_len: int) -> str:
 
 
 from datetime import date
+import re
 
 from aiogram import F
 from aiogram import Router
@@ -64,6 +65,9 @@ router.callback_query.filter(F.message.chat.type == "private")
 PAGE_SIZE = 8
 # Код приглашения — 4 байта в hex (worker.createPair).
 CODE_LENGTH = 8
+# Паритет с worker /api/pair/join (/^[A-F0-9]{8}$/): код — только hex, чтобы
+# текст ошибки «код недоступен» не расходился между ботом и Mini App.
+CODE_RE = re.compile(f"^[A-F0-9]{{{CODE_LENGTH}}}$")
 PAGE_TEXT_LIMIT = 3900
 # full_name складывается из имени и фамилии и длиннее «максимума Telegram»
 # для одного имени (64 символа ~ 128 UTF-16 единиц, если там эмодзи),
@@ -474,9 +478,10 @@ async def join_pair(call: CallbackQuery, service: DuoPlanService, state: FSMCont
 @router.message(StateFilter(Form.join_code), F.text)
 async def receive_code(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     code = normalize_code(message.text)
-    if len(code) != CODE_LENGTH:
+    if not CODE_RE.fullmatch(code):
         await message.answer(
-            f"Код состоит из {CODE_LENGTH} символов. Пришлите код из приглашения или /cancel."
+            f"Код должен состоять из {CODE_LENGTH} символов (A–F, 0–9). "
+            "Пришлите код из приглашения или /cancel."
         )
         return
     if await service.join_pair(message.from_user.id, name_of(message.from_user), code):

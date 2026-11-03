@@ -7,8 +7,6 @@ import re
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery
-from aiogram.types import Message
 from aiogram.types import TelegramObject
 from aiogram.types import User
 

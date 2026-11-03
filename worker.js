@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.01.9";
+const APP_VERSION = "2026.11.03.1";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.01.9";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.01.9";
+const DB_SCHEMA_VERSION = "2026.11.03.1";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -467,21 +467,25 @@ async function dailyFor(env, pairId, timeZone, userId = null) {
 // себе: после пропущенных дней там остаётся «7», пока кто-то не отметит ритуал.
 // Для вывода считаем серию прерванной, если last_activity не сегодня и не
 // вчера — иначе интерфейс показывает устаревшую серию (репорт 2026-10-29).
-function displayStreak(user) {
+// last_activity пишется как daily.day в поясе ПАРЫ (dailyFor), поэтому
+// «сегодня» для проверки серии считаем в том же поясе — иначе при
+// users.timezone != pairs.timezone на границе суток живая серия показывалась
+// бы как 0 (репорт 2026-11-03, B-8). Без пары откат к личному поясу.
+function displayStreak(user, pairTz = null) {
   const streak = Number(user?.streak || 0);
   if (streak <= 0) return 0;
   const last = String(user?.last_activity || "").slice(0, 10);
-  const today = localDay(user?.timezone);
+  const today = localDay(pairTz || user?.timezone);
   const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
   return last === today || last === yesterday ? streak : 0;
 }
 
-function publicUser(user) {
+function publicUser(user, pairTz = null) {
   return {
     tg_id: user.tg_id,
     display_name: user.display_name,
     points: user.points,
-    streak: displayStreak(user),
+    streak: displayStreak(user, pairTz),
     best_streak: user.best_streak,
     timezone: user.timezone,
     gender: user.gender || null,
@@ -751,7 +755,7 @@ async function state(env, userId) {
   ]);
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
   return {
-    user: publicUser(user),
+    user: publicUser(user, pair.timezone),
     pair: {
       id: pair.id,
       code: pair.user_b ? null : pair.code,
@@ -820,7 +824,13 @@ async function archivePage(env, pair, type, page, userId = null) {
     };
   }
   const offset = (config.active ? STATE_ACTIVE_LIMIT : STATE_RECENT_LIMIT) + page * ARCHIVE_PAGE_SIZE;
-  const rows = await env.DB.prepare(config.sql).bind(pair.id, ARCHIVE_PAGE_SIZE + 1, offset).all();
+  // userScoped-запросы (done_tasks) содержат плейсхолдер created_by=? — биндим
+  // userId так же, как это делает COUNT ниже, иначе D1 отдаёт «not enough
+  // parameters» и архив «Завершённые» падает с 500 (репорт 2026-11-03, A-1).
+  const bindArgs = config.userScoped
+    ? [pair.id, userId, ARCHIVE_PAGE_SIZE + 1, offset]
+    : [pair.id, ARCHIVE_PAGE_SIZE + 1, offset];
+  const rows = await env.DB.prepare(config.sql).bind(...bindArgs).all();
   const results = rows.results || [];
   const shown = offset + Math.min(results.length, ARCHIVE_PAGE_SIZE);
   const totalRow = await env.DB.prepare(ARCHIVE_COUNT_SQL[type])
@@ -1330,13 +1340,10 @@ async function webhook(request, env, url) {
   if (!env.WEBHOOK_SECRET || !safeEqual(request.headers.get("x-telegram-bot-api-secret-token"), env.WEBHOOK_SECRET)) {
     return new Response("Forbidden", { status: 403 });
   }
-  // Схема (включая индекс по received_at) создаётся до очистки: иначе
-  // DELETE бьёт по таблице без индекса на каждый апдейт (репорт 2026-10-29).
+  // Схема (включая индекс по received_at) создаётся до INSERT дедупликации.
   await ensureSchemaOnce(env);
-  // Ограничиваем рост таблицы дедупликации: храним отметки около недели.
-  try {
-    await env.DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(now() - 7 * 24 * 60 * 60).run();
-  } catch {}
+  // Чистку дедуп-таблицы делаем в cron (sendDigests), а не здесь: минус один
+  // запрос на каждый апдейт вебхука (репорт 2026-11-03, §5.5).
 
   let update;
   try {
@@ -1841,6 +1848,13 @@ async function nextNotificationQueue(env, pairs) {
 
 async function sendDigests(env) {
   await ensureSchemaOnce(env);
+  // Дедуп-таблица вебхука растёт на каждый апдейт: чистим её здесь, раз в
+  // cron-тик, а не в обработчике вебхука (репорт 2026-11-03, §5.5).
+  try {
+    await env.DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(now() - 7 * 24 * 60 * 60).run();
+  } catch (error) {
+    console.error("telegram_updates prune failed", error);
+  }
   // Журнал растёт на несколько строк в день: хвост старше недели бесполезен.
   try {
     await env.DB.prepare("DELETE FROM notification_log WHERE day < ?")
