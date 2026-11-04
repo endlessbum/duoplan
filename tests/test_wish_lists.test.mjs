@@ -58,6 +58,7 @@ function makeLoader() {
       extractBraced("function archiveMoreHtml"),
       extractBraced("function wishItem"),
       extractBraced("function formatTimestamp"),
+      extractBraced("function completionMeta"),
       extractBraced("function completedWishItem"),
       extractBraced("function renderWishLists"),
       "return { renderWishLists, setWishView: (v) => { wishView = v; }, setAppState: (v) => { appState = v; } };"

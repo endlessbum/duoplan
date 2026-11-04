@@ -379,6 +379,35 @@ test("paintAvatarSlot: при включённом флаге и https-фото 
   equal(el.textContent, "");
 });
 
+test("paintAvatar красит подложку longhand-ом и не стирает background-image с фото", () => {
+  // Регрессия: el.style.background = ... (shorthand) сбрасывал background-image,
+  // а themeChanged приходит без render() — фото аватаров пропадало при смене
+  // темы Telegram до следующего обновления state.
+  const loadPaint = new Function(
+    [
+      'const document = { documentElement: { dataset: { theme: "dark" } } };',
+      'const ACCENT_PALETTES = { sage: { dark: "#7ba394" } };',
+      extractBraced(appSource, "function hexRgb"),
+      extractBraced(appSource, "function paintAvatar"),
+      "return paintAvatar;"
+    ].join("\n")
+  );
+  const paint = loadPaint();
+  const makeStyled = () => {
+    const style = { backgroundImage: 'url("https://t.me/i/userpic/x.jpg")' };
+    style.removeProperty = (name) => { delete style[name]; };
+    return style;
+  };
+  const withPhoto = { style: makeStyled() };
+  paint(withPhoto, "sage");
+  ok(withPhoto.style.backgroundImage.includes("t.me"), "перекраска акцента стёрла фото");
+  ok(withPhoto.style.backgroundColor, "подложка не покрашена");
+  const noPalette = { style: makeStyled() };
+  paint(noPalette, "");
+  ok(noPalette.style.backgroundImage.includes("t.me"), "ветка без палитры стёрла фото");
+  ok(!("backgroundColor" in noPalette.style), "ветка без палитры оставила инлайн-цвет");
+});
+
 test("paintAvatarSlot: выключенный флаг, нет фото или не-https — буква", () => {
   const slot = loadAvatarSlot();
   slot.setState({ user: { show_avatar: false } });

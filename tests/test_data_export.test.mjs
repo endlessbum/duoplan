@@ -72,6 +72,7 @@ test("файл содержит структуру приложения, дне�
     day: "2027-03-08",
     time: "12:00",
     title: "Годовщина",
+    kind: "date",     // вид записи: дата или день рождения
     recurs: true,     // 1 -> true
     monthly: false,   // 0 -> false
     is_private: true, // 1 -> true
@@ -92,6 +93,7 @@ test("файл «Личные даты» содержит только личн�
     day: "2027-05-01",
     time: null,
     title: "Сюрприз",
+    kind: "date",
     recurs: false,
     monthly: false,
     is_private: true,

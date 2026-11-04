@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.04.7";
+const APP_VERSION = "2026.11.04.11";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.04.7";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.04.7";
+const DB_SCHEMA_VERSION = "2026.11.04.11";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -72,7 +72,7 @@ const ARCHIVE_QUERIES = {
     // Личные даты видит только создатель: фильтр в SQL, а не после запроса —
     // иначе приватная запись успевает попасть в сортируемый набор.
     userScoped: true,
-    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY day"
+    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY day"
   },
   wishes: {
     active: true,
@@ -146,6 +146,201 @@ function wishUrl(value) {
     throw new HttpError(400, "Ссылка должна быть адресом http или https", "INVALID_URL");
   }
   return url;
+}
+
+// ---------------------------------------------------------------------------
+// Кино: данные IMDb. Официального API у IMDb нет, поэтому используем
+// публичный suggest-эндпоинт (подсказки при вводе) и страницу тайтла
+// (JSON-LD + __NEXT_DATA__ для сезонов сериалов). Данные — снимок на момент
+// добавления: хранятся в строке movies, при чтениях наружу не ходим.
+// ---------------------------------------------------------------------------
+const IMDB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const IMDB_TIMEOUT_MS = 8000;
+const IMDB_SUGGEST_TTL_MS = 24 * 3600 * 1000;
+const imdbSuggestCache = new Map();
+
+// Поле q у suggestion — текстовый тип («feature», «TV series», …). Берём
+// только то, что можно посмотреть: полнометражки, ТВ-фильмы и сериалы.
+const IMDB_KIND_BY_TYPE = {
+  "feature": "movie",
+  "tv movie": "movie",
+  "tv series": "series",
+  "tv mini series": "series"
+};
+
+function parseIsoDuration(value) {
+  const match = /^PT(?:(\d+)H)?(?:(\d+)M)?/.exec(String(value || ""));
+  if (!match) return null;
+  const minutes = Number(match[1] || 0) * 60 + Number(match[2] || 0);
+  return minutes || null;
+}
+
+async function imdbSearch(rawQuery, env) {
+  const query = String(rawQuery || "").trim().slice(0, 100);
+  if (!query) throw new HttpError(400, "Введите название фильма или сериала", "INVALID_QUERY");
+  const cacheKey = query.toLowerCase();
+  const cached = imdbSuggestCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < IMDB_SUGGEST_TTL_MS) return cached.results;
+  let payload;
+  try {
+    const response = await fetch(`https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(query)}.json`, {
+      headers: { "User-Agent": IMDB_UA, "Accept": "application/json" },
+      signal: AbortSignal.timeout(IMDB_TIMEOUT_MS)
+    });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    payload = await response.json();
+  } catch (error) {
+    // Прямой IMDb не отвечает — пробуем OMDb-фолбэк (если задан ключ),
+    // иначе отдаём ошибку в формате API (сырые Error из fetch заворачиваем).
+    const fallback = await omdbSearch(env, query);
+    if (fallback?.length) {
+      imdbSuggestCache.set(cacheKey, { at: Date.now(), results: fallback });
+      return fallback;
+    }
+    throw error instanceof HttpError
+      ? error
+      : new HttpError(502, "IMDb сейчас недоступен, попробуйте позже", "IMDB_UNAVAILABLE");
+  }
+  const results = (Array.isArray(payload.d) ? payload.d : [])
+    .filter((item) => typeof item?.id === "string" && /^tt\d+$/.test(item.id) && IMDB_KIND_BY_TYPE[String(item?.q || "").toLowerCase()])
+    .slice(0, 8)
+    .map((item) => ({
+      imdb_id: item.id,
+      title: String(item.l || "").slice(0, 180),
+      year: Number(item.y) || null,
+      kind: IMDB_KIND_BY_TYPE[String(item.q).toLowerCase()]
+    }));
+  imdbSuggestCache.set(cacheKey, { at: Date.now(), results });
+  // Простая гигиена памяти изолята: при переполнении стираем самый старый ключ.
+  if (imdbSuggestCache.size > 200) {
+    imdbSuggestCache.delete(imdbSuggestCache.keys().next().value);
+  }
+  return results;
+}
+
+async function imdbTitle(imdbId) {
+  let html;
+  try {
+    const response = await fetch(`https://www.imdb.com/title/${imdbId}/`, {
+      headers: { "User-Agent": IMDB_UA, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9" },
+      signal: AbortSignal.timeout(IMDB_TIMEOUT_MS)
+    });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    html = await response.text();
+  } catch {
+    throw new HttpError(502, "IMDb сейчас недоступен, попробуйте позже", "IMDB_UNAVAILABLE");
+  }
+  // Первый JSON-LD на странице тайтла: название, рейтинг, жанры, длительность.
+  const ldMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+  let ld = {};
+  if (ldMatch) {
+    try { ld = JSON.parse(ldMatch[1]); } catch { /* битый JSON — тянем что можем */ }
+  }
+  const rating = Number(ld.aggregateRating?.ratingValue);
+  const genreRaw = ld.genre;
+  const kind = ld["@type"] === "TVSeries" || ld["@type"] === "TVMiniSeries" ? "series" : "movie";
+  const publishedYear = Number(String(ld.datePublished || "").slice(0, 4)) || null;
+  // Сезоны/серии сериалов в JSON-LD не отдаются: эпизоды иногда лежат в
+  // numberOfEpisodes.value, остальное — best-effort из __NEXT_DATA__.
+  let seasons = null;
+  let episodes = Number(ld.numberOfEpisodes?.value ?? ld.numberOfEpisodes) || null;
+  const nextMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  if (nextMatch) {
+    try {
+      const next = JSON.parse(nextMatch[1]);
+      const props = next?.props?.pageProps?.aboveTheFoldData || next?.props?.pageProps || {};
+      seasons = Number(props.numberOfSeasons) || null;
+      if (!episodes) {
+        const epCount = props.numberOfEpisodes;
+        episodes = Number(typeof epCount === "object" ? epCount?.count : epCount) || null;
+      }
+    } catch { /* нет __NEXT_DATA__ — остаёмся без сезонов */ }
+  }
+  return {
+    title: String(ld.name || "").slice(0, 180) || null,
+    rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? Math.round(rating * 10) / 10 : null,
+    genre: (Array.isArray(genreRaw) ? genreRaw[0] : genreRaw) || null,
+    kind,
+    year: publishedYear,
+    runtime: parseIsoDuration(ld.duration),
+    seasons,
+    episodes
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Фолбэк OMDb: если прямой IMDb недоступен (сайт не отвечает, парсинг
+// сломался), используем OMDb API — зеркало того же датасета IMDb. Ключ
+// бесплатный (1000 запросов/день) и опционален: без секрета OMDB_API_KEY
+// фолбэк просто не активируется, приложение живёт на прямом IMDb.
+// ---------------------------------------------------------------------------
+function omdbMinutes(value) {
+  const match = /^(\d+)\s*min/i.exec(String(value || ""));
+  return match ? Number(match[1]) : null;
+}
+
+async function omdbFetch(env, params) {
+  const key = env?.OMDB_API_KEY;
+  if (!key) return null;
+  try {
+    const response = await fetch(`https://www.omdbapi.com/?apikey=${encodeURIComponent(key)}&${params}`, {
+      signal: AbortSignal.timeout(IMDB_TIMEOUT_MS)
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    // OMDb отвечает {"Response":"False","Error":…} со статусом 200.
+    return payload?.Response === "True" ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+// Поиск OMDb (s=): отдаёт movie/series с imdbID — тот же формат, что у suggest.
+async function omdbSearch(env, query) {
+  const payload = await omdbFetch(env, `s=${encodeURIComponent(query)}`);
+  if (!payload) return null;
+  return (Array.isArray(payload.Search) ? payload.Search : [])
+    .filter((item) => /^tt\d+$/.test(String(item?.imdbID || "")) && ["movie", "series"].includes(item?.Type))
+    .slice(0, 8)
+    .map((item) => ({
+      imdb_id: item.imdbID,
+      title: String(item.Title || "").slice(0, 180),
+      year: Number(String(item.Year || "").slice(0, 4)) || null,
+      kind: item.Type === "series" ? "series" : "movie"
+    }));
+}
+
+// Тайтл OMDb (i=): рейтинг, жанр, длительность и сезоны одним ответом.
+async function omdbTitle(env, imdbId) {
+  const payload = await omdbFetch(env, `i=${encodeURIComponent(imdbId)}`);
+  if (!payload) return null;
+  const rating = Number(payload.imdbRating);
+  return {
+    title: String(payload.Title || "").slice(0, 180) || null,
+    rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? Math.round(rating * 10) / 10 : null,
+    genre: String(payload.Genre || "").split(",")[0].trim() || null,
+    kind: payload.Type === "series" ? "series" : "movie",
+    year: Number(String(payload.Year || "").slice(0, 4)) || null,
+    runtime: omdbMinutes(payload.Runtime),
+    seasons: Number(payload.totalSeasons) || null,
+    episodes: null
+  };
+}
+
+// Карточка фильма: прямой IMDb; страница не отдалась или парсинг не вытащил
+// даже название — OMDb-фолбэк; без ключа — исходная ошибка 502.
+async function movieInfo(env, imdbId) {
+  let primaryError = null;
+  try {
+    const info = await imdbTitle(imdbId);
+    if (info.title) return info;
+  } catch (error) {
+    if (error?.code !== "IMDB_UNAVAILABLE") throw error;
+    primaryError = error;
+  }
+  const fallback = await omdbTitle(env, imdbId);
+  if (fallback?.title) return fallback;
+  throw primaryError || new HttpError(502, "IMDb сейчас недоступен, попробуйте позже", "IMDB_UNAVAILABLE");
 }
 
 function validTimeZone(value) {
@@ -754,20 +949,29 @@ async function state(env, userId) {
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, daily, partnerUser] = await Promise.all([
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, movies, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
-    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare(`SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
+    // Цитаты и места — общие коллекции пары: приватности у них нет, поэтому
+    // фильтровать по created_by нечего. Потолок тот же, что у активных планов:
+    // на практике это десятки записей, архив им не нужен.
+    env.DB.prepare(`SELECT q.id,q.body,q.source,q.author_id,q.created_at,u.display_name FROM quotes q
+      LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=? ORDER BY q.created_at DESC, q.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,note,url,visited,visited_at,visited_by,created_by,created_at FROM places WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    // Кино — общая коллекция пары, как места: без приватности и архива.
+    // Данные (рейтинг/жанр/длительность) — снимок IMDb на момент добавления.
+    env.DB.prepare("SELECT id,imdb_id,title,year,kind,rating,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
@@ -782,8 +986,10 @@ async function state(env, userId) {
   // tg_id партнёра в одной паре), чтобы «везде» значило везде.
   const override = clean(user.partner_custom_name) || null;
   if (override && partnerId) {
-    for (const row of memories.results || []) {
-      if (Number(row.author_id) === Number(partnerId)) row.display_name = override;
+    for (const list of [memories.results || [], quotes.results || []]) {
+      for (const row of list) {
+        if (Number(row.author_id) === Number(partnerId)) row.display_name = override;
+      }
     }
     for (const list of [wishes.results || [], completedWishes.results || []]) {
       for (const row of list) {
@@ -822,6 +1028,9 @@ async function state(env, userId) {
     memories: memories.results,
     wishes: wishes.results,
     completedWishes: completedWishes.results,
+    quotes: quotes.results,
+    places: places.results,
+    movies: movies.results,
     daily
   };
 }
@@ -914,7 +1123,7 @@ async function ensureWishOwner(env, pair, user, id) {
 // чтобы само существование чужой личной даты не раскрывалось. Возвращает строку
 // даты: PATCH использует created_by, чтобы разрешить смену приватности только автору.
 async function ensureDateVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT is_private,created_by FROM dates WHERE id=? AND pair_id=?")
+  const row = await env.DB.prepare("SELECT is_private,created_by,kind FROM dates WHERE id=? AND pair_id=?")
     .bind(id, pair.id).first();
   if (!row) return null; // 404 отдаст сам UPDATE/DELETE
   if (Number(row.is_private) === 1 && Number(row.created_by) !== Number(user.tg_id)) {
@@ -937,12 +1146,12 @@ async function ensureTaskVisible(env, pair, user, id) {
 }
 
 async function itemRoute(env, pair, user, method, pathname, body) {
-  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes)\/(\d+)(?:\/(done|reopen))?$/);
+  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|movies)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched))?$/);
   if (!match) return false;
   const [, type, rawId, action] = match;
   const id = Number(rawId);
   if (!positiveId(id)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
-  const table = { tasks: "tasks", dates: "dates", memories: "memories", wishes: "wishes" }[type];
+  const table = { tasks: "tasks", dates: "dates", memories: "memories", wishes: "wishes", quotes: "quotes", places: "places", movies: "movies" }[type];
   // Проверяем владельца до любой записи, чтобы чужая строка не менялась даже
   // частично (UPDATE ... WHERE не сработал бы, но 403 точнее 404).
   const mutating = method === "DELETE" || method === "PATCH" || (method === "POST" && action);
@@ -955,11 +1164,15 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     return true;
   }
   if (method === "PATCH") {
+    // Фильм приходит из IMDb целиком: точечных правок у карточки нет.
+    if (type === "movies") throw new HttpError(405, "Карточку фильма отредактировать нельзя", "METHOD_NOT_ALLOWED");
     const patchSchemas = {
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
       dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
       memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 } },
-      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } }
+      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } },
+      quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
+      places: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } }
     };
     if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
     const fields = [];
@@ -985,8 +1198,11 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       values.push(textField(body, "title", 120, "Название"));
       if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
       // monthly перекрывает recurs: ежемесячная дата не может быть ежегодной.
-      const monthly = body.monthly !== undefined ? (body.monthly === true ? 1 : 0) : null;
-      const recurs = monthly === 1 ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1);
+      // У дня рождения повтор всегда ежегодный — флаги из формы игнорируем,
+      // иначе правка карточки могла бы «отключить» сам день рождения.
+      const isBirthday = dateRow?.kind === "birthday";
+      const monthly = isBirthday ? 0 : (body.monthly !== undefined ? (body.monthly === true ? 1 : 0) : null);
+      const recurs = isBirthday ? 1 : (monthly === 1 ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1));
       fields.push("day=?", "recurs=?", "time=?");
       values.push(clean(body.day), recurs, optionalTime(body.time));
       if (monthly !== null) {
@@ -1009,6 +1225,27 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         fields.push("title=?");
         values.push(clean(body.title) || null);
       }
+    } else if (type === "quotes") {
+      fields.push("body=?");
+      values.push(textField(body, "body", 600, "Цитата"));
+      // Источник необязателен: пустая строка очищает подпись.
+      if (body.source !== undefined) {
+        fields.push("source=?");
+        values.push(clean(body.source) || null);
+      }
+    } else if (type === "places") {
+      fields.push("title=?");
+      values.push(textField(body, "title", 120, "Место"));
+      if (body.note !== undefined) {
+        fields.push("note=?");
+        values.push(clean(body.note) || null);
+      }
+      // Ссылка валидируется до UPDATE: иначе при битом URL название уже
+      // изменилось бы, а клиент получил бы 400.
+      if (body.url !== undefined) {
+        fields.push("url=?");
+        values.push(wishUrl(body.url) || null);
+      }
     } else {
       fields.push("body=?");
       values.push(textField(body, "body", 300, "Желание"));
@@ -1025,18 +1262,39 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     return true;
   }
   if (method === "POST" && action) {
-    if (!["tasks", "wishes"].includes(type)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
     let result;
     if (type === "tasks") {
+      if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
       result = action === "done"
         ? await env.DB.prepare("UPDATE tasks SET status='done',completed_by=?,completed_at=? WHERE id=? AND pair_id=? AND status='open'")
           .bind(user.tg_id, now(), id, pair.id).run()
         : await env.DB.prepare("UPDATE tasks SET status='open',completed_by=NULL,completed_at=NULL WHERE id=? AND pair_id=? AND status='done'")
           .bind(id, pair.id).run();
-    } else {
+    } else if (type === "wishes") {
+      if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
       result = action === "done"
         ? await env.DB.prepare("UPDATE wishes SET done=1,done_at=? WHERE id=? AND pair_id=? AND owner_id=? AND done=0").bind(now(), id, pair.id, user.tg_id).run()
         : await env.DB.prepare("UPDATE wishes SET done=0,done_at=NULL WHERE id=? AND pair_id=? AND owner_id=? AND done=1").bind(id, pair.id, user.tg_id).run();
+    } else if (type === "places") {
+      // Посещение — совместное: отметку ставит любой партнёр, visited_by
+      // нужен только для подписи «кто отметил».
+      if (!["visited", "unvisited"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+      result = action === "visited"
+        ? await env.DB.prepare("UPDATE places SET visited=1,visited_at=?,visited_by=? WHERE id=? AND pair_id=? AND visited=0")
+          .bind(now(), user.tg_id, id, pair.id).run()
+        : await env.DB.prepare("UPDATE places SET visited=0,visited_at=NULL,visited_by=NULL WHERE id=? AND pair_id=? AND visited=1")
+          .bind(id, pair.id).run();
+    } else if (type === "movies") {
+      // Просмотр — совместный, как посещение места: отметку ставит любой
+      // партнёр, watched_by нужен только для подписи «кто отметил».
+      if (!["watched", "unwatched"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+      result = action === "watched"
+        ? await env.DB.prepare("UPDATE movies SET watched=1,watched_at=?,watched_by=? WHERE id=? AND pair_id=? AND watched=0")
+          .bind(now(), user.tg_id, id, pair.id).run()
+        : await env.DB.prepare("UPDATE movies SET watched=0,watched_at=NULL,watched_by=NULL WHERE id=? AND pair_id=? AND watched=1")
+          .bind(id, pair.id).run();
+    } else {
+      throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
     }
     if (!result.meta.changes) throw new HttpError(409, "Запись уже в этом состоянии", "NO_CHANGE");
     return true;
@@ -1193,6 +1451,12 @@ async function api(request, env, url) {
     const page = Math.min(500, Math.max(0, Math.floor(Number(url.searchParams.get("page")) || 0)));
     return json(await archivePage(env, pair, type, page, user.tg_id));
   }
+  // Подсказки IMDb для диалога «Добавить фильм»: как в поисковике —
+  // пользователь печатает, воркер возвращает до 8 совпадений (фильмы/сериалы).
+  if (request.method === "GET" && url.pathname === "/api/movies/search") {
+    await rateLimit(env, `ms:${user.tg_id}`, 30, 60);
+    return json({ results: await imdbSearch(url.searchParams.get("q"), env) });
+  }
   if (request.method === "POST" && url.pathname === "/api/pair/leave") {
     await leavePair(env, pair, url);
     return json(await state(env, user.tg_id));
@@ -1215,11 +1479,11 @@ async function api(request, env, url) {
     const memories = (await env.DB.prepare(`SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name AS author FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at ASC, m.id ASC`)
       .bind(pair.id).all()).results || [];
-    const dates = (await env.DB.prepare(`SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.created_at,u.display_name AS author FROM dates d
+    const dates = (await env.DB.prepare(`SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
       LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND (d.is_private=0 OR d.created_by=?)
       ORDER BY d.day ASC, d.id ASC`)
       .bind(pair.id, user.tg_id).all()).results || [];
-    const privateDates = (await env.DB.prepare(`SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.created_at,u.display_name AS author FROM dates d
+    const privateDates = (await env.DB.prepare(`SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
       LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.is_private=1 AND d.created_by=?
       ORDER BY d.day ASC, d.id ASC`)
       .bind(pair.id, user.tg_id).all()).results || [];
@@ -1260,16 +1524,19 @@ async function api(request, env, url) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/dates") {
-    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } });
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" }, kind: { type: "string", enum: ["date", "birthday"] } });
     const title = textField(body, "title", 120, "Название");
     if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
     const time = optionalTime(body.time);
     const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
+    // День рождения — та же дата, но повтор всегда ежегодный: monthly из
+    // формы игнорируем, recurs принудительно 1.
+    const kind = body.kind === "birthday" ? "birthday" : "date";
     // Ежемесячный повтор и ежегодный взаимоисключающие: monthly перекрывает recurs.
-    const monthly = body.monthly === true ? 1 : 0;
-    const recurs = monthly ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1);
-    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,monthly,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
-      .bind(pair.id, title, clean(body.day), time, recurs, monthly, isPrivate, user.tg_id, now()).run();
+    const monthly = kind === "birthday" ? 0 : (body.monthly === true ? 1 : 0);
+    const recurs = kind === "birthday" ? 1 : (monthly ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1));
+    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+      .bind(pair.id, title, clean(body.day), time, recurs, monthly, isPrivate, user.tg_id, kind, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
@@ -1288,6 +1555,50 @@ async function api(request, env, url) {
     const wishLink = wishUrl(body.url);
     await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,created_at) VALUES(?,?,?,?,?)")
       .bind(pair.id, user.tg_id, text, wishLink, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/quotes") {
+    validateSchema(body, { body: { type: "string", required: true, maxLength: 600 }, source: { type: "string", maxLength: 120 } });
+    const text = textField(body, "body", 600, "Цитата");
+    // Источник («Антуан де Сент-Экзюпери», «Мастер и Маргарита») необязателен.
+    const source = clean(body.source) || null;
+    await env.DB.prepare("INSERT INTO quotes(pair_id,author_id,body,source,created_at) VALUES(?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, text, source, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/places") {
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } });
+    const title = textField(body, "title", 120, "Место");
+    const note = clean(body.note) || null;
+    // Ссылка на карту/сайт: пустая строка — «ссылки нет», а не ошибка.
+    const link = wishUrl(body.url) || null;
+    await env.DB.prepare("INSERT INTO places(pair_id,created_by,title,note,url,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, title, note, link, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  // Добавление фильма по выбору из подсказок: карточка собирается из IMDb
+  // целиком (название/рейтинг/жанр/длительность), ручной ввод названий нет.
+  if (request.method === "POST" && url.pathname === "/api/movies") {
+    validateSchema(body, { imdb_id: { type: "string", required: true } });
+    const imdbId = clean(body.imdb_id);
+    if (!/^tt\d+$/.test(imdbId)) throw new HttpError(400, "Некорректный идентификатор фильма", "INVALID_IMDB_ID");
+    const existing = await env.DB.prepare("SELECT id FROM movies WHERE pair_id=? AND imdb_id=?")
+      .bind(pair.id, imdbId).first();
+    if (existing) throw new HttpError(409, "Этот фильм уже в списке", "ALREADY_ADDED");
+    const info = await movieInfo(env, imdbId);
+    await env.DB.prepare(`INSERT INTO movies(pair_id,created_by,imdb_id,title,year,kind,rating,genres,runtime,seasons,episodes,url,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(pair.id, user.tg_id, imdbId,
+        clean(info.title) || "Без названия",
+        info.year ?? (Number(body.year) || null),
+        info.kind,
+        info.rating,
+        clean(info.genre) || null,
+        info.runtime,
+        info.seasons,
+        info.episodes,
+        `https://www.imdb.com/title/${imdbId}/`,
+        now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/daily/done") {
@@ -1615,15 +1926,24 @@ const DIGEST_MAX_ITEMS = 18;
 const DIGEST_MAX_CHARS = 3400;
 
 function digestText(today, tomorrow, dates, tasks) {
-  const todayDates = dates.filter(d => dateOccursOnDay(d, today));
-  const tomorrowDates = dates.filter(d => dateOccursOnDay(d, tomorrow));
+  // Дни рождения — отдельный абзац: их читают иначе, чем годовщины, и по ним
+  // нужен запас на подарок, а не «сегодня — значит сегодня».
+  const birthday = (d) => d.kind === "birthday";
+  const todayDates = dates.filter(d => !birthday(d) && dateOccursOnDay(d, today));
+  const tomorrowDates = dates.filter(d => !birthday(d) && dateOccursOnDay(d, tomorrow));
+  const birthdayLines = [
+    // Своё личное напоминание не маскируем: сообщение уходит только автору,
+    // а «Скрытый» в строке «день рождения у Скрытый» бесполезен.
+    ...dates.filter(d => birthday(d) && dateOccursOnDay(d, today)).map(d => `• Сегодня — ${richToHtml(d.title)}`),
+    ...dates.filter(d => birthday(d) && dateOccursOnDay(d, tomorrow)).map(d => `• Завтра — ${richToHtml(d.title)}`)
+  ];
   const occurs = (task, day) =>
     String(task.day) === day ||
     monthlyOccursOnDay(task, day) ||
     (Number(task.yearly) === 1 && String(task.day).slice(5) === String(day).slice(5));
   const todayTasks = tasks.filter(t => occurs(t, today));
   const tomorrowTasks = tasks.filter(t => occurs(t, tomorrow));
-  if (!todayDates.length && !tomorrowDates.length && !todayTasks.length && !tomorrowTasks.length) return "";
+  if (!todayDates.length && !tomorrowDates.length && !birthdayLines.length && !todayTasks.length && !tomorrowTasks.length) return "";
   const dateLines = [
     ...todayDates.map(d => `• Сегодня — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}`),
     ...tomorrowDates.map(d => `• Завтра — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}`)
@@ -1650,6 +1970,7 @@ function digestText(today, tomorrow, dates, tasks) {
     lines.push("");
     used += 1;
   };
+  pushParagraph("Дни рождения", birthdayLines);
   pushParagraph("Значимые даты", dateLines);
   pushParagraph("Планы", taskLines);
   if (hidden) lines.push(`…и ещё ${hidden} — полный список в приложении`);
@@ -1668,7 +1989,7 @@ function datesDigestText(timeZone, tomorrow, dates) {
   let hidden = 0;
   let used = lines[0].length + 30;
   for (const item of tomorrowDates) {
-    const line = `• ${maskTitle(item)}${item.time ? ` (${item.time})` : ""}`;
+    const line = `• ${item.kind === "birthday" ? "День рождения — " : ""}${item.kind === "birthday" ? richToHtml(item.title) : maskTitle(item)}${item.time ? ` (${item.time})` : ""}`;
     if (shown < DIGEST_MAX_ITEMS && used + line.length + 1 <= DIGEST_MAX_CHARS) { lines.push(line); used += line.length + 1; shown++; }
     else hidden++;
   }
@@ -1703,6 +2024,7 @@ function exportDateRow(row) {
     day: row.day,
     time: row.time || null,
     title: row.title,
+    kind: row.kind === "birthday" ? "birthday" : "date",
     recurs: Number(row.recurs) === 1,
     monthly: Number(row.monthly) === 1,
     is_private: Number(row.is_private) === 1,
@@ -1819,7 +2141,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
   budget.left -= 3; // пользователи + даты + планы
   const [userRows, dateRows, taskRows] = await Promise.all([
     env.DB.prepare(`SELECT * FROM users WHERE tg_id IN (${members.map(() => "?").join(",")})`).bind(...members).all(),
-    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by FROM dates WHERE pair_id=?").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind FROM dates WHERE pair_id=?").bind(pair.id).all(),
     env.DB.prepare("SELECT id,title,day,time,monthly,yearly,is_private,created_by FROM tasks WHERE pair_id=? AND status='open' AND day IS NOT NULL").bind(pair.id).all()
   ]);
   const users = userRows.results || [];
@@ -1837,6 +2159,20 @@ async function processPairNotifications(env, pair, stamp, budget) {
       budget.left -= 2;
       const title = Number(reminder.task.is_private) === 1 ? RICH_MASKED : richToHtml(reminder.task.title);
       await deliverNotification(env, member, today, reminder.kind, `${reminder.lead}: ${title} (${reminder.task.time})`);
+    }
+  }
+
+  // День рождения за 3 дня: запас на подарок и планы. Окно ровно одно —
+  // ровно за трое суток, поэтому сообщение приходит один раз; дедуп в журнале
+  // страхует от повторного тика. Личный ДР напоминаем только автору.
+  const inThreeDays = new Date(Date.parse(`${today}T00:00:00Z`) + 3 * 86400000).toISOString().slice(0, 10);
+  for (const member of members) {
+    const visible = dates.filter(d => Number(d.is_private) !== 1 || Number(d.created_by) === Number(member));
+    for (const date of visible) {
+      if (date.kind !== "birthday" || !dateOccursOnDay(date, inThreeDays)) continue;
+      if (budget.left < 2) break;
+      budget.left -= 2;
+      await deliverNotification(env, member, today, `birthday3d:${date.id}`, `Через 3 дня — день рождения: ${richToHtml(date.title)}`);
     }
   }
 
@@ -1971,9 +2307,12 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
-    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
+    `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,PRIMARY KEY (pair_id,day))`,  /* done_by/done_at removed: relic of pre-daily_completions schema */
     `CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS telegram_updates (update_id INTEGER PRIMARY KEY,received_at INTEGER NOT NULL)`,
@@ -1984,6 +2323,9 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_dates_pair ON dates(pair_id,day)`,
     `CREATE INDEX IF NOT EXISTS idx_memories_pair ON memories(pair_id,created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_wishes_pair ON wishes(pair_id,done)`,
+    `CREATE INDEX IF NOT EXISTS idx_quotes_pair ON quotes(pair_id,created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_places_pair ON places(pair_id,visited)`,
+    `CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id,watched)`,
     `CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id,role)`,
     `CREATE INDEX IF NOT EXISTS idx_telegram_updates_received_at ON telegram_updates(received_at)`,
@@ -2014,6 +2356,7 @@ async function ensureSchema(env) {
     ["tasks", "monthly", "INTEGER NOT NULL DEFAULT 0"],
     ["tasks", "yearly", "INTEGER NOT NULL DEFAULT 0"],
     ["dates", "monthly", "INTEGER NOT NULL DEFAULT 0"],
+    ["dates", "kind", "TEXT NOT NULL DEFAULT 'date'"],
     ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();

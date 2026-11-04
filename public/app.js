@@ -26,19 +26,39 @@
   const dialogCancel = document.getElementById("dialog-cancel");
   const toastEl = document.getElementById("toast");
 
-  const TAB_ORDER = ["home", "tasks", "dates", "memories", "wishes"];
+  // Пять слотов дока: «Желания» переехали в «Нашу пару» (переключатель
+  // «Профиль / Желания»), «Цитаты» — в «Дневник», «Дни рождения» — в «Даты».
+  // Так бар остаётся прежней геометрии: капля и линза рассчитаны на 5 слотов.
+  const TAB_ORDER = ["home", "tasks", "dates", "places", "memories"];
   const TAB_META = {
     home: { title: "Наше пространство" },
     tasks: { title: "Наши планы", sub: "Общие дела, свидания и идеи" },
-    dates: { title: "Значимые даты", sub: "Важные дни вашей истории" },
-    memories: { title: "Общий дневник", sub: "Тёплые моменты и заметки" },
-    wishes: { title: "Вишлист", sub: "Желания и подсказки для подарков" },
-    pair: { title: "Наша пара", sub: "Настройки вашего пространства" }
+    dates: { title: "Даты", sub: "Значимые дни и дни рождения" },
+    places: { title: "Места", sub: "Куда сходить вместе" },
+    memories: { title: "Дневник", sub: "Записи и цитаты" },
+    pair: { title: "Наша пара", sub: "Профиль, желания и настройки" }
   };
 
   let appState = null;
   let currentTab = "home";
   let wishView = "mine"; // "mine" | "partner" — переключатель вишлиста
+  // Виды внутри вкладок: «Наша пара» (профиль/желания), «Даты»
+  // (наше/дни рождения), «Дневник» (записи/цитаты). Живут вне рендера, чтобы
+  // минутный refresh и возврат на вкладку не сбрасывали выбранный вид.
+  let pairView = "profile";
+  let datesView = "dates";
+  let memoriesView = "memories";
+  // «Планы / Кино» — виды вкладки «Планы».
+  let tasksView = "plans";
+  // «Рандом» мест: колода id и текущий выпавший. Живут вне рендера, чтобы
+  // карточка результата переживала минутный refresh, а колода не начиналась
+  // заново после каждой отметки посещения.
+  let placeDeck = [];
+  let placePickId = null;
+  // Тот же рандом для «Кино» — своя колода, чтобы посещение места не
+  // сбрасывало выбор фильмов и наоборот.
+  let movieDeck = [];
+  let moviePickId = null;
   // Календарь на вкладке «Наша пара»: месяц и выбранный день живут вне
   // рендера, иначе любой refresh возвращал бы пользователя на текущий месяц.
   let calendarMonth = null;   // { year, month } — month 1..12
@@ -282,12 +302,14 @@
     const hex = key && ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
     if (!hex) {
       // Нет палитры — возвращаем дефолт из CSS (убираем инлайн-стили).
-      el.style.removeProperty("background");
+      // Только background-color: shorthand background стёр бы background-image
+      // с фото профиля (paintAvatarSlot), а themeChanged приходит без render().
+      el.style.removeProperty("background-color");
       el.style.removeProperty("color");
       return;
     }
     const rgb = hexRgb(hex);
-    el.style.background = `rgba(${rgb.join(", ")}, ${dark ? 0.18 : 0.14})`;
+    el.style.backgroundColor = `rgba(${rgb.join(", ")}, ${dark ? 0.18 : 0.14})`;
     el.style.color = hex;
   }
 
@@ -623,6 +645,7 @@
   // и в главном баре, и в переключателе вишлиста.
   navRefreshHook = () => {
     liquidNav?.refresh();
+    segSwitch?.refresh();
     wishSwitch?.refresh();
   };
 
@@ -976,7 +999,7 @@
           <p class="eyebrow">DuoPlan заблокирован</p>
           <h2>Введите пароль</h2>
           <form id="lock-form" style="margin-top:14px; display:grid; gap:10px;">
-            <input id="lock-pin" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required>
+            <input id="lock-pin" class="lock-pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required>
             <button class="primary full" type="submit">Войти</button>
           </form>
           <p class="settings-hint" id="lock-error" style="color:var(--berry);" hidden>Неверный пароль. Попробуйте ещё раз.</p>
@@ -1069,7 +1092,10 @@
     const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
     // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
     // На главной каждая группа — не больше трёх карточек, остальное за «Все →».
-    const previewDates = dates.slice(0, 3).map(dateItem).join("");
+    // День рождения показываем своей карточкой: без года и с «через N дней».
+    const previewDates = dates.slice(0, 3)
+      .map((item) => (item.kind === "birthday" ? birthdayItem(item) : dateItem(item)))
+      .join("");
     const latestMemory = memories[0];
 
     return `
@@ -1235,7 +1261,10 @@
       tasks: [...mergedArchive("tasks", appState?.tasks || []), ...mergedArchive("done_tasks", appState?.completedTasks || [])],
       dates: mergedArchive("dates", appState?.dates || []),
       memories: mergedArchive("memories", appState?.memories || []),
-      wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])]
+      wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])],
+      quotes: appState?.quotes || [],
+      places: appState?.places || [],
+      movies: appState?.movies || []
     };
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
   }
@@ -1257,6 +1286,23 @@
   // глифа ★ (U+2605), который рендерится шрифтом платформы.
   const STAR_ICON = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none" aria-hidden="true"><path d="m12 3 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3Z"/></svg>';
 
+  // Шевроны стрелок календаря и ссылка в карточке фильма: SVG в толщине
+  // иконок приложения вместо текстовых глифов ‹ › (базлайн глифа «плавает»
+  // относительно центра кнопки — визуально стрелка стоит ниже центра).
+  const CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5"/></svg>';
+  const CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
+  const LINK_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 14.5a4.24 4.24 0 0 0 6 0l3.2-3.2a4.24 4.24 0 1 0-6-6L11.5 6.5"/><path d="M14.5 9.5a4.24 4.24 0 0 0-6 0l-3.2 3.2a4.24 4.24 0 1 0 6 6l1.2-1.2"/></svg>';
+
+  // Единый вид дат завершённой карточки (как у посещённых мест): дата создания
+  // — серая пилюля, дата завершения справа — приглушённо-зелёная (.day-chip).
+  function completionMeta(created, completed) {
+    const pills = [
+      created ? `<span class="day-chip is-muted">${esc(created)}</span>` : "",
+      completed ? `<span class="day-chip">${esc(completed)}</span>` : ""
+    ].filter(Boolean).join("");
+    return pills ? `<div class="item-meta">${pills}</div>` : "";
+  }
+
   function completedTaskItem(item) {
     const created = formatTimestamp(item.created_at);
     const completed = formatTimestamp(item.completed_at);
@@ -1265,8 +1311,7 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.title)}</h3>
-            ${created ? `<div class="item-meta">${esc(created)}</div>` : ""}
-            <div class="item-meta" style="justify-content:space-between;"><span>Завершён</span>${completed ? `<span>${esc(completed)}</span>` : ""}</div>
+            ${completionMeta(created, completed)}
           </div>
           <div class="item-actions">
             <button class="icon-btn" type="button" data-action="reopen-item" data-type="tasks" data-id="${item.id}" aria-label="Вернуть в планы">${REOPEN_ICON}</button>
@@ -1292,8 +1337,7 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
-            ${created ? `<div class="item-meta">${esc(created)}</div>` : ""}
-            <div class="item-meta" style="justify-content:space-between;"><span>Исполнено</span>${completed ? `<span>${esc(completed)}</span>` : ""}</div>
+            ${completionMeta(created, completed)}
           </div>
           ${actions ? `<div class="item-actions">${actions}</div>` : ""}
         </div>
@@ -1302,10 +1346,11 @@
     `;
   }
 
-  function renderListTab(tabKey, items, addAction, addLabel, emptyTitle, emptyCopy, renderer) {
+  // Тело списочной вкладки без шапки: шапка и сегмент-переключатель живут в
+  // render() и не перерисовываются при смене вида.
+  function renderListTab(items, addAction, addLabel, emptyTitle, emptyCopy, renderer) {
     const disabledClass = partnerMissing() ? " is-disabled" : "";
     return `
-      ${renderTabHeader(tabKey)}
       ${items.length ? `<button class="primary full add-button${disabledClass}" type="button" data-action="${addAction}">${esc(addLabel)}</button>` : ""}
       ${items.length ? items.map(renderer).join("") : `
         <section class="card">
@@ -1362,13 +1407,13 @@
     return cells;
   }
 
-  // События месяца по дням: Map<"YYYY-MM-DD", { tasks: [], dates: [] }>.
+  // События месяца по дням: Map<"YYYY-MM-DD", { tasks, dates, birthdays, wishes }>.
   // Планы без даты не попадают, ежегодные даты проецируются на тот же
   // месяц/день, 29 февраля в невисокосный год пропускается.
   function calendarEventIndex(tasks, dates, wishes, year, month) {
     const index = new Map();
     const push = (key, kind, item) => {
-      const bucket = index.get(key) || { tasks: [], dates: [], wishes: [] };
+      const bucket = index.get(key) || { tasks: [], dates: [], birthdays: [], wishes: [] };
       bucket[kind].push(item);
       index.set(key, bucket);
     };
@@ -1398,18 +1443,21 @@
       if (!date.day) continue;
       const [dateYear, dateMonth, dateDay] = String(date.day).split("-").map(Number);
       if (![dateYear, dateMonth, dateDay].every(Number.isFinite)) continue;
+      // День рождения — отдельная дорожка календаря: своя точка в сетке и
+      // своя подпись в списке событий дня.
+      const bucketKind = date.kind === "birthday" ? "birthdays" : "dates";
       const recurs = Number(date.recurs) === 1 || date.recurs === true;
       const monthly = Number(date.monthly) === 1;
       if (monthly) {
         // Ежемесячная дата — как ежегодная, но каждый месяц того же дня.
         if (year < dateYear) continue;
         if (dateDay > calendarDaysInMonth(year, month)) continue;
-        push(calendarDayKey(year, month, dateDay), "dates", date);
+        push(calendarDayKey(year, month, dateDay), bucketKind, date);
         continue;
       }
       if (!recurs) {
         if (dateYear === year && dateMonth === month) {
-          push(calendarDayKey(year, month, dateDay), "dates", date);
+          push(calendarDayKey(year, month, dateDay), bucketKind, date);
         }
         continue;
       }
@@ -1418,7 +1466,7 @@
       if (year < dateYear) continue;
       // 29 февраля существует не в каждом году — не переносим на 28-е/1-е.
       if (dateDay > calendarDaysInMonth(year, month)) continue;
-      push(calendarDayKey(year, month, dateDay), "dates", date);
+      push(calendarDayKey(year, month, dateDay), bucketKind, date);
     }
     // Вручённые желания: звезда стоит в день, когда желание отметили
     // исполненным. Даты вручения у старых записей нет — такие пропускаем.
@@ -1499,6 +1547,9 @@
       ...bucket.dates.map((date) => ({
         kind: "date", title: date.title, time: date.time, isPrivate: Number(date.is_private) === 1
       })),
+      ...(bucket.birthdays || []).map((date) => ({
+        kind: "birthday", title: date.title, time: date.time, isPrivate: Number(date.is_private) === 1
+      })),
       ...(bucket.wishes || []).map((wish) => ({
         kind: "wish", title: wish.body, time: null, isPrivate: false
       }))
@@ -1528,15 +1579,19 @@
       const bucket = index.get(cell.key);
       const cellTasks = bucket?.tasks || [];
       const cellDates = bucket?.dates || [];
+      const cellBirthdays = bucket?.birthdays || [];
       const dots = [];
-      // Звезда — вручённое желание, точки — планы и даты. Личные записи
-      // (is_private) помечаем серым, чтобы не путать с общими.
+      // Звезда — вручённое желание, точки — планы, даты и дни рождения.
+      // Личные записи (is_private) помечаем серым, чтобы не путать с общими.
       if (bucket?.wishes.length) dots.push(`<span class="cal-star">${STAR_ICON}</span>`);
       if (cellTasks.length) {
         dots.push(`<i class="cal-dot ${cellTasks.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-task"}"></i>`);
       }
       if (cellDates.length) {
         dots.push(`<i class="cal-dot ${cellDates.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-date"}"></i>`);
+      }
+      if (cellBirthdays.length) {
+        dots.push(`<i class="cal-dot ${cellBirthdays.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-birthday"}"></i>`);
       }
       const classes = ["cal-day"];
       if (!cell.inMonth) classes.push("is-outside");
@@ -1567,10 +1622,10 @@
             <div class="cal-event">
               ${row.kind === "wish"
                 ? `<span class="cal-star" aria-hidden="true">${STAR_ICON}</span>`
-                : `<i class="cal-dot ${row.isPrivate ? "is-private" : row.kind === "task" ? "is-task" : "is-date"}" aria-hidden="true"></i>`}
+                : `<i class="cal-dot ${row.isPrivate ? "is-private" : row.kind === "task" ? "is-task" : row.kind === "birthday" ? "is-birthday" : "is-date"}" aria-hidden="true"></i>`}
               <div class="cal-event-body">
                 <span class="cal-event-title">${renderRichText(row.title)}</span>
-                <span class="cal-event-meta">${row.kind === "task" ? "План" : row.kind === "date" ? "Значимая дата" : "Желание подарено"}${row.isPrivate ? " · личное" : ""}${row.time ? ` · ${esc(row.time)}` : ""}</span>
+                <span class="cal-event-meta">${row.kind === "task" ? "План" : row.kind === "date" ? "Значимая дата" : row.kind === "birthday" ? "День рождения" : "Желание подарено"}${row.isPrivate ? " · личное" : ""}${row.time ? ` · ${esc(row.time)}` : ""}</span>
               </div>
             </div>
           `).join("") : `<p class="cal-empty">На этот день событий нет.</p>`}
@@ -1582,15 +1637,16 @@
       <section class="card calendar-card">
         <p class="eyebrow">Календарь</p>
         <div class="cal-head">
-          <button class="cal-nav-btn" type="button" data-action="calendar-prev" aria-label="Предыдущий месяц">‹</button>
+          <button class="cal-nav-btn" type="button" data-action="calendar-prev" aria-label="Предыдущий месяц">${CHEVRON_LEFT}</button>
           <h3 class="cal-title">${esc(calendarMonthTitle(year, month))}</h3>
-          <button class="cal-nav-btn" type="button" data-action="calendar-next" aria-label="Следующий месяц">›</button>
+          <button class="cal-nav-btn" type="button" data-action="calendar-next" aria-label="Следующий месяц">${CHEVRON_RIGHT}</button>
         </div>
         <div class="cal-weekdays" aria-hidden="true">${weekdays.map((day) => `<span>${day}</span>`).join("")}</div>
         <div class="cal-grid">${cellsHtml}</div>
         <div class="cal-legend">
           <span><i class="cal-dot is-task" aria-hidden="true"></i> Планы</span>
           <span><i class="cal-dot is-date" aria-hidden="true"></i> Значимые даты</span>
+          <span><i class="cal-dot is-birthday" aria-hidden="true"></i> Дни рождения</span>
           <span><span class="cal-star" aria-hidden="true">${STAR_ICON}</span> Желания</span>
           <span><i class="cal-dot is-private" aria-hidden="true"></i> Личное</span>
         </div>
@@ -1699,7 +1755,7 @@
       <section class="card">
         <p class="eyebrow">Безопасность</p>
         <h3>Пароль на вход</h3>
-        <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
+        <input id="pin-input" class="lock-pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
         <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Это локальная блокировка экрана: она не шифрует данные и не защищает их при входе в ваш Telegram-аккаунт с другого устройства. Без тайм-аутов при ошибке.</p>
         ${storedPin()
           ? `<button class="secondary full card-action" type="button" data-action="clear-pin">Удалить</button>`
@@ -1749,7 +1805,14 @@
     `;
   }
 
-  function renderPair() {
+  // Тело «Нашей пары»: профиль (календарь, настройки, выход) или желания.
+  // Шапка и сегмент-переключатель живут в render() и при смене вида не
+  // перерисовываются — капля остаётся на живом экземпляре.
+  function renderPairView() {
+    return pairView === "wishes" ? renderWishBlock() : renderPairBody();
+  }
+
+  function renderPairBody() {
     const { pair } = appState;
     // Карточка приглашения живёт ровно пока партнёра нет: как только он
     // присоединился (user_b заполнен) — скрываем; если партнёр вышел
@@ -1768,7 +1831,6 @@
       </section>
     ` : "";
     return `
-      ${renderTabHeader("pair")}
       ${inviteBlock}
       ${renderPairCalendar()}
       ${renderPairSettings()}
@@ -1779,6 +1841,527 @@
         <button class="secondary pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
       </div>
     `;
+  }
+
+  // Желания внутри «Нашей пары»: свой переключатель «Мои / Её» и списки.
+  function renderWishBlock() {
+    const hasPartner = Boolean(appState.pair?.user_b);
+    if (wishView === "partner" && !hasPartner) wishView = "mine";
+    const isMine = wishView === "mine";
+    const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
+    let html = "";
+    if (hasPartner) {
+      html += `
+        <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
+          <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine" data-tab="mine">Мои</button>
+          <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>
+        </div>
+      `;
+    }
+    html += `<div id="wish-lists">${renderWishLists()}</div>`;
+    return html;
+  }
+
+  // Сегмент-переключатель вида: те же кнопки, что в доке, но внутри вкладки.
+  // data-action="seg-switch" обрабатывается общим делегированным кликом.
+  function renderSegment(key, value, options) {
+    return `
+      <div class="seg-switch" data-switch="${key}" role="tablist">
+        ${options.map(([id, label]) => `
+          <button class="seg-switch-btn${id === value ? " is-active" : ""}" type="button" role="tab"
+            aria-selected="${id === value}" data-action="seg-switch" data-switch="${key}" data-tab="${id}">${esc(label)}</button>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  // ------------------------------------------------------------------
+  // Планы: вид «Планы» сегмента вкладки «Планы»
+  // ------------------------------------------------------------------
+  function renderTasksBody() {
+    const openTasks = mergedArchive("tasks", sortByTaskDeadline(appState.tasks || []));
+    const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
+    const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
+    let html = "";
+    if (openTasks.length) {
+      html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
+      html += openTasks.map(taskItem).join("");
+    } else if (!doneTasks.length) {
+      html += `
+        <section class="card">
+          <h3>Всё впереди</h3>
+          <p>Запишите идею свидания, поездки или общего дела.</p>
+          <div style="margin-top:12px;">
+            <button class="primary full${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>
+          </div>
+        </section>
+      `;
+    } else {
+      html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
+    }
+    if (doneTasks.length) {
+      html += `<div class="section-head-inline"><h3>Завершённые · ${doneTasks.length}</h3></div>`;
+      html += doneTasks.map(completedTaskItem).join("");
+    }
+    html += archiveMoreHtml("done_tasks", (appState.completedTasks || []).length);
+    html += archiveMoreHtml("tasks", (appState.tasks || []).length);
+    return html;
+  }
+
+  // ------------------------------------------------------------------
+  // Даты: «Наше» и «Дни рождения» — один конвейер, два списка
+  // ------------------------------------------------------------------
+  // День рождения — та же запись dates с kind='birthday' и recurs=1, поэтому
+  // приватность, отсчёт, календарь, сводки и экспорт работают без отдельной
+  // таблицы. Здесь только делим список по виду.
+  function datesOfKind(kind) {
+    return mergedArchive("dates", appState.dates || []).filter((item) =>
+      (item.kind === "birthday" ? "birthday" : "date") === kind
+    );
+  }
+
+  function renderDatesBody() {
+    if (datesView === "birthdays") {
+      const rows = datesOfKind("birthday");
+      const disabledClass = partnerMissing() ? " is-disabled" : "";
+      if (!rows.length) {
+        return `
+          <section class="card">
+            <h3>Чтобы не забыть</h3>
+            <p>Добавьте день рождения близкого человека — напомним за 3 дня и в сам день.</p>
+            <div style="margin-top:12px;">
+              <button class="primary full${disabledClass}" type="button" data-action="add-birthday">Добавить день рождения</button>
+            </div>
+          </section>
+        `;
+      }
+      return `
+        <button class="primary full add-button${disabledClass}" type="button" data-action="add-birthday">Добавить день рождения</button>
+        ${rows.map(birthdayItem).join("")}
+      `;
+    }
+    // Порядок приходит отсортированным из /api/state (sortDateRows):
+    // повторная сортировка с часовыми поясами на каждое сравнение не нужна.
+    return renderListTab(datesOfKind("date"), "add-date", "Добавить дату", "Хочу запомнить", "Добавьте годовщину, день знакомства или важный праздник.", dateItem)
+      + archiveMoreHtml("dates", (appState.dates || []).length);
+  }
+
+  // ------------------------------------------------------------------
+  // Дневник: записи и цитаты
+  // ------------------------------------------------------------------
+  function renderMemoriesBody() {
+    if (memoriesView === "quotes") {
+      const quotes = appState.quotes || [];
+      return renderListTab(quotes, "add-quote", "Добавить цитату", "Ни одной цитаты", "Сохраните фразу, которая зацепила — из книги, фильма или разговора.", quoteItem);
+    }
+    const recentMemories = appState.memories || [];
+    return renderListTab(mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem)
+      + archiveMoreHtml("memories", recentMemories.length);
+  }
+
+  // Автор цитаты — select вместо свободного ввода: по запросу выбор
+  // ограничен двумя пользователями пространства (имена из pair уже учитывают
+  // личное имя партнёра). Пустой вариант оставляет поле необязательным.
+  // Старые цитаты с источником-текстом (книга, фильм) при редактировании
+  // получают свой источник лишним вариантом — иначе select молча затёр бы его.
+  function quoteAuthorOptions(selected) {
+    const pair = appState.pair || {};
+    const names = [pair.name1, pair.name2].filter((name) => name);
+    if (selected && !names.includes(selected)) names.push(selected);
+    return [
+      `<option value="">Не указан</option>`,
+      ...names.map((name) => `<option value="${esc(name)}"${name === selected ? " selected" : ""}>${esc(name)}</option>`)
+    ].join("");
+  }
+
+  function quoteItem(item) {
+    // Кнопки — в одном ряду с автором и датой (item-row): иначе под
+    // коротким блоком меты оставалось много пустого места.
+    return `
+      <article class="card quote-card">
+        <span class="quote-mark" aria-hidden="true">&ldquo;</span>
+        <p class="quote-text">${renderRichText(item.body || "")}</p>
+        ${item.source ? `<p class="quote-source">— ${esc(item.source)}</p>` : ""}
+        <div class="item-row">
+          <div class="item-main">
+            <div class="item-meta">
+              <span>${esc(item.display_name || "Партнёр")}</span>
+              <span>· ${esc(formatTimestamp(item.created_at))}</span>
+            </div>
+          </div>
+          <div class="item-actions">
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="quotes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="quotes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  // Год в дне рождения технический (нужен только валидной дате): показываем
+  // месяц и число, без возраста.
+  function formatBirthday(day) {
+    const [, month, date] = String(day || "").split("-").map(Number);
+    if (!month || !date) return "";
+    const value = new Date(Date.UTC(2000, month - 1, date, 12));
+    return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(value);
+  }
+
+  function nextDaysLabel(item) {
+    const next = nextOccurrence(item);
+    if (!next) return "";
+    const tz = pairTimeZone();
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    const [year, month, day] = parts.split("-").map(Number);
+    const midnight = makeDateInTimeZone(year, month - 1, day, 12, 0, tz);
+    const days = Math.round((next.getTime() - midnight.getTime()) / 86400000);
+    if (days === 0) return "Сегодня";
+    if (days === 1) return "Завтра";
+    return `Через ${days} ${plural(days, "день", "дня", "дней")}`;
+  }
+
+  function birthdayItem(item) {
+    const label = nextDaysLabel(item);
+    return `
+      <article class="card birthday-card">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${renderRichText(item.title)}</h3>
+            <div class="item-meta">
+              ${item.is_private ? `<span class="day-chip is-private">Личное</span>` : ""}
+              <span>${esc(formatBirthday(item.day))}</span>
+              ${label ? `<span class="day-chip">${esc(label)}</span>` : ""}
+            </div>
+          </div>
+          <div class="item-actions">
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="dates" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="dates" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  // ------------------------------------------------------------------
+  // Места: список «куда сходить» и «Рандом»
+  // ------------------------------------------------------------------
+  function placeList() {
+    return appState.places || [];
+  }
+
+  function unvisitedPlaces() {
+    return placeList().filter((place) => Number(place.visited) !== 1);
+  }
+
+  function visitedPlaces() {
+    return placeList().filter((place) => Number(place.visited) === 1);
+  }
+
+  // Hero-карточка рандома — информер: показывается до первого запуска
+  // рандома на этом устройстве и после этого не нужна (флаг в localStorage,
+  // как PIN и тема — серверу он не нужен).
+  const PLACE_RANDOM_KEY = "duoplan.placeRandomUsed";
+  function placeRandomUsed() {
+    try { return localStorage.getItem(PLACE_RANDOM_KEY) === "1"; } catch { return false; }
+  }
+  function markPlaceRandomUsed() {
+    try { localStorage.setItem(PLACE_RANDOM_KEY, "1"); } catch {}
+  }
+
+  // Текущий выпавший выбор. Если место успели удалить или отметить с другого
+  // устройства, карточка тихо снимается — показывать нечего.
+  function currentPlacePick() {
+    if (!placePickId) return null;
+    const place = placeList().find((item) => Number(item.id) === Number(placePickId));
+    if (!place || Number(place.visited) === 1) {
+      placePickId = null;
+      return null;
+    }
+    return place;
+  }
+
+  // Колода, а не Math.random() на каждый тап: перемешанный список id, тянем
+  // по одному, пока не кончится. Иначе на коротком списке из трёх мест
+  // «случайность» возвращала бы одно и то же через раз.
+  function shuffleIds(list) {
+    for (let i = list.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [list[i], list[j]] = [list[j], list[i]];
+    }
+    return list;
+  }
+
+  // Синхронизация с текущим списком: посещённые и удалённые места выпадают из
+  // колоды. Новые места попадут в неё в начале следующего цикла — дописывать
+  // их на ходу нельзя: уже выпавшее место снова считалось бы «новым» и
+  // повторялось через раз (репорт 2026-11-04).
+  function syncPlaceDeck(pool) {
+    const ids = new Set(pool.map((place) => Number(place.id)));
+    placeDeck = placeDeck.filter((id) => ids.has(id));
+    return pool;
+  }
+
+  function drawPlace() {
+    const pool = syncPlaceDeck(unvisitedPlaces());
+    if (!pool.length) {
+      placePickId = null;
+      return null;
+    }
+    if (!placeDeck.length) {
+      placeDeck = shuffleIds(pool.map((place) => Number(place.id)));
+      // Не показывать то же место дважды подряд, если есть из чего выбрать.
+      if (placeDeck.length > 1 && placeDeck[placeDeck.length - 1] === Number(placePickId)) {
+        [placeDeck[placeDeck.length - 1], placeDeck[0]] = [placeDeck[0], placeDeck[placeDeck.length - 1]];
+      }
+    }
+    placePickId = placeDeck.pop();
+    return placePickId;
+  }
+
+  function renderPlacePick(place) {
+    return `
+      <article class="card place-pick" aria-live="polite">
+        <p class="eyebrow">Вам выпало</p>
+        <h2 class="place-pick-title">${esc(place.title)}</h2>
+        ${place.note ? `<p class="place-pick-note">${esc(place.note)}</p>` : ""}
+        <div class="place-actions">
+          <button class="primary full" type="button" data-action="place-visited" data-id="${place.id}">Посетили</button>
+          <button class="secondary full" type="button" data-action="random-place">Следующее</button>
+        </div>
+        ${place.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(place.url)}">Открыть ссылку</button>` : ""}
+      </article>
+    `;
+  }
+
+  function placeItem(place) {
+    const visited = Number(place.visited) === 1;
+    return `
+      <article class="card${visited ? " place-visited" : ""}">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${esc(place.title)}</h3>
+            ${place.note ? `<p class="place-note">${esc(place.note)}</p>` : ""}
+            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(place.visited_at) || "Посещено")}</span></div>` : ""}
+          </div>
+          <div class="item-actions">
+            ${visited
+              ? `<button class="icon-btn" type="button" data-action="place-unvisited" data-id="${place.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
+              : `<button class="icon-btn" type="button" data-action="place-visited" data-id="${place.id}" aria-label="Отметить посещённым">${DONE_ICON}</button>`}
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="places" data-id="${place.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="places" data-id="${place.id}" aria-label="Удалить">${DELETE_ICON}</button>
+          </div>
+        </div>
+        ${place.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(place.url)}">Ссылка</button>` : ""}
+      </article>
+    `;
+  }
+
+  function renderPlaces() {
+    const open = unvisitedPlaces();
+    const visited = visitedPlaces();
+    const total = open.length + visited.length;
+    const pick = currentPlacePick();
+    const disabledClass = partnerMissing() ? " is-disabled" : "";
+    let html = renderTabHeader("places");
+    if (!placeRandomUsed()) {
+      html += `
+        <section class="card place-hero">
+          <p class="eyebrow">Рандом</p>
+          <h3>Не знаете, куда пойти?</h3>
+          <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите.</p>
+          ${open.length ? "" : `<p class="place-count">${total ? "Все места уже посещены — добавьте новое или верните старое." : "Пока нечего выбирать — добавьте первое место."}</p>`}
+        </section>
+      `;
+    }
+    if (pick) html += renderPlacePick(pick);
+    html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-place">Добавить место</button>`;
+    // «Рандом» живёт под «Добавить место» и окрашен нейтрально, как кнопки
+    // карточек «Нашей пары» (.secondary — следует теме, а не акценту).
+    html += `<button class="secondary full place-random" type="button" data-action="random-place">Рандом</button>`;
+    if (open.length) {
+      html += `<div class="section-head-inline"><h3>Хотим посетить · ${open.length}</h3></div>`;
+      html += open.map((place) => placeItem(place)).join("");
+    } else if (!total) {
+      html += `<section class="card"><h3>Пока пусто</h3><p>Добавьте кафе, парк или город, куда давно хотели выбраться.</p></section>`;
+    }
+    if (visited.length) {
+      html += `<div class="section-head-inline"><h3>Посещённые · ${visited.length}</h3></div>`;
+      html += visited.map((place) => placeItem(place)).join("");
+    }
+    return html;
+  }
+
+  // ------------------------------------------------------------------
+  // Кино: избранное к просмотру с данными IMDb (сегмент вкладки «Планы»)
+  // ------------------------------------------------------------------
+  function movieList() {
+    return appState.movies || [];
+  }
+
+  function openMovies() {
+    return movieList().filter((movie) => Number(movie.watched) !== 1);
+  }
+
+  function watchedMovies() {
+    return movieList().filter((movie) => Number(movie.watched) === 1);
+  }
+
+  // Пилюля рейтинга IMDb: серая (0–3.9 и «нет оценки»), красная (4–5.9),
+  // жёлтая (6–7.9), зелёная (8–10). Подпись «IMDb» текстом — вместо звёздочки
+  // (item 35: текстовый ★ на мобильных рендерится эмодзи и выпадает из стиля).
+  function ratingPill(rating) {
+    const r = Number(rating);
+    if (!Number.isFinite(r) || r <= 0) return `<span class="day-chip is-rating-gray">IMDb —</span>`;
+    const cls = r < 4 ? "is-rating-gray" : r < 6 ? "is-rating-red" : r < 8 ? "is-rating-yellow" : "is-rating-green";
+    return `<span class="day-chip ${cls}">IMDb ${r.toFixed(1)}</span>`;
+  }
+
+  // Длительность без пилюли: у фильма — хронометраж, у сериала — сезоны
+  // и общие серии. Чего IMDb не отдал — того не показываем.
+  function formatMovieLength(movie) {
+    if (movie.kind === "series") {
+      const parts = [];
+      const seasons = Number(movie.seasons);
+      if (seasons) parts.push(`${seasons} ${plural(seasons, "сезон", "сезона", "сезонов")}`);
+      const episodes = Number(movie.episodes);
+      if (episodes) parts.push(`${episodes} ${plural(episodes, "серия", "серии", "серий")}`);
+      return parts.join(" · ");
+    }
+    const minutes = Number(movie.runtime);
+    if (!minutes) return "";
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    if (hours && rest) return `${hours} ч ${rest} мин`;
+    if (hours) return `${hours} ч`;
+    return `${rest} мин`;
+  }
+
+  function movieItem(movie) {
+    const watched = Number(movie.watched) === 1;
+    // В IMDb жанры приходят списком — для пилюли берём первый.
+    const genre = movie.genres ? String(movie.genres).split(",")[0].trim() : "";
+    const yearPill = movie.year ? `<span class="day-chip is-muted">${esc(movie.year)}</span>` : "";
+    const length = formatMovieLength(movie);
+    return `
+      <article class="card movie-card${watched ? " movie-watched" : ""}">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${esc(movie.title)}</h3>
+            ${genre || movie.year ? `<div class="item-meta">${genre ? `<span class="day-chip is-muted">${esc(genre)}</span>` : ""}${yearPill}</div>` : ""}
+            <div class="item-meta">
+              ${ratingPill(movie.rating)}
+              ${length ? `<span>${esc(length)}</span>` : ""}
+            </div>
+            ${watched ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(movie.watched_at) || "Просмотрено")}</span></div>` : ""}
+          </div>
+          <div class="item-actions">
+            ${watched
+              ? `<button class="icon-btn" type="button" data-action="movie-unwatched" data-id="${movie.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
+              : `<button class="icon-btn" type="button" data-action="movie-watched" data-id="${movie.id}" aria-label="Просмотрено">${DONE_ICON}</button>`}
+            ${movie.url ? `<button class="icon-btn" type="button" data-action="open-url" data-url="${esc(movie.url)}" aria-label="Ссылка">${LINK_ICON}</button>` : ""}
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="movies" data-id="${movie.id}" aria-label="Удалить">${DELETE_ICON}</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  // Текущий выпавший фильм. Удалённый или просмотренный с другого устройства
+  // тихо снимается с карточки — показывать нечего.
+  function currentMoviePick() {
+    if (!moviePickId) return null;
+    const movie = movieList().find((item) => Number(item.id) === Number(moviePickId));
+    if (!movie || Number(movie.watched) === 1) {
+      moviePickId = null;
+      return null;
+    }
+    return movie;
+  }
+
+  // Колода «Кино» — клон местской: перемешанный список id без повторов,
+  // посещённое/удалённое выпадает, новое попадает в следующем цикле.
+  function syncMovieDeck(pool) {
+    const ids = new Set(pool.map((movie) => Number(movie.id)));
+    movieDeck = movieDeck.filter((id) => ids.has(id));
+    return pool;
+  }
+
+  function drawMovie() {
+    const pool = syncMovieDeck(openMovies());
+    if (!pool.length) {
+      moviePickId = null;
+      return null;
+    }
+    if (!movieDeck.length) {
+      movieDeck = shuffleIds(pool.map((movie) => Number(movie.id)));
+      // Не показывать то же место дважды подряд, если есть из чего выбрать.
+      if (movieDeck.length > 1 && movieDeck[movieDeck.length - 1] === Number(moviePickId)) {
+        [movieDeck[movieDeck.length - 1], movieDeck[0]] = [movieDeck[0], movieDeck[movieDeck.length - 1]];
+      }
+    }
+    moviePickId = movieDeck.pop();
+    return moviePickId;
+  }
+
+  function renderMoviePick(movie) {
+    const length = formatMovieLength(movie);
+    return `
+      <article class="card place-pick movie-pick" aria-live="polite">
+        <p class="eyebrow">Вам выпало</p>
+        <h2 class="place-pick-title">${esc(movie.title)}</h2>
+        <div class="item-meta">
+          ${ratingPill(movie.rating)}
+          ${length ? `<span>${esc(length)}</span>` : ""}
+        </div>
+        <div class="place-actions">
+          <button class="primary full" type="button" data-action="movie-watched" data-id="${movie.id}">Просмотрели</button>
+          <button class="secondary full" type="button" data-action="random-movie">Следующее</button>
+        </div>
+      </article>
+    `;
+  }
+
+  // Hero-карточка кино — информер, как у мест: до первого запуска рандома
+  // на этом устройстве (флаг в localStorage), потом не нужна.
+  const MOVIE_RANDOM_KEY = "duoplan.movieRandomUsed";
+  function movieRandomUsed() {
+    try { return localStorage.getItem(MOVIE_RANDOM_KEY) === "1"; } catch { return false; }
+  }
+  function markMovieRandomUsed() {
+    try { localStorage.setItem(MOVIE_RANDOM_KEY, "1"); } catch {}
+  }
+
+  // Тело вкладки «Планы» для вида «Кино».
+  function renderMoviesBody() {
+    const open = openMovies();
+    const watched = watchedMovies();
+    const disabledClass = partnerMissing() ? " is-disabled" : "";
+    const pick = currentMoviePick();
+    let html = "";
+    if (!movieRandomUsed()) {
+      html += `
+        <section class="card place-hero movie-hero">
+          <p class="eyebrow">Рандом</p>
+          <h3>Не знаете, что посмотреть?</h3>
+          <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров.</p>
+          ${open.length ? "" : `<p class="place-count">${open.length + watched.length ? "Всё из списка уже просмотрено — добавьте новое или верните старое." : "Пока нечего выбирать — добавьте первый фильм."}</p>`}
+        </section>
+      `;
+    }
+    if (pick) html += renderMoviePick(pick);
+    html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>`;
+    html += `<button class="secondary full place-random" type="button" data-action="random-movie">Рандом</button>`;
+    if (open.length) {
+      html += `<div class="section-head-inline"><h3>Хотим посмотреть · ${open.length}</h3></div>`;
+      html += open.map((movie) => movieItem(movie)).join("");
+    } else if (!open.length && !watched.length) {
+      html += `<section class="card"><h3>Пока пусто</h3><p>Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью.</p></section>`;
+    }
+    if (watched.length) {
+      html += `<div class="section-head-inline"><h3>Просмотренные · ${watched.length}</h3></div>`;
+      html += watched.map((movie) => movieItem(movie)).join("");
+    }
+    return html;
   }
 
   // Списки вкладки «Вишлист» отдельно от переключателя: при смене вида
@@ -1832,9 +2415,9 @@
   }
 
   function render() {
-    // Разметка ниже перезаписывается целиком — экземпляр капли снимаем заранее,
-    // иначе он остался бы висеть на window-слушателях.
-    destroyWishSwitch();
+    // Разметка ниже перезаписывается целиком — экземпляры капли снимаем
+    // заранее, иначе они остались бы висеть на window-слушателях.
+    destroySwitches();
     // Акцент мог измениться (настройки/тема) — пере-применяем на каждом рендере.
     applyAccent();
     syncArchiveCachePair();
@@ -1855,123 +2438,143 @@
     if (currentTab === "home") {
       appEl.innerHTML = renderHome();
     } else if (currentTab === "tasks") {
-      const openTasks = mergedArchive("tasks", sortByTaskDeadline(appState.tasks || []));
-      const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
-      const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
-      let html = renderTabHeader("tasks");
-      if (openTasks.length) {
-        html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
-        html += openTasks.map(taskItem).join("");
-      } else if (!doneTasks.length) {
-        html += `
-          <section class="card">
-            <h3>Всё впереди</h3>
-            <p>Запишите идею свидания, поездки или общего дела.</p>
-            <div style="margin-top:12px;">
-              <button class="primary full${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>
-            </div>
-          </section>
-        `;
-      } else {
-        html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
-      }
-      if (doneTasks.length) {
-        html += `<div class="section-head-inline"><h3>Завершённые · ${doneTasks.length}</h3></div>`;
-        html += doneTasks.map(completedTaskItem).join("");
-      }
-      html += archiveMoreHtml("done_tasks", (appState.completedTasks || []).length);
-      html += archiveMoreHtml("tasks", (appState.tasks || []).length);
-      appEl.innerHTML = html;
+      // Шапка одна на оба вида «Планы/Кино»: переключатель меняет только
+      // тело, поэтому капля остаётся живой и доезжает пружиной.
+      appEl.innerHTML = `
+        ${renderTabHeader("tasks")}
+        ${renderSegment("tasks", tasksView, [["plans", "Планы"], ["movies", "Кино"]])}
+        <div id="tab-body">${tasksView === "movies" ? renderMoviesBody() : renderTasksBody()}</div>
+      `;
     } else if (currentTab === "dates") {
-      // Порядок приходит отсортированным из /api/state (sortDateRows):
-      // повторная сортировка с часовыми поясами на каждое сравнение не нужна.
-      const sortedDates = mergedArchive("dates", appState.dates || []);
-      appEl.innerHTML = renderListTab("dates", sortedDates, "add-date", "Добавить дату", "Хочу запомнить", "Добавьте годовщину, день знакомства или важный праздник.", dateItem) + archiveMoreHtml("dates", (appState.dates || []).length);
+      // Шапка одна на оба вида: переключатель меняет только тело, поэтому
+      // капля остаётся живой и доезжает пружиной.
+      appEl.innerHTML = `
+        ${renderTabHeader("dates")}
+        ${renderSegment("dates", datesView, [["dates", "Наше"], ["birthdays", "Дни рождения"]])}
+        <div id="tab-body">${renderDatesBody()}</div>
+      `;
+    } else if (currentTab === "places") {
+      appEl.innerHTML = renderPlaces();
     } else if (currentTab === "memories") {
-      const recentMemories = appState.memories || [];
-      const memoriesHtml = renderListTab("memories", mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem);
-      appEl.innerHTML = memoriesHtml + archiveMoreHtml("memories", recentMemories.length);
-    } else if (currentTab === "wishes") {
-      const hasPartner = Boolean(appState.pair?.user_b);
-      if (wishView === "partner" && !hasPartner) wishView = "mine";
-      const isMine = wishView === "mine";
-      const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
-      let html = renderTabHeader("wishes");
-      if (hasPartner) {
-        html += `
-          <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
-            <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine" data-tab="mine">Мои</button>
-            <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>
-          </div>
-        `;
-      }
-      // Списки живут в отдельном контейнере: переключение «Мои / партнёр»
-      // перерисовывает только их, капля остаётся на живом экземпляре и
-      // доезжает плавно — как в главном баре.
-      html += `<div id="wish-lists">${renderWishLists()}</div>`;
-      appEl.innerHTML = html;
+      appEl.innerHTML = `
+        ${renderTabHeader("memories")}
+        ${renderSegment("memories", memoriesView, [["memories", "Записи"], ["quotes", "Цитаты"]])}
+        <div id="tab-body">${renderMemoriesBody()}</div>
+      `;
     } else if (currentTab === "pair") {
-      appEl.innerHTML = renderPair();
+      appEl.innerHTML = `
+        ${renderTabHeader("pair")}
+        ${renderSegment("pair", pairView, [["profile", "Профиль"], ["wishes", "Желания"]])}
+        <div id="pair-body">${renderPairView()}</div>
+      `;
       // Если активных записей больше лимита /api/state, календарь догружает
       // страницы архива в фоне и перерисовывается сам.
       ensureCalendarArchive();
     }
+    mountTabSwitch();
     mountWishSwitch();
   }
 
   // ------------------------------------------------------------------
-  // Переключатель «Мои / партнёр»: та же капля, что в нижней панели
+  // Сегмент-переключатели внутри вкладок: та же капля, что в нижней панели
   // ------------------------------------------------------------------
-  // Разметка переключателя перерисовывается вместе с вкладкой, поэтому
-  // экземпляр живёт до следующего render(): старый снимаем в начале, новый
-  // создаём в конце. Вид запоминаем, чтобы капля приезжала с прежнего места,
-  // а не появлялась сразу на новом.
-  let wishSwitch = null;
+  // Виды («Профиль / Желания», «Наше / Дни рождения», «Записи / Цитаты»,
+  // «Мои / Её») — те же вкладки, но внутри страницы. Разметка вкладки
+  // перерисовывается целиком, поэтому экземпляры снимаем в начале render() и
+  // создаём в конце; переключение вида меняет только тело (#tab-body или
+  // #pair-body), и капля доезжает пружиной, как в главном баре.
+  let segSwitch = null;      // переключатель вида текущей вкладки
+  let wishSwitch = null;     // внутренний «Мои / Её» в желаниях
   let wishSwitchPrevView = null;
 
-  function destroyWishSwitch() {
-    if (!wishSwitch) return;
-    wishSwitch.destroy();
-    wishSwitch = null;
+  function switchValue(key) {
+    if (key === "pair") return pairView;
+    if (key === "dates") return datesView;
+    if (key === "memories") return memoriesView;
+    if (key === "tasks") return tasksView;
+    return wishView;
   }
 
-  function mountWishSwitch() {
-    const container = document.querySelector(".wish-switch");
-    if (!container || !window.createLiquidNav) {
-      wishSwitchPrevView = null;
-      return;
-    }
-    const items = Array.from(container.querySelectorAll(".wish-switch-btn[data-tab]"));
-    if (items.length < 2) return;
+  function setSwitchValue(key, value) {
+    if (key === "pair") pairView = value;
+    else if (key === "dates") datesView = value;
+    else if (key === "memories") memoriesView = value;
+    else if (key === "tasks") tasksView = value;
+    else wishView = value;
+  }
+
+  function destroySwitches() {
+    if (segSwitch) { segSwitch.destroy(); segSwitch = null; }
+    if (wishSwitch) { wishSwitch.destroy(); wishSwitch = null; }
+  }
+
+  function createSwitch(container, key) {
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (!window.createLiquidNav || items.length < 2) return null;
     const instance = window.createLiquidNav({
       nav: container,
       items,
       // В переключателе обычный цвет — это цвет подписи на стекле.
       idleVar: "--nav-label",
-      onCommit: (view) => {
-        if (view === wishView) return;
-        wishView = view;
-        // Капля уже на месте после перетаскивания: списки меняем точечно,
-        // экземпляр жив — доводим каплю пружиной, как в главном баре.
-        const lists = document.getElementById("wish-lists");
-        if (lists) {
-          lists.innerHTML = renderWishLists();
-          instance.setActive(view, true);
-          items.forEach((btn) => btn.setAttribute("aria-selected", String(btn.dataset.tab === view)));
-        } else {
-          render();
-        }
-      }
+      onCommit: (value) => commitSwitch(key, value, instance)
     });
+    if (!instance) return null;
+    instance.setActive(switchValue(key), false);
+    return instance;
+  }
+
+  function mountTabSwitch() {
+    const container = document.querySelector(".seg-switch[data-switch]");
+    segSwitch = container ? createSwitch(container, container.dataset.switch) : null;
+  }
+
+  function mountWishSwitch() {
+    const container = document.querySelector(".wish-switch");
+    if (!container) {
+      wishSwitchPrevView = null;
+      return;
+    }
+    const instance = createSwitch(container, "wishes");
     if (!instance) return;
+    // Вид запоминаем, чтобы капля приезжала с прежнего места, а не появлялась
+    // сразу на новом.
     if (wishSwitchPrevView && wishSwitchPrevView !== wishView) {
       instance.setActive(wishSwitchPrevView, false);
       instance.setActive(wishView, true);
-    } else {
-      instance.setActive(wishView, false);
     }
     wishSwitch = instance;
     wishSwitchPrevView = wishView;
+  }
+
+  // Переключение вида: меняем только тело вкладки, чтобы капля и сам
+  // переключатель остались живыми.
+  function commitSwitch(key, value, instance) {
+    if (switchValue(key) === value) return;
+    setSwitchValue(key, value);
+    if (key === "wishes") {
+      const lists = document.getElementById("wish-lists");
+      if (!lists) { render(); return; }
+      lists.innerHTML = renderWishLists();
+      instance?.setActive(value, true);
+      document.querySelectorAll(".wish-switch-btn[data-tab]").forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
+    const body = document.getElementById(key === "pair" ? "pair-body" : "tab-body");
+    if (!body) { render(); return; }
+    // Внутренний переключатель желаний живёт в перерисовываемом теле — его
+    // экземпляр снимаем до замены разметки, иначе останутся window-слушатели.
+    if (key === "pair" && wishSwitch) {
+      wishSwitch.destroy();
+      wishSwitch = null;
+    }
+    body.innerHTML = key === "pair" ? renderPairView()
+      : key === "dates" ? renderDatesBody()
+        : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : renderTasksBody())
+          : renderMemoriesBody();
+    instance?.setActive(value, true);
+    if (key === "pair") mountWishSwitch();
   }
 
   // ------------------------------------------------------------------
@@ -2058,6 +2661,84 @@
     if (target.type === "checkbox" && target.dataset.excludes) {
       const other = form?.querySelector(`input[name="${target.dataset.excludes}"]`);
       if (other && target.checked) other.checked = false;
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // Живые подсказки IMDb в диалоге «Добавить фильм»: печатаем название —
+  // приходят совпадения; тап по строке сразу добавляет фильм и закрывает
+  // диалог. Слушатели вешаются один раз на постоянный #dialog-fields,
+  // как input-обработчик выше, поэтому на каждое открытие диалога ничего
+  // не накопится.
+  // ------------------------------------------------------------------
+  let movieSuggestTimer = null;
+  let movieSuggestSeq = 0;
+  const MOVIE_SUGGEST_DEBOUNCE_MS = 350;
+
+  function movieSuggestMeta(movie) {
+    const type = movie.kind === "series" ? "сериал" : "фильм";
+    return movie.year ? `${movie.year} · ${type}` : type;
+  }
+
+  function renderMovieSuggestions(box, results) {
+    if (!results.length) {
+      box.innerHTML = `<p class="movie-suggest-hint">Ничего не нашлось — попробуйте оригинальное название.</p>`;
+      return;
+    }
+    box.innerHTML = results.map((movie) => `
+      <button class="movie-suggest-item" type="button"
+        data-imdb-id="${esc(movie.imdb_id)}" data-title="${esc(movie.title)}" data-year="${esc(movie.year || "")}">
+        <span class="movie-suggest-title">${esc(movie.title)}</span>
+        <span class="movie-suggest-meta">${esc(movieSuggestMeta(movie))}</span>
+      </button>
+    `).join("");
+  }
+
+  dialogFields.addEventListener("input", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement) || target.name !== "q") return;
+    const box = dialogFields.querySelector(".movie-suggest");
+    if (!box) return;
+    clearTimeout(movieSuggestTimer);
+    const query = target.value.trim();
+    if (query.length < 2) {
+      box.innerHTML = `<p class="movie-suggest-hint">Начните печатать — здесь появятся совпадения с IMDb.</p>`;
+      return;
+    }
+    box.innerHTML = `<p class="movie-suggest-hint">Ищем на IMDb…</p>`;
+    const seq = ++movieSuggestSeq;
+    movieSuggestTimer = setTimeout(async () => {
+      try {
+        const data = await request(`/api/movies/search?q=${encodeURIComponent(query)}`);
+        if (seq !== movieSuggestSeq) return;
+        renderMovieSuggestions(box, data?.results || []);
+      } catch (error) {
+        if (seq !== movieSuggestSeq) return;
+        box.innerHTML = `<p class="movie-suggest-hint">${esc(error?.message || "Не удалось получить подсказки")}</p>`;
+      }
+    }, MOVIE_SUGGEST_DEBOUNCE_MS);
+  });
+
+  dialogFields.addEventListener("click", async (e) => {
+    const btn = e.target.closest?.(".movie-suggest-item");
+    if (!btn || !dialogContext || dialogSubmitting) return;
+    dialogSubmitting = true;
+    dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = true; });
+    try {
+      appState = await request("/api/movies", {
+        method: "POST",
+        body: { imdb_id: btn.dataset.imdbId, year: btn.dataset.year || undefined }
+      });
+      dialog.close();
+      render();
+      showToast(`Добавлено: ${btn.dataset.title}`);
+    } catch (error) {
+      // 409 «уже в списке» и прочие ошибки показываем тостом и возвращаем
+      // диалог к жизни — можно продолжить поиск.
+      handleRequestError(error);
+      dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = false; });
+    } finally {
+      dialogSubmitting = false;
     }
   });
   dialogForm.addEventListener("submit", async (e) => {
@@ -2180,7 +2861,9 @@
 
   pairButton?.addEventListener("click", () => {
     if (currentTab === "pair") {
-      goBack();
+      // Повторный тап по пилюле пары не уводит со вкладки: из «Желаний»
+      // возвращает в «Профиль», в «Профиле» ничего не делает.
+      if (pairView === "wishes") commitSwitch("pair", "profile", segSwitch);
       return;
     }
     switchTab("pair");
@@ -2196,12 +2879,19 @@
     const action = btn.dataset.action;
 
     try {
-      if (["add-task", "add-date", "add-memory", "add-wish"].includes(action) && partnerMissing()) {
+      if (["add-task", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-movie", "add-birthday"].includes(action) && partnerMissing()) {
         showToast("Сначала добавьте партнёра");
         return;
       }
       if (action === "close-dialog") {
         dialog.close();
+      } else if (action === "seg-switch") {
+        // Переключение вида внутри вкладки: меняем только тело, капля и сам
+        // переключатель остаются живыми.
+        const key = btn.dataset.switch || "";
+        const value = btn.dataset.tab || "";
+        if (!["pair", "dates", "memories", "tasks"].includes(key)) return;
+        commitSwitch(key, value, segSwitch);
       } else if (action === "calendar-prev") {
         shiftCalendarMonth(-1);
       } else if (action === "calendar-next") {
@@ -2271,6 +2961,48 @@
            <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>`,
           onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), url: fd.get("url") } })
         });
+      } else if (action === "add-quote") {
+        openDialog({
+          title: "Новая цитата",
+          fields: `
+            <label class="field"><span>Цитата</span><textarea name="body" rows="4" maxlength="600" required placeholder="Мы в ответе за тех, кого приручили"></textarea></label>
+            <label class="field"><span>Автор</span><select name="source">${quoteAuthorOptions("")}</select></label>
+          `,
+          onSubmit: (fd) => request("/api/quotes", { method: "POST", body: { body: fd.get("body"), source: fd.get("source") } })
+        });
+      } else if (action === "add-place") {
+        openDialog({
+          title: "Новое место",
+          fields: `
+            <label class="field"><span>Куда сходить?</span><input name="title" maxlength="120" required placeholder="Крыша с видом на город"></label>
+            <label class="field"><span>Заметка (необязательно)</span><textarea name="note" rows="3" maxlength="600" placeholder="Почему хочется именно сюда"></textarea></label>
+            <label class="field"><span>Ссылка на карту (необязательно)</span><input name="url" type="url" placeholder="https://maps.example.com/..."></label>
+          `,
+          onSubmit: (fd) => request("/api/places", { method: "POST", body: { title: fd.get("title"), note: fd.get("note"), url: fd.get("url") } })
+        });
+      } else if (action === "add-movie") {
+        // Диалог поиска: без кнопки сохранения — фильм добавляется тапом
+        // по подсказке (механика в делегированном слушателе dialogFields).
+        openDialog({
+          title: "Добавить фильм",
+          submitLabel: null,
+          cancelLabel: "Закрыть",
+          fields: `
+            <label class="field"><span>Название на IMDb</span><input name="q" type="text" autocomplete="off" placeholder="Интерстеллар, Дюна, Во все тяжкие…"></label>
+            <div class="movie-suggest" aria-live="polite"><p class="movie-suggest-hint">Начните печатать — здесь появятся совпадения с IMDb.</p></div>
+          `,
+          onSubmit: async () => appState
+        });
+      } else if (action === "add-birthday") {
+        openDialog({
+          title: "День рождения",
+          fields: `
+            <label class="field"><span>Кто именинник?</span><input name="title" maxlength="120" required placeholder="Маша"></label>
+            <label class="field"><span>Дата рождения</span><input type="date" name="day" required></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личное — партнёр не увидит и не получит напоминание</span></label>
+          `,
+          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), kind: "birthday", is_private: fd.get("is_private") === "on" } })
+        });
       } else if (action === "daily-done") {
         btn.disabled = true;
         try {
@@ -2295,9 +3027,76 @@
             return appState;
           }
         });
+      } else if (action === "place-visited" || action === "place-unvisited") {
+        const id = btn.dataset.id;
+        const markVisited = action === "place-visited";
+        const place = placeList().find((item) => Number(item.id) === Number(id));
+        btn.disabled = true;
+        try {
+          appState = await request(`/api/places/${id}/${markVisited ? "visited" : "unvisited"}`, { method: "POST", body: {} });
+          if (markVisited) {
+            // Показ и подтверждение — разные действия: место уходит в
+            // «Посещённые» и больше не участвует в рандоме.
+            placePickId = null;
+            showToast(place ? `Отмечено: ${place.title}` : "Отмечено: мы были здесь");
+          } else {
+            showToast(place ? `«${place.title}» снова в списке` : "Место вернулось в список");
+          }
+          render();
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (action === "random-place") {
+        if (!drawPlace()) {
+          showToast("Все места уже посещены");
+          return;
+        }
+        // Первый успешный запуск гасит hero-информер на этом устройстве.
+        markPlaceRandomUsed();
+        render();
+        // Карточка результата вставляется над кнопками — на телефоне она
+        // может оказаться ниже сгиба, поэтому мягко доводим её в поле зрения.
+        document.querySelector(".place-pick")?.scrollIntoView({
+          behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+          block: "nearest"
+        });
+      } else if (action === "movie-watched" || action === "movie-unwatched") {
+        const id = btn.dataset.id;
+        const markWatched = action === "movie-watched";
+        const movie = movieList().find((item) => Number(item.id) === Number(id));
+        btn.disabled = true;
+        try {
+          appState = await request(`/api/movies/${id}/${markWatched ? "watched" : "unwatched"}`, { method: "POST", body: {} });
+          if (markWatched) {
+            // Фильм уходит в «Просмотренные» и больше не участвует в рандоме.
+            moviePickId = null;
+            showToast(movie ? `Просмотрено: ${movie.title}` : "Просмотрено");
+          } else {
+            showToast(movie ? `«${movie.title}» снова в списке` : "Фильм вернулся в список");
+          }
+          render();
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (action === "random-movie") {
+        if (!drawMovie()) {
+          showToast("Всё из списка уже просмотрено");
+          return;
+        }
+        // Первый успешный запуск гасит hero-информер на этом устройстве.
+        markMovieRandomUsed();
+        render();
+        document.querySelector(".movie-pick")?.scrollIntoView({
+          behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+          block: "nearest"
+        });
       } else if (action === "delete-item") {
-        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание" };
-        const name = typeNames[btn.dataset.type] || "запись";
+        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", movies: "фильм" };
+        const item = findItem(btn.dataset.type, btn.dataset.id);
+        // У дня рождения своё название: «Удалить дату?» звучало бы странно.
+        const name = btn.dataset.type === "dates" && item?.kind === "birthday"
+          ? "день рождения"
+          : (typeNames[btn.dataset.type] || "запись");
         // Родное confirm() заменено диалогом приложения — в едином стиле.
         openDialog({
           title: `Удалить ${name}?`,
@@ -2370,6 +3169,20 @@
           // Чекбокс приватности видит только автор: партнёр чужую дату
           // «личной» сделать не может, сервер его флаг всё равно игнорирует.
           const ownsPrivacy = Number(item.created_by) === Number(appState.user.tg_id);
+          // У дня рождения своя форма: ни времени, ни повторов — только имя,
+          // дата и приватность.
+          if (item.kind === "birthday") {
+            openDialog({
+              title: "Редактировать день рождения",
+              fields: `
+                <label class="field"><span>Кто именинник?</span><input name="title" maxlength="120" required value="${esc(item.title || "")}"></label>
+                <label class="field"><span>Дата рождения</span><input type="date" name="day" required value="${esc(item.day || "")}"></label>
+                ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личное — партнёр не увидит и не получит напоминание</span></label>` : ""}
+              `,
+              onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined } })
+            });
+            return;
+          }
           openDialog({
             title: "Редактировать дату",
             fields: `
@@ -2406,6 +3219,25 @@
               patchArchiveItem("wishes", id, body);
               return state;
             }
+          });
+        } else if (type === "quotes") {
+          openDialog({
+            title: "Редактировать цитату",
+            fields: `
+              <label class="field"><span>Цитата</span><textarea name="body" rows="4" maxlength="600" required>${esc(item.body || "")}</textarea></label>
+              <label class="field"><span>Автор</span><select name="source">${quoteAuthorOptions(item.source || "")}</select></label>
+            `,
+            onSubmit: (fd) => request(`/api/quotes/${id}`, { method: "PATCH", body: { body: fd.get("body"), source: fd.get("source") } })
+          });
+        } else if (type === "places") {
+          openDialog({
+            title: "Редактировать место",
+            fields: `
+              <label class="field"><span>Куда сходить?</span><input name="title" maxlength="120" required value="${esc(item.title || "")}"></label>
+              <label class="field"><span>Заметка (необязательно)</span><textarea name="note" rows="3" maxlength="600">${esc(item.note || "")}</textarea></label>
+              <label class="field"><span>Ссылка на карту (необязательно)</span><input name="url" type="url" value="${esc(item.url || "")}" placeholder="https://maps.example.com/..."></label>
+            `,
+            onSubmit: (fd) => request(`/api/places/${id}`, { method: "PATCH", body: { title: fd.get("title"), note: fd.get("note"), url: fd.get("url") } })
           });
         }
       } else if (action === "open-url") {
@@ -2565,7 +3397,7 @@
     if (isTyping()) return;
     // Жест по капле в разгаре: перерисовка пересоздала бы переключатель и
     // оборвала движение. Пропускаем тик — данные придут на следующем.
-    if (liquidNav?.getState?.().dragging || wishSwitch?.getState?.().dragging) return;
+    if (liquidNav?.getState?.().dragging || segSwitch?.getState?.().dragging || wishSwitch?.getState?.().dragging) return;
     refreshInProgress = true;
     try {
       const next = await request("/api/state");

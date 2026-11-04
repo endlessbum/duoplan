@@ -48,6 +48,7 @@ const load = new Function(
     extractBraced("function esc"),
     extractBraced("function formatDay"),
     extractBraced("function formatTimestamp"),
+    extractBraced("function completionMeta"),
     extractBraced("function richInline"),
     extractBraced("function renderRichText"),
     extractBraced("function pairTimeZone"),
@@ -128,6 +129,56 @@ test("кнопка возврата — SVG в стиле приложения, 
   ok(REOPEN_ICON.includes('stroke-width="1.9"'), "SVG возврата не в толщине иконок приложения");
 });
 
+test("единый вид дат завершённых карточек: серая пилюля создания + зелёная завершения", () => {
+  // Единый язык с посещёнными местами: дата создания — is-muted, завершение —
+  // обычная зелёная .day-chip; текстовые строки «Завершён»/«Исполнено» ушли.
+  const task = completedTaskItem({ id: 20, title: "План", created_at: 1730000000, completed_at: 1730100000 });
+  ok(task.includes('class="day-chip is-muted"'), "план: нет серой пилюли даты создания");
+  ok(task.includes('<span class="day-chip">'), "план: нет зелёной пилюли завершения");
+  ok(!task.includes("Завершён"), "план: осталась текстовая метка «Завершён»");
+  const wish = completedWishItem({ id: 21, body: "Желание", owner_id: 1, url: "", created_at: 1730000000, done_at: 1730100000 }, true);
+  ok(wish.includes('class="day-chip is-muted"'), "желание: нет серой пилюли даты создания");
+  ok(wish.includes('<span class="day-chip">'), "желание: нет зелёной пилюли завершения");
+  ok(!wish.includes("Исполнено"), "желание: осталась текстовая метка «Исполнено»");
+  // Без дат пилюль нет вовсе — пустой .item-meta не отрисовывается.
+  const bare = completedTaskItem({ id: 22, title: "План" });
+  ok(!bare.includes("day-chip"), "карточка без дат отрисовывает пустые пилюли");
+});
+
+test("quoteAuthorOptions: только пользователи пространства, старый источник не затирается", () => {
+  const loadQuote = new Function(
+    [
+      'const appState = { pair: { name1: "Аня", name2: "Боря" }, user: { tg_id: 1 } };',
+      extractBraced("function esc"),
+      extractBraced("function quoteAuthorOptions"),
+      "return quoteAuthorOptions;"
+    ].join("\n")
+  );
+  const quoteAuthorOptions = loadQuote();
+  const fresh = quoteAuthorOptions("");
+  ok(fresh.includes("<option"), "select без вариантов");
+  ok(fresh.includes(">Не указан</option>"), "нет пустого варианта");
+  ok(fresh.includes('value="Аня"') && fresh.includes('value="Боря"'), "нет обоих пользователей пространства");
+  ok(!fresh.includes("Антуан"), "свободный источник остался в выборе");
+  ok(quoteAuthorOptions("Аня").includes('value="Аня" selected'), "выбранный автор не подставляется");
+  // Цитата из старых данных с текстовым источником: он остаётся вариантом,
+  // иначе select при сохранении молча затёр бы его пустой строкой.
+  const legacy = quoteAuthorOptions("Антуан де Сент-Экзюпери");
+  ok(legacy.includes('value="Антуан де Сент-Экзюпери"'), "старый источник потерян");
+  // Партнёр ещё не присоединился: второго варианта нет.
+  const loadSolo = new Function(
+    [
+      'const appState = { pair: { name1: "Аня", name2: "" }, user: { tg_id: 1 } };',
+      extractBraced("function esc"),
+      extractBraced("function quoteAuthorOptions"),
+      "return quoteAuthorOptions;"
+    ].join("\n")
+  );
+  const solo = loadSolo()("");
+  ok(solo.includes('value="Аня"'), "свой вариант потерян");
+  ok((solo.match(/value=""/g) || []).length === 1, "пустое имя партнёра попало в select как второй пустой вариант");
+});
+
 test("у чужого исполненного желания кнопок нет, у своего — есть", () => {
   const own = completedWishItem({ id: 11, body: "Моё", owner_id: 1, url: "" }, true);
   ok(own.includes('data-action="reopen-item"'), "у своего нет кнопок");
@@ -140,6 +191,74 @@ test("у чужого исполненного желания кнопок не�
 test("приватная запись помечается чипом «Личное»", () => {
   ok(taskItem({ id: 14, title: "x", day: "2026-11-05", time: "", is_private: 1 }).includes(">Личное</span>"));
   ok(dateItem({ id: 15, title: "x", day: "2026-11-05", time: "", recurs: 0, is_private: 1 }).includes(">Личное</span>"));
+});
+
+test("movieItem: пилюля рейтинга по порогам оценки", () => {
+  const loadMovie = new Function(
+    [
+      extractBraced("function esc"),
+      extractBraced("function plural"),
+      extractBraced("function formatTimestamp"),
+      extractBraced("function ratingPill"),
+      extractBraced("function formatMovieLength"),
+      extractBraced("function movieItem"),
+      "return { ratingPill, formatMovieLength, movieItem };"
+    ].join("\n")
+  );
+  const { ratingPill, formatMovieLength, movieItem } = loadMovie();
+  ok(ratingPill(2.1).includes("is-rating-gray"), "2.1 — серая пилюля");
+  ok(ratingPill(4.2).includes("is-rating-red"), "4.2 — красная пилюля");
+  ok(ratingPill(7.5).includes("is-rating-yellow"), "7.5 — жёлтая пилюля");
+  ok(ratingPill(8.9).includes("is-rating-green"), "8.9 — зелёная пилюля");
+  const none = ratingPill(null);
+  ok(none.includes("is-rating-gray") && none.includes("—"), "без рейтинга — серая пилюля «—»");
+  ok(ratingPill(8).includes("8.0"), "оценка форматируется с одним знаком");
+  const pill = ratingPill(8.9);
+  ok(pill.includes("IMDb"), "в пилюле подпись «IMDb» вместо звёздочки");
+  ok(!pill.includes("★") && !pill.includes("svg"), "ни текстового ★ (U+2605), ни иконки — только текст (п.35)");
+});
+
+test("formatMovieLength: хронометраж фильма и сезоны/серии сериала", () => {
+  const loadMovie = new Function(
+    [
+      extractLine("  const REOPEN_ICON"),
+      extractLine("  const DONE_ICON"),
+      extractLine("  const EDIT_ICON"),
+      extractLine("  const DELETE_ICON"),
+      extractBraced("function esc"),
+      extractBraced("function plural"),
+      extractBraced("function formatTimestamp"),
+      extractBraced("function ratingPill"),
+      extractBraced("function formatMovieLength"),
+      extractBraced("function movieItem"),
+      "return { formatMovieLength, movieItem };"
+    ].join("\n")
+  );
+  const { formatMovieLength, movieItem } = loadMovie();
+  equal(formatMovieLength({ kind: "movie", runtime: 142 }), "2 ч 22 мин");
+  equal(formatMovieLength({ kind: "movie", runtime: 120 }), "2 ч");
+  equal(formatMovieLength({ kind: "movie", runtime: 45 }), "45 мин");
+  equal(formatMovieLength({ kind: "movie", runtime: null }), "");
+  equal(formatMovieLength({ kind: "series", seasons: 2, episodes: 18 }), "2 сезона · 18 серий");
+  equal(formatMovieLength({ kind: "series", seasons: 1, episodes: 8 }), "1 сезон · 8 серий");
+  equal(formatMovieLength({ kind: "series", seasons: null, episodes: null }), "");
+  // Карточка: жанр и год — одинаковые серые пилюли, длительность рядом с
+  // рейтингом без пилюли, кнопки «Просмотрено»/«Удалить», редактирования нет.
+  const card = movieItem({ id: 30, title: "Оппенгеймер", year: 2023, kind: "movie", rating: 8.4, genres: "Драма, История", runtime: 181, watched: 0 });
+  ok(card.includes('class="day-chip is-muted">Драма'), "жанр — в серой пилюле, как год");
+  ok(card.includes('class="day-chip is-muted">2023'), "год — в серой пилюле");
+  ok(card.includes('is-rating-green') && card.includes("8.4"), "рейтинг в зелёной пилюле");
+  ok(card.includes("<span>3 ч 1 мин</span>"), "длительность — без пилюли");
+  ok(card.includes('data-action="movie-watched"'), "нет кнопки «Просмотрено»");
+  ok(card.includes('data-action="delete-item"'), "нет кнопки удаления");
+  ok(!card.includes("edit-item"), "у фильма нет кнопки редактирования");
+  const watched = movieItem({ id: 31, title: "Дюна", year: 2021, kind: "movie", rating: 8, genres: "Фантастика", runtime: 155, watched: 1, watched_at: 1730000000 });
+  ok(watched.includes("movie-watched"), "нет класса просмотренной карточки");
+  ok(watched.includes('data-action="movie-unwatched"'), "нет кнопки возврата");
+  ok(watched.includes(">27.10.2024</span>"), "нет зелёной пилюли с датой просмотра");
+  // Ни жанра, ни года, ни длительности — карточка не падает.
+  const bare = movieItem({ id: 32, title: "Без данных", watched: 0 });
+  ok(bare.includes("is-rating-gray"), "карточка без данных отрисовывается с серой пилюлей");
 });
 
 test("wishItem: у желания партнёра нет кнопок, у своего — полный набор", () => {

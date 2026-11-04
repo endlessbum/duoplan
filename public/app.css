@@ -15,10 +15,15 @@
   --cal-task: #4f8a5f;
   --cal-date: #c25550;
   --cal-wish: #d9a520;
+  --cal-birthday: #8a6bb8;
   --cal-private: #948d86;
-  /* Просрочка: приглушённый янтарно-оранжевый, не тревожный красный. */
-  --overdue-ink: #a35f1f;
-  --overdue-bg: rgba(214, 140, 60, 0.18);
+  /* Отсчёт: янтарный — событие ближе суток, cherry — уже просрочено.
+     Оба цвета фиксированные: красный должен читаться как тревога независимо
+     от акцентной палитры пользователя. */
+  --amber-ink: #a35f1f;
+  --amber-bg: rgba(214, 140, 60, 0.18);
+  --cherry: #a81f2e;
+  --cherry-soft: rgba(168, 31, 46, 0.14);
 
   /* Жидкое стекло Telegram (Light) */
   --glass-bg: rgba(255, 253, 249, 0.68);
@@ -56,9 +61,12 @@
   --cal-task: #86c79a;
   --cal-date: #e88a84;
   --cal-wish: #f0c24e;
+  --cal-birthday: #b39ddb;
   --cal-private: #9d958c;
-  --overdue-ink: #e2a35c;
-  --overdue-bg: rgba(226, 163, 92, 0.16);
+  --amber-ink: #e2a35c;
+  --amber-bg: rgba(226, 163, 92, 0.16);
+  --cherry: #ef6b6b;
+  --cherry-soft: rgba(239, 107, 107, 0.18);
 
   /* Жидкое стекло Telegram (Dark) */
   --glass-bg: rgba(34, 31, 30, 0.66);
@@ -285,7 +293,8 @@ body {
 /* ------------------------------------------------------------------
    Переключатель вишлиста «Мои / Её(Его)» — стекло как у нижнего бара
 ------------------------------------------------------------------- */
-.wish-switch {
+.wish-switch,
+.seg-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
   width: max-content;
@@ -305,7 +314,8 @@ body {
   touch-action: none;
 }
 
-.wish-switch-btn {
+.wish-switch-btn,
+.seg-switch-btn {
   position: relative;
   z-index: 1;
   touch-action: none;
@@ -325,7 +335,8 @@ body {
 
 /* Подсветку даёт капля; фон активной кнопки убран, иначе он просвечивал бы
    сквозь стекло вторым прямоугольником. */
-.wish-switch-btn.is-active {
+.wish-switch-btn.is-active,
+.seg-switch-btn.is-active {
   color: var(--berry);
 }
 
@@ -519,17 +530,25 @@ body {
   margin-top: 12px;
 }
 
+/* Пилюли: единая высота и шрифт на всех (item 62), ширина — по содержимому:
+   inline-flex + nowrap, горизонтальный паддинг задаёт поля. Цвет, радиус
+   и границы — в блоках конкретных пилюль ниже. */
+.day-chip,
 .stat-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: var(--surface);
-  border: 1px solid var(--line);
+  height: 24px;
+  padding: 0 10px;
+  white-space: nowrap;
   font-size: 11.5px;
   font-weight: 500;
-  white-space: nowrap;
+}
+
+.stat-pill {
+  gap: 6px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
 }
 
 .primary, .secondary {
@@ -1002,25 +1021,50 @@ select.settings-select {
 }
 
 .day-chip {
-  display: inline-flex;
-  align-items: center;
-  white-space: nowrap;
-  padding: 2px 8px;
   border-radius: 8px;
   background: var(--sage-soft);
   color: var(--sage);
-  font-weight: 500;
-  font-size: 11.5px;
 }
 
+/* Нейтральная серая пилюля: дата создания в завершённых карточках, год
+   фильма, оценка без рейтинга. */
+.day-chip.is-muted {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+/* Пилюля рейтинга IMDb на карточке фильма: цвет = оценка
+   (серая 0–3.9, красная 4–5.9, жёлтая 6–7.9, зелёная 8–10). */
+.day-chip.is-rating-gray {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.day-chip.is-rating-red {
+  background: var(--cherry-soft);
+  color: var(--cherry);
+}
+
+.day-chip.is-rating-yellow {
+  background: var(--amber-bg);
+  color: var(--amber-ink);
+}
+
+.day-chip.is-rating-green {
+  background: var(--sage-soft);
+  color: var(--sage);
+}
+
+/* Меньше суток: янтарный — «уже скоро», но событие ещё не наступило. */
 .day-chip.is-countdown {
-  background: var(--berry-soft);
-  color: var(--berry);
+  background: var(--amber-bg);
+  color: var(--amber-ink);
 }
 
+/* Просрочено: фиксированный cherry, а не акцент пользователя. */
 .day-chip.is-overdue {
-  background: var(--overdue-bg);
-  color: var(--overdue-ink);
+  background: var(--cherry-soft);
+  color: var(--cherry);
 }
 
 /* Просрочка старше недели: чип приглушается — событие давно позади,
@@ -1226,6 +1270,7 @@ select.settings-select {
 }
 
 .field > input,
+.field > select,
 .field > textarea {
   width: 100%;
   /* Единая высота строк диалога: на iOS -webkit-appearance:none у дата/время
@@ -1248,6 +1293,14 @@ select.settings-select {
    скролла в диалогах создания. */
 .field {
   min-width: 0;
+}
+
+/* Select в диалоге (автор цитаты): нативная стрелка и системная геометрия
+   не нужны, высоту держит min-height 48px из общего правила .field
+   (урок п.52: appearance:none без явной высоты схлопывает контрол). */
+.field > select {
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .field > input[type="date"],
@@ -1334,12 +1387,17 @@ input[type="checkbox"] {
 .lock-pin {
   /* Блочный: центрируется сам (margin auto) и вне flex-обёртки карточки
      «Безопасность», и в грид-форме экрана блокировки. Рамка/высота/фон —
-     из общего правила полей настроек; свои — крупный шрифт и разрядка. */
+     из общего правила полей настроек; свои — крупный шрифт и разрядка.
+     text-indent компенсирует хвостовой пробел letter-spacing (иначе точки
+     уезжают влево от центра), caret-color прячет курсор — тап показывает
+     только клавиатуру, введённые цифры замещают точки плейсхолдера. */
   display: block;
   width: 132px;
   margin: 0 auto;
   text-align: center;
+  text-indent: 0.35em;
   letter-spacing: 0.35em;
+  caret-color: transparent;
   font-size: 20px;
 }
 
@@ -1387,4 +1445,190 @@ input[type="checkbox"] {
   font-size: 13px;
   font-weight: 500;
   z-index: 60;
+}
+
+/* ------------------------------------------------------------------
+   Места, цитаты и дни рождения
+   ------------------------------------------------------------------ */
+
+/* «Рандом» — главное действие вкладки, поэтому карточка стоит выше списка
+   и единственная на экране получает акцентную окантовку. */
+.place-hero,
+.movie-hero {
+  border-color: var(--berry-soft);
+}
+
+/* «Рандом» под «Добавить место»: тот же нижний отступ, что у add-button,
+   чтобы секции списка отступали от второй кнопки так же. */
+.place-random {
+  margin-bottom: 14px;
+}
+
+.place-hero h3 {
+  margin: 6px 0;
+}
+
+.place-hero p {
+  margin: 0 0 14px;
+}
+
+.place-count {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.place-pick {
+  border-color: var(--berry);
+  box-shadow: 0 10px 30px var(--berry-soft);
+}
+
+.place-pick-title {
+  margin: 2px 0 6px;
+  font-size: 21px;
+  line-height: 1.25;
+}
+
+.place-pick-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.place-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* Живые подсказки IMDb в диалоге «Добавить фильм»: вертикальный список
+   строк «Название · год · тип» под полем поиска. */
+.movie-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.movie-suggest-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.movie-suggest-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.movie-suggest-item:disabled {
+  opacity: 0.55;
+}
+
+.movie-suggest-item:active {
+  background: var(--berry-soft);
+}
+
+.movie-suggest-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.movie-suggest-meta {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.place-note {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.place-visited,
+.movie-watched {
+  opacity: 0.72;
+}
+
+/* Строки меты (пилюли, подписи) в любых карточках не склеиваются:
+   вертикальный зазор между строками равен горизонтальному gap внутри
+   строки (6px) — работает для любого числа .item-meta подряд. */
+.item-meta + .item-meta {
+  margin-top: 6px;
+}
+
+/* Цитата: кавычка в левом поле карточки, текст — обычный rich-text. */
+.quote-card {
+  position: relative;
+  padding-left: 38px;
+}
+
+.quote-mark {
+  position: absolute;
+  left: 12px;
+  top: 4px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 38px;
+  line-height: 1;
+  color: var(--berry);
+  opacity: 0.3;
+}
+
+.quote-text {
+  margin: 0 0 8px;
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.quote-source {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Автор с датой — «через пустую строку» ниже цитаты (двойной Enter):
+   блок не сливается с текстом. Кнопки редактирования живут в том же
+   ряду (.item-row) — по центру против строки меты. */
+.quote-card .item-meta {
+  margin-top: 14px;
+}
+
+.quote-card .item-row {
+  align-items: center;
+}
+
+/* Устаревший отдельный ряд кнопок цитаты заменён на .item-row против
+   автора с датой — здесь правило больше не нужно. */
+
+/* День рождения в календаре — своя точка, чтобы не сливаться со значимыми
+   датами: у них красный, у дней рождения фиолетовый. */
+.cal-dot.is-birthday {
+  background: var(--cal-birthday);
 }

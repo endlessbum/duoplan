@@ -41,8 +41,8 @@ const loadRenderPair = new Function(
   [
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function partnerMissing"),
-    extractBraced(appSource, "function renderPair()"),
-    "return renderPair;"
+    extractBraced(appSource, "function renderPairBody()"),
+    "return renderPairBody;"
   ].join("\n")
 );
 

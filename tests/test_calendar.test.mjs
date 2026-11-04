@@ -279,7 +279,7 @@ test("в календарь попадают только свои вручён�
 const cssSource = readFileSync(join(root, "public/app.css"), "utf8");
 
 test("календарь стоит между участниками и настройками", () => {
-  const pair = source.slice(source.indexOf("function renderPair()"), source.indexOf("function render()"));
+  const pair = source.slice(source.indexOf("function renderPairBody()"), source.indexOf("function render()"));
   const calendarAt = pair.indexOf("${renderPairCalendar()}");
   const settingsAt = pair.indexOf("${renderPairSettings()}");
   equal(calendarAt > 0, true, "календарь не вставлен в renderPair");

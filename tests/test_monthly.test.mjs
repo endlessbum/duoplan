@@ -185,7 +185,7 @@ test("POST /api/dates: monthly перекрывает recurs", async () => {
   });
   await api(request, env, new URL("https://duoplan.test/api/dates"));
   const insert = queries.find((q) => q.sql.startsWith("INSERT INTO dates"));
-  equal(insert.args.length, 9);
+  equal(insert.args.length, 10); // + kind (дата или день рождения)
   equal(insert.args[4], 0); // recurs погашен
   equal(insert.args[5], 1); // monthly
 });

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.11.04.7">
+  <link rel="stylesheet" href="/app.css?v=2026.11.04.11">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -84,6 +84,16 @@
         <span class="nav-label">Даты</span>
       </button>
 
+      <button class="nav-item" type="button" data-tab="places">
+        <span class="nav-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/>
+            <circle cx="12" cy="10.4" r="2.4"/>
+          </svg>
+        </span>
+        <span class="nav-label">Места</span>
+      </button>
+
       <button class="nav-item" type="button" data-tab="memories">
         <span class="nav-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
@@ -92,15 +102,6 @@
           </svg>
         </span>
         <span class="nav-label">Дневник</span>
-      </button>
-
-      <button class="nav-item" type="button" data-tab="wishes">
-        <span class="nav-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m12 3.4 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3.4Z"/>
-          </svg>
-        </span>
-        <span class="nav-label">Желания</span>
       </button>
     </nav>
   </div>
@@ -140,8 +141,8 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.11.04.7" defer></script>
-  <script src="/nav.js?v=2026.11.04.7" defer></script>
-  <script src="/app.js?v=2026.11.04.7" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.04.11" defer></script>
+  <script src="/nav.js?v=2026.11.04.11" defer></script>
+  <script src="/app.js?v=2026.11.04.11" defer></script>
 </body>
 </html>

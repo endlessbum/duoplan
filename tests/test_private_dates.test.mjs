@@ -95,11 +95,12 @@ test("POST /api/dates с is_private пишет метку приватности
   });
   await api(request, env, new URL("https://duoplan.test/api/dates"));
   const insert = queries.find(q => q.sql.startsWith("INSERT INTO dates"));
-  deepStrictEqual(insert.args.length, 9);
+  deepStrictEqual(insert.args.length, 10);
   equal(insert.args[4], 1); // recurs
   equal(insert.args[5], 0); // monthly не включён
   equal(insert.args[6], 1); // is_private
   equal(insert.args[7], 777); // created_by — автор
+  equal(insert.args[8], "date"); // kind — обычная дата, не день рождения
 });
 
 test("POST /api/dates без is_private остаётся общей, created_by всё равно пишется", async () => {
