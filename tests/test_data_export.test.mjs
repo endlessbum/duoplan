@@ -54,7 +54,8 @@ test("нормализация строк: флаги к булевым, пус�
     id: 5, title: "Поездка", status: "open", day: "2026-12-01", time: null,
     monthly: 0, yearly: 1, is_private: 1, completed_at: null, created_at: 1790000000, author: "Аня"
   });
-  equal(plan.status, "open");
+  // Выгружаются только незавершённые планы — поля статуса в файле нет.
+  ok(!("status" in plan) && !("completed_at" in plan), "поля статуса быть не должно");
   equal(plan.yearly, true);
   equal(plan.is_private, true);
   equal(plan.day, "2026-12-01");

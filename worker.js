@@ -2117,8 +2117,10 @@ const EXPORT_LABELS = {
 // SQL каждой секции: состав меняет второй фильтр — «все» оставляет видимость
 // интерфейса, «private»/«mine» жёстко привязывают выборку к запросившему.
 const EXPORT_SQL = {
-  plans: (scope) => `SELECT t.id,t.title,t.status,t.day,t.time,t.monthly,t.yearly,t.is_private,t.completed_at,t.created_at,u.display_name AS author FROM tasks t
-    LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=?${scope === "private" ? " AND t.is_private=1 AND t.created_by=?" : " AND (t.is_private=0 OR t.created_by=?)"} ORDER BY COALESCE(t.day,'9999-99-99') ASC, t.id ASC`,
+  // Планы — только незавершённые: завершённые живут в архиве приложения и
+  // в выгрузку не входят (состав «private» дополнительно сужает до личных).
+  plans: (scope) => `SELECT t.id,t.title,t.day,t.time,t.monthly,t.yearly,t.is_private,t.created_at,u.display_name AS author FROM tasks t
+    LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=? AND t.status='open'${scope === "private" ? " AND t.is_private=1 AND t.created_by=?" : " AND (t.is_private=0 OR t.created_by=?)"} ORDER BY COALESCE(t.day,'9999-99-99') ASC, t.id ASC`,
   movies: () => `SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.runtime,m.seasons,m.episodes,m.url,m.created_at,u.display_name AS author FROM movies m
     LEFT JOIN users u ON u.tg_id=m.created_by WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at ASC, m.id ASC`,
   dates: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
@@ -2190,13 +2192,11 @@ const EXPORT_ROW_MAPPERS = {
   plans: (row) => ({
     id: row.id,
     title: row.title,
-    status: row.status === "done" ? "done" : "open",
     day: row.day || null,
     time: row.time || null,
     monthly: Number(row.monthly) === 1,
     yearly: Number(row.yearly) === 1,
     is_private: Number(row.is_private) === 1,
-    completed_at: row.completed_at || null,
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   }),

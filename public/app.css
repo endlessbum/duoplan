@@ -122,6 +122,14 @@ body {
   background-color: var(--bg);
 }
 
+/* Открытый диалог блокирует страницу за собой: скролл фона и резиновая
+   прокрутка не двигают контент (экспорт, длинные формы). Класс на корне:
+   overflow:hidden на body в части WebView не блокирует вьюпорт. Снимается
+   на close-событии диалога. */
+html.dialog-locked {
+  overflow: hidden;
+}
+
 .app-shell {
   max-width: 520px;
   margin: 0 auto;
@@ -639,7 +647,9 @@ body {
   cursor: pointer;
 }
 
-.memory-body {
+/* Специфичность .card .memory-body выше .card p (0,2,0 > 0,1,1): без этого
+   общий правило «p внутри карточки» красит тело записи приглушённым 14px. */
+.card .memory-body {
   margin: 0 0 6px;
   color: var(--ink);
   font-size: 14px;
@@ -649,6 +659,12 @@ body {
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Имя добавившего запись — размером с основной текст записи
+   (.item-meta задаёт 12px, здесь крупнее); дата остаётся подписью. */
+.memory-card .memory-author {
+  font-size: 14px;
 }
 
 .memory-view-title {
@@ -1219,12 +1235,19 @@ select.settings-select {
 
 .sheet-dialog {
   width: min(480px, calc(100% - 24px));
+  /* Длинные диалоги (экспорт: восемь секций) не вылезают за экран —
+     прокручиваются внутри, не двигая страницу за собой. */
+  max-height: 92vh;
+  max-height: min(92dvh, 100% - 24px);
+  overflow-y: auto;
   border: 1px solid var(--glass-border);
   border-radius: 24px;
   padding: 0;
   background: var(--surface);
   color: var(--ink);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  /* Касания по окну не «стекают» в прокрутку страницы за ним. */
+  overscroll-behavior: contain;
 }
 
 .sheet-dialog::backdrop {
@@ -1698,18 +1721,24 @@ input[type="checkbox"] {
   opacity: 0.3;
 }
 
-.quote-text {
+.card .quote-text {
   margin: 0 0 8px;
-  font-size: 15px;
+  /* Цвет и размер текста — ровно как у тела записи дневника: основной текст
+     в записях и цитатах одинаков. Специфичность выше .card p, иначе цитата
+     красилась приглушённым 14px как «любой p в карточке». */
+  color: var(--ink);
+  font-size: 14px;
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.quote-source {
+.card .quote-source {
   margin: 0 0 8px;
+  /* Автор/источник — размером с основной текст записи (14px), но
+     приглушённым цветом; специфичность — против .card p. */
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 /* Автор с датой — «через пустую строку» ниже цитаты (двойной Enter):

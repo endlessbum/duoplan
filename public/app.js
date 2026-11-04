@@ -19,6 +19,8 @@
   dialog.addEventListener("close", () => {
     if (dialog.open) return;
     dialogContext = null;
+    // Страница за диалогом снова скроллится.
+    document.documentElement.classList.remove("dialog-locked");
   });
   const dialogTitle = document.getElementById("dialog-title");
   const dialogFields = document.getElementById("dialog-fields");
@@ -1224,7 +1226,7 @@
             ${item.title ? `<h3 class="item-title">${renderRichText(item.title)}</h3>` : ""}
             <p class="memory-body">${renderRichText(item.body)}</p>
             <div class="item-meta">
-              <span>${esc(item.display_name || "Партнёр")}</span>
+              <span class="memory-author">${esc(item.display_name || "Партнёр")}</span>
               <span>· ${esc(formatDay(item.day))}</span>
             </div>
           </div>
@@ -2072,8 +2074,7 @@
         <div class="item-row">
           <div class="item-main">
             <div class="item-meta">
-              <span>${esc(item.display_name || "Партнёр")}</span>
-              <span>· ${esc(formatTimestamp(item.created_at))}</span>
+              <span>${esc(formatTimestamp(item.created_at))}</span>
             </div>
           </div>
           <div class="item-actions">
@@ -2680,6 +2681,10 @@
     }
     if (dialogCancel) dialogCancel.textContent = config.cancelLabel ?? "Отмена";
     dialog.showModal();
+    // Страница за диалогом блокируется от скролла (касания по фону и
+    // резиновая прокрутка не двигают контент под окном). Класс на корне:
+    // overflow:hidden на body в части WebView не доходил до вьюпорта.
+    document.documentElement.classList.add("dialog-locked");
     // Focus trap для старых WebView, которые не поддерживают нативный <dialog> focus.
     const focusables = () => Array.from(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter(el => !el.disabled && el.offsetParent !== null);
     const first = () => focusables()[0];
@@ -3545,9 +3550,9 @@
         openDialog({
           title: "Что выгрузить?",
           fields: `
-            <label class="field"><span>Планы</span><select name="plans">
+            <label class="field"><span>Планы (незавершённые)</span><select name="plans">
               <option value="">Не выгружать</option>
-              <option value="all" selected>Все (включая завершённые)</option>
+              <option value="all" selected>Все</option>
               <option value="private">Только личные</option>
             </select></label>
             <label class="field"><span>Кино</span><select name="movies">
