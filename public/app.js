@@ -999,7 +999,7 @@
           <p class="eyebrow">DuoPlan заблокирован</p>
           <h2>Введите пароль</h2>
           <form id="lock-form" style="margin-top:14px; display:grid; gap:10px;">
-            <input id="lock-pin" class="lock-pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required>
+            ${pinField("lock-pin")}
             <button class="primary full" type="submit">Войти</button>
           </form>
           <p class="settings-hint" id="lock-error" style="color:var(--berry);" hidden>Неверный пароль. Попробуйте ещё раз.</p>
@@ -1017,7 +1017,7 @@
         const error = document.getElementById("lock-error");
         if (error) error.hidden = false;
         const input = document.getElementById("lock-pin");
-        if (input) { input.value = ""; input.focus(); }
+        if (input) { input.value = ""; renderPinCells(input); input.focus(); }
         return;
       }
       appUnlocked = true;
@@ -1025,7 +1025,10 @@
       // Полная инициализация грузит /api/state и рендерит пространство.
       initApp();
     });
-    setTimeout(() => document.getElementById("lock-pin")?.focus(), 50);
+    setTimeout(() => {
+      mountPinFields();
+      document.getElementById("lock-pin")?.focus();
+    }, 50);
   }
 
   function renderGenderGate() {
@@ -1264,7 +1267,8 @@
       wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])],
       quotes: appState?.quotes || [],
       places: appState?.places || [],
-      movies: appState?.movies || []
+      movies: appState?.movies || [],
+      savings: appState?.savings || []
     };
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
   }
@@ -1292,6 +1296,9 @@
   const CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5"/></svg>';
   const CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
   const LINK_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 14.5a4.24 4.24 0 0 0 6 0l3.2-3.2a4.24 4.24 0 1 0-6-6L11.5 6.5"/><path d="M14.5 9.5a4.24 4.24 0 0 0-6 0l-3.2 3.2a4.24 4.24 0 1 0 6 6l1.2-1.2"/></svg>';
+
+  // Плюс — пополнить копилку.
+  const PLUS_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>';
 
   // Единый вид дат завершённой карточки (как у посещённых мест): дата создания
   // — серая пилюля, дата завершения справа — приглушённо-зелёная (.day-chip).
@@ -1755,7 +1762,7 @@
       <section class="card">
         <p class="eyebrow">Безопасность</p>
         <h3>Пароль на вход</h3>
-        <input id="pin-input" class="lock-pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
+        ${pinField("pin-input")}
         <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Это локальная блокировка экрана: она не шифрует данные и не защищает их при входе в ваш Telegram-аккаунт с другого устройства. Без тайм-аутов при ошибке.</p>
         ${storedPin()
           ? `<button class="secondary full card-action" type="button" data-action="clear-pin">Удалить</button>`
@@ -1771,7 +1778,7 @@
       <section class="card">
         <p class="eyebrow">Резервная копия</p>
         <h3>Экспорт данных</h3>
-        <p class="settings-hint">Бот пришлёт два файла: «Архив» — все записи дневника пары и значимые даты, «Личные даты» — только ваши личные даты (их нет в «Архиве» партнёра). Удобно хранить вне приложения.</p>
+        <p class="settings-hint">Выберите разделы — бот пришлёт один JSON-файл с выбранным. Удобно хранить вне приложения.</p>
         <button class="secondary full card-action" type="button" data-action="export-data">Экспортировать</button>
       </section>
     `;
@@ -1809,7 +1816,9 @@
   // Шапка и сегмент-переключатель живут в render() и при смене вида не
   // перерисовываются — капля остаётся на живом экземпляре.
   function renderPairView() {
-    return pairView === "wishes" ? renderWishBlock() : renderPairBody();
+    if (pairView === "wishes") return renderWishBlock();
+    if (pairView === "savings") return renderSavingsBody();
+    return renderPairBody();
   }
 
   function renderPairBody() {
@@ -1859,6 +1868,84 @@
       `;
     }
     html += `<div id="wish-lists">${renderWishLists()}</div>`;
+    return html;
+  }
+
+  // ------------------------------------------------------------------
+  // Копилки: сегмент «Копилка» на вкладке «Наша пара»
+  // ------------------------------------------------------------------
+  // Личная копилка видна только автору (фильтр на сервере), общая — паре.
+  // collected поддерживается сервером при пополнении той же транзакцией,
+  // что пишет запись в историю — карточка всегда согласована с историей.
+  function savingsList() {
+    return appState.savings || [];
+  }
+
+  // Деньги копилки — целые, форматируем с разрядкой «30 000».
+  function formatAmount(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "0";
+    return new Intl.NumberFormat("ru-RU").format(n);
+  }
+
+  function savingIsFull(saving) {
+    return Number(saving.collected) >= Number(saving.target);
+  }
+
+  function savingItem(saving) {
+    const full = savingIsFull(saving);
+    const percent = Number(saving.target) > 0
+      ? Math.min(100, Math.round((Number(saving.collected) / Number(saving.target)) * 100))
+      : 0;
+    // У полной копилки цель достигнута: «Пополнить» и «Редактировать» не нужны —
+    // остаётся только удаление; история по-прежнему открывается тапом.
+    const actions = full
+      ? `<button class="icon-btn" type="button" data-action="delete-item" data-type="savings" data-id="${saving.id}" aria-label="Удалить">${DELETE_ICON}</button>`
+      : `
+        <button class="icon-btn" type="button" data-action="deposit-saving" data-id="${saving.id}" aria-label="Пополнить">${PLUS_ICON}</button>
+        <button class="icon-btn" type="button" data-action="edit-saving" data-id="${saving.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+        <button class="icon-btn" type="button" data-action="delete-item" data-type="savings" data-id="${saving.id}" aria-label="Удалить">${DELETE_ICON}</button>
+      `;
+    return `
+      <article class="card${full ? " saving-full" : ""}" data-action="open-saving" data-id="${saving.id}"
+        role="button" tabindex="0" aria-label="История пополнений копилки «${esc(saving.title)}»">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${esc(saving.title)}</h3>
+            <div class="item-meta">
+              <span class="day-chip ${saving.kind === "shared" ? "" : "is-muted"}">${saving.kind === "shared" ? "Общая" : "Личная"}</span>
+              <span>${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))}</span>
+            </div>
+            <div class="saving-progress" aria-hidden="true"><i style="width:${percent}%"></i></div>
+          </div>
+          <div class="item-actions">${actions}</div>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderSavingsBody() {
+    const list = savingsList();
+    const open = list.filter((saving) => !savingIsFull(saving));
+    const full = list.filter(savingIsFull);
+    // Наполнение пространства — только после воссоединения партнёров:
+    // гейт как у всех add-кнопок приложения.
+    const disabledClass = partnerMissing() ? " is-disabled" : "";
+    let html = `<button class="primary full add-button${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>`;
+    if (open.length) {
+      html += open.map(savingItem).join("");
+    } else if (!full.length) {
+      html += `
+        <section class="card">
+          <h3>Пока пусто</h3>
+          <p>Создайте копилку на общую мечту или личную цель — пополняйте и следите за прогрессом.</p>
+        </section>
+      `;
+    }
+    if (full.length) {
+      html += `<div class="section-head-inline"><h3>Накопленные · ${full.length}</h3></div>`;
+      html += full.map(savingItem).join("");
+    }
     return html;
   }
 
@@ -2464,7 +2551,7 @@
     } else if (currentTab === "pair") {
       appEl.innerHTML = `
         ${renderTabHeader("pair")}
-        ${renderSegment("pair", pairView, [["profile", "Профиль"], ["wishes", "Желания"]])}
+        ${renderSegment("pair", pairView, [["profile", "Профиль"], ["wishes", "Желания"], ["savings", "Копилка"]])}
         <div id="pair-body">${renderPairView()}</div>
       `;
       // Если активных записей больше лимита /api/state, календарь догружает
@@ -2473,6 +2560,7 @@
     }
     mountTabSwitch();
     mountWishSwitch();
+    mountPinFields();
   }
 
   // ------------------------------------------------------------------
@@ -2671,6 +2759,44 @@
   // как input-обработчик выше, поэтому на каждое открытие диалога ничего
   // не накопится.
   // ------------------------------------------------------------------
+  // PIN-поля: видимая часть — 4 ячейки (точка или цифра), реальный инпут —
+  // невидимый слой поверх (тап открывает цифровую клавиатуру, курсора нет).
+  // Нативный плейсхолдер не используем: на мобильных он мигает вместе с
+  // вводом — ячейки рисуем сами, цифра встаёт на своё место и не исчезает.
+  function pinField(id, extraAttrs = "") {
+    return `
+      <span class="pin-field">
+        <span class="pin-cells" id="${id}-cells" aria-hidden="true">
+          <span class="pin-cell"></span><span class="pin-cell"></span><span class="pin-cell"></span><span class="pin-cell"></span>
+        </span>
+        <input id="${id}" class="pin-real" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" aria-label="ПИН-код, четыре цифры" ${extraAttrs}>
+      </span>
+    `;
+  }
+
+  function renderPinCells(input) {
+    const wrap = document.getElementById(`${input.id}-cells`);
+    if (!wrap) return;
+    const digits = input.value.replace(/\D/g, "").slice(0, 4);
+    if (digits !== input.value) input.value = digits;
+    [...wrap.querySelectorAll(".pin-cell")].forEach((cell, index) => {
+      const digit = digits[index];
+      cell.textContent = digit || "•";
+      cell.classList.toggle("is-filled", Boolean(digit));
+    });
+  }
+
+  document.addEventListener("input", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement) || !target.classList.contains("pin-real")) return;
+    renderPinCells(target);
+  });
+
+  // Первичное наполнение ячеек точками после каждой отрисовки экрана с PIN.
+  function mountPinFields() {
+    document.querySelectorAll("input.pin-real").forEach(renderPinCells);
+  }
+
   let movieSuggestTimer = null;
   let movieSuggestSeq = 0;
   const MOVIE_SUGGEST_DEBOUNCE_MS = 350;
@@ -2744,6 +2870,9 @@
   dialogForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!dialogContext || dialogSubmitting) return;
+    // Диалог-«пикер» (поиск фильмов, история копилки): без кнопки сохранения,
+    // Enter и прочие нативные сабмиты не должны его закрывать.
+    if (dialogContext.readOnly) return;
     // Страховка к нативной проверке: required/type=date должны остановить
     // отправку до запроса к API. reportValidity показывает то же сообщение
     // браузера и работает, даже если атрибут novalidate когда-нибудь вернут.
@@ -2861,9 +2990,9 @@
 
   pairButton?.addEventListener("click", () => {
     if (currentTab === "pair") {
-      // Повторный тап по пилюле пары не уводит со вкладки: из «Желаний»
-      // возвращает в «Профиль», в «Профиле» ничего не делает.
-      if (pairView === "wishes") commitSwitch("pair", "profile", segSwitch);
+      // Повторный тап по пилюле пары не уводит со вкладки: из «Желаний» и
+      // «Копилки» возвращает в «Профиль», в «Профиле» ничего не делает.
+      if (pairView !== "profile") commitSwitch("pair", "profile", segSwitch);
       return;
     }
     switchTab("pair");
@@ -2879,7 +3008,7 @@
     const action = btn.dataset.action;
 
     try {
-      if (["add-task", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-movie", "add-birthday"].includes(action) && partnerMissing()) {
+      if (["add-task", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-movie", "add-saving", "add-birthday"].includes(action) && partnerMissing()) {
         showToast("Сначала добавьте партнёра");
         return;
       }
@@ -2901,13 +3030,16 @@
       } else if (action === "show-in-calendar") {
         // Переход к месяцу события из списка: выбираем день и открываем
         // вкладку календаря. Состояние задаём напрямую — промежуточный
-        // render() текущей вкладки не нужен.
+        // render() текущей вкладки не нужен. Календарь живёт в виде
+        // «Профиль» — вид переключателя возвращаем, иначе попали бы в
+        // «Желания»/«Копилку» с последнего визита.
         const day = btn.dataset.day || "";
         if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
           const [year, month] = day.split("-").map(Number);
           calendarMonth = { year, month };
           calendarSelected = day;
         }
+        pairView = "profile";
         switchTab("pair");
       } else if (action === "go-tab") {
         switchTab(btn.dataset.tab || "home");
@@ -2983,15 +3115,33 @@
       } else if (action === "add-movie") {
         // Диалог поиска: без кнопки сохранения — фильм добавляется тапом
         // по подсказке (механика в делегированном слушателе dialogFields).
+        // readOnly гасит нативный сабмит по Enter — диалог не закрывается.
         openDialog({
           title: "Добавить фильм",
           submitLabel: null,
+          readOnly: true,
           cancelLabel: "Закрыть",
           fields: `
             <label class="field"><span>Название на IMDb</span><input name="q" type="text" autocomplete="off" placeholder="Интерстеллар, Дюна, Во все тяжкие…"></label>
             <div class="movie-suggest" aria-live="polite"><p class="movie-suggest-hint">Начните печатать — здесь появятся совпадения с IMDb.</p></div>
           `,
           onSubmit: async () => appState
+        });
+      } else if (action === "add-saving") {
+        openDialog({
+          title: "Новая копилка",
+          fields: `
+            <label class="field"><span>Название</span><input name="title" maxlength="120" required placeholder="Поездка на море"></label>
+            <label class="field"><span>Сколько нужно накопить</span><input name="target" type="number" inputmode="numeric" min="1" step="1" required placeholder="30000"></label>
+            <label class="field"><span>Тип копилки</span><select name="kind">
+              <option value="shared">Общая — пополняете вдвоём</option>
+              <option value="personal">Личная — видна только вам</option>
+            </select></label>
+          `,
+          onSubmit: (fd) => request("/api/savings", {
+            method: "POST",
+            body: { title: fd.get("title"), target: Number(fd.get("target")), kind: fd.get("kind") }
+          })
         });
       } else if (action === "add-birthday") {
         openDialog({
@@ -3090,8 +3240,70 @@
           behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
           block: "nearest"
         });
+      } else if (action === "deposit-saving") {
+        const saving = savingsList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        if (!saving) return;
+        openDialog({
+          title: `Пополнить «${saving.title}»`,
+          fields: `
+            <label class="field"><span>Сумма пополнения</span><input name="amount" type="number" inputmode="numeric" min="1" step="1" required placeholder="5000"></label>
+            <p class="settings-hint">Сейчас собрано ${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))}.</p>
+          `,
+          submitLabel: "Пополнить",
+          onSubmit: async (fd) => {
+            const state = await request(`/api/savings/${saving.id}/deposit`, {
+              method: "POST",
+              body: { amount: Number(fd.get("amount")) }
+            });
+            showToast(`Пополнено на ${esc(formatAmount(fd.get("amount")))}`);
+            return state;
+          }
+        });
+      } else if (action === "edit-saving") {
+        const saving = savingsList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        if (!saving) return;
+        openDialog({
+          title: "Редактировать копилку",
+          fields: `
+            <label class="field"><span>Название</span><input name="title" maxlength="120" required value="${esc(saving.title)}"></label>
+            <label class="field"><span>Сколько нужно накопить</span><input name="target" type="number" inputmode="numeric" min="1" step="1" required value="${esc(saving.target)}"></label>
+          `,
+          onSubmit: (fd) => request(`/api/savings/${saving.id}`, {
+            method: "PATCH",
+            body: { title: fd.get("title"), target: Number(fd.get("target")) }
+          })
+        });
+      } else if (action === "open-saving") {
+        const saving = savingsList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        if (!saving) return;
+        openDialog({
+          title: saving.title,
+          submitLabel: null,
+          readOnly: true,
+          cancelLabel: "Закрыть",
+          fields: `<div class="saving-history" aria-live="polite"><p class="movie-suggest-hint">Загружаем историю…</p></div>`,
+          onSubmit: async () => appState
+        });
+        try {
+          const data = await request(`/api/savings/${saving.id}/history`);
+          const box = dialogFields.querySelector(".saving-history");
+          if (!box) return;
+          const rows = data.deposits || [];
+          box.innerHTML = rows.length
+            ? rows.map((row) => `
+                <div class="saving-history-row">
+                  <span class="saving-history-name">${esc(row.display_name || "Партнёр")}</span>
+                  <span class="saving-history-amount">+${esc(formatAmount(row.amount))}</span>
+                  <span class="saving-history-date">${esc(formatTimestamp(row.created_at))}</span>
+                </div>
+              `).join("")
+            : `<p class="movie-suggest-hint">Пополнений пока не было — нажмите «Плюс» на карточке.</p>`;
+        } catch (error) {
+          handleRequestError(error);
+          dialog.close();
+        }
       } else if (action === "delete-item") {
-        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", movies: "фильм" };
+        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", movies: "фильм", savings: "копилку" };
         const item = findItem(btn.dataset.type, btn.dataset.id);
         // У дня рождения своё название: «Удалить дату?» звучало бы странно.
         const name = btn.dataset.type === "dates" && item?.kind === "birthday"
@@ -3329,13 +3541,64 @@
         showToast("Пароль убран");
         render();
       } else if (action === "export-data") {
-        btn.disabled = true;
-        try {
-          await request("/api/data/export", { method: "POST", body: {} });
-          showToast("Файлы высланы от бота: «Архив» и «Личные даты»");
-        } finally {
-          btn.disabled = false;
-        }
+        // Диалог выбора разделов: для каждой коллекции — свой состав выгрузки.
+        openDialog({
+          title: "Что выгрузить?",
+          fields: `
+            <label class="field"><span>Планы</span><select name="plans">
+              <option value="">Не выгружать</option>
+              <option value="all" selected>Все (включая завершённые)</option>
+              <option value="private">Только личные</option>
+            </select></label>
+            <label class="field"><span>Кино</span><select name="movies">
+              <option value="" selected>Не выгружать</option>
+              <option value="open">Не просмотренные</option>
+            </select></label>
+            <label class="field"><span>Значимые даты</span><select name="dates">
+              <option value="">Не выгружать</option>
+              <option value="all" selected>Все</option>
+              <option value="private">Только личные</option>
+            </select></label>
+            <label class="field"><span>Дни рождения</span><select name="birthdays">
+              <option value="">Не выгружать</option>
+              <option value="all" selected>Все</option>
+              <option value="private">Только личные</option>
+            </select></label>
+            <label class="field"><span>Места</span><select name="places">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Все</option>
+              <option value="mine">Только добавленные мной</option>
+            </select></label>
+            <label class="field"><span>Записи дневника</span><select name="memories">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Все записи</option>
+              <option value="mine">Только мои</option>
+            </select></label>
+            <label class="field"><span>Цитаты</span><select name="quotes">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Все</option>
+              <option value="mine">Только мои</option>
+            </select></label>
+            <label class="field"><span>Желания (не подаренные)</span><select name="wishes">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Все</option>
+              <option value="mine">Только мои</option>
+            </select></label>
+          `,
+          onSubmit: async (fd) => {
+            const sections = {};
+            for (const key of ["plans", "movies", "dates", "birthdays", "places", "memories", "quotes", "wishes"]) {
+              const value = fd.get(key);
+              if (value) sections[key] = value;
+            }
+            // Ответ экспорта — счётчики, а не состояние приложения:
+            // appState не перезаписываем.
+            const result = await request("/api/data/export", { method: "POST", body: { sections } });
+            const total = Object.values(result?.counts || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+            showToast(`Файл «Экспорт» выслан от бота: ${total} записей`);
+            return appState;
+          }
+        });
       } else if (action === "save-pair-timezone") {
         const value = document.getElementById("pair-timezone")?.value || "";
         if (!value) {

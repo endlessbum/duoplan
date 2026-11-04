@@ -1,14 +1,14 @@
-// Экспорт данных: POST /api/data/export (worker.js) — записи дневника и
-// значимые даты пары одним JSON-файлом через sendDocument. Проверяем
-// форматтер dataExportFile (структура, нормализация флагов, заглушки автора)
-// и сам маршрут: SELECT с фильтром приватных дат партнёра, содержимое
-// multipart-формы, точные счётчики в ответе.
+// Экспорт данных: POST /api/data/export (worker.js) — пользователь выбирает
+// разделы и состав каждого, воркер собирает выбранные коллекции пары в один
+// JSON («Экспорт.json») через sendDocument. Проверяем нормализацию строк
+// (флаги, заглушки автора), валидацию секций, SQL-фильтры приватности,
+// содержимое multipart-формы и счётчики в ответе.
 //
 // Запуск: node --test tests/test_data_export.test.mjs
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal, match, ok } from "node:assert/strict";
+import { deepStrictEqual, equal, match, ok, rejects, throws } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -36,95 +36,87 @@ function extractLine(prefix) {
 }
 
 // ------------------------------------------------------------------
-// 1. Форматтер файла
+// 1. Нормализация строк по секциям
 // ------------------------------------------------------------------
-const load = new Function(
+const loadMappers = new Function(
   [
-    extractLine("const APP_VERSION"),
     extractLine("const clean = "),
     extractBraced("function exportMemoryRow"),
     extractBraced("function exportDateRow"),
-    extractBraced("function dataExportFile"),
-    extractBraced("function privateDatesExportFile"),
-    "return { dataExportFile, privateDatesExportFile, APP_VERSION };"
+    extractBraced("const EXPORT_ROW_MAPPERS = {"),
+    "return { EXPORT_ROW_MAPPERS };"
   ].join("\n")
 );
-const { dataExportFile, privateDatesExportFile, APP_VERSION } = load();
+const { EXPORT_ROW_MAPPERS } = loadMappers();
 
-test("файл содержит структуру приложения, дневник и даты", () => {
-  const file = JSON.parse(dataExportFile(
-    [{ id: 5, title: "Выходные", body: "Тёплый **вечер** у реки", day: "2026-10-31", created_at: 1790000000, author: "Аня" }],
-    [{ id: 7, title: "Годовщина", day: "2027-03-08", time: "12:00", recurs: 1, monthly: 0, is_private: 1, created_at: 1780000000, author: "Игорь" }]
-  ));
-  equal(file.app, "duoplan");
-  equal(file.version, APP_VERSION);
-  ok(!Number.isNaN(Date.parse(file.exported_at)), "exported_at — дата");
-  deepStrictEqual(file.memories, [{
-    id: 5,
-    day: "2026-10-31",
-    author: "Аня",
-    title: "Выходные",
-    body: "Тёплый **вечер** у реки",
-    created_at: 1790000000
-  }]);
-  deepStrictEqual(file.dates, [{
-    id: 7,
-    day: "2027-03-08",
-    time: "12:00",
-    title: "Годовщина",
-    kind: "date",     // вид записи: дата или день рождения
-    recurs: true,     // 1 -> true
-    monthly: false,   // 0 -> false
-    is_private: true, // 1 -> true
-    author: "Игорь",
-    created_at: 1780000000
-  }]);
+test("нормализация строк: флаги к булевым, пустые заголовки — null", () => {
+  const plan = EXPORT_ROW_MAPPERS.plans({
+    id: 5, title: "Поездка", status: "open", day: "2026-12-01", time: null,
+    monthly: 0, yearly: 1, is_private: 1, completed_at: null, created_at: 1790000000, author: "Аня"
+  });
+  equal(plan.status, "open");
+  equal(plan.yearly, true);
+  equal(plan.is_private, true);
+  equal(plan.day, "2026-12-01");
+
+  const memory = EXPORT_ROW_MAPPERS.memories({
+    id: 6, title: "   ", body: "Текст", day: "2026-11-01", created_at: 1, author: null
+  });
+  equal(memory.title, null);
+  equal(memory.author, "Партнёр");
 });
 
-test("файл «Личные даты» содержит только личные даты", () => {
-  const file = JSON.parse(privateDatesExportFile([
-    { id: 11, title: "Сюрприз", day: "2027-05-01", time: null, recurs: 0, monthly: 0, is_private: 1, created_at: 3, author: "Аня" }
-  ]));
-  equal(file.app, "duoplan");
-  equal(file.version, APP_VERSION);
-  ok(!Number.isNaN(Date.parse(file.exported_at)));
-  deepStrictEqual(file.dates, [{
-    id: 11,
-    day: "2027-05-01",
-    time: null,
-    title: "Сюрприз",
-    kind: "date",
-    recurs: false,
-    monthly: false,
-    is_private: true,
-    author: "Аня",
-    created_at: 3
-  }]);
-  ok(!("memories" in file), "в файле личных дат дневника нет");
+test("нормализация фильмов: watched в файл не попадает (там только не просмотренные)", () => {
+  const movie = EXPORT_ROW_MAPPERS.movies({
+    id: 9, imdb_id: "tt15398776", title: "Оппенгеймер", year: 2023, kind: "movie",
+    rating: 8.4, runtime: 181, seasons: null, episodes: null, url: "https://www.imdb.com/title/tt15398776/",
+    created_at: 1790000000, author: "Аня"
+  });
+  equal(movie.kind, "movie");
+  equal(movie.rating, 8.4);
+  ok(!("watched" in movie), "поля watched в файле быть не должно");
 });
 
-test("пустой заголовок — null, пустой автор — «Партнёр», пустые списки допустимы", () => {
-  const file = JSON.parse(dataExportFile(
-    [{ id: 1, title: "   ", body: "Текст", day: "2026-11-01", created_at: 1, author: null }],
-    []
-  ));
-  equal(file.memories[0].title, null);
-  equal(file.memories[0].author, "Партнёр");
-  deepStrictEqual(file.dates, []);
-  equal(Object.keys(file).length, 5);
+test("нормализация дат и дней рождения — одна и та же форма записи", () => {
+  const row = { id: 7, title: "Годовщина", day: "2027-03-08", time: "12:00", recurs: 1, monthly: 0, is_private: 1, kind: "date", created_at: 1780000000, author: "Игорь" };
+  deepStrictEqual(EXPORT_ROW_MAPPERS.dates(row), EXPORT_ROW_MAPPERS.birthdays(row));
 });
 
 test("тело — валидный JSON без потерь юникода", () => {
-  const raw = dataExportFile(
-    [{ id: 2, title: null, body: "🎄 & <кавычки> \"тут\"", day: "2026-11-01", created_at: 2, author: "Аня" }],
-    []
-  );
-  const parsed = JSON.parse(raw);
-  equal(parsed.memories[0].body, "🎄 & <кавычки> \"тут\"");
+  const parsed = JSON.parse(JSON.stringify(EXPORT_ROW_MAPPERS.memories({
+    id: 2, title: null, body: "🎄 & <кавычки> \"тут\"", day: "2026-11-01", created_at: 2, author: "Аня"
+  })));
+  equal(parsed.body, "🎄 & <кавычки> \"тут\"");
 });
 
 // ------------------------------------------------------------------
-// 2. Маршрут: приватность, форма, счётчики
+// 2. Валидация секций
+// ------------------------------------------------------------------
+const loadSections = new Function(
+  [
+    'class HttpError extends Error { constructor(status, message, code) { super(message); this.status = status; this.code = code; } }',
+    extractBraced("const EXPORT_SECTIONS = {"),
+    extractBraced("function exportSections("),
+    "return { exportSections };"
+  ].join("\n")
+);
+const { exportSections } = loadSections();
+
+test("exportSections: составы валидируются по ключу и значению", () => {
+  deepStrictEqual(exportSections({ sections: { plans: "all", movies: "open" } }), { plans: "all", movies: "open" });
+  for (const bad of [
+    undefined,                        // sections нет вовсе
+    {},                               // пустой выбор
+    { plans: "open" },                // недопустимый состав
+    { savings: "all" },               // неизвестный раздел
+    { plans: "all", dates: "open" }   // недопустимый состав второй секции
+  ]) {
+    throws(() => exportSections({ sections: bad }), `должен отбросить ${JSON.stringify(bad)}`);
+  }
+});
+
+// ------------------------------------------------------------------
+// 3. Маршрут: приватность, форма, счётчики
 // ------------------------------------------------------------------
 const buildApi = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
@@ -136,23 +128,40 @@ const buildApi = new Function(
     extractLine("const DEFAULT_TZ"),
     extractLine("const APP_VERSION"),
     extractLine("const ACCENT_KEYS"),
+    extractLine("const STATE_ACTIVE_LIMIT"),
     extractBraced("function validateSchema"),
     extractBraced("function textField"),
     extractBraced("function validDate"),
     extractBraced("function optionalTime"),
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
+    extractBraced("const EXPORT_SECTIONS = {"),
+    extractBraced("const EXPORT_LABELS = {"),
+    extractBraced("const EXPORT_SQL = {"),
+    extractBraced("function exportSectionBinds("),
+    extractBraced("function exportSections("),
     extractBraced("function exportMemoryRow"),
     extractBraced("function exportDateRow"),
-    extractBraced("function dataExportFile"),
-    extractBraced("function privateDatesExportFile"),
+    extractBraced("const EXPORT_ROW_MAPPERS = {"),
     extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
   ].join("\n")
 );
 
-function makeApiEnv({ pair, memories, dates, privateDates, tgId = 777 }) {
+function resultsFor(sql, rows) {
+  if (sql.includes("FROM tasks")) return rows.tasks || [];
+  if (sql.includes("FROM movies")) return rows.movies || [];
+  if (sql.includes("kind='birthday'")) return rows.birthdays || [];
+  if (sql.includes("FROM dates")) return rows.dates || [];
+  if (sql.includes("FROM places")) return rows.places || [];
+  if (sql.includes("FROM memories")) return rows.memories || [];
+  if (sql.includes("FROM quotes")) return rows.quotes || [];
+  if (sql.includes("FROM wishes")) return rows.wishes || [];
+  return [];
+}
+
+function makeApiEnv({ pair, rows = {}, body = {}, tgId = 777 }) {
   const queries = [];
   const db = {
     prepare(sql) {
@@ -161,8 +170,7 @@ function makeApiEnv({ pair, memories, dates, privateDates, tgId = 777 }) {
           queries.push({ sql, args });
           return {
             run: async () => ({ meta: { changes: 1 } }),
-            // Порядок выборок маршрута: дневник, даты архива, личные даты.
-            all: async () => ({ results: queries.length === 1 ? memories : queries.length === 2 ? dates : privateDates }),
+            all: async () => ({ results: resultsFor(sql, rows) }),
             first: async () => null
           };
         }
@@ -178,7 +186,7 @@ function makeApiEnv({ pair, memories, dates, privateDates, tgId = 777 }) {
     new Function(`${extractBraced("function validTimeZone")}; return validTimeZone;`)(),
     async () => ({ tg_id: tgId }),
     async () => {},
-    async () => ({}),
+    async () => body,
     async () => ({ user: { tg_id: tgId }, pair }),
     async () => pair,
     async () => [],
@@ -190,58 +198,64 @@ function makeApiEnv({ pair, memories, dates, privateDates, tgId = 777 }) {
   return { api, env: { DB: db }, queries, request, uploads };
 }
 
-test("маршрут шлёт два файла: «Архив» и «Личные даты», с фильтрами приватности", async () => {
+test("маршрут: фильтры приватности по составам, один файл «Экспорт.json», счётчики", async () => {
   const env0 = makeApiEnv({
     pair: { id: 3, timezone: "Asia/Irkutsk" },
-    memories: [{ id: 5, title: "Выходные", body: "Текст", day: "2026-10-31", created_at: 1, author: "Аня" }],
-    dates: [{ id: 9, title: "Общая", day: "2027-01-15", time: null, recurs: 0, monthly: 0, is_private: 0, created_at: 2, author: "Игорь" }],
-    privateDates: [{ id: 12, title: "Сюрприз", day: "2027-05-01", time: null, recurs: 0, monthly: 0, is_private: 1, created_at: 3, author: "Аня" }]
+    body: { sections: { plans: "all", movies: "open", dates: "private", birthdays: "private", places: "mine", memories: "mine", quotes: "mine", wishes: "mine" } },
+    rows: {
+      tasks: [{ id: 5, title: "Поездка", status: "open", day: "2026-12-01", time: null, monthly: 0, yearly: 0, is_private: 0, completed_at: null, created_at: 1, author: "Аня" }],
+      movies: [{ id: 6, imdb_id: "tt15398776", title: "Оппенгеймер", year: 2023, kind: "movie", rating: 8.4, runtime: 181, seasons: null, episodes: null, url: "https://x", created_at: 2, author: "Аня" }],
+      memories: [{ id: 7, title: "Выходные", body: "Текст", day: "2026-10-31", created_at: 3, author: "Аня" }]
+    }
   });
   const response = await env0.api(env0.request, env0.env, new URL("https://duoplan.test/api/data/export"));
 
-  // Даты архива — с фильтром видимости; личные — строго свои.
-  const datesQuery = env0.queries.find(q => q.sql.includes("FROM dates d") && q.sql.includes("(d.is_private=0 OR d.created_by=?)"));
-  ok(datesQuery, "фильтр видимости дат архива в SQL");
+  // «Все» планы/даты — видимость интерфейса; «личные» — жёстко свои.
+  const plansQuery = env0.queries.find((q) => q.sql.includes("FROM tasks"));
+  ok(plansQuery.sql.includes("(t.is_private=0 OR t.created_by=?)"), "планы «все» — видимость интерфейса");
+  deepStrictEqual(plansQuery.args, [3, 777]);
+  const datesQuery = env0.queries.find((q) => q.sql.includes("FROM dates d") && q.sql.includes("kind='date'"));
+  ok(datesQuery.sql.includes("d.is_private=1 AND d.created_by=?"), "даты «личные» — только свои");
   deepStrictEqual(datesQuery.args, [3, 777]);
-  const privateQuery = env0.queries.find(q => q.sql.includes("d.is_private=1 AND d.created_by=?"));
-  ok(privateQuery, "личные даты — отдельным запросом только свои");
-  deepStrictEqual(privateQuery.args, [3, 777]);
+  const birthdayQuery = env0.queries.find((q) => q.sql.includes("kind='birthday'"));
+  ok(birthdayQuery.sql.includes("kind='birthday'") && birthdayQuery.sql.includes("d.is_private=1 AND d.created_by=?"), "дни рождения с тем же приватным фильтром");
+  // Общие коллекции «мои» — привязка к автору; кино — без второго бинда.
+  const moviesQuery = env0.queries.find((q) => q.sql.includes("FROM movies"));
+  ok(moviesQuery.sql.includes("m.watched=0"), "кино — только не просмотренные");
+  deepStrictEqual(moviesQuery.args, [3], "у кино нет бинда пользователя");
+  for (const [table, filter] of [["places", "p.created_by=?"], ["memories", "m.author_id=?"], ["quotes", "q.author_id=?"], ["wishes", "w.owner_id=?"]]) {
+    const q = env0.queries.find((x) => x.sql.includes(`FROM ${table}`));
+    ok(q && q.sql.includes(filter), `${table}: фильтр «мои»`);
+    deepStrictEqual(q.args, [3, 777], `${table}: бинды пары и пользователя`);
+  }
+  ok(env0.queries.find((q) => q.sql.includes("FROM wishes")).sql.includes("w.done=0"), "желания — только не подаренные");
 
-  // Ровно два sendDocument: «Архив» и «Личные даты».
-  equal(env0.uploads.length, 2);
-  const [archive, personal] = env0.uploads;
-  for (const upload of env0.uploads) equal(upload.method, "sendDocument");
-
-  equal(archive.form.get("chat_id"), "777");
-  match(archive.form.get("caption"), /Архив — записи дневника: 1, значимые даты: 1/);
-  const archiveDoc = archive.form.get("document");
-  equal(archiveDoc.name, "Архив.json");
-  const archivePayload = JSON.parse(await archiveDoc.text());
-  equal(archivePayload.app, "duoplan");
-  equal(archivePayload.memories.length, 1);
-  equal(archivePayload.dates.length, 1);
-  equal(archivePayload.memories[0].title, "Выходные");
-
-  equal(personal.form.get("caption"), "Личные даты — только ваши личные значимые даты: 1.");
-  const personalDoc = personal.form.get("document");
-  equal(personalDoc.name, "Личные даты.json");
-  const personalPayload = JSON.parse(await personalDoc.text());
-  deepStrictEqual(personalPayload.dates.length, 1);
-  equal(personalPayload.dates[0].title, "Сюрприз");
-  ok(!("memories" in personalPayload));
-
-  // Ответ — счётчики для интерфейса.
-  deepStrictEqual(response.data, { ok: true, memories: 1, dates: 1, private_dates: 1 });
+  // Один sendDocument с файлом «Экспорт.json».
+  equal(env0.uploads.length, 1);
+  const upload = env0.uploads[0];
+  equal(upload.method, "sendDocument");
+  equal(upload.form.get("chat_id"), "777");
+  match(upload.form.get("caption"), /Экспорт данных — /);
+  const doc = upload.form.get("document");
+  equal(doc.name, "Экспорт.json");
+  const payload = JSON.parse(await doc.text());
+  equal(payload.app, "duoplan");
+  ok(!Number.isNaN(Date.parse(payload.exported_at)));
+  deepStrictEqual([...Object.keys(payload.sections)].sort(), ["birthdays", "dates", "memories", "movies", "places", "plans", "quotes", "wishes"].sort());
+  equal(payload.sections.plans[0].title, "Поездка");
+  equal(payload.sections.movies[0].title, "Оппенгеймер");
+  equal(payload.sections.memories[0].title, "Выходные");
+  deepStrictEqual(response.data, {
+    ok: true,
+    counts: { plans: 1, movies: 1, dates: 0, birthdays: 0, places: 0, memories: 1, quotes: 0, wishes: 0 }
+  });
 });
 
-test("маршрут без записей всё равно шлёт оба валидных файла", async () => {
-  const env0 = makeApiEnv({ pair: { id: 4, timezone: "Europe/Moscow" }, memories: [], dates: [], privateDates: [] });
-  const response = await env0.api(env0.request, env0.env, new URL("https://duoplan.test/api/data/export"));
-  equal(env0.uploads.length, 2);
-  const archive = JSON.parse(await env0.uploads[0].form.get("document").text());
-  const personal = JSON.parse(await env0.uploads[1].form.get("document").text());
-  deepStrictEqual(archive.memories, []);
-  deepStrictEqual(archive.dates, []);
-  deepStrictEqual(personal.dates, []);
-  deepStrictEqual(response.data, { ok: true, memories: 0, dates: 0, private_dates: 0 });
+test("маршрут без выбранных секций — 400 и без запросов к базе", async () => {
+  const env0 = makeApiEnv({ pair: { id: 4, timezone: "Europe/Moscow" }, body: {} });
+  await rejects(
+    env0.api(env0.request, env0.env, new URL("https://duoplan.test/api/data/export")),
+    (error) => error.status === 400 && error.code === "INVALID_EXPORT"
+  );
+  equal(env0.queries.length, 0, "до SQL-запросов дело не доходит");
 });

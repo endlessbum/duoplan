@@ -77,7 +77,9 @@ function makeNotifier(order = [], { fail = false } = {}) {
   return { calls, openApp };
 }
 
-const CHILD_TABLES = ["tasks", "dates", "memories", "wishes", "daily_rolls"];
+// Полный список child-таблиц: все коллекции пары, а не только до-0016
+// (savings_deposits уходит каскадом за savings).
+const CHILD_TABLES = ["tasks", "dates", "memories", "wishes", "daily_rolls", "quotes", "places", "movies", "savings"];
 
 test("выход последнего держателя удаляет все данные пары", async () => {
   const { db, executed } = makeMockDb();

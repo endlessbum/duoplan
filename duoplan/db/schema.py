@@ -22,6 +22,8 @@ SCHEMA: list[str] = [
     "CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT, pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, author_id INTEGER NOT NULL, body TEXT NOT NULL, source TEXT, created_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT, pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, created_by INTEGER NOT NULL, title TEXT NOT NULL, note TEXT, url TEXT, visited INTEGER NOT NULL DEFAULT 0, visited_at INTEGER, visited_by INTEGER, created_at INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT, pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, created_by INTEGER NOT NULL, imdb_id TEXT NOT NULL, title TEXT NOT NULL, year INTEGER, kind TEXT NOT NULL DEFAULT 'movie', rating REAL, genres TEXT, runtime INTEGER, seasons INTEGER, episodes INTEGER, url TEXT, watched INTEGER NOT NULL DEFAULT 0, watched_at INTEGER, watched_by INTEGER, created_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS savings (id INTEGER PRIMARY KEY AUTOINCREMENT, pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, created_by INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'personal', title TEXT NOT NULL, target INTEGER NOT NULL, collected INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS savings_deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, saving_id INTEGER NOT NULL REFERENCES savings(id) ON DELETE CASCADE, tg_id INTEGER NOT NULL, amount INTEGER NOT NULL, created_at INTEGER NOT NULL)",
     # done_by/done_at removed: relic of pre-daily_completions schema
     "CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, day TEXT NOT NULL, daily_value TEXT NOT NULL, PRIMARY KEY (pair_id, day))",
 "CREATE TABLE IF NOT EXISTS daily_completions (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, tg_id INTEGER NOT NULL, day TEXT NOT NULL, completed_at INTEGER NOT NULL, PRIMARY KEY (pair_id, tg_id, day))",
@@ -34,6 +36,9 @@ SCHEMA: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_quotes_pair ON quotes(pair_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_places_pair ON places(pair_id, visited)",
     "CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id, watched)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_pair_imdb ON movies(pair_id, imdb_id)",
+    "CREATE INDEX IF NOT EXISTS idx_savings_pair ON savings(pair_id, kind)",
+    "CREATE INDEX IF NOT EXISTS idx_savings_deposits_saving ON savings_deposits(saving_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id, role)",
     "CREATE INDEX IF NOT EXISTS idx_users_pair ON users(pair_id)",
