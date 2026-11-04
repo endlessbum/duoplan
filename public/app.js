@@ -301,6 +301,27 @@
     paintAvatar(avatarB, iAmOwner ? partnerKey : myAccent);
   }
 
+  // Фото профиля Telegram вместо буквы: ссылка приходит из state (pair.photo1/
+  // photo2 и user.photo_url) и всегда свежая — ensureUser обновляет её из
+  // initData при каждом открытии приложения. Переключатель «Отображение
+  // аватара» выключает фото для всех аватаров, которые видит владелец
+  // настройки; буква-фолбэк остаётся тем, у кого фото в Telegram нет.
+  function paintAvatarSlot(el, name, fallback, photoUrl) {
+    if (!el) return;
+    const showPhoto = appState?.user?.show_avatar !== false
+      && typeof photoUrl === "string"
+      && /^https:\/\//.test(photoUrl);
+    if (showPhoto) {
+      el.classList.add("has-photo");
+      el.style.backgroundImage = `url("${esc(photoUrl)}")`;
+      el.textContent = "";
+    } else {
+      el.classList.remove("has-photo");
+      el.style.backgroundImage = "";
+      el.textContent = firstLetter(name, fallback);
+    }
+  }
+
   // Фон WebView в Telegram — это то, что видно за краями документа при
   // отскоке прокрутки (и в полноэкранном режиме под шапкой). Ключ "bg_color"
   // отдаёт цвет темы Telegram: в тёмной теме это чёрный, в светлой — белый,
@@ -653,8 +674,12 @@
     const wasHidden = bottomNav.hidden;
     bottomNav.hidden = false;
     if (wasHidden) liquidNav?.refresh();
-    avatarA.textContent = firstLetter(pair.name1, "А");
-    avatarB.textContent = pair.user_b ? firstLetter(pair.name2, "Б") : "+";
+    const role = pair.role === "b" ? "b" : "a";
+    // Моё фото — user.photo_url (если я владелец — слот A, иначе слот B),
+    // фото партнёра — соответствующий photo1/photo2 из state.
+    paintAvatarSlot(avatarA, pair.name1, "А", role === "a" ? appState.user.photo_url : pair.photo1);
+    paintAvatarSlot(avatarB, pair.name2, "Б", pair.user_b ? (role === "b" ? appState.user.photo_url : pair.photo2) : null);
+    if (!pair.user_b) avatarB.textContent = "+";
   }
 
   function switchTab(tab, pushScroll = true) {
@@ -943,18 +968,20 @@
   // Рендер экранов
   // ------------------------------------------------------------------
   // Экран блокировки: спрашивает 4-значный пароль, если он задан в настройках.
+  // Обёртка .lock-wrap центрирует карточку по середине окна (item 58).
   function renderLock() {
     return `
-      <section class="card lock-card">
-        <p class="eyebrow">DuoPlan заблокирован</p>
-        <h2>Введите пароль</h2>
-        <p>Четыре цифры, установленные в настройках приложения.</p>
-        <form id="lock-form" style="margin-top:14px; display:grid; gap:10px;">
-          <input id="lock-pin" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required>
-          <button class="primary full" type="submit">Войти</button>
-        </form>
-        <p class="settings-hint" id="lock-error" style="color:var(--berry);" hidden>Неверный пароль. Попробуйте ещё раз.</p>
-      </section>
+      <div class="lock-wrap">
+        <section class="card lock-card">
+          <p class="eyebrow">DuoPlan заблокирован</p>
+          <h2>Введите пароль</h2>
+          <form id="lock-form" style="margin-top:14px; display:grid; gap:10px;">
+            <input id="lock-pin" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••" required>
+            <button class="primary full" type="submit">Войти</button>
+          </form>
+          <p class="settings-hint" id="lock-error" style="color:var(--berry);" hidden>Неверный пароль. Попробуйте ещё раз.</p>
+        </section>
+      </div>
     `;
   }
 
@@ -1002,7 +1029,7 @@
         <p class="eyebrow">DuoPlan · для двоих</p>
         <h2>Создайте ваше общее пространство</h2>
         <p>Совместные планы, воспоминания и желания — в одном месте.</p>
-        <div style="margin-top:16px; display:grid; gap:10px;">
+        <div style="margin-top:18px; display:grid; gap:10px;">
           <button class="primary full" type="button" data-action="create-pair">Создать пространство</button>
         </div>
       </section>
@@ -1010,7 +1037,7 @@
         <p class="eyebrow">Вход по коду</p>
         <h3>Добавить партнёра по коду</h3>
         <label class="field"><span>Код партнёра (8 символов)</span><input id="join-code-home" maxlength="8" placeholder="Введите 8-значный код"></label>
-        <button class="secondary full" type="button" data-action="join-code" data-input="join-code-home">Войти по коду партнёра</button>
+        <button class="secondary full card-action" type="button" data-action="join-code" data-input="join-code-home">Войти по коду партнёра</button>
       </section>
     `;
   }
@@ -1024,7 +1051,7 @@
           <p class="eyebrow">Ожидание партнёра</p>
           <h2>Пригласите партнёра в пространство</h2>
           <p>Отправьте код партнёру. После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня.</p>
-          <div style="margin-top:12px;">
+          <div style="margin-top:18px;">
             <button class="primary full" type="button" data-action="go-tab" data-tab="pair">Наша пара</button>
           </div>
         </section>
@@ -1035,7 +1062,7 @@
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
         <p>${daily.done ? `Вы отметили ритуал +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP.")}</p>
-        ${daily.done ? "" : `<div style="margin-top:12px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это +10 XP</button></div>`}
+        ${daily.done ? "" : `<div style="margin-top:18px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это +10 XP</button></div>`}
       </section>
     ` : "";
 
@@ -1188,15 +1215,17 @@
       <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
       <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
     ` : "";
+    // Кнопка «Ссылка» — действие карточки: по центру, с симметричным отступом
+    // (как «Сохранить пояс» и прочие card-action), а не прижата к заголовку.
     return `
       <article class="card">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.body)}</h3>
-            ${item.url ? `<button class="secondary small" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
           </div>
           ${actions ? `<div class="item-actions">${actions}</div>` : ""}
         </div>
+        ${item.url ? `<button class="secondary full card-action" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
       </article>
     `;
   }
@@ -1263,12 +1292,12 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
-            ${item.url ? `<button class="secondary small" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
             ${created ? `<div class="item-meta">${esc(created)}</div>` : ""}
             <div class="item-meta" style="justify-content:space-between;"><span>Исполнено</span>${completed ? `<span>${esc(completed)}</span>` : ""}</div>
           </div>
           ${actions ? `<div class="item-actions">${actions}</div>` : ""}
         </div>
+        ${item.url ? `<button class="secondary full card-action" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
       </article>
     `;
   }
@@ -1610,6 +1639,9 @@
   function renderPairSettings() {
     const user = appState.user;
     const accent = user.accent_color || "berry";
+    // Текущее имя партнёра (уже с личной подменой, если она задана) —
+    // подсказка в поле переименования.
+    const partnerName = appState.pair?.role === "b" ? (appState.pair.name1 || "") : (appState.pair?.name2 || "");
     // Свотчи сразу рисуются вариантом текущей темы; при смене темы между
     // рендерами их перекрашивает applyAccent().
     const dark = document.documentElement.dataset.theme === "dark";
@@ -1625,6 +1657,15 @@
           <span class="settings-label">Акцентный цвет</span>
           <div class="swatch-row">${swatches}</div>
         </div>
+        <label class="settings-row">
+          <span class="settings-label"><input type="checkbox" id="show-avatar" ${user.show_avatar !== false ? "checked" : ""}> Отображение аватара</span>
+        </label>
+        <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары. Если у пользователя фото нет, остаётся буква, пока аватар не появится. Без галочки всегда показываются буквы.</p>
+        <div class="settings-row">
+          <span class="settings-label">Имя партнёра</span>
+          <input id="partner-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(partnerName)}" value="${esc(user.partner_custom_name || "")}">
+        </div>
+        <p class="settings-hint">Каким вы видите имя партнёра в приложении — например, если в Telegram у него ник. Видно только вам; партнёр у себя ничего не заметит. Пусто — имя из Telegram.</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" id="digest-enabled" ${user.digest_enabled ? "checked" : ""}> Утренняя сводка</span>
           <input type="time" id="digest-time" lang="ru" value="${esc(user.digest_time || "09:00")}">
@@ -1643,19 +1684,26 @@
             `).join("")}
           </div>
         </div>
-        <div class="settings-row">
-          <span class="settings-label">Пароль на вход</span>
-          <div style="display:flex; gap:8px; align-items:center;">
-            <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
-            ${storedPin()
-              ? `<button class="secondary small" type="button" data-action="clear-pin">Удалить</button>`
-              : `<button class="secondary small" type="button" data-action="save-pin">Задать</button>`}
-          </div>
-        </div>
-        <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Это локальная блокировка экрана: она не шифрует данные и не защищает их при входе в ваш Telegram-аккаунт с другого устройства. Без тайм-аутов при ошибке.</p>
-        <div style="margin-top:14px; display:grid; gap:8px;">
+        <div style="margin-top:18px; display:grid; gap:8px;">
           <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
         </div>
+      </section>
+    `;
+  }
+
+  // Пароль на вход — отдельная карточка (item 56): это локальная блокировка
+  // экрана устройства, а не настройка оформления/уведомлений, и её состояние
+  // живёт в localStorage, а не в POST /api/settings.
+  function renderPairLock() {
+    return `
+      <section class="card">
+        <p class="eyebrow">Безопасность</p>
+        <h3>Пароль на вход</h3>
+        <input id="pin-input" class="lock-pin" type="password" inputmode="numeric" maxlength="4" autocomplete="new-password" placeholder="${storedPin() ? "•••• (задан)" : "••••"}">
+        <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Это локальная блокировка экрана: она не шифрует данные и не защищает их при входе в ваш Telegram-аккаунт с другого устройства. Без тайм-аутов при ошибке.</p>
+        ${storedPin()
+          ? `<button class="secondary full card-action" type="button" data-action="clear-pin">Удалить</button>`
+          : `<button class="secondary full card-action" type="button" data-action="save-pin">Задать</button>`}
       </section>
     `;
   }
@@ -1667,8 +1715,8 @@
       <section class="card">
         <p class="eyebrow">Резервная копия</p>
         <h3>Экспорт данных</h3>
-        <button class="secondary full" type="button" data-action="export-data">Экспортировать</button>
         <p class="settings-hint">Бот пришлёт два файла: «Архив» — все записи дневника пары и значимые даты, «Личные даты» — только ваши личные даты (их нет в «Архиве» партнёра). Удобно хранить вне приложения.</p>
+        <button class="secondary full card-action" type="button" data-action="export-data">Экспортировать</button>
       </section>
     `;
   }
@@ -1694,12 +1742,9 @@
       <section class="card">
         <p class="eyebrow">Общее</p>
         <h3>Часовой пояс</h3>
-        <div class="settings-row">
-          <span class="settings-label">Пояс пары</span>
-          <select id="pair-timezone" class="settings-select">${options}</select>
-        </div>
+        <select id="pair-timezone" class="settings-select">${options}</select>
         <p class="settings-hint">Общий для календаря, ритуала дня и напоминаний у обоих партнёров. При смене пояса пересчитываются «сегодня/завтра» — граница суток сдвинется.</p>
-        <button class="secondary small" type="button" data-action="save-pair-timezone">Сохранить пояс</button>
+        <button class="secondary full card-action" type="button" data-action="save-pair-timezone">Сохранить пояс</button>
       </section>
     `;
   }
@@ -1715,7 +1760,7 @@
         <h3>Отправьте код партнёру</h3>
         <p>После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня. Общие очки пары: ${pair.together_pts || 0} XP</p>
         ${pair.code ? `
-          <div style="margin-top:14px; display:grid; gap:8px;">
+          <div style="margin-top:18px; display:grid; gap:8px;">
             <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
             <button class="secondary full" type="button" data-action="copy-link" data-code="${esc(pair.code)}">Скопировать ссылку для партнёра</button>
           </div>
@@ -1726,8 +1771,9 @@
       ${renderTabHeader("pair")}
       ${inviteBlock}
       ${renderPairCalendar()}
-      ${renderPairTimezone()}
       ${renderPairSettings()}
+      ${renderPairLock()}
+      ${renderPairTimezone()}
       ${renderPairExport()}
       <div class="pair-exit">
         <button class="secondary pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
@@ -2423,7 +2469,10 @@
             digest_enabled: document.getElementById("digest-enabled")?.checked ?? true,
             digest_time: timeOf("digest-time"),
             dates_digest_enabled: document.getElementById("dates-digest-enabled")?.checked ?? true,
-            dates_digest_time: timeOf("dates-digest-time")
+            dates_digest_time: timeOf("dates-digest-time"),
+            show_avatar: document.getElementById("show-avatar")?.checked ?? true,
+            // Пустое поле сбрасывает личное имя партнёра на имя из Telegram.
+            partner_name: document.getElementById("partner-name-input")?.value?.trim() || null
           }
         });
         showToast("Настройки сохранены");

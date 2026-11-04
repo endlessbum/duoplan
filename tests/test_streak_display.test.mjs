@@ -32,11 +32,18 @@ function extractBraced(declaration) {
 const buildPublicUser = new Function(
   "localDay",
   [
+    extractLine("const clean = "),
     extractBraced("function displayStreak"),
     extractBraced("function publicUser"),
     "return { displayStreak, publicUser };"
   ].join("\n")
 );
+
+function extractLine(prefix) {
+  const start = source.indexOf(prefix);
+  if (start === -1) throw new Error(`${prefix} не найдено`);
+  return source.slice(start, source.indexOf("\n", start));
+}
 
 // Сегодня фиксируем, чтобы тест не зависел от даты запуска: localDay возвращает
 // дату в зависимости от пояса — в Auckland уже 30-е, в Москве ещё 29-е.

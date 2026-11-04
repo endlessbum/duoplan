@@ -226,6 +226,15 @@ body {
   color: var(--sage);
 }
 
+/* Фото профиля Telegram: инлайн background из paintAvatar остаётся под фото
+   цветной подложкой, буква внутри не нужна. */
+.mini-avatar.has-photo {
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  color: transparent;
+}
+
 /* ------------------------------------------------------------------
    Внедренная шапка прямо на вкладке над элементами (закрепленная вверху)
 ------------------------------------------------------------------- */
@@ -561,6 +570,28 @@ body {
   width: 100%;
 }
 
+/* Действие карточки (item 55): кнопка по центру карточки, отступ сверху равен
+   нижней подложке карточки (18px) — зазор над кнопкой = зазору под ней.
+   Полноширинные кнопки центрируются шириной: .full перекрывает fit-content.
+   Соседние вертикальные margins схлопываются: после .field (12px снизу)
+   зазор остаётся 18px. */
+.card-action {
+  display: flex;
+  width: fit-content;
+  margin: 18px auto 0;
+}
+
+.card-action.full {
+  width: 100%;
+}
+
+/* В карточках списков (желания) кнопка идёт после .item-row — flex-контейнер
+   не отдаёт наружу margin-bottom заголовка (.card h3, 6px), они остаются
+   внутри строки: 6 + 12 = те же 18px от текста. */
+.item-row + .card-action {
+  margin-top: 12px;
+}
+
 .add-button {
   margin-bottom: 14px;
 }
@@ -864,19 +895,34 @@ body {
   outline-offset: 2px;
 }
 
+/* Окна настроек (item 59): рамка, высота и фон у всех полей в карточках
+   одинаковые — высота взята с поля пароля (46px), меняется только ширина.
+   Данные во всех окнах центрируются (item 60).
+   Время и имя — в строках настроек, пояс — отдельное окно по центру карточки. */
 .settings-row input[type="time"],
-.settings-row select {
+.settings-row input[type="text"],
+select.settings-select,
+.lock-pin {
+  height: 46px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 8px 10px;
+  padding: 0 12px;
   background: var(--bg);
   color: var(--ink);
   font: inherit;
   font-size: 14px;
+  text-align: center;
 }
 
-.settings-row select {
+select.settings-select {
+  display: block;
+  margin: 0 auto;
   max-width: 100%;
+  /* Стрелка нативного селекта не нужна (item 60): текст центрирован, окно
+     как остальные. appearance:none сбивает внутреннюю геометрию поля —
+     высота 46px задана явно (см. урок п.52 про appearance:none). */
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .item-row {
@@ -1268,23 +1314,33 @@ input[type="checkbox"] {
   pointer-events: none;
 }
 
+/* Экран блокировки по центру окна: тот же приём, что у .loading-card —
+   отрицательный нижний отступ гасит padding-bottom main-view (резерв под
+   навигацию), иначе центр уезжает вверх на его высоту. Карточка — обычная
+   по ширине (flex:1), вертикально — строго посередине окна. */
+.lock-wrap {
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin-bottom: calc(-1 * (env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 104px));
+  display: flex;
+  align-items: center;
+}
+
 .lock-card {
-  margin-top: 18vh;
+  flex: 1;
   text-align: center;
 }
 
 .lock-pin {
+  /* Блочный: центрируется сам (margin auto) и вне flex-обёртки карточки
+     «Безопасность», и в грид-форме экрана блокировки. Рамка/высота/фон —
+     из общего правила полей настроек; свои — крупный шрифт и разрядка. */
+  display: block;
   width: 132px;
   margin: 0 auto;
   text-align: center;
   letter-spacing: 0.35em;
   font-size: 20px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: var(--bg);
-  color: var(--ink);
-  font: inherit;
 }
 
 .theme-switch {

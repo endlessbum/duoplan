@@ -24,7 +24,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -47,6 +47,13 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     ),
     4: (
         "ALTER TABLE wishes ADD COLUMN url TEXT",
+    ),
+    # Аватары и личное имя партнёра (migrations/0015_avatar_settings.sql):
+    # ботом не используются, но колонки обязаны совпадать с D1 (test_schema_parity).
+    5: (
+        "ALTER TABLE users ADD COLUMN photo_url TEXT",
+        "ALTER TABLE users ADD COLUMN show_avatar INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE users ADD COLUMN partner_custom_name TEXT",
     ),
 }
 

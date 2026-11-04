@@ -177,6 +177,7 @@ const loadState = new Function(
   `${source.slice(constsStart, constsEnd)}\n` +
   [
     'const DEFAULT_TZ = "Europe/Moscow";',
+    extractLine("const clean = "),
     extractBraced("class HttpError"),
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
@@ -190,6 +191,7 @@ const loadState = new Function(
     extractBraced("function sortDateRows"),
     extractBraced("function displayStreak"),
     extractBraced("function publicUser"),
+    extractBraced("function withPartnerOverride"),
     extractBraced("async function membership"),
     extractBraced("async function state"),
     extractBraced("async function archivePage")

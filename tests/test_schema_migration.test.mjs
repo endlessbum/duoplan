@@ -105,7 +105,8 @@ test("гонка isolate: duplicate column name обрабатывается п�
   deepStrictEqual(log.alters.sort(), [
     "accent_color", "created_by", "dates_digest_enabled", "dates_digest_time", "day",
     "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
-    "is_private", "monthly", "monthly", "time", "time", "timezone", "timezone", "title", "url", "yearly"
+    "is_private", "monthly", "monthly", "partner_custom_name", "photo_url", "show_avatar",
+    "time", "time", "timezone", "timezone", "title", "url", "yearly"
   ]);
 });
 
@@ -114,8 +115,9 @@ test("чистый проход миграции без гонки записы�
   await ensureSchemaOnce({ DB: db });
   deepStrictEqual(log.versionWrite, DB_SCHEMA_VERSION);
   // time + is_private (tasks) + time/is_private/created_by (dates) + done_at (wishes)
-  // + url (wishes) + timezone (users, pairs) + expires_at (rate_limits) + 5 настроек (users)
-  deepStrictEqual(log.alters.length, 21);
+  // + url (wishes) + timezone (users, pairs) + expires_at (rate_limits) + 5 настроек
+  // (users) + photo_url/show_avatar/partner_custom_name (users, item 54)
+  deepStrictEqual(log.alters.length, 24);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

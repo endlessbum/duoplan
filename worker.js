@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.03.1";
+const APP_VERSION = "2026.11.04.7";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.03.1";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.03.1";
+const DB_SCHEMA_VERSION = "2026.11.04.7";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -316,17 +316,23 @@ async function ensureUser(env, tgUser, requestedTimeZone) {
   const timestamp = now();
   const existing = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
   const timezone = validTimeZone(requestedTimeZone) || existing?.timezone || DEFAULT_TZ;
-  await env.DB.prepare(`INSERT INTO users(tg_id,username,display_name,timezone,created_at,updated_at) VALUES(?,?,?,?,?,?)
+  // photo_url из initData: Telegram присылает актуальную ссылку при каждом
+  // открытии приложения — здесь она обновляется при смене аватара и
+  // очищается, когда аватар удалён (тогда клиент показывает букву).
+  const photoUrl = /^https:\/\//.test(String(tgUser.photo_url || "")) ? tgUser.photo_url : null;
+  await env.DB.prepare(`INSERT INTO users(tg_id,username,display_name,timezone,photo_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
     ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,
-      timezone=excluded.timezone,updated_at=excluded.updated_at`)
-    .bind(tgUser.id, tgUser.username || null, displayName(tgUser), timezone, timestamp, timestamp).run();
+      timezone=excluded.timezone,photo_url=excluded.photo_url,updated_at=excluded.updated_at`)
+    .bind(tgUser.id, tgUser.username || null, displayName(tgUser), timezone, photoUrl, timestamp, timestamp).run();
   return env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
 }
 
 async function membership(env, userId) {
   return env.DB.prepare(`SELECT p.*,pm.role,pm.tg_id,
     (SELECT display_name FROM users WHERE tg_id=p.user_a) AS owner_name,
-    (SELECT display_name FROM users WHERE tg_id=p.user_b) AS partner_name
+    (SELECT display_name FROM users WHERE tg_id=p.user_b) AS partner_name,
+    (SELECT photo_url FROM users WHERE tg_id=p.user_a) AS owner_photo,
+    (SELECT photo_url FROM users WHERE tg_id=p.user_b) AS partner_photo
     FROM pair_members pm JOIN pairs p ON p.id=pm.pair_id WHERE pm.tg_id=? LIMIT 1`).bind(userId).first();
 }
 
@@ -493,8 +499,25 @@ function publicUser(user, pairTz = null) {
     digest_enabled: Number(user.digest_enabled ?? 1) === 1,
     dates_digest_time: user.dates_digest_time || null,
     dates_digest_enabled: Number(user.dates_digest_enabled ?? 1) === 1,
-    accent_color: user.accent_color || null
+    accent_color: user.accent_color || null,
+    photo_url: user.photo_url || null,
+    show_avatar: Number(user.show_avatar ?? 1) === 1,
+    // Личное имя партнёра просматривающего — чтобы поле в настройках
+    // показывало текущее значение. Партнёру эта строка не видна: в state()
+    // подмена идёт только в name его пары и подписи авторов.
+    partner_custom_name: clean(user.partner_custom_name) || null
   };
+}
+
+// Личное имя партнёра (users.partner_custom_name) видно только тому, кто его
+// задал: подставляется в имя партнёра просматривающего, не меняя порядок
+// name1 (владелец) / name2 (партнёр) в выдаче.
+function withPartnerOverride(viewer, pair) {
+  const override = clean(viewer.partner_custom_name) || null;
+  const ownerName = pair.owner_name || pair.name1;
+  const partnerName = pair.partner_name || pair.name2;
+  if (pair.role === "a") return { name1: ownerName, name2: override || partnerName };
+  return { name1: override || ownerName, name2: partnerName };
 }
 
 function timeZoneOffsetMs(timeZone, date) {
@@ -754,16 +777,36 @@ async function state(env, userId) {
     partnerId ? env.DB.prepare("SELECT gender, points, accent_color FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
+  // Личное имя партнёра видно только просматривающему — подставляем его и в
+  // подписи авторов воспоминаний/желаний (author_id/owner_id совпадает с
+  // tg_id партнёра в одной паре), чтобы «везде» значило везде.
+  const override = clean(user.partner_custom_name) || null;
+  if (override && partnerId) {
+    for (const row of memories.results || []) {
+      if (Number(row.author_id) === Number(partnerId)) row.display_name = override;
+    }
+    for (const list of [wishes.results || [], completedWishes.results || []]) {
+      for (const row of list) {
+        if (Number(row.owner_id) === Number(partnerId)) row.display_name = override;
+      }
+    }
+  }
+  const names = withPartnerOverride(user, pair);
   return {
     user: publicUser(user, pair.timezone),
     pair: {
       id: pair.id,
       code: pair.user_b ? null : pair.code,
-      name1: pair.owner_name || pair.name1,
-      name2: pair.partner_name || pair.name2,
+      name1: names.name1,
+      name2: names.name2,
       user_b: pair.user_b,
       role: pair.role,
       started_at: pair.started_at,
+      // Ссылки на фото профиля Telegram: photo1 — владелец, photo2 — партнёр.
+      // Свежесть гарантируется ensureUser (обновляется при каждом открытии
+      // приложения тем, кому принадлежит фото).
+      photo1: pair.owner_photo || null,
+      photo2: pair.partner_photo || null,
       // «Вместе XP»: сумма личных XP обоих партнёров за всё время отметок.
       together_pts: (Number(user.points) || 0) + (Number(partnerUser?.points) || 0),
       // Выбранный акцент партнёра для раскраски его аватара на этом устройстве.
@@ -1089,7 +1132,9 @@ async function api(request, env, url) {
       digest_time: { type: "string" },
       digest_enabled: { type: "boolean" },
       dates_digest_time: { type: "string" },
-      dates_digest_enabled: { type: "boolean" }
+      dates_digest_enabled: { type: "boolean" },
+      show_avatar: { type: "boolean" },
+      partner_name: { type: "string" }
     });
     const updates = [];
     const values = [];
@@ -1099,6 +1144,23 @@ async function api(request, env, url) {
       }
       updates.push("accent_color=?");
       values.push(body.accent_color);
+    }
+    // Переключатель «Отображение аватара»: false — буквы вместо фото профиля.
+    if (body?.show_avatar !== undefined) {
+      if (typeof body.show_avatar !== "boolean") throw new HttpError(400, "Флаг включённости должен быть булевым", "INVALID_SETTING");
+      updates.push("show_avatar=?");
+      values.push(body.show_avatar ? 1 : 0);
+    }
+    // Личное имя партнёра: null/пустая строка сбрасывает на имя из Telegram,
+    // не пустая — обрезается и ограничивается 80 кодовыми точками (как
+    // displayName, чтобы эмодзи не растянули бюджет UTF-16).
+    if (body?.partner_name !== undefined) {
+      const name = body.partner_name === null ? "" : clean(body.partner_name);
+      if (Array.from(name).length > 80) {
+        throw new HttpError(400, "Имя партнёра: не больше 80 символов", "INVALID_NAME");
+      }
+      updates.push("partner_custom_name=?");
+      values.push(name ? name : null);
     }
     for (const [timeColumn, enabledColumn, enabledKey] of [
       ["digest_time", "digest_enabled", "digest_enabled"],
@@ -1906,7 +1968,7 @@ async function ensureSchema(env) {
 
   const statements = [
     `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
@@ -1936,6 +1998,9 @@ async function ensureSchema(env) {
     ["users", "dates_digest_time", "TEXT"],
     ["users", "dates_digest_enabled", "INTEGER NOT NULL DEFAULT 1"],
     ["users", "accent_color", "TEXT"],
+    ["users", "photo_url", "TEXT"],
+    ["users", "show_avatar", "INTEGER NOT NULL DEFAULT 1"],
+    ["users", "partner_custom_name", "TEXT"],
     ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
     ["tasks", "day", "TEXT"],
     ["tasks", "time", "TEXT"],

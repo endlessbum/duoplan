@@ -35,6 +35,7 @@ const loadRenderPair = new Function(
   "renderTabHeader",
   "renderPairCalendar",
   "renderPairSettings",
+  "renderPairLock",
   "renderPairTimezone",
   "renderPairExport",
   [
@@ -48,6 +49,7 @@ const loadRenderPair = new Function(
 function render(pair) {
   const renderPair = loadRenderPair(
     { pair },
+    () => "",
     () => "",
     () => "",
     () => "",

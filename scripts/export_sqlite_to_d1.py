@@ -29,7 +29,8 @@ TABLES = {
     "users": (
         "tg_id, username, display_name, role, gender, pair_id, points, streak, "
         "last_activity, best_streak, timezone, digest_time, digest_enabled, "
-        "dates_digest_time, dates_digest_enabled, accent_color, created_at, updated_at"
+        "dates_digest_time, dates_digest_enabled, accent_color, photo_url, "
+        "show_avatar, partner_custom_name, created_at, updated_at"
     ),
     "tasks": (
         "id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, "
@@ -55,6 +56,7 @@ NOT_NULL_FALLBACKS = {
     "created_by": "0",
     "digest_enabled": "1",
     "dates_digest_enabled": "1",
+    "show_avatar": "1",
 }
 
 

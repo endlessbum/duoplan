@@ -35,6 +35,12 @@ function extractBraced(declaration) {
   throw new Error(`незакрытый блок: ${declaration}`);
 }
 
+function extractLine(prefix) {
+  const start = source.indexOf(prefix);
+  if (start === -1) throw new Error(`${prefix} не найдено`);
+  return source.slice(start, source.indexOf("\n", start));
+}
+
 const constsStart = source.indexOf("const STATE_ACTIVE_LIMIT");
 const constsEnd = source.indexOf("const schemaReady");
 if (constsStart === -1 || constsEnd === -1 || constsEnd < constsStart) {
@@ -45,6 +51,7 @@ const load = new Function(
   `${source.slice(constsStart, constsEnd)}\n` +
   [
     'const DEFAULT_TZ = "Europe/Moscow";',
+    extractLine("const clean = "),
     extractBraced("class HttpError"),
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
@@ -60,6 +67,7 @@ const load = new Function(
     extractBraced("function sortDateRows"),
     extractBraced("function displayStreak"),
     extractBraced("function publicUser"),
+    extractBraced("function withPartnerOverride"),
     extractBraced("async function membership"),
     extractBraced("async function state"),
     extractBraced("async function archivePage")
