@@ -23,3 +23,4 @@ _smoke.py
 DuoPlan.zip
 desktop.ini
 .zcode/
+.ruff_cache/
