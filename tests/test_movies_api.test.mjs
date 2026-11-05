@@ -500,7 +500,7 @@ test(
 );
 
 test("маршруты movies зарегистрированы в воркере (itemRoute + коллекция)", () => {
-  ok(workerSource.includes("places|movies|savings)"), "movies нет в itemRoute regex");
+  ok(workerSource.includes("places|trips|goals|goal_items|movies|savings)"), "movies нет в itemRoute regex");
   ok(workerSource.includes('"/api/movies/search"'), "нет маршрута поиска");
   ok(workerSource.includes('"UPDATE movies SET watched=1'), "нет действия watched");
   ok(workerSource.includes('"UPDATE movies SET watched=0'), "нет действия unwatched");

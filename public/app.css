@@ -87,6 +87,20 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Фокус нигде не отображается (репорт 2026-11-05): системное кольцо появлялось
+   после программного focus() (кнопка «Закрыть» диалога) и при возврате фокуса
+   нажатой карточке/кнопке после закрытия окна. Интерфейс ведётся касанием;
+   в полях ввода остаётся каретка. */
+button:focus,
+button:focus-visible,
+select:focus,
+select:focus-visible,
+[tabindex]:focus,
+[tabindex]:focus-visible,
+.sheet-dialog:focus {
+  outline: none;
+}
+
 /* Атрибут hidden обязан перекрывать явный display у .glass-btn/.bottom-nav и т.п. */
 [hidden] {
   display: none !important;
@@ -1440,10 +1454,35 @@ select.settings-select {
   color: var(--muted);
 }
 
-/* Нативные чекбоксы (диалоги создания и карточка настроек) красятся в
-   акцентный цвет приложения, а не в системный синий. */
+/* Чекбокс приложения: круглый элемент в акценте пары. Не отмечен —
+   прозрачный внутри с тонкой акцентной границей; отмечен — заполняется
+   акцентом целиком (без отображения галочки). Касается всех чекбоксов:
+   диалоги («Повторять каждый месяц/год», «Личный/Личное») и настройки. */
 input[type="checkbox"] {
-  accent-color: var(--berry);
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  /* По центру строки текста: дефолтный baseline ставил 18px круг выше
+     центра строки (репорт 2026-11-05). */
+  vertical-align: middle;
+  border: 1.5px solid var(--berry);
+  border-radius: 50%;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+input[type="checkbox"]:checked {
+  border-color: var(--berry);
+  background: var(--berry);
+}
+
+input[type="checkbox"]:active {
+  transform: scale(0.88);
 }
 
 .spinner {
@@ -1678,11 +1717,6 @@ input[type="checkbox"] {
   color: #fff;
 }
 
-.rating-option input:focus-visible + span {
-  outline: 2px solid var(--berry);
-  outline-offset: 2px;
-}
-
 /* Карточка «Кино» открывает окно с описанием — тап по всей площади. */
 .movie-card,
 .movie-pick {
@@ -1815,6 +1849,118 @@ input[type="checkbox"] {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Цели: пункты выполнения внутри карточки. Выполненный пункт тусклее —
+   не бросается в глаза на фоне невыполненных. */
+.goal-items {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.goal-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.goal-item-check {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.goal-item-title {
+  font-size: 14.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.goal-item.is-done {
+  opacity: 0.45;
+}
+
+.goal-item.is-done .goal-item-title {
+  color: var(--muted);
+}
+
+/* Строки пунктов в диалоге создания цели: та же геометрия поля, что и у
+   остальных input диалога, крестик справа удаляет строку. */
+.goal-step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.goal-step-row input {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 11px 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+}
+
+.goal-steps {
+  display: grid;
+  gap: 8px;
+}
+
+/* «+» — круглая кнопка по центру диалога цели: добавляет строку пункта.
+   Grid-центрирование: «+» в блочной раскладке съезжал к базовой линии. */
+.goal-add {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 12px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.goal-add:active {
+  transform: scale(0.92);
+}
+
+/* Активное поле ввода: вместо системной синей рамки — тонкая (1px) граница
+   в акценте пары. --berry перезаписывается applyAccent из настроек, поэтому
+   рамка всегда следует выбранному акценту. У .pin-real рамки нет — сигналом
+   служит рамка ячеек через focus-within. */
+.field > input:focus,
+.field > textarea:focus,
+.field > select:focus,
+.goal-step-row input:focus,
+.settings-row input:focus,
+.lock-pin:focus,
+.pin-real:focus {
+  outline: none;
+  border-color: var(--berry);
+}
+
+.pin-field:focus-within .pin-cells {
+  border-color: var(--berry);
 }
 
 .place-visited,

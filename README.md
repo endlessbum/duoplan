@@ -10,7 +10,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.05.6` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.05.16` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -34,11 +34,11 @@ Telegram Mini App для пар: общие планы, значимые дат�
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 19 миграций схемы D1 |
+| `migrations/` | 26 миграций схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, проверка жеста касаниями, упаковка проекта |
-| `tests/` | pytest (28 файлов) и `node:test` (47 файлов) + браузерные harness'ы |
+| `tests/` | pytest (27 файлов) и `node:test` (54 файла) + браузерные harness'ы |
 
 **Production:** Cloudflare Worker + D1 + static assets. Worker обслуживает только
 `/api/*`, `/health` и `/telegram/*` (`run_worker_first`), остальное отдаёт
@@ -66,9 +66,11 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 
 ## Схема D1
 
-15 таблиц: `pairs`, `users`, `pair_members`, `tasks`, `dates`, `memories`,
-`wishes`, `quotes`, `places`, `daily_rolls`, `daily_completions`, `rate_limits`,
-`telegram_updates`, `notification_log`, `app_meta`.
+22 таблицы: `pairs`, `users`, `pair_members`, `tasks`, `dates`, `memories`,
+`wishes`, `quotes`, `places`, `trips`, `goals`, `goal_items`, `movies`,
+`movie_ratings`, `savings`, `savings_deposits`, `daily_rolls`,
+`daily_completions`, `rate_limits`, `telegram_updates`, `notification_log`,
+`app_meta`.
 
 | Миграция | Что добавляет |
 |---|---|
@@ -88,6 +90,16 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0014_notification_log` | Журнал уведомлений и индекс `telegram_updates(received_at)` |
 | `0015_avatar_settings` | `users.photo_url`, `show_avatar`, `partner_custom_name` |
 | `0016_quotes_places_birthdays` | `quotes`, `places`, `dates.kind` (`date` / `birthday`) |
+| `0017_movies` | `movies` — избранное кино с данными IMDb |
+| `0018_savings` | `savings` + `savings_deposits` — копилки и пополнения |
+| `0019_movies_unique` | Уникальный индекс `movies(pair_id, imdb_id)` против дублей |
+| `0020_movie_rating_source` | `movies.rating_source` (IMDb / TMDB) |
+| `0021_movie_rating_checked_at` | `movies.rating_checked_at` — время снятия рейтинга |
+| `0022_movie_ratings` | `movie_ratings` — голоса RAofP обоих партнёров |
+| `0023_movie_details` | `movies.details` — снимок описания (TMDB ru / OMDb) |
+| `0024_user_custom_name` | `users.custom_name` — личное имя пользователя |
+| `0025_trips` | `trips` — желанные путешествия (сегмент «Путешествие») |
+| `0026_goals` | `goals` + `goal_items` — цели с пунктами выполнения |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -385,7 +397,7 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 остальным приложением — в `public/app.js` (`updateDroplet` → `setActive`).
 Пять вкладок: «Главная», «Планы», «Даты», «Места», «Дневник»; «Наша пара»
 открывается кнопкой-пилюлей с аватарами вверху справа и содержит переключатель
-«Профиль / Желания». Ещё два вида живут сегментами внутри вкладок: «Наше / Дни
+«Профиль / Желания». Ещё два вида живут сегментами внутри вкладок: «Наши / Дни
 рождения» в «Датах» и «Записи / Цитаты» в «Дневнике». Восемь отдельных вкладок
 в док не помещаются: на 360 px слот при восьми вкладках — 40 px, а подпись
 «Желания» занимает около 38 px; линза капли вдобавок расширяет вкладку на
@@ -432,7 +444,7 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
   `createLiquidNav({ nav, items })` собирает SVG сам, если её не передали
   (свой градиент, чтобы не зависеть от разметки панели), ищет цель по
   `data-tab` и берёт цвета из `idleVar`/`accentVar`. Так подключены
-  «Профиль / Желания» в «Нашей паре», «Наше / Дни рождения» в «Датах»,
+  «Профиль / Желания» в «Нашей паре», «Наши / Дни рождения» в «Датах»,
   «Записи / Цитаты» в «Дневнике» (`.seg-switch`) и «Мои / Его» в желаниях
   (`.wish-switch`). Разметка вкладки перерисовывается целиком, поэтому
   `render()` снимает экземпляры в начале и монтирует новые в конце, а вид
@@ -712,7 +724,7 @@ wrangler deploy --dry-run
 node scripts/check-touch-drag.mjs
 ```
 
-75 файлов тестов: 28 pytest и 47 `node:test`. Python-часть покрывает гонку входа
+81 файл тестов: 27 pytest и 54 `node:test`. Python-часть покрывает гонку входа
 в пару, запрет входа владельцу пустой пары, двойное начисление XP, валидацию,
 часовой пояс и DST, FSM-медиа, миграции, приватный гейт, уровни и паритет
 схемы (`test_schema_parity.py`) и ритуала (`test_daily_parity.py`).
@@ -747,5 +759,5 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.04.7`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.05.16`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.

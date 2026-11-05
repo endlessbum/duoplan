@@ -45,13 +45,17 @@
   let currentTab = "home";
   let wishView = "mine"; // "mine" | "partner" — переключатель вишлиста
   // Виды внутри вкладок: «Наша пара» (профиль/желания), «Даты»
-  // (наше/дни рождения), «Дневник» (записи/цитаты). Живут вне рендера, чтобы
+  // (наши/дни рождения), «Дневник» (записи/цитаты). Живут вне рендера, чтобы
   // минутный refresh и возврат на вкладку не сбрасывали выбранный вид.
   let pairView = "profile";
   let datesView = "dates";
   let memoriesView = "memories";
-  // «Планы / Кино» — виды вкладки «Планы».
+  // «Планы / Цели / Кино» — виды вкладки «Планы».
   let tasksView = "plans";
+  // «Предстоящие / Выполненные» — виды сегмента «Цели».
+  let goalsView = "open";
+  // «Посетить / Путешествие» — виды вкладки «Места».
+  let placesView = "visit";
   // «В планах / Просмотрено» — виды сегмента «Кино» и их сортировки.
   let moviesView = "open";
   // «Рандом» мест: колода id и текущий выпавший. Живут вне рендера, чтобы
@@ -723,6 +727,12 @@
   }
 
   function goBack() {
+    // Открытое окно — первый «Назад» закрывает его, вкладка не трогается.
+    // Повторное нажатие уже работает как навигация: не главная → главная.
+    if (dialog?.open) {
+      dialog.close();
+      return;
+    }
     if (currentTab !== "home") {
       switchTab("home");
       return;
@@ -1015,12 +1025,14 @@
   function mountLock() {
     document.getElementById("lock-form")?.addEventListener("submit", (e) => {
       e.preventDefault();
-      const value = document.getElementById("lock-pin")?.value?.trim() || "";
+      const input = document.getElementById("lock-pin");
+      // Последняя цифра тоже маскируется точкой сразу, до входа или ошибки.
+      if (input) renderPinCells(input, true);
+      const value = input?.value?.trim() || "";
       if (value !== storedPin()) {
         // Без тайм-аутов: просто повторная попытка.
         const error = document.getElementById("lock-error");
         if (error) error.hidden = false;
-        const input = document.getElementById("lock-pin");
         if (input) { input.value = ""; renderPinCells(input); input.focus(); }
         return;
       }
@@ -1271,6 +1283,8 @@
       wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])],
       quotes: appState?.quotes || [],
       places: appState?.places || [],
+      trips: appState?.trips || [],
+      goals: appState?.goals || [],
       movies: appState?.movies || [],
       savings: appState?.savings || []
     };
@@ -1646,7 +1660,6 @@
 
     return `
       <section class="card calendar-card">
-        <p class="eyebrow">Календарь</p>
         <div class="cal-head">
           <button class="cal-nav-btn" type="button" data-action="calendar-prev" aria-label="Предыдущий месяц">${CHEVRON_LEFT}</button>
           <h3 class="cal-title">${esc(calendarMonthTitle(year, month))}</h3>
@@ -1728,6 +1741,11 @@
           <span class="settings-label"><input type="checkbox" id="show-avatar" ${user.show_avatar !== false ? "checked" : ""}> Отображение аватара</span>
         </label>
         <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары. Если у пользователя фото нет, остаётся буква, пока аватар не появится</p>
+        <div class="settings-row">
+          <span class="settings-label">Ваше имя</span>
+          <input id="display-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(user.display_name || "")}" value="${esc(user.custom_name || "")}">
+        </div>
+        <p class="settings-hint">Как вас видит партнёр в приложении. Пусто — имя из Telegram</p>
         <div class="settings-row">
           <span class="settings-label">Имя партнёра</span>
           <input id="partner-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(partnerName)}" value="${esc(user.partner_custom_name || "")}">
@@ -2003,7 +2021,7 @@
   }
 
   // ------------------------------------------------------------------
-  // Даты: «Наше» и «Дни рождения» — один конвейер, два списка
+  // Даты: «Наши» и «Дни рождения» — один конвейер, два списка
   // ------------------------------------------------------------------
   // День рождения — та же запись dates с kind='birthday' и recurs=1, поэтому
   // приватность, отсчёт, календарь, сводки и экспорт работают без отдельной
@@ -2055,17 +2073,15 @@
 
   // Автор цитаты — select вместо свободного ввода: по запросу выбор
   // ограничен двумя пользователями пространства (имена из pair уже учитывают
-  // личное имя партнёра). Пустой вариант оставляет поле необязательным.
-  // Старые цитаты с источником-текстом (книга, фильм) при редактировании
-  // получают свой источник лишним вариантом — иначе select молча затёр бы его.
+  // личное имя партнёра). Пустого варианта «Не указан» нет: автор установлен
+  // всегда, по умолчанию это первый партнёр. Старые цитаты с источником-текстом
+  // (книга, фильм) при редактировании получают свой источник лишним вариантом —
+  // иначе select молча затёр бы его.
   function quoteAuthorOptions(selected) {
     const pair = appState.pair || {};
     const names = [pair.name1, pair.name2].filter((name) => name);
     if (selected && !names.includes(selected)) names.push(selected);
-    return [
-      `<option value="">Не указан</option>`,
-      ...names.map((name) => `<option value="${esc(name)}"${name === selected ? " selected" : ""}>${esc(name)}</option>`)
-    ].join("");
+    return names.map((name) => `<option value="${esc(name)}"${name === selected ? " selected" : ""}>${esc(name)}</option>`).join("");
   }
 
   function quoteItem(item) {
@@ -2249,7 +2265,7 @@
     `;
   }
 
-  function renderPlaces() {
+  function renderPlacesBody() {
     const open = unvisitedPlaces();
     const visited = visitedPlaces();
     const total = open.length + visited.length;
@@ -2257,7 +2273,7 @@
     const pick = currentPlacePick();
     const empty = !total;
     const heroUsed = placeRandomUsed();
-    let html = renderTabHeader("places");
+    let html = "";
     // Пустой список — как в «Кино»: «Добавить место» живёт в карточке
     // «Пока пусто», а не отдельной кнопкой над списком.
     if (empty) {
@@ -2300,6 +2316,72 @@
         html += `<div class="section-head-inline"><h3>Посещённые · ${visited.length}</h3></div>`;
         html += visited.map((place) => placeItem(place)).join("");
       }
+    }
+    return html;
+  }
+
+  // ------------------------------------------------------------------
+  // Путешествия: желанные поездки в дальние города и страны (сегмент
+  // вкладки «Места»). Механика та же, что у мест, но без ссылок и рандома.
+  // ------------------------------------------------------------------
+  function tripList() {
+    return appState.trips || [];
+  }
+
+  function openTrips() {
+    return tripList().filter((trip) => Number(trip.visited) !== 1);
+  }
+
+  function visitedTrips() {
+    return tripList().filter((trip) => Number(trip.visited) === 1);
+  }
+
+  function tripItem(trip) {
+    const visited = Number(trip.visited) === 1;
+    return `
+      <article class="card${visited ? " place-visited" : ""}">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${esc(trip.title)}</h3>
+            ${trip.note ? `<p class="place-note">${esc(trip.note)}</p>` : ""}
+            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(trip.visited_at) || "Съездили")}</span></div>` : ""}
+          </div>
+          <div class="item-actions">
+            ${visited
+              ? `<button class="icon-btn" type="button" data-action="trip-unvisited" data-id="${trip.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
+              : `<button class="icon-btn" type="button" data-action="trip-visited" data-id="${trip.id}" aria-label="Отметить съездили">${DONE_ICON}</button>`}
+            <button class="icon-btn" type="button" data-action="edit-item" data-type="trips" data-id="${trip.id}" aria-label="Редактировать">${EDIT_ICON}</button>
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="trips" data-id="${trip.id}" aria-label="Удалить">${DELETE_ICON}</button>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderTripsBody() {
+    const open = openTrips();
+    const visited = visitedTrips();
+    const total = open.length + visited.length;
+    const disabledClass = partnerMissing() ? " is-disabled" : "";
+    let html = "";
+    if (!total) {
+      html += `
+        <section class="card">
+          <h3>Пока пусто</h3>
+          <p>Добавьте город или страну, куда мечтаете съездить вдвоём</p>
+          <button class="primary full card-action${disabledClass}" type="button" data-action="add-trip">Добавить поездку</button>
+        </section>
+      `;
+      return html;
+    }
+    html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-trip">Добавить поездку</button>`;
+    if (open.length) {
+      html += `<div class="section-head-inline"><h3>Хотим съездить · ${open.length}</h3></div>`;
+      html += open.map((trip) => tripItem(trip)).join("");
+    }
+    if (visited.length) {
+      html += `<div class="section-head-inline"><h3>Съездили · ${visited.length}</h3></div>`;
+      html += visited.map((trip) => tripItem(trip)).join("");
     }
     return html;
   }
@@ -2768,19 +2850,25 @@
       // тело, поэтому капля остаётся живой и доезжает пружиной.
       appEl.innerHTML = `
         ${renderTabHeader("tasks")}
-        ${renderSegment("tasks", tasksView, [["plans", "Планы"], ["movies", "Кино"]])}
-        <div id="tab-body">${tasksView === "movies" ? renderMoviesBody() : renderTasksBody()}</div>
+        ${renderSegment("tasks", tasksView, [["plans", "Планы"], ["goals", "Цели"], ["movies", "Кино"]])}
+        <div id="tab-body">${tasksView === "movies" ? renderMoviesBody() : tasksView === "goals" ? renderGoalsBody() : renderTasksBody()}</div>
       `;
     } else if (currentTab === "dates") {
       // Шапка одна на оба вида: переключатель меняет только тело, поэтому
       // капля остаётся живой и доезжает пружиной.
       appEl.innerHTML = `
         ${renderTabHeader("dates")}
-        ${renderSegment("dates", datesView, [["dates", "Наше"], ["birthdays", "Дни рождения"]])}
+        ${renderSegment("dates", datesView, [["dates", "Наши"], ["birthdays", "Дни рождения"]])}
         <div id="tab-body">${renderDatesBody()}</div>
       `;
     } else if (currentTab === "places") {
-      appEl.innerHTML = renderPlaces();
+      // Шапка одна на оба вида «Посетить/Путешествие»: переключатель меняет
+      // только тело, поэтому капля остаётся живой и доезжает пружиной.
+      appEl.innerHTML = `
+        ${renderTabHeader("places")}
+        ${renderSegment("places", placesView, [["visit", "Посетить"], ["trips", "Путешествие"]])}
+        <div id="tab-body">${placesView === "trips" ? renderTripsBody() : renderPlacesBody()}</div>
+      `;
     } else if (currentTab === "memories") {
       appEl.innerHTML = `
         ${renderTabHeader("memories")}
@@ -2800,13 +2888,14 @@
     mountTabSwitch();
     mountWishSwitch();
     mountMovieSwitch();
+    mountGoalsSwitch();
     mountPinFields();
   }
 
   // ------------------------------------------------------------------
   // Сегмент-переключатели внутри вкладок: та же капля, что в нижней панели
   // ------------------------------------------------------------------
-  // Виды («Профиль / Желания», «Наше / Дни рождения», «Записи / Цитаты»,
+  // Виды («Профиль / Желания», «Наши / Дни рождения», «Записи / Цитаты»,
   // «Мои / Её») — те же вкладки, но внутри страницы. Разметка вкладки
   // перерисовывается целиком, поэтому экземпляры снимаем в начале render() и
   // создаём в конце; переключение вида меняет только тело (#tab-body или
@@ -2815,12 +2904,15 @@
   let wishSwitch = null;     // внутренний «Мои / Её» в желаниях
   let wishSwitchPrevView = null;
   let movieSwitch = null;    // внутренний «В планах / Просмотрено» в кино
+  let goalsSwitch = null;    // внутренний «Предстоящие / Выполненные» в целях
 
   function switchValue(key) {
     if (key === "pair") return pairView;
     if (key === "dates") return datesView;
     if (key === "memories") return memoriesView;
     if (key === "tasks") return tasksView;
+    if (key === "places") return placesView;
+    if (key === "goals") return goalsView;
     return wishView;
   }
 
@@ -2829,6 +2921,8 @@
     else if (key === "dates") datesView = value;
     else if (key === "memories") memoriesView = value;
     else if (key === "tasks") tasksView = value;
+    else if (key === "places") placesView = value;
+    else if (key === "goals") goalsView = value;
     else wishView = value;
   }
 
@@ -2836,6 +2930,7 @@
     if (segSwitch) { segSwitch.destroy(); segSwitch = null; }
     if (wishSwitch) { wishSwitch.destroy(); wishSwitch = null; }
     if (movieSwitch) { movieSwitch.destroy(); movieSwitch = null; }
+    if (goalsSwitch) { goalsSwitch.destroy(); goalsSwitch = null; }
   }
 
   function createSwitch(container, key) {
@@ -2912,6 +3007,110 @@
     });
   }
 
+  // ------------------------------------------------------------------
+  // Цели: задача с описанием и пунктами выполнения (сегмент вкладки
+  // «Планы»). Цель выполнена, когда отмечены все её пункты — тогда она
+  // переезжает в «Выполненные». Личные цели партнёр не видит вовсе.
+  // ------------------------------------------------------------------
+  function goalList() {
+    return appState.goals || [];
+  }
+
+  function goalCompleted(goal) {
+    const items = goal.items || [];
+    return items.length > 0 && items.every((item) => Number(item.done) === 1);
+  }
+
+  function openGoals() {
+    return goalList().filter((goal) => !goalCompleted(goal));
+  }
+
+  function completedGoals() {
+    return goalList().filter(goalCompleted);
+  }
+
+  function goalItemRow(item) {
+    const done = Number(item.done) === 1;
+    return `
+      <div class="goal-item${done ? " is-done" : ""}">
+        <button class="goal-item-check" type="button" data-action="${done ? "goal-item-reopen" : "goal-item-done"}" data-id="${item.id}" aria-label="${done ? "Вернуть пункт в работу" : "Отметить пункт выполненным"}">${done ? REOPEN_ICON : DONE_ICON}</button>
+        <span class="goal-item-title">${esc(item.title)}</span>
+      </div>
+    `;
+  }
+
+  function goalItem(goal) {
+    const items = goal.items || [];
+    return `
+      <article class="card goal-card">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${esc(goal.title)}</h3>
+            ${Number(goal.is_private) === 1 ? `<div class="item-meta"><span class="day-chip is-muted">Личная</span></div>` : ""}
+          </div>
+          <div class="item-actions">
+            <button class="icon-btn" type="button" data-action="delete-item" data-type="goals" data-id="${goal.id}" aria-label="Удалить цель">${DELETE_ICON}</button>
+          </div>
+        </div>
+        <div class="goal-items">
+          ${items.map(goalItemRow).join("")}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderGoalsList() {
+    const disabledClass = partnerMissing() ? " is-disabled" : "";
+    if (goalsView === "done") {
+      const done = completedGoals();
+      if (!done.length) {
+        return `<section class="card"><h3>Пока ничего не достигнуто</h3><p>Отметьте все пункты цели — она переедет сюда.</p></section>`;
+      }
+      return done.map(goalItem).join("");
+    }
+    const open = openGoals();
+    if (!open.length) {
+      return `
+        <section class="card">
+          <h3>Пока пусто</h3>
+          <p>Опишите большую цель и разбейте её на шаги — отмечайте выполненные вместе</p>
+          <button class="primary full card-action${disabledClass}" type="button" data-action="add-goal">Создать цель</button>
+        </section>
+      `;
+    }
+    return `<button class="primary full add-button${disabledClass}" type="button" data-action="add-goal">Создать цель</button>`
+      + open.map(goalItem).join("");
+  }
+
+  function renderGoalsBody() {
+    return `
+      ${renderSegment("goals", goalsView, [["open", "Предстоящие"], ["done", "Выполненные"]], "is-sub")}
+      <div id="goals-body">${renderGoalsList()}</div>
+    `;
+  }
+
+  // Внутренний бар «Предстоящие / Выполненные»: живёт внутри тела «Цели» —
+  // отдельный экземпляр капли, механика та же, что у кино.
+  function mountGoalsSwitch() {
+    if (goalsSwitch) {
+      goalsSwitch.destroy();
+      goalsSwitch = null;
+    }
+    const container = document.querySelector('.seg-switch[data-switch="goals"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitSwitch("goals", value, instance)
+    });
+    if (!instance) return;
+    instance.setActive(goalsView, false);
+    goalsSwitch = instance;
+  }
+
   // Перерисовка только списка: бар и его капля остаются на месте.
   function refreshMoviesList() {
     const body = document.getElementById("movies-body");
@@ -2940,6 +3139,17 @@
   function commitSwitch(key, value, instance) {
     if (switchValue(key) === value) return;
     setSwitchValue(key, value);
+    if (key === "goals") {
+      // Внутренний бар целей: меняем только список, капля и бар остаются живыми.
+      const list = document.getElementById("goals-body");
+      if (!list) { render(); return; }
+      list.innerHTML = renderGoalsList();
+      instance?.setActive(value, true);
+      document.querySelectorAll('.seg-switch[data-switch="goals"] .seg-switch-btn').forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
     if (key === "wishes") {
       const lists = document.getElementById("wish-lists");
       if (!lists) { render(); return; }
@@ -2964,10 +3174,16 @@
       movieSwitch.destroy();
       movieSwitch = null;
     }
+    // Бар «Предстоящие / Выполненные» живёт в теле «Цели» — так же.
+    if (key === "tasks" && goalsSwitch) {
+      goalsSwitch.destroy();
+      goalsSwitch = null;
+    }
     body.innerHTML = key === "pair" ? renderPairView()
       : key === "dates" ? renderDatesBody()
-        : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : renderTasksBody())
-          : renderMemoriesBody();
+        : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : tasksView === "goals" ? renderGoalsBody() : renderTasksBody())
+          : key === "places" ? (placesView === "trips" ? renderTripsBody() : renderPlacesBody())
+            : renderMemoriesBody();
     instance?.setActive(value, true);
     // aria-selected обновляем у всех сегментов, а не только у желаний:
     // капля двигается классами, скринридер читает атрибут.
@@ -2976,6 +3192,7 @@
     });
     if (key === "pair") mountWishSwitch();
     if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
+    if (key === "tasks" && tasksView === "goals") mountGoalsSwitch();
   }
 
   // ------------------------------------------------------------------
@@ -3001,7 +3218,13 @@
     const focusables = () => Array.from(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter(el => !el.disabled && el.offsetParent !== null);
     const first = () => focusables()[0];
     const last = () => focusables()[focusables().length - 1];
-    setTimeout(() => first()?.focus(), 0);
+    // Начальный фокус — на поле ввода, а не на первую кнопку: первый
+    // фокусируемый элемент здесь «Закрыть», и программный focus() рисует на
+    // ней системное синее кольцо выделения. Полей нет — фокус на сам диалог.
+    setTimeout(() => {
+      const field = dialog.querySelector("input:not([type=hidden]), select, textarea");
+      (field ?? dialog).focus();
+    }, 0);
     dialog._focusTrap = (e) => {
       if (e.key !== "Tab") return;
       const f = focusables();
@@ -3014,6 +3237,9 @@
 
   dialog.addEventListener("close", () => {
     if (dialog._focusTrap) { dialog.removeEventListener("keydown", dialog._focusTrap); dialog._focusTrap = null; }
+    // Нативное закрытие возвращает фокус на нажатую кнопку/карточку — в
+    // мобильном WebView вокруг неё остаётся синее выделение. Снимаем фокус.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
 
   function sureLabel() {
@@ -3079,7 +3305,8 @@
   // PIN-поля: видимая часть — 4 ячейки (точка или цифра), реальный инпут —
   // невидимый слой поверх (тап открывает цифровую клавиатуру, курсора нет).
   // Нативный плейсхолдер не используем: на мобильных он мигает вместе с
-  // вводом — ячейки рисуем сами, цифра встаёт на своё место и не исчезает.
+  // вводом — ячейки рисуем сами: видна только последняя введённая цифра,
+  // предыдущие снова точки; при сабмите маскируются все (maskAll).
   function pinField(id, extraAttrs = "") {
     return `
       <span class="pin-field">
@@ -3091,15 +3318,16 @@
     `;
   }
 
-  function renderPinCells(input) {
+  function renderPinCells(input, maskAll = false) {
     const wrap = document.getElementById(`${input.id}-cells`);
     if (!wrap) return;
     const digits = input.value.replace(/\D/g, "").slice(0, 4);
     if (digits !== input.value) input.value = digits;
     [...wrap.querySelectorAll(".pin-cell")].forEach((cell, index) => {
-      const digit = digits[index];
-      cell.textContent = digit || "•";
-      cell.classList.toggle("is-filled", Boolean(digit));
+      // Цифра видна только в последней заполненной ячейке, остальные — точки.
+      const showDigit = !maskAll && Boolean(digits[index]) && index === digits.length - 1;
+      cell.textContent = showDigit ? digits[index] : "•";
+      cell.classList.toggle("is-filled", showDigit);
     });
   }
 
@@ -3162,7 +3390,56 @@
     }, MOVIE_SUGGEST_DEBOUNCE_MS);
   });
 
+  // Пункты цели в диалоге создания: «+» добавляет строку, крестик удаляет
+  // (кроме единственной — цель без пунктов не создаётся, первый input required).
+  function goalStepsBox() {
+    return document.getElementById("goal-steps");
+  }
+
+  function syncGoalStepButtons() {
+    const box = goalStepsBox();
+    if (!box) return;
+    const rows = Array.from(box.querySelectorAll(".goal-step-row"));
+    for (const row of rows) {
+      const del = row.querySelector("[data-action='remove-goal-step']");
+      if (del) del.hidden = rows.length <= 1;
+    }
+  }
+
+  function addGoalStepRow() {
+    const box = goalStepsBox();
+    if (!box) return;
+    if (box.querySelectorAll(".goal-step-row").length >= 30) {
+      showToast("Не больше 30 пунктов на цель");
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "goal-step-row";
+    row.innerHTML = `
+      <input name="items" maxlength="180" placeholder="Ещё один шаг к цели">
+      <button class="icon-btn" type="button" data-action="remove-goal-step" aria-label="Удалить пункт">${DELETE_ICON}</button>
+    `;
+    box.appendChild(row);
+    syncGoalStepButtons();
+    row.querySelector("input")?.focus();
+  }
+
+  function removeGoalStepRow(btn) {
+    const box = goalStepsBox();
+    const row = btn.closest(".goal-step-row");
+    if (!box || !row) return;
+    if (box.querySelectorAll(".goal-step-row").length <= 1) return;
+    row.remove();
+    syncGoalStepButtons();
+  }
+
   dialogFields.addEventListener("click", async (e) => {
+    const stepBtn = e.target.closest?.("[data-action='add-goal-step'], [data-action='remove-goal-step']");
+    if (stepBtn) {
+      if (stepBtn.dataset.action === "add-goal-step") addGoalStepRow();
+      else removeGoalStepRow(stepBtn);
+      return;
+    }
     const btn = e.target.closest?.(".movie-suggest-item");
     if (!btn || !dialogContext || dialogSubmitting) return;
     dialogSubmitting = true;
@@ -3331,7 +3608,7 @@
     const action = btn.dataset.action;
 
     try {
-      if (["add-task", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-movie", "add-saving", "add-birthday"].includes(action) && partnerMissing()) {
+      if (["add-task", "add-goal", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-trip", "add-movie", "add-saving", "add-birthday"].includes(action) && partnerMissing()) {
         showToast("Сначала добавьте партнёра");
         return;
       }
@@ -3346,7 +3623,13 @@
           commitMoviesView(value, movieSwitch);
           return;
         }
-        if (!["pair", "dates", "memories", "tasks"].includes(key)) return;
+        // Внутренние бары идут к своим экземплярам капли: setActive от
+        // внешнего segSwitch двигал бы каплю вкладки, а не бара.
+        if (key === "goals") {
+          commitSwitch("goals", value, goalsSwitch);
+          return;
+        }
+        if (!["pair", "dates", "memories", "tasks", "places"].includes(key)) return;
         commitSwitch(key, value, segSwitch);
       } else if (action === "movie-sort-dir") {
         toggleMovieSortDir();
@@ -3395,6 +3678,34 @@
           `,
           onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", yearly: fd.get("yearly") === "on", is_private: fd.get("is_private") === "on" } })
         });
+      } else if (action === "add-goal") {
+        // Цель: название + пункты выполнения. Строк одна, «Добавить пункт»
+        // добавляет ещё, крестик справа удаляет (syncGoalStepButtons прячет
+        // его у единственной строки).
+        openDialog({
+          title: "Новая цель",
+          fields: `
+            <label class="field"><span>Что за цель?</span><input name="title" maxlength="180" required placeholder="Обменять квартиру на дом у моря"></label>
+            <div class="field"><span>Пункты выполнения</span>
+              <div class="goal-steps" id="goal-steps">
+                <div class="goal-step-row">
+                  <input name="items" maxlength="180" required placeholder="Первый шаг к цели">
+                  <button class="icon-btn" type="button" data-action="remove-goal-step" aria-label="Удалить пункт" hidden>${DELETE_ICON}</button>
+                </div>
+              </div>
+            </div>
+            <button class="goal-add" type="button" data-action="add-goal-step" aria-label="Добавить пункт">+</button>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личная — партнёр не увидит эту цель</span></label>
+          `,
+          onSubmit: (fd) => request("/api/goals", {
+            method: "POST",
+            body: {
+              title: fd.get("title"),
+              items: fd.getAll("items").map((value) => value.trim()).filter(Boolean),
+              is_private: fd.get("is_private") === "on"
+            }
+          })
+        });
       } else if (action === "add-date") {
         openDialog({
           title: "Значимая дата",
@@ -3440,6 +3751,15 @@
             <label class="field"><span>Ссылка на карту (необязательно)</span><input name="url" type="url" placeholder="https://maps.example.com/..."></label>
           `,
           onSubmit: (fd) => request("/api/places", { method: "POST", body: { title: fd.get("title"), note: fd.get("note"), url: fd.get("url") } })
+        });
+      } else if (action === "add-trip") {
+        openDialog({
+          title: "Новая поездка",
+          fields: `
+            <label class="field"><span>Куда хотим съездить?</span><input name="title" maxlength="120" required placeholder="Байкал, Италия, Владивосток"></label>
+            <label class="field"><span>Заметка (необязательно)</span><textarea name="note" rows="3" maxlength="600" placeholder="Когда хочется поехать и что посмотреть"></textarea></label>
+          `,
+          onSubmit: (fd) => request("/api/trips", { method: "POST", body: { title: fd.get("title"), note: fd.get("note") } })
         });
       } else if (action === "add-movie") {
         // Диалог поиска: без кнопки сохранения — фильм добавляется тапом
@@ -3521,6 +3841,30 @@
           } else {
             showToast(place ? `«${place.title}» снова в списке` : "Место вернулось в список");
           }
+          render();
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (action === "trip-visited" || action === "trip-unvisited") {
+        const id = btn.dataset.id;
+        const markVisited = action === "trip-visited";
+        const trip = tripList().find((item) => Number(item.id) === Number(id));
+        btn.disabled = true;
+        try {
+          appState = await request(`/api/trips/${id}/${markVisited ? "visited" : "unvisited"}`, { method: "POST", body: {} });
+          showToast(markVisited
+            ? (trip ? `Съездили: ${trip.title}` : "Отмечено: съездили")
+            : (trip ? `«${trip.title}» снова в списке` : "Поездка вернулась в список"));
+          render();
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (action === "goal-item-done" || action === "goal-item-reopen") {
+        const id = btn.dataset.id;
+        const markDone = action === "goal-item-done";
+        btn.disabled = true;
+        try {
+          appState = await request(`/api/goal_items/${id}/${markDone ? "done" : "reopen"}`, { method: "POST", body: {} });
           render();
         } finally {
           btn.disabled = false;
@@ -3651,7 +3995,7 @@
           dialog.close();
         }
       } else if (action === "delete-item") {
-        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", movies: "фильм", savings: "копилку" };
+        const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", trips: "поездку", goals: "цель", movies: "фильм", savings: "копилку" };
         const item = findItem(btn.dataset.type, btn.dataset.id);
         // У дня рождения своё название: «Удалить дату?» звучало бы странно.
         const name = btn.dataset.type === "dates" && item?.kind === "birthday"
@@ -3799,6 +4143,15 @@
             `,
             onSubmit: (fd) => request(`/api/places/${id}`, { method: "PATCH", body: { title: fd.get("title"), note: fd.get("note"), url: fd.get("url") } })
           });
+        } else if (type === "trips") {
+          openDialog({
+            title: "Редактировать поездку",
+            fields: `
+              <label class="field"><span>Куда хотим съездить?</span><input name="title" maxlength="120" required value="${esc(item.title || "")}"></label>
+              <label class="field"><span>Заметка (необязательно)</span><textarea name="note" rows="3" maxlength="600">${esc(item.note || "")}</textarea></label>
+            `,
+            onSubmit: (fd) => request(`/api/trips/${id}`, { method: "PATCH", body: { title: fd.get("title"), note: fd.get("note") } })
+          });
         }
       } else if (action === "open-url") {
         openExternal(btn.dataset.url);
@@ -3863,6 +4216,8 @@
             dates_digest_enabled: document.getElementById("dates-digest-enabled")?.checked ?? true,
             dates_digest_time: timeOf("dates-digest-time"),
             show_avatar: document.getElementById("show-avatar")?.checked ?? true,
+            // Пустое поле оставляет текущее имя из Telegram.
+            display_name: document.getElementById("display-name-input")?.value?.trim() || null,
             // Пустое поле сбрасывает личное имя партнёра на имя из Telegram.
             partner_name: document.getElementById("partner-name-input")?.value?.trim() || null
           }
@@ -3875,7 +4230,10 @@
         applyTheme();
         render();
       } else if (action === "save-pin") {
-        const value = document.getElementById("pin-input")?.value?.trim() || "";
+        const pinInput = document.getElementById("pin-input");
+        // Последняя цифра тоже маскируется точкой сразу, до результата.
+        if (pinInput) renderPinCells(pinInput, true);
+        const value = pinInput?.value?.trim() || "";
         if (!/^\d{4}$/.test(value)) {
           showToast("Пароль — ровно 4 цифры");
           return;
@@ -3917,6 +4275,11 @@
               <option value="all">Все</option>
               <option value="mine">Только добавленные мной</option>
             </select></label>
+            <label class="field"><span>Поездки</span><select name="trips">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Все</option>
+              <option value="mine">Только добавленные мной</option>
+            </select></label>
             <label class="field"><span>Записи дневника</span><select name="memories">
               <option value="" selected>Не выгружать</option>
               <option value="all">Все записи</option>
@@ -3935,7 +4298,7 @@
           `,
           onSubmit: async (fd) => {
             const sections = {};
-            for (const key of ["plans", "movies", "dates", "birthdays", "places", "memories", "quotes", "wishes"]) {
+            for (const key of ["plans", "movies", "dates", "birthdays", "places", "trips", "memories", "quotes", "wishes"]) {
               const value = fd.get(key);
               if (value) sections[key] = value;
             }

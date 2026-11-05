@@ -103,7 +103,7 @@ test("renderSavingsBody: активные и «Накопленные» разд
 });
 
 test("маршруты копилок зарегистрированы в воркере", () => {
-  ok(workerSource.includes("places|movies|savings)"), "savings нет в itemRoute regex");
+  ok(workerSource.includes("places|trips|goals|goal_items|movies|savings)"), "savings нет в itemRoute regex");
   ok(workerSource.includes('"/api/savings"'), "нет POST /api/savings");
   ok(workerSource.includes("/history$"), "нет GET истории пополнений");
   ok(workerSource.includes('kind=\'shared\' OR created_by=?'), "личные копилки не фильтруются по автору");

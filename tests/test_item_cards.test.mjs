@@ -157,7 +157,9 @@ test("quoteAuthorOptions: только пользователи простран
   const quoteAuthorOptions = loadQuote();
   const fresh = quoteAuthorOptions("");
   ok(fresh.includes("<option"), "select без вариантов");
-  ok(fresh.includes(">Не указан</option>"), "нет пустого варианта");
+  // «Не указан» больше нет: автор из партнёров установлен всегда.
+  ok(!fresh.includes("Не указан"), "пустой вариант «Не указан» вернулся");
+  ok(!(fresh.match(/value=""/g) || []).length, "пустое значение в select");
   ok(fresh.includes('value="Аня"') && fresh.includes('value="Боря"'), "нет обоих пользователей пространства");
   ok(!fresh.includes("Антуан"), "свободный источник остался в выборе");
   ok(quoteAuthorOptions("Аня").includes('value="Аня" selected'), "выбранный автор не подставляется");
@@ -176,7 +178,7 @@ test("quoteAuthorOptions: только пользователи простран
   );
   const solo = loadSolo()("");
   ok(solo.includes('value="Аня"'), "свой вариант потерян");
-  ok((solo.match(/value=""/g) || []).length === 1, "пустое имя партнёра попало в select как второй пустой вариант");
+  ok(!(solo.match(/value=""/g) || []).length, "пустое имя партнёра попало в select как пустой вариант");
 });
 
 test("у чужого исполненного желания кнопок нет, у своего — есть", () => {

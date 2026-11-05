@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.05.6";
+const APP_VERSION = "2026.11.05.16";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.05.6";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.05.6";
+const DB_SCHEMA_VERSION = "2026.11.05.16";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -854,9 +854,13 @@ async function leavePair(env, member, requestUrl) {
       env.DB.prepare("DELETE FROM daily_completions WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pair_members WHERE pair_id=?").bind(member.id),
       // Все коллекции после 0016 тоже явно (страховка поверх FK CASCADE):
-      // quotes, places, movies (вместе с unique-индексом не мешает), savings.
+      // quotes, places, trips, goals+goal_items, movies (вместе с
+      // unique-индексом не мешает), savings.
       env.DB.prepare("DELETE FROM quotes WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM places WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM trips WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM goal_items WHERE pair_id=?").bind(member.id),
+      env.DB.prepare("DELETE FROM goals WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM movies WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM savings WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pairs WHERE id=?").bind(member.id)
@@ -934,7 +938,8 @@ function displayStreak(user, pairTz = null) {
 function publicUser(user, pairTz = null) {
   return {
     tg_id: user.tg_id,
-    display_name: user.display_name,
+    // Личное имя пользователя (custom_name) имеет приоритет над display_name из Telegram.
+    display_name: clean(user.custom_name) || user.display_name,
     points: user.points,
     streak: displayStreak(user, pairTz),
     best_streak: user.best_streak,
@@ -950,19 +955,34 @@ function publicUser(user, pairTz = null) {
     // Личное имя партнёра просматривающего — чтобы поле в настройках
     // показывало текущее значение. Партнёру эта строка не видна: в state()
     // подмена идёт только в name его пары и подписи авторов.
-    partner_custom_name: clean(user.partner_custom_name) || null
+    partner_custom_name: clean(user.partner_custom_name) || null,
+    // Личное имя пользователя для отображения в поле настроек.
+    custom_name: clean(user.custom_name) || null
   };
 }
 
 // Личное имя партнёра (users.partner_custom_name) видно только тому, кто его
 // задал: подставляется в имя партнёра просматривающего, не меняя порядок
 // name1 (владелец) / name2 (партнёр) в выдаче.
+// Личное имя пользователя (users.custom_name) аналогично подставляется
+// вместо его display_name при отображении партнёру.
 function withPartnerOverride(viewer, pair) {
-  const override = clean(viewer.partner_custom_name) || null;
+  const viewerOverride = clean(viewer.partner_custom_name) || null;
+  const viewerCustomName = clean(viewer.custom_name) || null;
   const ownerName = pair.owner_name || pair.name1;
   const partnerName = pair.partner_name || pair.name2;
-  if (pair.role === "a") return { name1: ownerName, name2: override || partnerName };
-  return { name1: override || ownerName, name2: partnerName };
+  if (pair.role === "a") {
+    // viewer — владелец, его имя = custom_name или ownerName, имя партнёра = partner_custom_name или partnerName
+    return {
+      name1: viewerCustomName || ownerName,
+      name2: viewerOverride || partnerName
+    };
+  }
+  // viewer — партнёр, его имя = custom_name или partnerName, имя владельца = ownerName (без изменений)
+  return {
+    name1: viewerOverride || ownerName,
+    name2: viewerCustomName || partnerName
+  };
 }
 
 // Кеш Intl.DateTimeFormat по «локаль|пояс|опции». Создание форматтера —
@@ -1235,7 +1255,7 @@ async function state(env, userId) {
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, movies, movieRatings, savings, daily, partnerUser] = await Promise.all([
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, goals, goalItems, savings, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
@@ -1255,6 +1275,8 @@ async function state(env, userId) {
     env.DB.prepare(`SELECT q.id,q.body,q.source,q.author_id,q.created_at,u.display_name FROM quotes q
       LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=? ORDER BY q.created_at DESC, q.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare("SELECT id,title,note,url,visited,visited_at,visited_by,created_by,created_at FROM places WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    // Поездки — общая коллекция пары, как места: без приватности и архива.
+    env.DB.prepare("SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Кино — общая коллекция пары, как места: без приватности и архива.
     // Данные (рейтинг/жанр/длительность) — снимок IMDb на момент добавления.
     env.DB.prepare("SELECT id,imdb_id,title,year,kind,rating,rating_source,rating_checked_at,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
@@ -1265,6 +1287,12 @@ async function state(env, userId) {
     // Копилки: общие видит вся пара, личные — только автор (фильтр в SQL,
     // как у личных дат/планов). collected поддерживается при пополнении.
     env.DB.prepare("SELECT id,created_by,kind,title,target,collected,created_at FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
+    // Цели: личные (is_private=1) — только для создателя, как личные планы.
+    // Выполненность цели считается по пунктам, поэтому отдаём их вместе с целью.
+    env.DB.prepare("SELECT id,title,is_private,created_by,created_at FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare(`SELECT gi.id,gi.goal_id,gi.title,gi.done,gi.done_at,gi.done_by,gi.created_at FROM goal_items gi
+      JOIN goals g ON g.id=gi.goal_id WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?)
+      ORDER BY gi.created_at ASC, gi.id ASC`).bind(pair.id, user.tg_id).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
@@ -1324,6 +1352,11 @@ async function state(env, userId) {
     completedWishes: completedWishes.results,
     quotes: quotes.results,
     places: places.results,
+    trips: trips.results,
+    goals: (goals.results || []).map((goal) => ({
+      ...goal,
+      items: (goalItems.results || []).filter((item) => Number(item.goal_id) === Number(goal.id))
+    })),
     movies: movies.results,
     savings: savings.results,
     daily
@@ -1450,13 +1483,26 @@ async function ensureTaskVisible(env, pair, user, id) {
   return row;
 }
 
+// Видимость цели (прямой id) или цели-родителя её пункта (itemId). Личные
+// цели спрятаны от партнёра целиком — вместе с пунктами.
+async function ensureGoalVisible(env, pair, user, goalId, itemId = null) {
+  const row = goalId !== null
+    ? await env.DB.prepare("SELECT id,is_private,created_by FROM goals WHERE id=? AND pair_id=?").bind(goalId, pair.id).first()
+    : await env.DB.prepare("SELECT g.id,g.is_private,g.created_by FROM goal_items gi JOIN goals g ON g.id=gi.goal_id WHERE gi.id=? AND gi.pair_id=?").bind(itemId, pair.id).first();
+  if (!row) return null;
+  if (Number(row.is_private) === 1 && Number(row.created_by) !== Number(user.tg_id)) {
+    throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+  }
+  return row;
+}
+
 async function itemRoute(env, pair, user, method, pathname, body) {
-  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|deposit))?$/);
+  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|trips|goals|goal_items|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|deposit))?$/);
   if (!match) return false;
   const [, type, rawId, action] = match;
   const id = Number(rawId);
   if (!positiveId(id)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
-  const table = { tasks: "tasks", dates: "dates", memories: "memories", wishes: "wishes", quotes: "quotes", places: "places", movies: "movies", savings: "savings" }[type];
+  const table = { tasks: "tasks", dates: "dates", memories: "memories", wishes: "wishes", quotes: "quotes", places: "places", trips: "trips", goals: "goals", goal_items: "goal_items", movies: "movies", savings: "savings" }[type];
   // Проверяем владельца до любой записи, чтобы чужая строка не менялась даже
   // частично (UPDATE ... WHERE не сработал бы, но 403 точнее 404).
   const mutating = method === "DELETE" || method === "PATCH" || (method === "POST" && action);
@@ -1464,6 +1510,10 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   if (type === "savings" && mutating) await ensureSavingVisible(env, pair, user, id);
   const dateRow = type === "dates" && mutating ? await ensureDateVisible(env, pair, user, id) : null;
   const taskRow = type === "tasks" && mutating ? await ensureTaskVisible(env, pair, user, id) : null;
+  // Личные цели и их пункты: партнёр получает 404, как на личные планы.
+  const goalRow = (type === "goals" || type === "goal_items") && mutating
+    ? await ensureGoalVisible(env, pair, user, type === "goals" ? id : null, id)
+    : null;
   if (method === "DELETE") {
     const result = await env.DB.prepare(`DELETE FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
@@ -1479,6 +1529,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } },
       quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
       places: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } },
+      trips: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 } },
       savings: { title: { type: "string", maxLength: 120 }, target: { type: "number" } }
     };
     if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
@@ -1582,6 +1633,13 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         fields.push("url=?");
         values.push(wishUrl(body.url) || null);
       }
+    } else if (type === "trips") {
+      fields.push("title=?");
+      values.push(textField(body, "title", 120, "Поездка"));
+      if (body.note !== undefined) {
+        fields.push("note=?");
+        values.push(clean(body.note) || null);
+      }
     } else if (type === "savings") {
       fields.push("title=?");
       values.push(textField(body, "title", 120, "Название копилки"));
@@ -1631,6 +1689,23 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         ? await env.DB.prepare("UPDATE places SET visited=1,visited_at=?,visited_by=? WHERE id=? AND pair_id=? AND visited=0")
           .bind(now(), user.tg_id, id, pair.id).run()
         : await env.DB.prepare("UPDATE places SET visited=0,visited_at=NULL,visited_by=NULL WHERE id=? AND pair_id=? AND visited=1")
+          .bind(id, pair.id).run();
+    } else if (type === "trips") {
+      // «Съездили» — совместная отметка, механика та же, что у мест.
+      if (!["visited", "unvisited"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+      result = action === "visited"
+        ? await env.DB.prepare("UPDATE trips SET visited=1,visited_at=?,visited_by=? WHERE id=? AND pair_id=? AND visited=0")
+          .bind(now(), user.tg_id, id, pair.id).run()
+        : await env.DB.prepare("UPDATE trips SET visited=0,visited_at=NULL,visited_by=NULL WHERE id=? AND pair_id=? AND visited=1")
+          .bind(id, pair.id).run();
+    } else if (type === "goal_items") {
+      // Отметка пункта цели — совместная, как посещение места: отметившего
+      // запоминаем для подписи, на доступность она не влияет.
+      if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+      result = action === "done"
+        ? await env.DB.prepare("UPDATE goal_items SET done=1,done_at=?,done_by=? WHERE id=? AND pair_id=? AND done=0")
+          .bind(now(), user.tg_id, id, pair.id).run()
+        : await env.DB.prepare("UPDATE goal_items SET done=0,done_at=NULL,done_by=NULL WHERE id=? AND pair_id=? AND done=1")
           .bind(id, pair.id).run();
     } else if (type === "movies") {
       // Просмотр — совместный, как посещение места: отметку ставит любой
@@ -1793,6 +1868,7 @@ async function api(request, env, url) {
       dates_digest_time: { type: "string" },
       dates_digest_enabled: { type: "boolean" },
       show_avatar: { type: "boolean" },
+      display_name: { type: "string" },
       partner_name: { type: "string" }
     });
     const updates = [];
@@ -1809,6 +1885,16 @@ async function api(request, env, url) {
       if (typeof body.show_avatar !== "boolean") throw new HttpError(400, "Флаг включённости должен быть булевым", "INVALID_SETTING");
       updates.push("show_avatar=?");
       values.push(body.show_avatar ? 1 : 0);
+    }
+    // Личное имя пользователя: null/пустая строка оставляет имя из Telegram,
+    // не пустая — обрезается и ограничивается 80 кодовыми точками.
+    if (body?.display_name !== undefined) {
+      const name = body.display_name === null ? "" : clean(body.display_name);
+      if (Array.from(name).length > 80) {
+        throw new HttpError(400, "Ваше имя: не больше 80 символов", "INVALID_NAME");
+      }
+      updates.push("custom_name=?");
+      values.push(name || null);
     }
     // Личное имя партнёра: null/пустая строка сбрасывает на имя из Telegram,
     // не пустая — обрезается и ограничивается 80 кодовыми точками (как
@@ -1987,6 +2073,38 @@ async function api(request, env, url) {
     const link = wishUrl(body.url) || null;
     await env.DB.prepare("INSERT INTO places(pair_id,created_by,title,note,url,created_at) VALUES(?,?,?,?,?,?)")
       .bind(pair.id, user.tg_id, title, note, link, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && url.pathname === "/api/trips") {
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, note: { type: "string", maxLength: 600 } });
+    const title = textField(body, "title", 120, "Поездка");
+    const note = clean(body.note) || null;
+    await env.DB.prepare("INSERT INTO trips(pair_id,created_by,title,note,created_at) VALUES(?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, title, note, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  // Создание цели: название + пункты выполнения (хотя бы один). Пункты без
+  // текста не сохраняем — пустая строка в диалоге означает «строку не заполнили».
+  if (request.method === "POST" && url.pathname === "/api/goals") {
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, is_private: { type: "boolean" } });
+    const title = textField(body, "title", 180, "Цель");
+    if (!Array.isArray(body.items)) throw new HttpError(400, "Добавьте хотя бы один пункт", "INVALID_ITEMS");
+    const items = body.items
+      .filter((item) => typeof item === "string")
+      .map((item) => clean(item))
+      .filter(Boolean);
+    if (!items.length) throw new HttpError(400, "Добавьте хотя бы один пункт", "INVALID_ITEMS");
+    if (items.length > 30) throw new HttpError(400, "Не больше 30 пунктов на цель", "INVALID_ITEMS");
+    for (const item of items) {
+      if (Array.from(item).length > 180) throw new HttpError(400, "Пункт превышает 180 символов", "INVALID_ITEMS");
+    }
+    const goalResult = await env.DB.prepare("INSERT INTO goals(pair_id,created_by,title,is_private,created_at) VALUES(?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, title, body.is_private === true ? 1 : 0, now()).run();
+    const goalId = goalResult.meta.last_row_id;
+    await env.DB.batch(items.map((item) =>
+      env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
+        .bind(goalId, pair.id, user.tg_id, item, now())
+    ));
     return json(await state(env, user.tg_id));
   }
   // Добавление фильма по выбору из подсказок: карточка собирается из IMDb
@@ -2451,6 +2569,7 @@ const EXPORT_SECTIONS = {
   dates: ["all", "private"],
   birthdays: ["all", "private"],
   places: ["all", "mine"],
+  trips: ["all", "mine"],
   memories: ["all", "mine"],
   quotes: ["all", "mine"],
   wishes: ["all", "mine"]
@@ -2462,6 +2581,7 @@ const EXPORT_LABELS = {
   dates: "значимые даты",
   birthdays: "дни рождения",
   places: "места",
+  trips: "поездки",
   memories: "дневник",
   quotes: "цитаты",
   wishes: "желания"
@@ -2482,6 +2602,8 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.kind='birthday'${scope === "private" ? " AND d.is_private=1 AND d.created_by=?" : " AND (d.is_private=0 OR d.created_by=?)"} ORDER BY d.day ASC, d.id ASC`,
   places: (scope) => `SELECT p.id,p.title,p.note,p.url,p.visited,p.visited_at,p.created_at,u.display_name AS author FROM places p
     LEFT JOIN users u ON u.tg_id=p.created_by WHERE p.pair_id=?${scope === "mine" ? " AND p.created_by=?" : ""} ORDER BY p.created_at ASC, p.id ASC`,
+  trips: (scope) => `SELECT t.id,t.title,t.note,t.visited,t.visited_at,t.created_at,u.display_name AS author FROM trips t
+    LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=?${scope === "mine" ? " AND t.created_by=?" : ""} ORDER BY t.created_at ASC, t.id ASC`,
   memories: (scope) => `SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name AS author FROM memories m
     LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=?${scope === "mine" ? " AND m.author_id=?" : ""} ORDER BY m.created_at ASC, m.id ASC`,
   quotes: (scope) => `SELECT q.id,q.body,q.source,q.created_at,u.display_name AS author FROM quotes q
@@ -2491,7 +2613,7 @@ const EXPORT_SQL = {
 };
 
 // Бинды каждой секции: у кино состав фиксирован (второй фильтр не нужен);
-// у общих коллекций (места/дневник/цитаты/желания) второй бинд с tg_id
+// у общих коллекций (места/поездки/дневник/цитаты/желания) второй бинд с tg_id
 // появляется только в составе «mine» — в составе «all» в SQL один
 // плейсхолдер (пары), и лишний бинд роняет запрос. У планов/дат/дней
 // рождения фильтр видимости стоит в обоих составах — биндятся всегда.
@@ -2586,6 +2708,15 @@ const EXPORT_ROW_MAPPERS = {
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   }),
+  trips: (row) => ({
+    id: row.id,
+    title: row.title,
+    note: clean(row.note) || null,
+    visited: Number(row.visited) === 1,
+    visited_at: row.visited_at || null,
+    author: clean(row.author) || "Партнёр",
+    created_at: row.created_at
+  }),
   memories: exportMemoryRow,
   quotes: (row) => ({
     id: row.id,
@@ -2664,6 +2795,15 @@ const EXPORT_TXT_ROWS = {
       ["Заметка", row.note],
       ["Ссылка", row.url],
       ["Посещено", row.visited ? (row.visited_at ? `да (${exportTxtTime(row.visited_at)})` : "да") : null],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  trips: (row) => ({
+    head: row.title,
+    fields: [
+      ["Заметка", row.note],
+      ["Съездили", row.visited ? (row.visited_at ? `да (${exportTxtTime(row.visited_at)})` : "да") : null],
       ["Добавил", row.author],
       ["Создан", exportTxtTime(row.created_at)]
     ]
@@ -2978,7 +3118,7 @@ async function ensureSchema(env) {
 
   const statements = [
     `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
@@ -2986,6 +3126,9 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,is_private INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS goal_items (id INTEGER PRIMARY KEY AUTOINCREMENT,goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,done_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,rating_source TEXT,rating_checked_at INTEGER,details TEXT,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS movie_ratings (movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,rating INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY (movie_id,tg_id))`,
     `CREATE TABLE IF NOT EXISTS savings (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,kind TEXT NOT NULL DEFAULT 'personal',title TEXT NOT NULL,target INTEGER NOT NULL,collected INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
@@ -3002,6 +3145,9 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_wishes_pair ON wishes(pair_id,done)`,
     `CREATE INDEX IF NOT EXISTS idx_quotes_pair ON quotes(pair_id,created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_places_pair ON places(pair_id,visited)`,
+    `CREATE INDEX IF NOT EXISTS idx_trips_pair ON trips(pair_id,visited)`,
+    `CREATE INDEX IF NOT EXISTS idx_goals_pair ON goals(pair_id,is_private)`,
+    `CREATE INDEX IF NOT EXISTS idx_goal_items_goal ON goal_items(goal_id,done)`,
     `CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id,watched)`,
     `CREATE INDEX IF NOT EXISTS idx_savings_pair ON savings(pair_id,kind)`,
     `CREATE INDEX IF NOT EXISTS idx_savings_deposits_saving ON savings_deposits(saving_id,created_at)`,
@@ -3028,6 +3174,7 @@ async function ensureSchema(env) {
     ["users", "photo_url", "TEXT"],
     ["users", "show_avatar", "INTEGER NOT NULL DEFAULT 1"],
     ["users", "partner_custom_name", "TEXT"],
+    ["users", "custom_name", "TEXT"],
     ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
     ["tasks", "day", "TEXT"],
     ["tasks", "time", "TEXT"],
