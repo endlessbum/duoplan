@@ -352,6 +352,77 @@ html.dialog-locked {
   color: var(--berry);
 }
 
+/* Внутренний бар «В планах / Просмотрено» — та же капля, но мельче:
+   он живёт внутри вкладки и не должен конкурировать с «Планы/Кино». */
+.seg-switch.is-sub {
+  padding: 4px;
+  margin: 0 auto 12px;
+}
+
+.seg-switch.is-sub .seg-switch-btn {
+  padding: 7px 14px;
+  font-size: 12.5px;
+}
+
+/* Сортировка списка «Кино»: критерий + направление + количество. Стоит на
+   месте прежних заголовков «Хотим посмотреть» / «Просмотренные». */
+.movie-sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.movie-sort-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.movie-sort-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.movie-sort-field select {
+  width: 100%;
+  height: 38px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  appearance: none;
+  -webkit-appearance: none;
+  text-overflow: ellipsis;
+}
+
+.movie-sort-chevron {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.movie-sort-dir svg {
+  transition: transform 0.2s ease;
+}
+
+.movie-sort-dir.is-asc svg {
+  transform: rotate(180deg);
+}
+
+.movie-sort-count {
+  margin-left: 2px;
+  flex: none;
+}
+
 /* ------------------------------------------------------------------
    Нижний бар: Liquid Glass в духе Telegram iOS + жидкая SVG-капля.
    Слои материала: фон с размытием → верхний блик (sheen) → внутренняя
@@ -1566,6 +1637,119 @@ input[type="checkbox"] {
   display: grid;
   gap: 8px;
   margin-top: 16px;
+}
+
+/* Оценка фильма в диалоге: сетка 1..10, только целые числа. Выбранная
+   ячейка заливается акцентом пары, как .primary. */
+.rating-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.rating-option {
+  position: relative;
+}
+
+.rating-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rating-option span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.rating-option input:checked + span {
+  border-color: var(--berry);
+  background: var(--berry);
+  color: #fff;
+}
+
+.rating-option input:focus-visible + span {
+  outline: 2px solid var(--berry);
+  outline-offset: 2px;
+}
+
+/* Карточка «Кино» открывает окно с описанием — тап по всей площади. */
+.movie-card,
+.movie-pick {
+  cursor: pointer;
+}
+
+/* Окно карточки фильма: слоган, рейтинги, жанры, описание, факты. */
+.movie-details-tagline {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.movie-details-pills,
+.movie-details-genres {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.movie-details-plot {
+  margin: 12px 0 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.movie-details-facts {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+
+.movie-details-fact {
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.movie-details-fact dt {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.movie-details-fact dd {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.movie-details-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.movie-details-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* Живые подсказки IMDb в диалоге «Добавить фильм»: вертикальный список

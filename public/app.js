@@ -52,6 +52,8 @@
   let memoriesView = "memories";
   // «Планы / Кино» — виды вкладки «Планы».
   let tasksView = "plans";
+  // «В планах / Просмотрено» — виды сегмента «Кино» и их сортировки.
+  let moviesView = "open";
   // «Рандом» мест: колода id и текущий выпавший. Живут вне рендера, чтобы
   // карточка результата переживала минутный refresh, а колода не начиналась
   // заново после каждой отметки посещения.
@@ -1956,9 +1958,9 @@
 
   // Сегмент-переключатель вида: те же кнопки, что в доке, но внутри вкладки.
   // data-action="seg-switch" обрабатывается общим делегированным кликом.
-  function renderSegment(key, value, options) {
+  function renderSegment(key, value, options, extraClass = "") {
     return `
-      <div class="seg-switch" data-switch="${key}" role="tablist">
+      <div class="seg-switch${extraClass ? ` ${extraClass}` : ""}" data-switch="${key}" role="tablist">
         ${options.map(([id, label]) => `
           <button class="seg-switch-btn${id === value ? " is-active" : ""}" type="button" role="tab"
             aria-selected="${id === value}" data-action="seg-switch" data-switch="${key}" data-tab="${id}">${esc(label)}</button>
@@ -2218,8 +2220,8 @@
         <div class="place-actions">
           <button class="primary full" type="button" data-action="place-visited" data-id="${place.id}">Посетили</button>
           <button class="secondary full" type="button" data-action="random-place">Следующее</button>
+          ${place.url ? `<button class="secondary full" type="button" data-action="open-url" data-url="${esc(place.url)}">Открыть ссылку</button>` : ""}
         </div>
-        ${place.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(place.url)}">Открыть ссылку</button>` : ""}
       </article>
     `;
   }
@@ -2238,11 +2240,11 @@
             ${visited
               ? `<button class="icon-btn" type="button" data-action="place-unvisited" data-id="${place.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
               : `<button class="icon-btn" type="button" data-action="place-visited" data-id="${place.id}" aria-label="Отметить посещённым">${DONE_ICON}</button>`}
+            ${place.url ? `<button class="icon-btn" type="button" data-action="open-url" data-url="${esc(place.url)}" aria-label="Ссылка">${LINK_ICON}</button>` : ""}
             <button class="icon-btn" type="button" data-action="edit-item" data-type="places" data-id="${place.id}" aria-label="Редактировать">${EDIT_ICON}</button>
             <button class="icon-btn" type="button" data-action="delete-item" data-type="places" data-id="${place.id}" aria-label="Удалить">${DELETE_ICON}</button>
           </div>
         </div>
-        ${place.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(place.url)}">Ссылка</button>` : ""}
       </article>
     `;
   }
@@ -2251,33 +2253,53 @@
     const open = unvisitedPlaces();
     const visited = visitedPlaces();
     const total = open.length + visited.length;
-    const pick = currentPlacePick();
     const disabledClass = partnerMissing() ? " is-disabled" : "";
+    const pick = currentPlacePick();
+    const empty = !total;
+    const heroUsed = placeRandomUsed();
     let html = renderTabHeader("places");
-    if (!placeRandomUsed()) {
+    // Пустой список — как в «Кино»: «Добавить место» живёт в карточке
+    // «Пока пусто», а не отдельной кнопкой над списком.
+    if (empty) {
+      html += `
+        <section class="card">
+          <h3>Пока пусто</h3>
+          <p>Добавьте кафе, парк или город, куда давно хотели выбраться.</p>
+          <button class="primary full card-action${disabledClass}" type="button" data-action="add-place">Добавить место</button>
+        </section>
+      `;
+    }
+    // «Рандом» — кнопка внутри карточки-информера до первого запуска на этом
+    // устройстве; после первого выбора карточка исчезает, а кнопка
+    // возвращается отдельной — под «Добавить место».
+    if (!heroUsed) {
+      const hint = empty
+        ? "Пока нечего выбирать — добавьте первое место."
+        : open.length ? "" : "Все места уже посещены — добавьте новое или верните старое.";
       html += `
         <section class="card place-hero">
           <p class="eyebrow">Рандом</p>
           <h3>Не знаете, куда пойти?</h3>
           <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите.</p>
-          ${open.length ? "" : `<p class="place-count">${total ? "Все места уже посещены — добавьте новое или верните старое." : "Пока нечего выбирать — добавьте первое место."}</p>`}
+          ${hint ? `<p class="place-count">${hint}</p>` : ""}
+          <button class="secondary full card-action${disabledClass}" type="button" data-action="random-place">Рандом</button>
         </section>
       `;
     }
     if (pick) html += renderPlacePick(pick);
-    html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-place">Добавить место</button>`;
-    // «Рандом» живёт под «Добавить место» и окрашен нейтрально, как кнопки
-    // карточек «Нашей пары» (.secondary — следует теме, а не акценту).
-    html += `<button class="secondary full place-random" type="button" data-action="random-place">Рандом</button>`;
-    if (open.length) {
-      html += `<div class="section-head-inline"><h3>Хотим посетить · ${open.length}</h3></div>`;
-      html += open.map((place) => placeItem(place)).join("");
-    } else if (!total) {
-      html += `<section class="card"><h3>Пока пусто</h3><p>Добавьте кафе, парк или город, куда давно хотели выбраться.</p></section>`;
-    }
-    if (visited.length) {
-      html += `<div class="section-head-inline"><h3>Посещённые · ${visited.length}</h3></div>`;
-      html += visited.map((place) => placeItem(place)).join("");
+    if (!empty) {
+      html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-place">Добавить место</button>`;
+      // «Рандом» живёт под «Добавить место» и окрашен нейтрально, как кнопки
+      // карточек «Нашей пары» (.secondary — следует теме, а не акценту).
+      if (heroUsed) html += `<button class="secondary full place-random" type="button" data-action="random-place">Рандом</button>`;
+      if (open.length) {
+        html += `<div class="section-head-inline"><h3>Хотим посетить · ${open.length}</h3></div>`;
+        html += open.map((place) => placeItem(place)).join("");
+      }
+      if (visited.length) {
+        html += `<div class="section-head-inline"><h3>Посещённые · ${visited.length}</h3></div>`;
+        html += visited.map((place) => placeItem(place)).join("");
+      }
     }
     return html;
   }
@@ -2297,14 +2319,115 @@
     return movieList().filter((movie) => Number(movie.watched) === 1);
   }
 
-  // Пилюля рейтинга IMDb: серая (0–3.9 и «нет оценки»), красная (4–5.9),
-  // жёлтая (6–7.9), зелёная (8–10). Подпись «IMDb» текстом — вместо звёздочки
-  // (item 35: текстовый ★ на мобильных рендерится эмодзи и выпадает из стиля).
-  function ratingPill(rating) {
+  // Пилюля оценки: серая (0–3.9 и «нет оценки»), красная (4–5.9),
+  // жёлтая (6–7.9), зелёная (8–10). Порог общий для IMDb, TMDB и RAofP.
+  function scorePill(label, rating) {
     const r = Number(rating);
-    if (!Number.isFinite(r) || r <= 0) return `<span class="day-chip is-rating-gray">IMDb —</span>`;
+    if (!Number.isFinite(r) || r <= 0) return `<span class="day-chip is-rating-gray">${label} —</span>`;
     const cls = r < 4 ? "is-rating-gray" : r < 6 ? "is-rating-red" : r < 8 ? "is-rating-yellow" : "is-rating-green";
-    return `<span class="day-chip ${cls}">IMDb ${r.toFixed(1)}</span>`;
+    return `<span class="day-chip ${cls}">${label} ${r.toFixed(1)}</span>`;
+  }
+
+  function ratingPill(rating, source = "imdb") {
+    return scorePill(source === "tmdb" ? "TMDB" : "IMDb", rating);
+  }
+
+  // RAofP — rating assessment of the pair: среднее оценок обоих партнёров.
+  function raofpPill(movie) {
+    return scorePill("RAofP", movie?.pair_rating);
+  }
+
+  // Сетка оценок 1..10: только целые числа, выбор обязателен (required на
+  // радио-группе не даёт отправить форму без оценки).
+  function ratingField() {
+    const options = Array.from({ length: 10 }, (_, index) => index + 1)
+      .map((value) => `<label class="rating-option"><input type="radio" name="rating" value="${value}" required><span>${value}</span></label>`)
+      .join("");
+    return `<div class="rating-grid">${options}</div>`;
+  }
+
+  // Общий диалог оценки: «Просмотрено» (оценка обязательна для перехода
+  // в «Просмотренные») и «Оценить» для второго партнёра.
+  function openRatingDialog(movie, { path, hint, toast, clearPick = false }) {
+    openDialog({
+      title: movie?.kind === "series" ? "Оцените сериал" : "Оцените фильм",
+      fields: `<p class="settings-hint">${hint}</p>${ratingField()}`,
+      submitLabel: "Оценить",
+      onSubmit: async (formData) => {
+        const state = await request(path, { method: "POST", body: { rating: Number(formData.get("rating")) } });
+        if (clearPick) moviePickId = null;
+        showToast(toast);
+        return state;
+      }
+    });
+  }
+
+  // Статусы TMDB — по-русски; неизвестные не показываем.
+  const MOVIE_STATUS_RU = {
+    Released: "Вышел",
+    Ended: "Завершён",
+    "Returning Series": "Продолжается",
+    "In Production": "В производстве",
+    "Post Production": "Постпродакшн",
+    Canceled: "Отменён",
+    Planned: "Запланирован",
+    Rumored: "Слухи"
+  };
+
+  // Окно карточки: описание, все жанры, актёры, режиссёр/создатели, премьера,
+  // длительность, статус и рейтинги RT/Metacritic. Данные приходят из
+  // /api/movies/:id/details (TMDB ru + OMDb) и кешируются на сервере.
+  function renderMovieDetails(movie, details) {
+    if (!details) {
+      return `<p class="movie-details-empty">Описание пока недоступно — попробуйте открыть карточку позже.</p>`;
+    }
+    const genres = (details.genres || []).filter(Boolean);
+    const actors = (details.actors || []).filter(Boolean);
+    const director = (details.director || []).filter(Boolean);
+    const pills = [
+      ratingPill(movie.rating, movie.rating_source),
+      movie.pair_rating ? raofpPill(movie) : "",
+      details.rt ? `<span class="day-chip is-muted">RT ${esc(details.rt)}</span>` : "",
+      details.metascore ? `<span class="day-chip is-muted">Metacritic ${esc(details.metascore)}</span>` : ""
+    ].filter(Boolean).join("");
+    const length = formatMovieLength(movie);
+    const facts = [];
+    if (director.length) facts.push([movie.kind === "series" ? "Создатели" : "Режиссёр", director.join(", ")]);
+    if (actors.length) facts.push(["В главных ролях", actors.join(", ")]);
+    if (details.released) facts.push(["Премьера", formatDay(details.released)]);
+    if (length) facts.push(["Длительность", length]);
+    const status = MOVIE_STATUS_RU[details.status];
+    if (status) facts.push(["Статус", status]);
+    return `
+      ${details.tagline ? `<p class="movie-details-tagline">${esc(details.tagline)}</p>` : ""}
+      <div class="movie-details-pills">${pills}</div>
+      ${genres.length ? `<div class="movie-details-genres">${genres.map((genre) => `<span class="day-chip is-muted">${esc(genre)}</span>`).join("")}</div>` : ""}
+      ${details.plot ? `<p class="movie-details-plot">${esc(details.plot)}</p>` : ""}
+      ${facts.length ? `<dl class="movie-details-facts">${facts.map(([term, value]) => `<div class="movie-details-fact"><dt>${esc(term)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>` : ""}
+      ${details.plot_lang === "en" ? `<p class="movie-details-note">Описание на английском: русского перевода пока нет.</p>` : ""}
+    `;
+  }
+
+  // Тап по карточке: окно открывается сразу с заглушкой, детали подставляются
+  // после ответа сервера. Если диалог успели закрыть/сменить — ответ игнорим.
+  function openMovieDetails(movie) {
+    openDialog({
+      title: movie.title,
+      fields: `<p class="movie-details-empty">Загружаем описание…</p>`,
+      submitLabel: null,
+      readOnly: true,
+      cancelLabel: "Закрыть"
+    });
+    const context = dialogContext;
+    request(`/api/movies/${movie.id}/details`)
+      .then((data) => {
+        if (dialogContext !== context || !dialog.open) return;
+        dialogFields.innerHTML = renderMovieDetails(movie, data.details);
+      })
+      .catch(() => {
+        if (dialogContext !== context || !dialog.open) return;
+        dialogFields.innerHTML = `<p class="movie-details-empty">Не удалось загрузить описание. Попробуйте позже.</p>`;
+      });
   }
 
   // Длительность без пилюли: у фильма — хронометраж, у сериала — сезоны
@@ -2334,15 +2457,16 @@
     const yearPill = movie.year ? `<span class="day-chip is-muted">${esc(movie.year)}</span>` : "";
     const length = formatMovieLength(movie);
     return `
-      <article class="card movie-card${watched ? " movie-watched" : ""}">
+      <article class="card movie-card${watched ? " movie-watched" : ""}" data-action="open-movie" data-id="${movie.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(movie.title)}">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${esc(movie.title)}</h3>
             ${genre || movie.year ? `<div class="item-meta">${genre ? `<span class="day-chip is-muted">${esc(genre)}</span>` : ""}${yearPill}</div>` : ""}
             <div class="item-meta">
-              ${ratingPill(movie.rating)}
+              ${ratingPill(movie.rating, movie.rating_source)}
               ${length ? `<span>${esc(length)}</span>` : ""}
             </div>
+            ${watched ? `<div class="item-meta">${raofpPill(movie)}</div>` : ""}
             ${watched ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(movie.watched_at) || "Просмотрено")}</span></div>` : ""}
           </div>
           <div class="item-actions">
@@ -2353,6 +2477,7 @@
             <button class="icon-btn" type="button" data-action="delete-item" data-type="movies" data-id="${movie.id}" aria-label="Удалить">${DELETE_ICON}</button>
           </div>
         </div>
+        ${watched && movie.my_rating == null ? `<button class="secondary full card-action" type="button" data-action="rate-movie" data-id="${movie.id}">Оценить</button>` : ""}
       </article>
     `;
   }
@@ -2397,11 +2522,11 @@
   function renderMoviePick(movie) {
     const length = formatMovieLength(movie);
     return `
-      <article class="card place-pick movie-pick" aria-live="polite">
+      <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${movie.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(movie.title)}">
         <p class="eyebrow">Вам выпало</p>
         <h2 class="place-pick-title">${esc(movie.title)}</h2>
         <div class="item-meta">
-          ${ratingPill(movie.rating)}
+          ${ratingPill(movie.rating, movie.rating_source)}
           ${length ? `<span>${esc(length)}</span>` : ""}
         </div>
         <div class="place-actions">
@@ -2427,49 +2552,140 @@
   // исчезает, и кнопка возвращается отдельной, под «Добавить фильм».
   // Пустой список: «Добавить фильм» живёт в карточке «Пока пусто»,
   // карточка «Рандом» — под ней.
+  // Сортировка списков «Кино». Выбор живёт отдельно для «В планах» и
+  // «Просмотрено»: у просмотренных есть RAofP, у планов — нет.
+  const MOVIE_SORT_OPTIONS = [
+    ["added", "По добавлению"],
+    ["year", "Год"],
+    ["rating", "Оценка IMDb/TMDB"],
+    ["runtime", "Длительность"],
+    ["genre", "Жанр"],
+    ["kind", "Фильм/сериал"]
+  ];
+  const MOVIE_SORT_DIR = {
+    added: "desc", year: "desc", rating: "desc", runtime: "desc", genre: "asc", kind: "asc", raofp: "desc"
+  };
+  const movieSort = {
+    open: { key: "added", dir: "desc" },
+    watched: { key: "added", dir: "desc" }
+  };
+
+  function movieSortOptions(view) {
+    return view === "watched" ? [...MOVIE_SORT_OPTIONS, ["raofp", "RAofP"]] : MOVIE_SORT_OPTIONS;
+  }
+
+  // Числовое/строковое значение ключа. null — «нет данных», такие записи
+  // всегда уходят в конец независимо от направления.
+  function movieSortValue(movie, key) {
+    if (key === "added") return Number(movie.created_at) || 0;
+    if (key === "year") return Number(movie.year) || null;
+    if (key === "rating") return Number(movie.rating) > 0 ? Number(movie.rating) : null;
+    if (key === "runtime") {
+      // У сериала хронометража нет — длину сравниваем по числу серий.
+      if (movie.kind === "series") return Number(movie.episodes) > 0 ? Number(movie.episodes) : null;
+      return Number(movie.runtime) > 0 ? Number(movie.runtime) : null;
+    }
+    if (key === "genre") {
+      const genre = movie.genres ? String(movie.genres).split(",")[0].trim().toLowerCase() : "";
+      return genre || null;
+    }
+    if (key === "kind") return movie.kind === "series" ? "series" : "movie";
+    if (key === "raofp") return Number(movie.pair_rating) > 0 ? Number(movie.pair_rating) : null;
+    return null;
+  }
+
+  function sortMovies(list, view) {
+    const { key, dir } = movieSort[view];
+    const decorated = list.map((movie) => ({ movie, value: movieSortValue(movie, key) }));
+    decorated.sort((a, b) => {
+      const av = a.value;
+      const bv = b.value;
+      if (av === null && bv === null) return byRowId(a.movie.id, b.movie.id);
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      const cmp = typeof av === "string" ? av.localeCompare(bv, "ru") : av - bv;
+      if (cmp === 0) return byRowId(a.movie.id, b.movie.id);
+      return dir === "asc" ? cmp : -cmp;
+    });
+    return decorated.map(({ movie }) => movie);
+  }
+
+  function movieSortBar(view, count) {
+    const state = movieSort[view];
+    return `
+      <div class="movie-sort">
+        <span class="movie-sort-label">Сортировка</span>
+        <div class="movie-sort-field">
+          <select data-action="movie-sort-key" aria-label="Сортировка фильмов">
+            ${movieSortOptions(view).map(([key, label]) => `<option value="${key}"${key === state.key ? " selected" : ""}>${esc(label)}</option>`).join("")}
+          </select>
+          <svg class="movie-sort-chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <button class="icon-btn movie-sort-dir${state.dir === "asc" ? " is-asc" : ""}" type="button" data-action="movie-sort-dir" aria-label="${state.dir === "asc" ? "По возрастанию" : "По убыванию"}">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+        </button>
+        <span class="day-chip is-muted movie-sort-count">${count}</span>
+      </div>
+    `;
+  }
+
   function renderMoviesBody() {
+    return `
+      ${renderSegment("movies", moviesView, [["open", "В планах"], ["watched", "Просмотрено"]], "is-sub")}
+      <div id="movies-body">${renderMoviesList()}</div>
+    `;
+  }
+
+  function renderMoviesList() {
+    if (moviesView === "watched") {
+      const watched = watchedMovies();
+      if (!watched.length) {
+        return `<section class="card"><h3>Пока ничего не просмотрено</h3><p>Отметьте фильм просмотренным в «В планах» — он появится здесь.</p></section>`;
+      }
+      return movieSortBar("watched", watched.length) + sortMovies(watched, "watched").map(movieItem).join("");
+    }
+    return renderOpenMovies();
+  }
+
+  function renderOpenMovies() {
     const open = openMovies();
     const watched = watchedMovies();
     const disabledClass = partnerMissing() ? " is-disabled" : "";
     const pick = currentMoviePick();
-    const empty = !open.length && !watched.length;
     const heroUsed = movieRandomUsed();
     let html = "";
-    if (empty) {
+    // Пустой список планов — как в «Кино»: «Добавить фильм» внутри карточки.
+    if (!open.length) {
       html += `
         <section class="card">
           <h3>Пока пусто</h3>
-          <p>Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью.</p>
+          <p>${watched.length
+            ? "Все фильмы просмотрены — добавьте новый или верните старый."
+            : "Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью."}</p>
           <button class="primary full card-action${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>
         </section>
       `;
     }
+    // «Рандом» — кнопка внутри карточки-информера до первого запуска на этом
+    // устройстве; после первого выбора карточка исчезает, а кнопка
+    // возвращается отдельной — под «Добавить фильм».
     if (!heroUsed) {
-      const hint = empty
-        ? "Пока нечего выбирать — добавьте первый фильм."
-        : open.length ? "" : "Всё из списка уже просмотрено — добавьте новое или верните старое.";
       html += `
         <section class="card place-hero movie-hero">
           <p class="eyebrow">Рандом</p>
           <h3>Не знаете, что посмотреть?</h3>
           <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров.</p>
-          ${hint ? `<p class="place-count">${hint}</p>` : ""}
           <button class="secondary full card-action${disabledClass}" type="button" data-action="random-movie">Рандом</button>
         </section>
       `;
     }
     if (pick) html += renderMoviePick(pick);
-    if (!empty) {
+    if (open.length) {
       html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>`;
       if (heroUsed) html += `<button class="secondary full place-random" type="button" data-action="random-movie">Рандом</button>`;
-      if (open.length) {
-        html += `<div class="section-head-inline"><h3>Хотим посмотреть · ${open.length}</h3></div>`;
-        html += open.map((movie) => movieItem(movie)).join("");
-      }
-      if (watched.length) {
-        html += `<div class="section-head-inline"><h3>Просмотренные · ${watched.length}</h3></div>`;
-        html += watched.map((movie) => movieItem(movie)).join("");
-      }
+      // На месте прежнего заголовка «Хотим посмотреть» — сортировка списка.
+      html += movieSortBar("open", open.length);
+      html += sortMovies(open, "open").map(movieItem).join("");
     }
     return html;
   }
@@ -2583,6 +2799,7 @@
     }
     mountTabSwitch();
     mountWishSwitch();
+    mountMovieSwitch();
     mountPinFields();
   }
 
@@ -2597,6 +2814,7 @@
   let segSwitch = null;      // переключатель вида текущей вкладки
   let wishSwitch = null;     // внутренний «Мои / Её» в желаниях
   let wishSwitchPrevView = null;
+  let movieSwitch = null;    // внутренний «В планах / Просмотрено» в кино
 
   function switchValue(key) {
     if (key === "pair") return pairView;
@@ -2617,6 +2835,7 @@
   function destroySwitches() {
     if (segSwitch) { segSwitch.destroy(); segSwitch = null; }
     if (wishSwitch) { wishSwitch.destroy(); wishSwitch = null; }
+    if (movieSwitch) { movieSwitch.destroy(); movieSwitch = null; }
   }
 
   function createSwitch(container, key) {
@@ -2657,6 +2876,65 @@
     wishSwitchPrevView = wishView;
   }
 
+  // Внутренний бар «В планах / Просмотрено»: отдельный экземпляр капли,
+  // потому что он живёт внутри тела «Кино», а не на уровне вкладки.
+  function mountMovieSwitch() {
+    if (movieSwitch) {
+      movieSwitch.destroy();
+      movieSwitch = null;
+    }
+    const container = document.querySelector('.seg-switch[data-switch="movies"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitMoviesView(value, instance)
+    });
+    if (!instance) return;
+    instance.setActive(moviesView, false);
+    movieSwitch = instance;
+  }
+
+  // Переключение «В планах / Просмотрено»: меняем только список, чтобы капля
+  // и сам бар остались живыми.
+  function commitMoviesView(value, instance) {
+    if (moviesView === value) return;
+    moviesView = value;
+    const body = document.getElementById("movies-body");
+    if (!body) { render(); return; }
+    body.innerHTML = renderMoviesList();
+    instance?.setActive(value, true);
+    document.querySelectorAll('.seg-switch[data-switch="movies"] .seg-switch-btn').forEach((btn) => {
+      btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+    });
+  }
+
+  // Перерисовка только списка: бар и его капля остаются на месте.
+  function refreshMoviesList() {
+    const body = document.getElementById("movies-body");
+    if (!body) { render(); return; }
+    body.innerHTML = renderMoviesList();
+  }
+
+  function setMovieSortKey(key) {
+    const state = movieSort[moviesView];
+    if (!state || state.key === key) return;
+    if (!movieSortOptions(moviesView).some(([value]) => value === key)) return;
+    state.key = key;
+    state.dir = MOVIE_SORT_DIR[key] || "desc";
+    refreshMoviesList();
+  }
+
+  function toggleMovieSortDir() {
+    const state = movieSort[moviesView];
+    if (!state) return;
+    state.dir = state.dir === "asc" ? "desc" : "asc";
+    refreshMoviesList();
+  }
+
   // Переключение вида: меняем только тело вкладки, чтобы капля и сам
   // переключатель остались живыми.
   function commitSwitch(key, value, instance) {
@@ -2680,6 +2958,12 @@
       wishSwitch.destroy();
       wishSwitch = null;
     }
+    // Внутренний бар «В планах / Просмотрено» живёт в перерисовываемом теле
+    // «Кино» — снимаем экземпляр до замены разметки.
+    if (key === "tasks" && movieSwitch) {
+      movieSwitch.destroy();
+      movieSwitch = null;
+    }
     body.innerHTML = key === "pair" ? renderPairView()
       : key === "dates" ? renderDatesBody()
         : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : renderTasksBody())
@@ -2691,6 +2975,7 @@
       btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
     });
     if (key === "pair") mountWishSwitch();
+    if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
   }
 
   // ------------------------------------------------------------------
@@ -3007,6 +3292,12 @@
   dialog?.addEventListener("close", hideFmtToolbar);
 
   // Спойлер в карточках раскрывается тапом (как в Telegram).
+  // Сортировка «Кино»: смена критерия перерисовывает только список.
+  document.addEventListener("change", (e) => {
+    const select = e.target.closest?.('[data-action="movie-sort-key"]');
+    if (select) setMovieSortKey(select.value);
+  });
+
   document.addEventListener("click", (e) => {
     const spoiler = e.target.closest?.("[data-spoiler]");
     if (spoiler) spoiler.classList.toggle("is-revealed");
@@ -3051,8 +3342,14 @@
         // переключатель остаются живыми.
         const key = btn.dataset.switch || "";
         const value = btn.dataset.tab || "";
+        if (key === "movies") {
+          commitMoviesView(value, movieSwitch);
+          return;
+        }
         if (!["pair", "dates", "memories", "tasks"].includes(key)) return;
         commitSwitch(key, value, segSwitch);
+      } else if (action === "movie-sort-dir") {
+        toggleMovieSortDir();
       } else if (action === "calendar-prev") {
         shiftCalendarMonth(-1);
       } else if (action === "calendar-next") {
@@ -3242,24 +3539,43 @@
           behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
           block: "nearest"
         });
-      } else if (action === "movie-watched" || action === "movie-unwatched") {
+      } else if (action === "movie-watched") {
+        // Оценка обязательна: без неё сервер не переведёт карточку
+        // в «Просмотренные», а RAofP не из чего считать.
+        const movie = movieList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        if (!movie) return;
+        openRatingDialog(movie, {
+          path: `/api/movies/${movie.id}/watched`,
+          hint: "Поставьте оценку от 1 до 10 — без неё карточка не попадёт в «Просмотренные».",
+          toast: `Просмотрено: ${movie.title}`,
+          clearPick: true
+        });
+      } else if (action === "movie-unwatched") {
         const id = btn.dataset.id;
-        const markWatched = action === "movie-watched";
         const movie = movieList().find((item) => Number(item.id) === Number(id));
         btn.disabled = true;
         try {
-          appState = await request(`/api/movies/${id}/${markWatched ? "watched" : "unwatched"}`, { method: "POST", body: {} });
-          if (markWatched) {
-            // Фильм уходит в «Просмотренные» и больше не участвует в рандоме.
-            moviePickId = null;
-            showToast(movie ? `Просмотрено: ${movie.title}` : "Просмотрено");
-          } else {
-            showToast(movie ? `«${movie.title}» снова в списке` : "Фильм вернулся в список");
-          }
+          appState = await request(`/api/movies/${id}/unwatched`, { method: "POST", body: {} });
+          showToast(movie ? `«${movie.title}» снова в списке` : "Фильм вернулся в список");
           render();
         } finally {
           btn.disabled = false;
         }
+      } else if (action === "rate-movie") {
+        // Второй партнёр: кнопка «Оценить» в карточке «Просмотренные».
+        const movie = movieList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        if (!movie) return;
+        openRatingDialog(movie, {
+          path: `/api/movies/${movie.id}/rate`,
+          hint: "Оценка войдёт в RAofP — среднее по вашей паре.",
+          toast: "Оценка сохранена"
+        });
+      } else if (action === "open-movie") {
+        // Тап по карточке: описание и детали в окне. Кнопки внутри карточки
+        // (просмотрено/ссылка/удалить/оценить) ловятся раньше — у них свой
+        // data-action, closest находит кнопку, а не карточку.
+        const movie = movieList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        if (movie) openMovieDetails(movie);
       } else if (action === "random-movie") {
         if (!drawMovie()) {
           showToast("Всё из списка уже просмотрено");

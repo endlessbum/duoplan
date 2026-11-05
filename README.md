@@ -10,7 +10,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.05.2` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.05.6` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -163,7 +163,7 @@ python -m http.server 8080        # из корня репозитория
 | `WEBHOOK_SECRET` | Случайная строка для проверки Telegram webhook (`x-telegram-bot-api-secret-token`) |
 | `SETUP_TOKEN` | Необязательный отдельный секрет для `/api/setup` (иначе используется `BOT_TOKEN`) |
 | `OMDB_API_KEY` | Ключ [OMDb API](https://www.omdbapi.com/apikey.aspx) (бесплатный, 1000/день) — основной источник карточки фильма: рейтинг, жанр, длительность. Без него карточка собирается с suggest-эндпоинта IMDb без рейтинга (пилюля «IMDb —»); поиск подсказок всегда идёт по IMDb suggest — поиск OMDb слаб на русских и частичных запросах |
-| `TMDB_API_KEY` | Ключ [TMDB](https://www.themoviedb.org/settings/api) (бесплатный) — русские названия подсказок и карточек «Кино» (локализация ru-RU по tt-id). Без него названия остаются английскими; поиск и добавление работают в любом случае |
+| `TMDB_API_KEY` | Ключ [TMDB](https://www.themoviedb.org/settings/api) (бесплатный) — русские названия подсказок и карточек «Кино» (локализация ru-RU по tt-id) и оценка-фолбэк, когда у IMDb ещё нет голосов (пилюля «TMDB 7.5» вместо «IMDb —»). Без него названия остаются английскими; поиск и добавление работают в любом случае |
 
 Активация:
 
@@ -281,9 +281,14 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 | `POST /api/quotes` | Цитата `{ body, source }` — источник необязателен |
 | `POST /api/places` | Место `{ title, note, url }` |
 | `POST /api/places/:id/visited\|unvisited` | Отметить посещение (пишет `visited_by`/`visited_at`) или вернуть в список |
+| `POST /api/movies` | Фильм по `{ imdb_id }`: карточка собирается из OMDb/IMDb suggest, название и жанр локализует TMDB |
+| `GET /api/movies/:id/details` | Описание, все жанры, главные актёры, режиссёр/создатели, премьера и рейтинги RT/Metacritic (TMDB ru + OMDb, кешируется в `movies.details`) |
+| `POST /api/movies/:id/watched` | «Просмотрено» с обязательной оценкой `{ rating: 1…10 }`; без целой оценки 1–10 — 400, карточка не переходит в «Просмотренные» |
+| `POST /api/movies/:id/rate` | Оценка второго партнёра `{ rating: 1…10 }` (только для просмотренного); RAofP — среднее обоих голосов |
+| `POST /api/movies/:id/unwatched` | Вернуть в «Хотим посмотреть»; оценки пары сбрасываются |
 | `POST /api/daily/done` | Отметить ритуал дня (+10 XP, идемпотентно) |
 | `PATCH /api/{tasks\|dates\|memories\|wishes\|quotes\|places}/:id` | Изменить запись |
-| `DELETE /api/{tasks\|dates\|memories\|wishes\|quotes\|places}/:id` | Удалить запись |
+| `DELETE /api/{tasks\|dates\|memories\|wishes\|quotes\|places\|movies}/:id` | Удалить запись |
 | `POST /api/tasks/:id/done\|reopen` | Завершить или вернуть план |
 | `POST /api/wishes/:id/done\|reopen` | Отметить желание исполненным (только своё) |
 | `POST /api/setup` | Активация: схема, webhook, команды, меню-кнопка |

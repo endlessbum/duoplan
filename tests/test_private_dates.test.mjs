@@ -196,6 +196,7 @@ const loadState = new Function(
     extractBraced("function publicUser"),
     extractBraced("function withPartnerOverride"),
     extractBraced("async function membership"),
+    extractBraced("function attachMovieRatings"),
     extractBraced("async function state"),
     extractBraced("async function archivePage")
   ].join("\n") +

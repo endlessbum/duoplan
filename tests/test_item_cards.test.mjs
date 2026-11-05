@@ -199,7 +199,9 @@ test("movieItem: пилюля рейтинга по порогам оценки"
       extractBraced("function esc"),
       extractBraced("function plural"),
       extractBraced("function formatTimestamp"),
+      extractBraced("function scorePill"),
       extractBraced("function ratingPill"),
+      extractBraced("function raofpPill"),
       extractBraced("function formatMovieLength"),
       extractBraced("function movieItem"),
       "return { ratingPill, formatMovieLength, movieItem };"
@@ -218,6 +220,30 @@ test("movieItem: пилюля рейтинга по порогам оценки"
   ok(!pill.includes("★") && !pill.includes("svg"), "ни текстового ★ (U+2605), ни иконки — только текст (п.35)");
 });
 
+test("ratingPill: фолбэк TMDB подписан «TMDB», а не «IMDb»", () => {
+  const ratingPill = new Function(
+    `${extractBraced("function scorePill")}\n${extractBraced("function ratingPill")}\nreturn ratingPill;`
+  )();
+  const tmdb = ratingPill(7.5, "tmdb");
+  ok(tmdb.includes("TMDB 7.5"), "оценка TMDB подписана источником");
+  ok(!tmdb.includes("IMDb"), "оценка TMDB не выдаётся за IMDb");
+  ok(tmdb.includes("is-rating-yellow"), "порог цвета тот же, что у IMDb");
+  ok(ratingPill(null, "tmdb").includes("TMDB —"), "пустая оценка TMDB — «TMDB —»");
+});
+
+test("raofpPill: подпись RAofP и те же пороги цвета, что у IMDb", () => {
+  const { raofpPill } = new Function(
+    `${extractBraced("function scorePill")}
+${extractBraced("function raofpPill")}
+return { raofpPill };`
+  )();
+  ok(raofpPill({ pair_rating: 9.1 }).includes("RAofP 9.1"), "RAofP с оценкой");
+  ok(raofpPill({ pair_rating: 9.1 }).includes("is-rating-green"), "9.1 — зелёная");
+  ok(raofpPill({ pair_rating: 5 }).includes("is-rating-red"), "5 — красная");
+  ok(raofpPill({ pair_rating: 7.5 }).includes("is-rating-yellow"), "7.5 — жёлтая");
+  ok(raofpPill({}).includes("RAofP —"), "без оценки — «RAofP —»");
+});
+
 test("formatMovieLength: хронометраж фильма и сезоны/серии сериала", () => {
   const loadMovie = new Function(
     [
@@ -228,7 +254,9 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       extractBraced("function esc"),
       extractBraced("function plural"),
       extractBraced("function formatTimestamp"),
+      extractBraced("function scorePill"),
       extractBraced("function ratingPill"),
+      extractBraced("function raofpPill"),
       extractBraced("function formatMovieLength"),
       extractBraced("function movieItem"),
       "return { formatMovieLength, movieItem };"
@@ -249,6 +277,7 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
   ok(card.includes('class="day-chip is-muted">2023'), "год — в серой пилюле");
   ok(card.includes('is-rating-green') && card.includes("8.4"), "рейтинг в зелёной пилюле");
   ok(card.includes("<span>3 ч 1 мин</span>"), "длительность — без пилюли");
+  ok(card.includes('data-action="open-movie"'), "карточка не открывает описание");
   ok(card.includes('data-action="movie-watched"'), "нет кнопки «Просмотрено»");
   ok(card.includes('data-action="delete-item"'), "нет кнопки удаления");
   ok(!card.includes("edit-item"), "у фильма нет кнопки редактирования");
@@ -256,9 +285,52 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
   ok(watched.includes("movie-watched"), "нет класса просмотренной карточки");
   ok(watched.includes('data-action="movie-unwatched"'), "нет кнопки возврата");
   ok(watched.includes(">27.10.2024</span>"), "нет зелёной пилюли с датой просмотра");
+  ok(watched.includes("RAofP"), "нет пилюли RAofP у просмотренного");
+  ok(watched.includes('data-action="rate-movie"'), "нет кнопки «Оценить» для второго партнёра");
+  const rated = movieItem({ id: 33, title: "Дюна", rating: 8, watched: 1, watched_at: 1730000000, my_rating: 9, pair_rating: 8.5 });
+  ok(rated.includes("RAofP 8.5"), "RAofP не показан");
+  ok(!rated.includes('data-action="rate-movie"'), "кнопка «Оценить» осталась после оценки");
+  ok(!card.includes("RAofP"), "у непросмотренного фильма не должно быть RAofP");
   // Ни жанра, ни года, ни длительности — карточка не падает.
   const bare = movieItem({ id: 32, title: "Без данных", watched: 0 });
   ok(bare.includes("is-rating-gray"), "карточка без данных отрисовывается с серой пилюлей");
+});
+
+test("renderMovieDetails: описание, актёры, все жанры, режиссёр и рейтинги", () => {
+  const renderMovieDetails = new Function(
+    [
+      extractBraced("const MOVIE_STATUS_RU = "),
+      extractBraced("function esc"),
+      extractBraced("function plural"),
+      extractBraced("function formatDay"),
+      extractBraced("function scorePill"),
+      extractBraced("function ratingPill"),
+      extractBraced("function raofpPill"),
+      extractBraced("function formatMovieLength"),
+      extractBraced("function renderMovieDetails"),
+      "return renderMovieDetails;"
+    ].join("\n")
+  )();
+  const movie = { id: 1, title: "Оппенгеймер", kind: "movie", rating: 8.4, rating_source: "imdb", pair_rating: 9, runtime: 181 };
+  const html = renderMovieDetails(movie, {
+    plot: "История жизни физика.", plot_lang: "ru", tagline: "Мир изменится.",
+    genres: ["драма", "история"], actors: ["Киллиан Мёрфи", "Эмили Блант"],
+    director: ["Кристофер Нолан"], released: "2023-07-19", status: "Released", rt: "93%", metascore: 89
+  });
+  ok(html.includes("История жизни физика."), "нет описания");
+  ok(html.includes("драма") && html.includes("история"), "не все жанры");
+  ok(html.includes("Киллиан Мёрфи"), "нет актёров");
+  ok(html.includes("Режиссёр") && html.includes("Кристофер Нолан"), "нет режиссёра");
+  ok(html.includes("19.07.2023"), "дата премьеры не в дд.мм.гггг");
+  ok(html.includes("RT 93%") && html.includes("Metacritic 89"), "нет RT/Metacritic");
+  ok(html.includes("Вышел"), "статус не переведён");
+  ok(html.includes("RAofP 9.0"), "нет RAofP");
+  ok(!html.includes("Описание на английском"), "русское описание помечено как английское");
+
+  const series = renderMovieDetails({ ...movie, kind: "series", seasons: 2, episodes: 18, runtime: null }, { plot: "Сюжет", plot_lang: "en", director: ["Создатель"] });
+  ok(series.includes("Создатели") && series.includes("Создатель"), "у сериала нет создателей");
+  ok(series.includes("Описание на английском"), "английское описание не помечено");
+  ok(renderMovieDetails(movie, null).includes("Описание пока недоступно"), "нет заглушки");
 });
 
 test("wishItem: у желания партнёра нет кнопок, у своего — полный набор", () => {

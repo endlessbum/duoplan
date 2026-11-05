@@ -229,6 +229,7 @@ const loadState = new Function(
     extractBraced(workerSource, "function publicUser"),
     extractBraced(workerSource, "function withPartnerOverride"),
     extractBraced(workerSource, "async function membership"),
+    extractBraced(workerSource, "function attachMovieRatings"),
     extractBraced(workerSource, "async function state"),
     // Ритуал в этих тестах не участвует: пара с user_b есть, поэтому state()
     // вызывает dailyFor — глушим его моком.

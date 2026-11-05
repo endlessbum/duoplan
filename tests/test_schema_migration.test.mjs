@@ -51,6 +51,7 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = 
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
     wishes: new Set(["id", "pair_id", "owner_id", "body", "done", "created_at"]),
     memories: new Set(["id", "pair_id", "author_id", "body", "day", "created_at"]),
+    movies: new Set(["id", "pair_id", "created_by", "imdb_id", "title", "year", "kind", "rating", "genres", "runtime", "seasons", "episodes", "url", "watched", "watched_at", "watched_by", "created_at"]),
     tasks: new Set(["id", "pair_id", "title", "status", "created_by", "created_at", "completed_by", "completed_at"]),
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
     rate_limits: new Set(["bucket_key", "count"])
@@ -104,8 +105,9 @@ test("гонка isolate: duplicate column name обрабатывается п�
   // pairs.timezone добавлен этим isolate штатно.
   deepStrictEqual(log.alters.sort(), [
     "accent_color", "created_by", "dates_digest_enabled", "dates_digest_time", "day",
-    "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
-    "is_private", "kind", "monthly", "monthly", "partner_custom_name", "photo_url", "show_avatar",
+    "details", "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
+    "is_private", "kind", "monthly", "monthly", "partner_custom_name", "photo_url",
+    "rating_checked_at", "rating_source", "show_avatar",
     "time", "time", "timezone", "timezone", "title", "url", "yearly"
   ]);
 });
@@ -117,7 +119,8 @@ test("чистый проход миграции без гонки записы�
   // time + is_private (tasks) + time/is_private/created_by/kind (dates) + done_at
   // (wishes) + url (wishes) + timezone (users, pairs) + expires_at (rate_limits)
   // + 5 настроек (users) + photo_url/show_avatar/partner_custom_name (users, item 54)
-  deepStrictEqual(log.alters.length, 25);
+  // + rating_source/rating_checked_at/details (movies, items 88/89/92)
+  deepStrictEqual(log.alters.length, 28);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.05.2";
+const APP_VERSION = "2026.11.05.6";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.05.2";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.05.2";
+const DB_SCHEMA_VERSION = "2026.11.05.6";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -363,9 +363,21 @@ async function tmdbLocalize(env, imdbId) {
   const payload = await tmdbFetch(env, `/find/${encodeURIComponent(imdbId)}`, "external_source=imdb_id");
   if (!payload) return null;
   // tt-id — фильм или сериал: берём первый непустой массив результатов.
-  const entry = payload?.movie_results?.[0] || payload?.tv_results?.[0] || null;
+  const movieEntry = payload?.movie_results?.[0] || null;
+  const tvEntry = payload?.tv_results?.[0] || null;
+  const entry = movieEntry || tvEntry;
   const value = entry
-    ? { title: String(entry.title || entry.name || "").slice(0, 180) || null, genreIds: Array.isArray(entry.genre_ids) ? entry.genre_ids : [] }
+    ? {
+        // id/kind нужны деталям карточки: /movie/{id} или /tv/{id}.
+        id: Number(entry.id) || null,
+        kind: movieEntry ? "movie" : "tv",
+        title: String(entry.title || entry.name || "").slice(0, 180) || null,
+        genreIds: Array.isArray(entry.genre_ids) ? entry.genre_ids : [],
+        // Голосов меньше пяти — оценка случайна; 0 — «ещё никто не голосовал».
+        rating: Number(entry.vote_count) >= 5 && Number(entry.vote_average) > 0
+          ? Math.round(Number(entry.vote_average) * 10) / 10
+          : null
+      }
     : null;
   tmdbRuCache.set(imdbId, { at: Date.now(), value });
   return value;
@@ -404,7 +416,162 @@ async function movieInfo(env, imdbId) {
   const ru = await tmdbLocalize(env, imdbId);
   if (!ru) return info;
   const genre = ru.genreIds.length ? await tmdbGenreName(env, info.kind, ru.genreIds[0]) : null;
+  // У нового фильма IMDb ещё не имеет оценки (OMDb отдаёт imdbRating "N/A"),
+  // а TMDB уже голосует. Показываем оценку TMDB с честной подписью «TMDB»,
+  // а не пустую «IMDb —». Источник хранится в movies.rating_source.
+  if (!info.rating && ru.rating) {
+    return { ...info, title: ru.title || info.title, genre: genre || info.genre, rating: ru.rating, ratingSource: "tmdb" };
+  }
   return { ...info, title: ru.title || info.title, genre: genre || info.genre };
+}
+
+// OMDb отдаёт дату релиза по-английски («19 Jul 2023») — приводим к ISO,
+// чтобы клиент показывал её тем же formatDay, что и остальные даты.
+const OMDB_MONTHS = {
+  Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06",
+  Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12"
+};
+function omdbDate(value) {
+  const match = /^(\d{1,2}) ([A-Za-z]{3}) (\d{4})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const month = OMDB_MONTHS[match[2]];
+  return month ? `${match[3]}-${month}-${match[1].padStart(2, "0")}` : null;
+}
+
+// Детали карточки: OMDb с plot=full — актёры, режиссёр, жанры, награды и
+// рейтинги Rotten Tomatoes/Metacritic. Описание здесь английское — русское
+// берём из TMDB (tmdbTitleDetails), OMDb остаётся запасным источником.
+async function omdbDetails(env, imdbId) {
+  const payload = await omdbFetch(env, `i=${encodeURIComponent(imdbId)}&plot=full`);
+  if (!payload) return null;
+  const ratings = Array.isArray(payload.Ratings) ? payload.Ratings : [];
+  const rt = ratings.find((item) => item.Source === "Rotten Tomatoes")?.Value || null;
+  const metascore = Number(payload.Metascore);
+  const plot = String(payload.Plot || "").trim();
+  return {
+    plot: plot && plot !== "N/A" ? plot : null,
+    genres: String(payload.Genre || "").split(",").map((part) => part.trim()).filter(Boolean),
+    actors: String(payload.Actors || "").split(",").map((part) => part.trim()).filter(Boolean).slice(0, 6),
+    director: String(payload.Director || "").split(",").map((part) => part.trim()).filter(Boolean).slice(0, 3),
+    released: omdbDate(payload.Released),
+    runtime: omdbMinutes(payload.Runtime),
+    metascore: Number.isFinite(metascore) && metascore > 0 ? metascore : null,
+    rt: rt && rt !== "N/A" ? rt : null
+  };
+}
+
+// Детали из TMDB на русском: описание, слоган, все жанры, главные актёры,
+// режиссёр (у сериала — создатели), дата премьеры, статус, длительность.
+async function tmdbTitleDetails(env, imdbId) {
+  const localized = await tmdbLocalize(env, imdbId);
+  if (!localized?.id) return null;
+  const kind = localized.kind === "tv" ? "tv" : "movie";
+  const payload = await tmdbFetch(env, `/${kind}/${localized.id}`, "append_to_response=credits");
+  if (!payload) return null;
+  const credits = payload.credits || {};
+  const directors = (credits.crew || []).filter((person) => person.job === "Director").map((person) => person.name).filter(Boolean);
+  const creators = (payload.created_by || []).map((person) => person.name).filter(Boolean);
+  return {
+    plot: String(payload.overview || "").trim() || null,
+    tagline: String(payload.tagline || "").trim() || null,
+    genres: (payload.genres || []).map((genre) => genre.name).filter(Boolean),
+    actors: (credits.cast || []).slice(0, 6).map((person) => String(person.name || "").trim()).filter(Boolean),
+    director: (kind === "tv" ? creators : directors).slice(0, 3),
+    released: payload.release_date || payload.first_air_date || null,
+    status: payload.status || null,
+    runtime: Number(payload.runtime) || null,
+    seasons: Number(payload.number_of_seasons) || null,
+    episodes: Number(payload.number_of_episodes) || null
+  };
+}
+
+// Сводные детали для окна карточки: TMDB (русский) приоритетен, OMDb
+// дополняет рейтингами RT/Metacritic и работает без ключа TMDB.
+// null — оба источника недоступны (клиент покажет «описание недоступно»).
+async function movieDetails(env, imdbId) {
+  const [tmdb, omdb] = await Promise.all([tmdbTitleDetails(env, imdbId), omdbDetails(env, imdbId)]);
+  if (!tmdb && !omdb) return null;
+  const plot = tmdb?.plot || omdb?.plot || null;
+  return {
+    plot,
+    // ru — перевод TMDB, en — только английский OMDb (клиент подпишет это).
+    plot_lang: plot ? (tmdb?.plot ? "ru" : "en") : null,
+    tagline: tmdb?.tagline || null,
+    genres: tmdb?.genres?.length ? tmdb.genres : (omdb?.genres || []),
+    actors: tmdb?.actors?.length ? tmdb.actors : (omdb?.actors || []),
+    director: tmdb?.director?.length ? tmdb.director : (omdb?.director || []),
+    released: tmdb?.released || omdb?.released || null,
+    status: tmdb?.status || null,
+    runtime: tmdb?.runtime || omdb?.runtime || null,
+    seasons: tmdb?.seasons || null,
+    episodes: tmdb?.episodes || null,
+    metascore: omdb?.metascore || null,
+    rt: omdb?.rt || null
+  };
+}
+
+// Детали строки с кешем в movies.details: описание не меняется, поэтому
+// повторный тап не ходит в TMDB/OMDb. Кеш не критичен — ошибка записи
+// не должна ломать показ.
+async function movieDetailsFor(env, pairId, id) {
+  const row = await env.DB.prepare("SELECT id,imdb_id,details FROM movies WHERE id=? AND pair_id=?")
+    .bind(id, pairId).first();
+  if (!row) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+  if (row.details) {
+    try {
+      return JSON.parse(row.details);
+    } catch { /* битый JSON — соберём заново */ }
+  }
+  const details = await movieDetails(env, row.imdb_id);
+  if (!details) return null;
+  try {
+    await env.DB.prepare("UPDATE movies SET details=? WHERE id=? AND pair_id=?")
+      .bind(JSON.stringify(details), id, pairId).run();
+  } catch { /* кеш не критичен */ }
+  return details;
+}
+
+// Оценки перепроверяются при открытии приложения, но не чаще раза в сутки на
+// фильм: у новинок IMDb появляется с задержкой, а дёргать OMDb/TMDB на каждом
+// запросе нельзя (лимит OMDb — 1000 запросов в день).
+const RATING_RECHECK_SECONDS = 86400;
+
+// Дозабор и обновление оценок: строки без источника (добавлены до фолбэка)
+// дозаполняются, а строки с оценкой TMDB или без оценки перепроверяются —
+// не появился ли наконец рейтинг IMDb. Как только OMDb его отдаёт, оценка
+// заменяется на IMDb и подпись пилюли меняется с «TMDB» на «IMDb».
+async function refreshMovieRatings(env, movies) {
+  const stamp = now();
+  const candidates = (movies || []).filter((movie) => {
+    if (!movie.imdb_id) return false;
+    // Строка без источника: оценку ещё ни разу не пробовали получить.
+    if (movie.rating == null && !movie.rating_source) return true;
+    // TMDB-фолбэк или «оценки нет»: перепроверяем раз в сутки.
+    if (movie.rating_source !== "tmdb" && movie.rating_source !== "none") return false;
+    return !movie.rating_checked_at || stamp - Number(movie.rating_checked_at) >= RATING_RECHECK_SECONDS;
+  });
+  if (!candidates.length) return;
+  // Одна строка за открытие: у пары десятки фильмов, последовательная
+  // перепроверка не создаёт всплеска запросов к OMDb.
+  const row = candidates[0];
+  let info;
+  try {
+    info = await movieInfo(env, row.imdb_id);
+  } catch {
+    return; // оба источника недоступны — попробуем в следующий раз
+  }
+  const rating = info?.rating ?? null;
+  // ratingSource === "tmdb" — IMDb оценки так и не дал, оставляем TMDB.
+  const source = rating ? (info?.ratingSource || "imdb") : "none";
+  try {
+    await env.DB.prepare("UPDATE movies SET rating=?, rating_source=?, rating_checked_at=? WHERE id=?")
+      .bind(rating, source, stamp, row.id).run();
+  } catch {
+    return;
+  }
+  row.rating = rating;
+  row.rating_source = source;
+  row.rating_checked_at = stamp;
 }
 
 function validTimeZone(value) {
@@ -455,6 +622,15 @@ function planSchedule(body) {
   const time = optionalTime(body?.time);
   if (time && !day) throw new HttpError(400, "Выберите дату, чтобы указать время", "INVALID_DATE");
   return { day, time };
+}
+
+// Оценка пары (RAofP): только целые числа 1..10. Дробные, строки и выход
+// за диапазон отбиваются 400 — оценка обязательна при отметке просмотра.
+function movieRatingValue(value) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 10) {
+    throw new HttpError(400, "Оценка должна быть целым числом от 1 до 10", "INVALID_RATING");
+  }
+  return value;
 }
 
 function safeEqual(left, right) {
@@ -1033,12 +1209,33 @@ function sortDateRows(rows, timeZone, nowMs = Date.now()) {
   return decorated.map(({ row }) => row);
 }
 
+// RAofP: my_rating — голос текущего пользователя (null — ещё не оценил),
+// pair_rating — среднее по всем голосам пары (1–10, один знак). Оценок
+// максимум две, поэтому считаем в памяти, без SQL-агрегата на карточку.
+function attachMovieRatings(movies, ratingRows, userId) {
+  const ratingIndex = new Map();
+  for (const row of ratingRows || []) {
+    const key = Number(row.movie_id);
+    const entry = ratingIndex.get(key) || { sum: 0, count: 0, mine: null };
+    entry.sum += Number(row.rating);
+    entry.count += 1;
+    if (Number(row.tg_id) === Number(userId)) entry.mine = Number(row.rating);
+    ratingIndex.set(key, entry);
+  }
+  for (const movie of movies || []) {
+    const entry = ratingIndex.get(Number(movie.id));
+    movie.my_rating = entry?.mine ?? null;
+    movie.pair_rating = entry?.count ? Math.round((entry.sum / entry.count) * 10) / 10 : null;
+  }
+  return movies;
+}
+
 async function state(env, userId) {
   const user = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(userId).first();
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, movies, savings, daily, partnerUser] = await Promise.all([
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, movies, movieRatings, savings, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
@@ -1060,7 +1257,11 @@ async function state(env, userId) {
     env.DB.prepare("SELECT id,title,note,url,visited,visited_at,visited_by,created_by,created_at FROM places WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Кино — общая коллекция пары, как места: без приватности и архива.
     // Данные (рейтинг/жанр/длительность) — снимок IMDb на момент добавления.
-    env.DB.prepare("SELECT id,imdb_id,title,year,kind,rating,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT id,imdb_id,title,year,kind,rating,rating_source,rating_checked_at,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    // Голоса RAofP всей пары одним запросом: у фильмов до 200 строк, оценки
+    // приклеиваются в памяти — без подзапроса на каждую карточку.
+    env.DB.prepare(`SELECT r.movie_id,r.tg_id,r.rating FROM movie_ratings r
+      JOIN movies m ON m.id=r.movie_id WHERE m.pair_id=?`).bind(pair.id).all(),
     // Копилки: общие видит вся пара, личные — только автор (фильтр в SQL,
     // как у личных дат/планов). collected поддерживается при пополнении.
     env.DB.prepare("SELECT id,created_by,kind,title,target,collected,created_at FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
@@ -1072,6 +1273,7 @@ async function state(env, userId) {
     // его выбранным акцентом (смена видна партнёру после обновления state).
     partnerId ? env.DB.prepare("SELECT gender, points, accent_color FROM users WHERE tg_id=?").bind(partnerId).first() : null
   ]);
+  attachMovieRatings(movies.results || [], movieRatings?.results, user.tg_id);
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
   // Личное имя партнёра видно только просматривающему — подставляем его и в
   // подписи авторов воспоминаний/желаний (author_id/owner_id совпадает с
@@ -1249,7 +1451,7 @@ async function ensureTaskVisible(env, pair, user, id) {
 }
 
 async function itemRoute(env, pair, user, method, pathname, body) {
-  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|deposit))?$/);
+  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|deposit))?$/);
   if (!match) return false;
   const [, type, rawId, action] = match;
   const id = Number(rawId);
@@ -1433,12 +1635,46 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     } else if (type === "movies") {
       // Просмотр — совместный, как посещение места: отметку ставит любой
       // партнёр, watched_by нужен только для подписи «кто отметил».
-      if (!["watched", "unwatched"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
-      result = action === "watched"
-        ? await env.DB.prepare("UPDATE movies SET watched=1,watched_at=?,watched_by=? WHERE id=? AND pair_id=? AND watched=0")
-          .bind(now(), user.tg_id, id, pair.id).run()
-        : await env.DB.prepare("UPDATE movies SET watched=0,watched_at=NULL,watched_by=NULL WHERE id=? AND pair_id=? AND watched=1")
-          .bind(id, pair.id).run();
+      if (!["watched", "unwatched", "rate"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+      const movie = await env.DB.prepare("SELECT id,watched FROM movies WHERE id=? AND pair_id=?")
+        .bind(id, pair.id).first();
+      if (!movie) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+      const stamp = now();
+      // «Просмотрено» без оценки невозможно: диалог на клиенте обязателен,
+      // здесь та же проверка — иначе карточка ушла бы в «Просмотренные»
+      // без голоса, и RAofP считался бы по одному партнёру.
+      if (action === "watched") {
+        const rating = movieRatingValue(body.rating);
+        await env.DB.batch([
+          env.DB.prepare(`INSERT INTO movie_ratings(movie_id,tg_id,rating,created_at,updated_at) VALUES(?,?,?,?,?)
+            ON CONFLICT(movie_id,tg_id) DO UPDATE SET rating=excluded.rating, updated_at=excluded.updated_at`)
+            .bind(id, user.tg_id, rating, stamp, stamp),
+          // Первого отметившего не перезаписываем: повторный вызов (двойной
+          // тап, гонка с партнёром) лишь обновляет его оценку.
+          env.DB.prepare("UPDATE movies SET watched=1,watched_at=COALESCE(watched_at,?),watched_by=COALESCE(watched_by,?) WHERE id=? AND pair_id=?")
+            .bind(stamp, user.tg_id, id, pair.id)
+        ]);
+        return true;
+      }
+      if (action === "rate") {
+        // Кнопка «Оценить» живёт только в «Просмотренных»: оценивать фильм
+        // из «Хотим посмотреть» нельзя.
+        if (Number(movie.watched) !== 1) throw new HttpError(409, "Сначала отметьте просмотр", "MOVIE_NOT_WATCHED");
+        const rating = movieRatingValue(body.rating);
+        await env.DB.prepare(`INSERT INTO movie_ratings(movie_id,tg_id,rating,created_at,updated_at) VALUES(?,?,?,?,?)
+          ON CONFLICT(movie_id,tg_id) DO UPDATE SET rating=excluded.rating, updated_at=excluded.updated_at`)
+          .bind(id, user.tg_id, rating, stamp, stamp).run();
+        return true;
+      }
+      // Возврат в «Хотим посмотреть» сбрасывает оценки: после повторного
+      // просмотра RAofP должен собираться заново, а не показывать старые голоса.
+      if (Number(movie.watched) !== 1) throw new HttpError(409, "Запись уже в этом состоянии", "NO_CHANGE");
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM movie_ratings WHERE movie_id=?").bind(id),
+        env.DB.prepare("UPDATE movies SET watched=0,watched_at=NULL,watched_by=NULL WHERE id=? AND pair_id=?")
+          .bind(id, pair.id)
+      ]);
+      return true;
     } else if (type === "savings") {
       // Пополнение: запись в историю и прирост collected — одна транзакция
       // (batch), чтобы сумма никогда не разошлась с историей.
@@ -1521,6 +1757,9 @@ async function api(request, env, url) {
   if (request.method === "GET" && url.pathname === "/api/state") {
     const t0 = Date.now();
     const result = await state(env, user.tg_id);
+    // Один фильм за открытие: старые строки дозаполняются, а TMDB-оценки
+    // перепроверяются — вдруг IMDb уже поставил свою.
+    await refreshMovieRatings(env, result.movies);
     console.log(`[metric] api_state_ms=${Date.now() - t0}`);
     return json(result);
   }
@@ -1618,6 +1857,14 @@ async function api(request, env, url) {
   if (request.method === "GET" && url.pathname === "/api/movies/search") {
     await rateLimit(env, `ms:${user.tg_id}`, 30, 60);
     return json({ results: await imdbSearch(url.searchParams.get("q"), env) });
+  }
+  // Детали карточки «Кино»: описание, актёры, все жанры и прочее — окно
+  // открывается тапом по карточке. Первый запрос собирает и кеширует данные.
+  const movieDetailsMatch = request.method === "GET" && url.pathname.match(/^\/api\/movies\/(\d+)\/details$/);
+  if (movieDetailsMatch) {
+    const movieId = Number(movieDetailsMatch[1]);
+    if (!positiveId(movieId)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
+    return json({ details: await movieDetailsFor(env, pair.id, movieId) });
   }
   // История пополнений копилки: открывается тапом по карточке. Имя автора
   // подставляем с учётом личного имени партнёра просматривающего.
@@ -1752,20 +1999,26 @@ async function api(request, env, url) {
       .bind(pair.id, imdbId).first();
     if (existing) throw new HttpError(409, "Этот фильм уже в списке", "ALREADY_ADDED");
     const info = await movieInfo(env, imdbId);
+    // Источник оценки: IMDb (OMDb) или TMDB-фолбэк для новинок без голосов.
+    const ratingSource = info.rating ? (info.ratingSource || "imdb") : null;
+    const stamp = now();
     try {
-      await env.DB.prepare(`INSERT INTO movies(pair_id,created_by,imdb_id,title,year,kind,rating,genres,runtime,seasons,episodes,url,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      await env.DB.prepare(`INSERT INTO movies(pair_id,created_by,imdb_id,title,year,kind,rating,rating_source,rating_checked_at,genres,runtime,seasons,episodes,url,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(pair.id, user.tg_id, imdbId,
           clean(info.title) || "Без названия",
           info.year ?? (Number(body.year) || null),
           info.kind,
           info.rating,
+          ratingSource,
+          // Следующая перепроверка — через сутки: сейчас OMDb только что ответил.
+          stamp,
           clean(info.genre) || null,
           info.runtime,
           info.seasons,
           info.episodes,
           `https://www.imdb.com/title/${imdbId}/`,
-          now()).run();
+          stamp).run();
     } catch (error) {
       // Гонка: партнёр добавил тот же фильм, пока мы получали данные с IMDb.
       // UNIQUE(pair_id, imdb_id) — честный 409 вместо 500.
@@ -2221,7 +2474,7 @@ const EXPORT_SQL = {
   // в выгрузку не входят (состав «private» дополнительно сужает до личных).
   plans: (scope) => `SELECT t.id,t.title,t.day,t.time,t.monthly,t.yearly,t.is_private,t.created_at,u.display_name AS author FROM tasks t
     LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=? AND t.status='open'${scope === "private" ? " AND t.is_private=1 AND t.created_by=?" : " AND (t.is_private=0 OR t.created_by=?)"} ORDER BY COALESCE(t.day,'9999-99-99') ASC, t.id ASC`,
-  movies: () => `SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.runtime,m.seasons,m.episodes,m.url,m.created_at,u.display_name AS author FROM movies m
+  movies: () => `SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.seasons,m.episodes,m.url,m.created_at,(SELECT ROUND(AVG(r.rating),1) FROM movie_ratings r WHERE r.movie_id=m.id) AS pair_rating,u.display_name AS author FROM movies m
     LEFT JOIN users u ON u.tg_id=m.created_by WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at ASC, m.id ASC`,
   dates: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
     LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.kind='date'${scope === "private" ? " AND d.is_private=1 AND d.created_by=?" : " AND (d.is_private=0 OR d.created_by=?)"} ORDER BY d.day ASC, d.id ASC`,
@@ -2312,6 +2565,8 @@ const EXPORT_ROW_MAPPERS = {
     year: row.year || null,
     kind: row.kind === "series" ? "series" : "movie",
     rating: row.rating ?? null,
+    rating_source: row.rating_source || null,
+    pair_rating: row.pair_rating ?? null,
     runtime: row.runtime || null,
     seasons: row.seasons || null,
     episodes: row.episodes || null,
@@ -2379,7 +2634,8 @@ const EXPORT_TXT_ROWS = {
     fields: [
       ["Год", row.year],
       ["Тип", row.kind === "series" ? "сериал" : "фильм"],
-      ["Рейтинг IMDb", row.rating],
+      ["Рейтинг", row.rating ? `${row.rating} (${row.rating_source === "tmdb" ? "TMDB" : "IMDb"})` : null],
+      ["RAofP", row.pair_rating],
       ["Длительность", row.runtime ? `${row.runtime} мин` : null],
       ["Сезоны", row.seasons],
       ["Эпизоды", row.episodes],
@@ -2730,7 +2986,8 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,rating_source TEXT,rating_checked_at INTEGER,details TEXT,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS movie_ratings (movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,rating INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY (movie_id,tg_id))`,
     `CREATE TABLE IF NOT EXISTS savings (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,kind TEXT NOT NULL DEFAULT 'personal',title TEXT NOT NULL,target INTEGER NOT NULL,collected INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS savings_deposits (id INTEGER PRIMARY KEY AUTOINCREMENT,saving_id INTEGER NOT NULL REFERENCES savings(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,amount INTEGER NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS daily_rolls (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,day TEXT NOT NULL,daily_value TEXT NOT NULL,PRIMARY KEY (pair_id,day))`,  /* done_by/done_at removed: relic of pre-daily_completions schema */
@@ -2753,6 +3010,7 @@ async function ensureSchema(env) {
     // Оставляем просмотренную строку, при равенстве — самую раннюю.
     `DELETE FROM movies WHERE id NOT IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY pair_id, imdb_id ORDER BY watched DESC, id ASC) AS rn FROM movies) WHERE rn = 1)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_pair_imdb ON movies(pair_id,imdb_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_movie_ratings_movie ON movie_ratings(movie_id)`,
     `CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id,role)`,
     `CREATE INDEX IF NOT EXISTS idx_telegram_updates_received_at ON telegram_updates(received_at)`,
@@ -2784,6 +3042,9 @@ async function ensureSchema(env) {
     ["tasks", "yearly", "INTEGER NOT NULL DEFAULT 0"],
     ["dates", "monthly", "INTEGER NOT NULL DEFAULT 0"],
     ["dates", "kind", "TEXT NOT NULL DEFAULT 'date'"],
+    ["movies", "rating_source", "TEXT"],
+    ["movies", "rating_checked_at", "INTEGER"],
+    ["movies", "details", "TEXT"],
     ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();

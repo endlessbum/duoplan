@@ -291,6 +291,195 @@ test(
 );
 
 test(
+  "movieInfo: у IMDb нет оценки (N/A) — рейтинг берётся из TMDB с пометкой источника",
+  withFetch(async (url) => {
+    url = String(url);
+    if (url.includes("omdbapi.com")) {
+      return { ok: true, json: async () => ({ Response: "True", Title: "Resident Evil", Year: "2026", Type: "movie", imdbRating: "N/A", Genre: "Action, Horror", Runtime: "90 min" }) };
+    }
+    if (url.includes("themoviedb.org/3/find/tt35538033")) {
+      return { ok: true, json: async () => ({ movie_results: [{ title: "Обитель зла", genre_ids: [27], vote_average: 7.467, vote_count: 1565 }], tv_results: [] }) };
+    }
+    if (url.includes("themoviedb.org/3/genre/movie/list")) {
+      return { ok: true, json: async () => ({ genres: [{ id: 27, name: "Ужасы" }] }) };
+    }
+    throw new Error("неожиданный запрос: " + url);
+  }, async () => {
+    const { movieInfo } = loadImdbSearch();
+    deepStrictEqual(await movieInfo({ OMDB_API_KEY: "k", TMDB_API_KEY: "k" }, "tt35538033"), {
+      title: "Обитель зла", rating: 7.5, ratingSource: "tmdb", genre: "Ужасы",
+      kind: "movie", year: 2026, runtime: 90, seasons: null, episodes: null
+    });
+  })
+);
+
+// refreshMovieRatings: один фильм за открытие. Оценки TMDB/«none»
+// перепроверяются раз в сутки — вдруг IMDb уже поставил свою.
+function loadRefresh(movieInfoStub, clock = () => 1000) {
+  const body = [
+    extractLine(workerSource, "const RATING_RECHECK_SECONDS"),
+    extractBraced(workerSource, "async function refreshMovieRatings"),
+    "return refreshMovieRatings;"
+  ].join("\n");
+  return new Function("movieInfo", "now", body)(movieInfoStub, clock);
+}
+
+function makeRefreshEnv() {
+  const updates = [];
+  return {
+    updates,
+    env: {
+      DB: { prepare(sql) { return { bind(...args) { updates.push([sql, args]); return { run: async () => ({}) }; } }; } }
+    }
+  };
+}
+
+test("refreshMovieRatings: пустая оценка дозаполняется и помечается источником", async () => {
+  const refresh = loadRefresh(async () => ({ rating: 7.5, ratingSource: "tmdb" }));
+  const { env, updates } = makeRefreshEnv();
+  const movies = [{ id: 5, imdb_id: "tt35538033", rating: null, rating_source: null }];
+  await refresh(env, movies);
+  deepStrictEqual(movies[0].rating, 7.5);
+  equal(movies[0].rating_source, "tmdb");
+  equal(movies[0].rating_checked_at, 1000);
+  equal(updates.length, 1);
+  deepStrictEqual(updates[0][1], [7.5, "tmdb", 1000, 5]);
+});
+
+test("refreshMovieRatings: обе площадки без оценки — «none», в пределах суток не дёргает", async () => {
+  let calls = 0;
+  const refresh = loadRefresh(async () => { calls++; return { rating: null }; });
+  const { env, updates } = makeRefreshEnv();
+  const movies = [{ id: 6, imdb_id: "tt0000006", rating: null, rating_source: null }];
+  await refresh(env, movies);
+  equal(movies[0].rating_source, "none");
+  equal(movies[0].rating_checked_at, 1000);
+  // Тот же фильм в пределах суток — повторного запроса к OMDb нет.
+  await refresh(env, movies);
+  equal(updates.length, 1);
+  equal(calls, 1);
+});
+
+test("refreshMovieRatings: оценка TMDB заменяется на IMDb, когда она появилась", async () => {
+  const refresh = loadRefresh(async () => ({ rating: 8.1 }), () => 1000 + 86400);
+  const { env, updates } = makeRefreshEnv();
+  const movies = [{ id: 7, imdb_id: "tt35538033", rating: 7.5, rating_source: "tmdb", rating_checked_at: 1000 }];
+  await refresh(env, movies);
+  equal(movies[0].rating, 8.1);
+  equal(movies[0].rating_source, "imdb");
+  equal(movies[0].rating_checked_at, 1000 + 86400);
+  deepStrictEqual(updates[0][1], [8.1, "imdb", 1000 + 86400, 7]);
+});
+
+test("refreshMovieRatings: свежая TMDB-оценка не перепроверяется", async () => {
+  let calls = 0;
+  const refresh = loadRefresh(async () => { calls++; return { rating: 9 }; }, () => 1000 + 3600);
+  const { env, updates } = makeRefreshEnv();
+  const movies = [{ id: 8, imdb_id: "tt1", rating: 7.5, rating_source: "tmdb", rating_checked_at: 1000 }];
+  await refresh(env, movies);
+  equal(updates.length, 0);
+  equal(calls, 0, "до истечения суток OMDb не вызывается");
+});
+
+test("omdbDate: английская дата OMDb → ISO", () => {
+  const omdbDate = new Function(
+    `${extractBraced(workerSource, "const OMDB_MONTHS = ")}\n${extractBraced(workerSource, "function omdbDate")}\nreturn omdbDate;`
+  )();
+  equal(omdbDate("19 Jul 2023"), "2023-07-19");
+  equal(omdbDate("1 Jan 2020"), "2020-01-01");
+  equal(omdbDate("N/A"), null);
+  equal(omdbDate(""), null);
+});
+
+test("movieDetails: TMDB (ru) приоритетен, OMDb дополняет RT/Metascore", async () => {
+  const movieDetails = new Function(
+    "tmdbTitleDetails", "omdbDetails",
+    `${extractBraced(workerSource, "async function movieDetails")}\nreturn movieDetails;`
+  )(
+    async () => ({
+      plot: "Русское описание", tagline: "Слоган", genres: ["драма"], actors: ["Актёр"],
+      director: ["Режиссёр"], released: "2023-07-19", status: "Released", runtime: 181, seasons: null, episodes: null
+    }),
+    async () => ({
+      plot: "English plot", genres: ["Drama"], actors: ["Actor"], director: ["Director"],
+      released: "2023-07-19", runtime: 181, metascore: 89, rt: "93%"
+    })
+  );
+  const details = await movieDetails({}, "tt1");
+  equal(details.plot, "Русское описание");
+  equal(details.plot_lang, "ru");
+  deepStrictEqual(details.genres, ["драма"]);
+  equal(details.rt, "93%");
+  equal(details.metascore, 89);
+});
+
+test("movieDetails: только OMDb — английское описание с пометкой", async () => {
+  const movieDetails = new Function(
+    "tmdbTitleDetails", "omdbDetails",
+    `${extractBraced(workerSource, "async function movieDetails")}\nreturn movieDetails;`
+  )(
+    async () => null,
+    async () => ({ plot: "English plot", genres: ["Drama"], actors: [], director: [], released: null, runtime: 100, metascore: null, rt: null })
+  );
+  const details = await movieDetails({}, "tt1");
+  equal(details.plot, "English plot");
+  equal(details.plot_lang, "en");
+});
+
+test("movieDetails: оба источника недоступны — null", async () => {
+  const movieDetails = new Function(
+    "tmdbTitleDetails", "omdbDetails",
+    `${extractBraced(workerSource, "async function movieDetails")}\nreturn movieDetails;`
+  )(async () => null, async () => null);
+  equal(await movieDetails({}, "tt1"), null);
+});
+
+test("movieDetailsFor: кеш в строке не ходит в сеть, пустой — собирает и сохраняет", async () => {
+  const loadDetailsFor = new Function(
+    "movieDetails", "HttpError",
+    `${extractBraced(workerSource, "async function movieDetailsFor")}\nreturn movieDetailsFor;`
+  );
+  const HttpError = new Function(`${extractBraced(workerSource, "class HttpError")}\nreturn HttpError;`)();
+
+  function makeDb(row) {
+    const calls = [];
+    const db = {
+      prepare(sql) {
+        const stmt = {
+          sql,
+          args: [],
+          bind(...args) { stmt.args = args; return stmt; },
+          async first() { return sql.startsWith("SELECT id,imdb_id,details") ? row : null; },
+          async run() { calls.push({ sql, args: stmt.args }); return { meta: { changes: 1 } }; }
+        };
+        return stmt;
+      }
+    };
+    return { db, calls };
+  }
+
+  // Кеш: сеть не нужна, UPDATE не выполняется.
+  let fetched = 0;
+  const cached = loadDetailsFor(async () => { fetched++; return { plot: "Сеть" }; }, HttpError);
+  const cachedDb = makeDb({ id: 5, imdb_id: "tt1", details: JSON.stringify({ plot: "Кеш" }) });
+  deepStrictEqual(await cached({ DB: cachedDb.db }, 3, 5), { plot: "Кеш" });
+  equal(fetched, 0);
+  equal(cachedDb.calls.length, 0);
+
+  // Пустой кеш: собрали, вернули и записали в строку.
+  const fresh = loadDetailsFor(async () => ({ plot: "Сеть" }), HttpError);
+  const freshDb = makeDb({ id: 5, imdb_id: "tt1", details: null });
+  deepStrictEqual(await fresh({ DB: freshDb.db }, 3, 5), { plot: "Сеть" });
+  equal(freshDb.calls.length, 1);
+  ok(freshDb.calls[0].sql.startsWith("UPDATE movies SET details=?"));
+  deepStrictEqual(freshDb.calls[0].args, [JSON.stringify({ plot: "Сеть" }), 5, 3]);
+
+  // Чужая/несуществующая строка — 404.
+  const missing = loadDetailsFor(async () => ({ plot: "Сеть" }), HttpError);
+  await rejects(missing({ DB: makeDb(null).db }, 3, 5), (error) => error.status === 404 && error.code === "NOT_FOUND");
+});
+
+test(
   "tmdbLocalize: «не нашли» кешируется — второй вызов без запроса в TMDB",
   async () => {
     let calls = 0;
