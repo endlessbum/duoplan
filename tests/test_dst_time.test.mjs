@@ -32,7 +32,11 @@ function extractFunction(source, name) {
 
 function loadImpl(relPath) {
   const source = readFileSync(join(root, relPath), "utf8");
-  const code = extractFunction(source, "timeZoneOffsetMs") + "\n" + extractFunction(source, "makeDateInTimeZone");
+  // Кеш форматтеров — общий для обеих функций: тянем из того же файла,
+  // если он там есть (в public/app.js дубликаты пока без кеша — самодостаточны).
+  const mapLine = source.match(/const dateTimeFormatCache = new Map\(\);/)?.[0] || "const dateTimeFormatCache = new Map();";
+  const cachedFn = source.includes("function cachedFormatter(") ? extractFunction(source, "cachedFormatter") : "";
+  const code = mapLine + "\n" + cachedFn + "\n" + extractFunction(source, "timeZoneOffsetMs") + "\n" + extractFunction(source, "makeDateInTimeZone");
   return new Function(`${code}; return makeDateInTimeZone;`)();
 }
 

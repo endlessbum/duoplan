@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.04.13";
+const APP_VERSION = "2026.11.05.2";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.04.13";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.04.13";
+const DB_SCHEMA_VERSION = "2026.11.05.2";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -177,13 +177,15 @@ const IMDB_KIND_BY_TYPE = {
   "tv mini series": "series"
 };
 
-function parseIsoDuration(value) {
-  const match = /^PT(?:(\d+)H)?(?:(\d+)M)?/.exec(String(value || ""));
-  if (!match) return null;
-  const minutes = Number(match[1] || 0) * 60 + Number(match[2] || 0);
-  return minutes || null;
+// Названия подсказок локализуются по TMDB (если задан TMDB_API_KEY);
+// без ключа список остаётся английским, как отдал источник.
+async function localizeResults(env, items) {
+  const localized = await Promise.all(items.map((item) => tmdbLocalize(env, item.imdb_id)));
+  return items.map((item, i) => localized[i]?.title ? { ...item, title: localized[i].title } : item);
 }
 
+// Поиск подсказок: основной источник — suggest IMDb (у OMDb поиск слаб:
+// русские и частичные запросы почти всегда мимо), OMDb — запасной.
 async function imdbSearch(rawQuery, env) {
   const query = String(rawQuery || "").trim().slice(0, 100);
   if (!query) throw new HttpError(400, "Введите название фильма или сериала", "INVALID_QUERY");
@@ -203,8 +205,9 @@ async function imdbSearch(rawQuery, env) {
     // иначе отдаём ошибку в формате API (сырые Error из fetch заворачиваем).
     const fallback = await omdbSearch(env, query);
     if (fallback?.length) {
-      imdbSuggestCache.set(cacheKey, { at: Date.now(), results: fallback });
-      return fallback;
+      const localizedFallback = await localizeResults(env, fallback);
+      imdbSuggestCache.set(cacheKey, { at: Date.now(), results: localizedFallback });
+      return localizedFallback;
     }
     throw error instanceof HttpError
       ? error
@@ -219,69 +222,56 @@ async function imdbSearch(rawQuery, env) {
       year: Number(item.y) || null,
       kind: IMDB_KIND_BY_TYPE[String(item.q).toLowerCase()]
     }));
-  imdbSuggestCache.set(cacheKey, { at: Date.now(), results });
+  // Подсказки показываются пользователю — локализуем названия по TMDB
+  // (если задан TMDB_API_KEY; без него остаются английские).
+  const localizedResults = await localizeResults(env, results);
+  imdbSuggestCache.set(cacheKey, { at: Date.now(), results: localizedResults });
   // Простая гигиена памяти изолята: при переполнении стираем самый старый ключ.
   if (imdbSuggestCache.size > 200) {
     imdbSuggestCache.delete(imdbSuggestCache.keys().next().value);
   }
-  return results;
+  return localizedResults;
 }
 
-async function imdbTitle(imdbId) {
-  let html;
-  try {
-    const response = await fetch(`https://www.imdb.com/title/${imdbId}/`, {
-      headers: { "User-Agent": IMDB_UA, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9" },
-      signal: AbortSignal.timeout(IMDB_TIMEOUT_MS)
-    });
-    if (!response.ok) throw new Error(`status ${response.status}`);
-    html = await response.text();
-  } catch {
-    throw new HttpError(502, "IMDb сейчас недоступен, попробуйте позже", "IMDB_UNAVAILABLE");
-  }
-  // Первый JSON-LD на странице тайтла: название, рейтинг, жанры, длительность.
-  const ldMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
-  let ld = {};
-  if (ldMatch) {
-    try { ld = JSON.parse(ldMatch[1]); } catch { /* битый JSON — тянем что можем */ }
-  }
-  const rating = Number(ld.aggregateRating?.ratingValue);
-  const genreRaw = ld.genre;
-  const kind = ld["@type"] === "TVSeries" || ld["@type"] === "TVMiniSeries" ? "series" : "movie";
-  const publishedYear = Number(String(ld.datePublished || "").slice(0, 4)) || null;
-  // Сезоны/серии сериалов в JSON-LD не отдаются: эпизоды иногда лежат в
-  // numberOfEpisodes.value, остальное — best-effort из __NEXT_DATA__.
-  let seasons = null;
-  let episodes = Number(ld.numberOfEpisodes?.value ?? ld.numberOfEpisodes) || null;
-  const nextMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
-  if (nextMatch) {
-    try {
-      const next = JSON.parse(nextMatch[1]);
-      const props = next?.props?.pageProps?.aboveTheFoldData || next?.props?.pageProps || {};
-      seasons = Number(props.numberOfSeasons) || null;
-      if (!episodes) {
-        const epCount = props.numberOfEpisodes;
-        episodes = Number(typeof epCount === "object" ? epCount?.count : epCount) || null;
-      }
-    } catch { /* нет __NEXT_DATA__ — остаёмся без сезонов */ }
-  }
+// Карточка по tt-id через публичный suggest-эндпоинт (тот же CDN, что и
+// поиск: с egress Cloudflare он отвечает, а www.imdb.com — анти-бот страница
+// 202 без JSON-LD, HTML-скрейп из воркера не работает). Отдаёт название, год
+// и тип; рейтинга/жанра/длительности в этом ответе нет — их добирает OMDb.
+async function imdbSuggestTitle(imdbId) {
+  const response = await fetch(`https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(imdbId)}.json`, {
+    headers: { "User-Agent": IMDB_UA, "Accept": "application/json" },
+    signal: AbortSignal.timeout(IMDB_TIMEOUT_MS)
+  });
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const payload = await response.json();
+  const entry = (Array.isArray(payload.d) ? payload.d : []).find((item) => item.id === imdbId);
+  if (!entry) return null;
   return {
-    title: String(ld.name || "").slice(0, 180) || null,
-    rating: Number.isFinite(rating) && rating > 0 && rating <= 10 ? Math.round(rating * 10) / 10 : null,
-    genre: (Array.isArray(genreRaw) ? genreRaw[0] : genreRaw) || null,
-    kind,
-    year: publishedYear,
-    runtime: parseIsoDuration(ld.duration),
-    seasons,
-    episodes
+    title: String(entry.l || "").slice(0, 180) || null,
+    rating: null,
+    genre: null,
+    kind: suggestKind(entry),
+    year: Number(entry.y) || null,
+    runtime: null,
+    seasons: null,
+    episodes: null
   };
 }
 
+// Тип из suggest-by-id: qid каноничен («movie»/«tvSeries»), q — человеческий
+// («feature»/«TV series»). Всё с «series» — сериал, остальное считаем фильмом.
+function suggestKind(entry) {
+  const qid = String(entry?.qid || "").toLowerCase();
+  if (qid.includes("series")) return "series";
+  return IMDB_KIND_BY_TYPE[String(entry?.q || "").toLowerCase()] || "movie";
+}
+
 // ---------------------------------------------------------------------------
-// Фолбэк OMDb: если прямой IMDb недоступен (сайт не отвечает, парсинг
-// сломался), используем OMDb API — зеркало того же датасета IMDb. Ключ
-// бесплатный (1000 запросов/день) и опционален: без секрета OMDB_API_KEY
-// фолбэк просто не активируется, приложение живёт на прямом IMDb.
+// OMDb API — основной источник карточки фильма (rating/genre/runtime одним
+// ответом; в поиске — запасной, потому что его поиск слаб: русские запросы
+// и частичные названия почти всегда «Too many results»/«Movie not found!»).
+// Ключ бесплатный (1000 запросов/день) и опционален: без секрета
+// OMDB_API_KEY карточка собирается из suggest-эндпоинта IMDb без рейтинга.
 // ---------------------------------------------------------------------------
 function omdbMinutes(value) {
   const match = /^(\d+)\s*min/i.exec(String(value || ""));
@@ -336,20 +326,85 @@ async function omdbTitle(env, imdbId) {
   };
 }
 
-// Карточка фильма: прямой IMDb; страница не отдалась или парсинг не вытащил
-// даже название — OMDb-фолбэк; без ключа — исходная ошибка 502.
-async function movieInfo(env, imdbId) {
-  let primaryError = null;
+// ---------------------------------------------------------------------------
+// TMDB — локализация «Кино»: русские названия и жанры (suggest IMDb и OMDb
+// отдают только оригинальные английские). Ключ бесплатный (themoviedb.org →
+// Settings → API), секрет TMDB_API_KEY; без него приложение показывает
+// английские названия. Русские тайтлы тянутся find'ом по tt-id и кешируются
+// надолго — названия фильмов не меняются.
+// ---------------------------------------------------------------------------
+const TMDB_RU_TTL_MS = 30 * 86400 * 1000;
+const TMDB_GENRE_TTL_MS = 86400 * 1000;
+const tmdbRuCache = new Map();    // tt-id → { title, genreIds } | null
+const tmdbGenreCache = new Map(); // "movie"/"tv" → { at, map: id → название }
+
+async function tmdbFetch(env, path, params) {
+  const key = env?.TMDB_API_KEY;
+  if (!key) return null;
   try {
-    const info = await imdbTitle(imdbId);
-    if (info.title) return info;
-  } catch (error) {
-    if (error?.code !== "IMDB_UNAVAILABLE") throw error;
-    primaryError = error;
+    const response = await fetch(`https://api.themoviedb.org/3${path}?api_key=${encodeURIComponent(key)}&language=ru-RU&${params}`, {
+      signal: AbortSignal.timeout(IMDB_TIMEOUT_MS)
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
   }
-  const fallback = await omdbTitle(env, imdbId);
-  if (fallback?.title) return fallback;
-  throw primaryError || new HttpError(502, "IMDb сейчас недоступен, попробуйте позже", "IMDB_UNAVAILABLE");
+}
+
+// Русское название и жанровые id по tt-id. null — ключа нет, сбой сети или
+// TMDB тайтла не знает. Кешируется только настоящий ответ TMDB (включая
+// «не нашли») — сетевой сбой НЕ кешируется, чтобы следующий запрос повторил
+// попытку, а не застрял с пустым результатом на месяц.
+async function tmdbLocalize(env, imdbId) {
+  if (!env?.TMDB_API_KEY) return null;
+  const cached = tmdbRuCache.get(imdbId);
+  if (cached && Date.now() - cached.at < TMDB_RU_TTL_MS) return cached.value;
+  const payload = await tmdbFetch(env, `/find/${encodeURIComponent(imdbId)}`, "external_source=imdb_id");
+  if (!payload) return null;
+  // tt-id — фильм или сериал: берём первый непустой массив результатов.
+  const entry = payload?.movie_results?.[0] || payload?.tv_results?.[0] || null;
+  const value = entry
+    ? { title: String(entry.title || entry.name || "").slice(0, 180) || null, genreIds: Array.isArray(entry.genre_ids) ? entry.genre_ids : [] }
+    : null;
+  tmdbRuCache.set(imdbId, { at: Date.now(), value });
+  return value;
+}
+
+// Русское имя жанра по TMDB genre_id; справочники жанров (movie/tv) — раз в сутки.
+async function tmdbGenreName(env, kind, genreId) {
+  const listKind = kind === "series" ? "tv" : "movie";
+  let genres = tmdbGenreCache.get(listKind);
+  if (!genres || Date.now() - genres.at > TMDB_GENRE_TTL_MS) {
+    const payload = await tmdbFetch(env, `/genre/${listKind}/list`, "");
+    genres = { at: Date.now(), map: Object.fromEntries((payload?.genres || []).map((g) => [g.id, String(g.name || "").slice(0, 40)])) };
+    tmdbGenreCache.set(listKind, genres);
+  }
+  return genres.map[genreId] || null;
+}
+
+// Карточка фильма: основной источник — OMDb с ключом OMDB_API_KEY (одним
+// ответом даёт название, год, тип, рейтинг, жанр и длительность); запасной —
+// публичный suggest-эндпоинт IMDb по tt-id (тот же CDN, что и поиск:
+// www.imdb.com с egress Cloudflare отдаёт анти-бот страницу 202 — скрейп
+// из воркера не работает). Без ключа или при сбое OMDb фильм добавляется
+// на данных suggest — с серой пилюлей «IMDb —»; 502 — только когда не
+// ответил ни один источник. Сверху TMDB (если задан TMDB_API_KEY) локализует
+// название и жанр на русский.
+async function movieInfo(env, imdbId) {
+  const primary = await omdbTitle(env, imdbId);
+  let info = primary?.title ? primary : null;
+  if (!info) {
+    try {
+      const base = await imdbSuggestTitle(imdbId);
+      if (base?.title) info = base;
+    } catch { /* оба источника недоступны */ }
+  }
+  if (!info) throw new HttpError(502, "IMDb сейчас недоступен, попробуйте позже", "IMDB_UNAVAILABLE");
+  const ru = await tmdbLocalize(env, imdbId);
+  if (!ru) return info;
+  const genre = ru.genreIds.length ? await tmdbGenreName(env, info.kind, ru.genreIds[0]) : null;
+  return { ...info, title: ru.title || info.title, genre: genre || info.genre };
 }
 
 function validTimeZone(value) {
@@ -636,15 +691,19 @@ async function leavePair(env, member, requestUrl) {
       env.DB.prepare(`UPDATE pairs SET user_a=user_b,name1=(SELECT display_name FROM users WHERE tg_id=?),
         user_b=0,name2='',updated_at=? WHERE id=?`).bind(partnerId, timestamp, member.id),
       env.DB.prepare("UPDATE pair_members SET role='a' WHERE tg_id=? AND pair_id=?").bind(partnerId, member.id),
-      env.DB.prepare("UPDATE users SET role='a',updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
+      // Личное имя партнёра оставшегося относилось к ушедшему — сбрасываем,
+      // иначе оно прилипнет к следующему присоединившемуся партнёру.
+      env.DB.prepare("UPDATE users SET role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
     );
   } else {
     operations.push(
       env.DB.prepare("UPDATE pairs SET user_b=0,name2='',updated_at=? WHERE id=?").bind(timestamp, member.id),
-      env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id)
+      env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id),
+      // Оставшийся партнёр (владелец) тоже держал личное имя для ушедшего.
+      env.DB.prepare("UPDATE users SET partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
     );
   }
-  operations.push(env.DB.prepare("UPDATE users SET pair_id=NULL,role='a',updated_at=? WHERE tg_id=?").bind(timestamp, member.tg_id));
+  operations.push(env.DB.prepare("UPDATE users SET pair_id=NULL,role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, member.tg_id));
   await env.DB.batch(operations);
   // Оставшийся партнёр узнаёт о выходе сообщением бота — иначе он просто
   // однажды не находит партнёра в пространстве. Сбой Telegram не отменяет
@@ -730,9 +789,24 @@ function withPartnerOverride(viewer, pair) {
   return { name1: override || ownerName, name2: partnerName };
 }
 
+// Кеш Intl.DateTimeFormat по «локаль|пояс|опции». Создание форматтера —
+// самая дорогая операция дата-математики, а она ходит по строкам state()
+// в циклах (дедлайны планов, повторяющиеся даты); набор опций фиксирован.
+// Верхний предел защищает изолят от разрастания на экзотических поясах.
+const dateTimeFormatCache = new Map();
+function cachedFormatter(locale, timeZone, options) {
+  const key = `${locale}|${timeZone || "UTC"}|${JSON.stringify(options)}`;
+  let formatter = dateTimeFormatCache.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, { ...options, timeZone: timeZone || "UTC" });
+    if (dateTimeFormatCache.size > 100) dateTimeFormatCache.clear();
+    dateTimeFormatCache.set(key, formatter);
+  }
+  return formatter;
+}
+
 function timeZoneOffsetMs(timeZone, date) {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timeZone || "UTC",
+  const formatter = cachedFormatter("en-US", timeZone, {
     year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
   });
@@ -749,8 +823,8 @@ function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
   const tz = timeZone || "UTC";
   const desiredUtc = Date.UTC(year, monthIndex, day, hour, minute, 0, 0);
   function localMatches(utcMs) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    const parts = cachedFormatter("en-US", tz, {
+      year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false
     }).formatToParts(new Date(utcMs));
     const get = (type) => parts.find((p) => p.type === type)?.value || "0";
@@ -797,11 +871,11 @@ function nextMonthlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
     if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
   }
   const now = new Date(nowMs);
-  const startY = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
-  const startM = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit" }).format(now));
-  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
-  const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
-  const keyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
+  const startY = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
+  const startM = Number(cachedFormatter("en-US", tz, { month: "2-digit" }).format(now));
+  const todayKey = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const dayFmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
+  const keyFmt = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" });
   for (let offset = 0; offset < 25; offset++) {
     const absolute = startM - 1 + offset;
     const year = startY + Math.floor(absolute / 12);
@@ -832,16 +906,16 @@ function nextYearlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
     if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
   }
   const now = new Date(nowMs);
-  const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
-  const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
-  const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
+  const currentYear = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
+  const todayKey = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const dayFmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
   for (let year = currentYear; year <= currentYear + 9; year++) {
     const candidate = makeDateInTimeZone(year, month, dayOfMonth, hours, minutes, tz);
     const cp = dayFmt.formatToParts(candidate);
     const cm = Number(cp.find((q) => q.type === "month")?.value);
     const cd = Number(cp.find((q) => q.type === "day")?.value);
     if (cm !== month + 1 || cd !== dayOfMonth) continue;
-    if (new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(candidate) >= todayKey) {
+    if (cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" }).format(candidate) >= todayKey) {
       return candidate.getTime();
     }
   }
@@ -902,7 +976,7 @@ function nextDateOccurrence(item, timeZone) {
   if (!Number.isFinite(month) || !Number.isFinite(date)) return Number.MAX_SAFE_INTEGER;
   const tz = timeZone || "UTC";
   const now = new Date();
-  const todayParts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  const todayParts = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
   const [todayYear, todayMonth, todayDay] = todayParts.split("-").map(Number);
   const today = makeDateInTimeZone(todayYear, todayMonth - 1, todayDay, 0, 0, tz);
   let hours = 12, minutes = 0;
@@ -911,13 +985,13 @@ function nextDateOccurrence(item, timeZone) {
     if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
   }
   const isRecurring = !!item.recurs;
-  const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+  const currentYear = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
   const years = isRecurring
     ? Array.from({ length: 9 }, (_, index) => currentYear + index)
     : [Number(parts[0])];
+  const fmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
   for (const year of years) {
     const candidate = makeDateInTimeZone(year, month, date, hours, minutes, tz);
-    const fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
     const cparts = fmt.formatToParts(candidate);
     const cm = Number(cparts.find((p) => p.type === "month")?.value);
     const cd = Number(cparts.find((p) => p.type === "day")?.value);
@@ -1149,9 +1223,10 @@ async function ensureSavingVisible(env, pair, user, id) {
 // Приватная дата принадлежит автору: партнёр не видит её в списках и не должен
 // иметь доступа по прямому id — отвечаем 404, как для несуществующей записи,
 // чтобы само существование чужой личной даты не раскрывалось. Возвращает строку
-// даты: PATCH использует created_by, чтобы разрешить смену приватности только автору.
+// даты: PATCH берёт из неё created_by (смена приватности — только автору) и
+// текущее расписание, чтобы частичный PATCH не затирал неприсланные поля.
 async function ensureDateVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT is_private,created_by,kind FROM dates WHERE id=? AND pair_id=?")
+  const row = await env.DB.prepare("SELECT is_private,created_by,kind,day,time,recurs,monthly FROM dates WHERE id=? AND pair_id=?")
     .bind(id, pair.id).first();
   if (!row) return null; // 404 отдаст сам UPDATE/DELETE
   if (Number(row.is_private) === 1 && Number(row.created_by) !== Number(user.tg_id)) {
@@ -1162,9 +1237,9 @@ async function ensureDateVisible(env, pair, user, id) {
 
 // Личный план — зеркально личной дате: партнёр не видит его в списках и не
 // может выполнить/изменить по прямому id; 404 вместо 403 не раскрывает факт
-// существования.
+// существования. Как и у дат, строка нужна PATCH'у для частичного обновления.
 async function ensureTaskVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT is_private,created_by FROM tasks WHERE id=? AND pair_id=?")
+  const row = await env.DB.prepare("SELECT is_private,created_by,day,time FROM tasks WHERE id=? AND pair_id=?")
     .bind(id, pair.id).first();
   if (!row) return null;
   if (Number(row.is_private) === 1 && Number(row.created_by) !== Number(user.tg_id)) {
@@ -1208,13 +1283,27 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     const fields = [];
     const values = [];
     if (type === "tasks") {
-      const { day, time } = planSchedule(body);
-      fields.push("title=?", "day=?", "time=?");
-      values.push(textField(body, "title", 180, "План"), day, time);
+      // PATCH частичный: в UPDATE попадают только присланные поля. Раньше
+      // title/day/time писались всегда, и запрос с одним title стирал дату и
+      // время плана (схема при этом объявляет все поля необязательными).
+      if (body.title !== undefined) {
+        fields.push("title=?");
+        values.push(textField(body, "title", 180, "План"));
+      }
+      // День и время — одна пара: неприсланное значение берём из строки,
+      // чтобы перенос даты не сбрасывал время (и наоборот).
+      if (body.day !== undefined || body.time !== undefined) {
+        const day = body.day !== undefined ? optionalDay(body.day) : optionalDay(taskRow?.day);
+        const time = body.time !== undefined ? optionalTime(body.time) : optionalTime(taskRow?.time);
+        if (time && !day) throw new HttpError(400, "Выберите дату, чтобы указать время", "INVALID_DATE");
+        fields.push("day=?", "time=?");
+        values.push(day, time);
+      }
       if (body.monthly !== undefined || body.yearly !== undefined) {
         const monthly = body.monthly === true ? 1 : 0;
         const yearly = monthly ? 0 : (body.yearly === true ? 1 : 0);
-        if ((monthly || yearly) && !day) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
+        const effectiveDay = body.day !== undefined ? optionalDay(body.day) : taskRow?.day;
+        if ((monthly || yearly) && !effectiveDay) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
         fields.push("monthly=?", "yearly=?");
         values.push(monthly, yearly);
       }
@@ -1224,20 +1313,35 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         values.push(body.is_private === true || body.is_private === 1 ? 1 : 0);
       }
     } else if (type === "dates") {
-      fields.push("title=?");
-      values.push(textField(body, "title", 120, "Название"));
-      if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
-      // monthly перекрывает recurs: ежемесячная дата не может быть ежегодной.
-      // У дня рождения повтор всегда ежегодный — флаги из формы игнорируем,
-      // иначе правка карточки могла бы «отключить» сам день рождения.
-      const isBirthday = dateRow?.kind === "birthday";
-      const monthly = isBirthday ? 0 : (body.monthly !== undefined ? (body.monthly === true ? 1 : 0) : null);
-      const recurs = isBirthday ? 1 : (monthly === 1 ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1));
-      fields.push("day=?", "recurs=?", "time=?");
-      values.push(clean(body.day), recurs, optionalTime(body.time));
-      if (monthly !== null) {
-        fields.push("monthly=?");
-        values.push(monthly);
+      if (body.title !== undefined) {
+        fields.push("title=?");
+        values.push(textField(body, "title", 120, "Название"));
+      }
+      // День/время/повтор — одна группа: правка названия не должна сбрасывать
+      // расписание, а перенос даты — терять время и флаги повтора.
+      const scheduleTouched = body.day !== undefined || body.time !== undefined ||
+        body.monthly !== undefined || body.recurs !== undefined;
+      if (scheduleTouched) {
+        const dayValue = body.day !== undefined ? clean(body.day) : dateRow?.day;
+        if (!validDate(dayValue)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
+        // monthly перекрывает recurs: ежемесячная дата не может быть ежегодной.
+        // У дня рождения повтор всегда ежегодный — флаги из формы игнорируем,
+        // иначе правка карточки могла бы «отключить» сам день рождения.
+        const isBirthday = dateRow?.kind === "birthday";
+        const monthly = isBirthday ? 0 : (body.monthly !== undefined
+          ? (body.monthly === true ? 1 : 0)
+          : (Number(dateRow?.monthly) === 1 ? 1 : 0));
+        const recurs = isBirthday ? 1 : (monthly === 1 ? 0 : (body.recurs !== undefined
+          ? (body.recurs === false || body.recurs === 0 ? 0 : 1)
+          : (Number(dateRow?.recurs) === 1 ? 1 : 0)));
+        fields.push("day=?", "recurs=?", "time=?");
+        values.push(dayValue, recurs, optionalTime(body.time !== undefined ? body.time : dateRow?.time));
+        // У дня рождения monthly пишется всегда (как и раньше); у обычной даты —
+        // только когда поле пришло, иначе PATCH названия трогал бы флаг.
+        if (isBirthday || body.monthly !== undefined) {
+          fields.push("monthly=?");
+          values.push(monthly);
+        }
       }
       // Приватность переключает только автор: партнёр, пометивший чужую общую
       // дату личной, мгновенно терял бы её из своих списков, а у дат без автора
@@ -1295,6 +1399,9 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         values.push(wishUrl(body.url));
       }
     }
+    // Пустой PATCH (ни одного известного поля) — не ошибка, но и UPDATE
+    // собирать не из чего: «SET  WHERE» был бы синтаксической ошибкой.
+    if (!fields.length) return true;
     const result = await env.DB.prepare(`UPDATE ${table} SET ${fields.join(",")} WHERE id=? AND pair_id=?`)
       .bind(...values, id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
@@ -1541,10 +1648,9 @@ async function api(request, env, url) {
       .bind(clean(body.timezone), now(), pair.id).run();
     return json(await state(env, user.tg_id));
   }
-  // Экспорт данных: бот запрашивающему партнёру высылаются два JSON-файла —
-  // «Архив» (все записи дневника пары + значимые даты, видимые ему, включая
-  // его собственные личные) и «Личные даты» (только его личные даты).
-  // Личные даты партнёра не включаются ни в один файл — фильтры как в UI.
+  // Экспорт данных: бот запрашивающему партнёру высылается один TXT-файл —
+  // человекочитаемый документ с выбранными разделами. Личные даты партнёра
+  // не включаются — фильтры как в UI.
   if (request.method === "POST" && url.pathname === "/api/data/export") {
     await rateLimit(env, `export:${user.tg_id}`, 5, 3600);
     const sections = exportSections(body);
@@ -1560,12 +1666,7 @@ async function api(request, env, url) {
     const form = new FormData();
     form.append("chat_id", String(user.tg_id));
     form.append("caption", `Экспорт данных — ${summary}.`);
-    form.append("document", new Blob([JSON.stringify({
-      app: "duoplan",
-      version: APP_VERSION,
-      exported_at: new Date().toISOString(),
-      sections: payload
-    }, null, 2)], { type: "application/json" }), "Экспорт.json");
+    form.append("document", new Blob([exportTxtDoc(APP_VERSION, payload)], { type: "text/plain;charset=utf-8" }), "Экспорт.txt");
     try {
       await telegramForm(env, "sendDocument", form);
     } catch (error) {
@@ -2082,10 +2183,9 @@ function datesDigestText(timeZone, tomorrow, dates) {
 
 // ------------------------------------------------------------------
 // Экспорт данных (POST /api/data/export): пользователь выбирает разделы и
-// состав каждого (все / личные / мои), воркер собирает выбранные коллекции
-// пары в один JSON и отправляет sendDocument'ом — без потолка сообщений и
-// без резки текста (файл — предпочтительный формат резервной копии по
-// аудиту 2026-11-01). Приватность — как в интерфейсе: личные записи
+// состав каждого, воркер собирает выбранные коллекции пары в один TXT-файл
+// («Экспорт.txt») и отправляет sendDocument'ом — без потолка сообщений и
+// без резки текста. Приватность — как в интерфейсе: личные записи
 // партнёра не попадают в выгрузку ни в каком составе.
 // ------------------------------------------------------------------
 
@@ -2137,10 +2237,15 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0${scope === "mine" ? " AND w.owner_id=?" : ""} ORDER BY w.created_at ASC, w.id ASC`
 };
 
-// У секций с фиксированным составом («кино — не просмотренные») второй бинд
-// с tg_id запросившего не нужен.
+// Бинды каждой секции: у кино состав фиксирован (второй фильтр не нужен);
+// у общих коллекций (места/дневник/цитаты/желания) второй бинд с tg_id
+// появляется только в составе «mine» — в составе «all» в SQL один
+// плейсхолдер (пары), и лишний бинд роняет запрос. У планов/дат/дней
+// рождения фильтр видимости стоит в обоих составах — биндятся всегда.
 function exportSectionBinds(key, scope, pairId, userId) {
-  return key === "movies" ? [pairId] : [pairId, userId];
+  if (key === "movies") return [pairId];
+  if (scope === "all" && !["plans", "dates", "birthdays"].includes(key)) return [pairId];
+  return [pairId, userId];
 }
 
 function exportSections(body) {
@@ -2242,6 +2347,131 @@ const EXPORT_ROW_MAPPERS = {
     created_at: row.created_at
   })
 };
+
+// ------------------------------------------------------------------
+// Рендер TXT: каждая выбранная секция — заголовок с количеством записей,
+// далее нумерованные записи. Первая строка записи — заголовок (или сам
+// текст для дневника/цитат/желаний), дальше строки «Метка: значение»,
+// пустые поля пропускаются, многострочные значения печатаются с отступом.
+// ------------------------------------------------------------------
+
+// unix-секунды → «2026-11-05 12:34 UTC» (время всегда в UTC — без пояса пары,
+// чтобы выгрузка не зависела от того, откуда её открыли).
+function exportTxtTime(unix) {
+  if (!unix) return null;
+  return `${new Date(unix * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+// Главная строка и поля каждой записи. Поля — пары [метка, значение].
+const EXPORT_TXT_ROWS = {
+  plans: (row) => ({
+    head: row.title,
+    fields: [
+      ["Когда", [row.day, row.time].filter(Boolean).join(" ")],
+      ["Повтор", row.monthly ? "ежемесячный" : row.yearly ? "ежегодный" : null],
+      ["Личный", row.is_private ? "да" : null],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  movies: (row) => ({
+    head: row.title,
+    fields: [
+      ["Год", row.year],
+      ["Тип", row.kind === "series" ? "сериал" : "фильм"],
+      ["Рейтинг IMDb", row.rating],
+      ["Длительность", row.runtime ? `${row.runtime} мин` : null],
+      ["Сезоны", row.seasons],
+      ["Эпизоды", row.episodes],
+      ["Ссылка", row.url],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  dates: (row) => ({
+    head: row.title,
+    fields: [
+      ["День", [row.day, row.time].filter(Boolean).join(" ")],
+      ["Повторяется", row.recurs ? "да" : null],
+      ["Ежемесячная", row.monthly ? "да" : null],
+      ["Личная", row.is_private ? "да" : null],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  // Дни рождения рендерятся той же формой записи, что и значимые даты:
+  // это одна таблица dates с разным kind (маппер строк общий — exportDateRow).
+  birthdays: (row) => EXPORT_TXT_ROWS.dates(row),
+  places: (row) => ({
+    head: row.title,
+    fields: [
+      ["Заметка", row.note],
+      ["Ссылка", row.url],
+      ["Посещено", row.visited ? (row.visited_at ? `да (${exportTxtTime(row.visited_at)})` : "да") : null],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  memories: (row) => ({
+    head: row.title || "(без заголовка)",
+    fields: [
+      ["День", row.day],
+      ["Текст", row.body],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  quotes: (row) => ({
+    head: row.body,
+    fields: [
+      ["Источник", row.source],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  wishes: (row) => ({
+    head: row.body,
+    fields: [
+      ["Ссылка", row.url],
+      ["Добавил", row.author],
+      ["Создан", exportTxtTime(row.created_at)]
+    ]
+  })
+};
+
+// Строки одной записи: номер и главная строка (продолжения — с отступом),
+// затем поля «Метка: значение» (пустые пропускаются). Сигнатура без
+// деструктуризации — extractBraced в тестах берёт первую «{» после имени.
+function exportTxtRecord(n, record) {
+  const { head, fields } = record;
+  const headLines = String(head ?? "").split("\n");
+  const lines = [`${n}. ${headLines[0]}`.trimEnd()];
+  for (const chunk of headLines.slice(1)) lines.push(`   ${chunk}`);
+  for (const [label, value] of fields) {
+    if (value === null || value === undefined || value === "") continue;
+    for (const [i, line] of String(value).split("\n").entries()) {
+      lines.push(i === 0 ? `   ${label}: ${line}` : `       ${line}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+// Весь документ: шапка + секции в порядке EXPORT_LABELS (пустые секции не
+// печатаются — их количества и так видны в подписи к файлу).
+function exportTxtDoc(version, payload) {
+  const parts = [
+    "Общий дневник — экспорт данных",
+    `Дата выгрузки: ${exportTxtTime(Math.floor(Date.now() / 1000))}`,
+    `Версия: ${version}`
+  ];
+  for (const [key, label] of Object.entries(EXPORT_LABELS)) {
+    const rows = payload[key] || [];
+    if (!rows.length) continue;
+    parts.push("", `${label[0].toUpperCase()}${label.slice(1)} — ${rows.length}`, "");
+    parts.push(rows.map((row, i) => exportTxtRecord(i + 1, EXPORT_TXT_ROWS[key](row))).join("\n\n"));
+  }
+  return `${parts.join("\n")}\n`;
+}
 
 // Отправка файла: multipart/form-data — fetch сам ставит boundary, поэтому
 // content-type не задаём. sendDocument не идемпотентен: сетевые ошибки не
@@ -2518,6 +2748,10 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id,watched)`,
     `CREATE INDEX IF NOT EXISTS idx_savings_pair ON savings(pair_id,kind)`,
     `CREATE INDEX IF NOT EXISTS idx_savings_deposits_saving ON savings_deposits(saving_id,created_at)`,
+    // Дубли кино, накопленные гонкой до появления уникального индекса, убираем
+    // здесь же: иначе CREATE UNIQUE INDEX упадёт и весь batch схемы не применится.
+    // Оставляем просмотренную строку, при равенстве — самую раннюю.
+    `DELETE FROM movies WHERE id NOT IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY pair_id, imdb_id ORDER BY watched DESC, id ASC) AS rn FROM movies) WHERE rn = 1)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_pair_imdb ON movies(pair_id,imdb_id)`,
     `CREATE INDEX IF NOT EXISTS idx_pair_members_pair ON pair_members(pair_id)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_members_role ON pair_members(pair_id,role)`,

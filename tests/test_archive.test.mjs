@@ -28,6 +28,12 @@ function extractBraced(declaration) {
   throw new Error(`незакрытый блок: ${declaration}`);
 }
 
+function extractLine(prefix) {
+  const start = source.indexOf(prefix);
+  if (start === -1) throw new Error("${prefix} не найдено");
+  return source.slice(start, source.indexOf("\n", start));
+}
+
 // Константы лимитов между STATE_ACTIVE_LIMIT и schemaReady.
 const constsStart = source.indexOf("const STATE_ACTIVE_LIMIT");
 const constsEnd = source.indexOf("const schemaReady");
@@ -36,7 +42,9 @@ if (constsStart === -1 || constsEnd === -1 || constsEnd < constsStart) {
 }
 const consts = source.slice(constsStart, constsEnd);
 const load = new Function(
-  `const DEFAULT_TZ = "Europe/Moscow";\n${consts}\n${extractBraced("function validTimeZone")}\n${extractBraced("function localDay")}\n${extractBraced("function byRowId")}\n${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function monthlyOccursOnDay"),
+  `const DEFAULT_TZ = "Europe/Moscow";\n${consts}\n${extractBraced("function validTimeZone")}\n${extractBraced("function localDay")}\n${extractBraced("function byRowId")}\n${extractLine("const dateTimeFormatCache = new Map();")}
+${extractBraced("function cachedFormatter")}
+${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function monthlyOccursOnDay"),
     extractBraced("function nextMonthlyOccurrenceMs"),
     extractBraced("function nextDateOccurrence")}\n${extractBraced("function isPastDate")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("function sortByTaskDeadline")}\n${extractBraced("class HttpError")}\n${extractBraced("const ARCHIVE_COUNT_SQL")}\n${extractBraced("async function archivePage")}\n` +
   "return { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };");

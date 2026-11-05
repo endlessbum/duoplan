@@ -183,6 +183,8 @@ const loadState = new Function(
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
     extractBraced("function byRowId"),
+    extractLine("const dateTimeFormatCache = new Map();"),
+    extractBraced("function cachedFormatter"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function taskTargetMs"),
@@ -309,6 +311,7 @@ const loadItemRoute = new Function(
     extractBraced("function planSchedule"),
     extractBraced("async function ensureWishOwner"),
     extractBraced("async function ensureDateVisible"),
+    extractBraced("async function ensureTaskVisible"),
     extractBraced("async function itemRoute"),
     "return itemRoute;"
   ].join("\n")
@@ -375,6 +378,37 @@ test("PATCH без is_private не сбрасывает приватность",
   equal(update.sql.includes("is_private=?"), false);
 });
 
+test("PATCH только названия не сбрасывает расписание даты", async () => {
+  // Схема объявляет поля PATCH необязательными: запрос с одним title не должен
+  // обнулять day/time/recurs (раньше UPDATE писал их всегда).
+  const row = { is_private: 0, created_by: 777, kind: "date", day: "2026-05-01", time: "19:00", recurs: 1, monthly: 0 };
+  const { env, queries } = makeItemDb({ privateRow: row });
+  const handled = await loadItemRoute(env, PAIR, { tg_id: 777 }, "PATCH", "/api/dates/5", { title: "Новое название" });
+  equal(handled, true);
+  const update = queries.find(q => q.sql.startsWith("UPDATE dates"));
+  equal(update.sql.includes("day=?"), false);
+  deepStrictEqual(update.args, ["Новое название", 5, 1]);
+});
+
+test("PATCH даты без day сохраняет время и флаг повтора", async () => {
+  const row = { is_private: 0, created_by: 777, kind: "date", day: "2026-05-01", time: "19:00", recurs: 1, monthly: 0 };
+  const { env, queries } = makeItemDb({ privateRow: row });
+  await loadItemRoute(env, PAIR, { tg_id: 777 }, "PATCH", "/api/dates/5", { day: "2026-06-01" });
+  const update = queries.find(q => q.sql.startsWith("UPDATE dates"));
+  equal(update.sql.includes("title=?"), false);
+  deepStrictEqual(update.args, ["2026-06-01", 1, "19:00", 5, 1]);
+});
+
+test("PATCH только названия не сбрасывает день и время плана", async () => {
+  const row = { is_private: 0, created_by: 777, day: "2026-05-01", time: "19:00" };
+  const { env, queries } = makeItemDb({ privateRow: row });
+  const handled = await loadItemRoute(env, PAIR, { tg_id: 777 }, "PATCH", "/api/tasks/5", { title: "Новое название" });
+  equal(handled, true);
+  const update = queries.find(q => q.sql.startsWith("UPDATE tasks"));
+  equal(update.sql.includes("day=?"), false);
+  deepStrictEqual(update.args, ["Новое название", 5, 1]);
+});
+
 test("PATCH чужой приватной даты даёт 404 и не выполняет UPDATE", async () => {
   const { env, queries } = makeItemDb({ privateRow: { is_private: 1, created_by: 999 } });
   await rejects(
@@ -410,6 +444,8 @@ const loadDigest = new Function(
     "const RICH_TOKENS = " + source.match(/const RICH_TOKENS = (\[\[.*\]\]);/)?.[1] + ";",
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
+    extractLine("const dateTimeFormatCache = new Map();"),
+    extractBraced("function cachedFormatter"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function escapeHtml"),
@@ -577,6 +613,8 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractLine("const DIGEST_MAX_CHARS"),
       extractBraced("function validTimeZone"),
       extractBraced("function localDay"),
+      extractLine("const dateTimeFormatCache = new Map();"),
+      extractBraced("function cachedFormatter"),
       extractBraced("function timeZoneOffsetMs"),
       extractBraced("function makeDateInTimeZone"),
       extractBraced("function taskTargetMs"),

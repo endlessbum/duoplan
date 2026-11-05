@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Настройка DuoPlan</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/setup.css">
+  <script src="/setup.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <h1>Активация DuoPlan</h1>
+    <p id="intro">Введите BOT_TOKEN из локального файла <code>.env</code>. Он нужен только для защищённой активации и нигде не сохраняется.</p>
+    <form id="setup">
+      <label for="secret">Секрет настройки</label>
+      <input id="secret" type="password" autocomplete="off" required>
+      <button id="start" type="submit">Активировать</button>
+    </form>
+    <p id="result" role="status"></p>
+    <a id="bot-link" class="hidden" href="https://t.me/duoplanbot">Открыть @duoplanbot</a>
+  </main>
+</body>
+</html>

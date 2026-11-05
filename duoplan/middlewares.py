@@ -61,6 +61,11 @@ class PrivateBotMiddleware(BaseMiddleware):
             or user.id in settings.owner_ids
         ):
             return await handler(event, data)
+        # Групповые чаты игнорируем молча: бот для пар, приватный гейт
+        # группового флуда не касается, а отказ в общий чат — спам.
+        chat = data.get("event_chat")
+        if chat is not None and getattr(chat, "type", None) != "private":
+            return None
         if service is None:
             return await handler(event, data)
 
@@ -104,6 +109,11 @@ class EnsureUserMiddleware(BaseMiddleware):
     ) -> Any:
         service: DuoPlanService | None = data.get("service")
         user: User | None = data.get("event_from_user")
+        # Сторонние участники групповых чатов в users не попадают:
+        # регистрируются только владельцы/приглашённые в личке.
+        chat = data.get("event_chat")
+        if chat is not None and getattr(chat, "type", None) != "private":
+            return await handler(event, data)
         if service is not None and user is not None and not user.is_bot:
             name = user.full_name or user.first_name or "Без имени"
             try:

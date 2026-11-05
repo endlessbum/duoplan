@@ -56,6 +56,8 @@ const load = new Function(
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
     extractBraced("function byRowId"),
+    extractLine("const dateTimeFormatCache = new Map();"),
+    extractBraced("function cachedFormatter"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function taskTargetMs"),

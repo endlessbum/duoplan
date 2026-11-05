@@ -1832,7 +1832,7 @@
       <section class="card">
         <p class="eyebrow">Приглашение партнёра</p>
         <h3>Отправьте код партнёру</h3>
-        <p>После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня. Общие очки пары: ${pair.together_pts || 0} XP</p>
+        <p>После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня.</p>
         ${pair.code ? `
           <div style="margin-top:18px; display:grid; gap:8px;">
             <button class="secondary full" type="button" data-action="copy-code" data-code="${esc(pair.code)}">Скопировать код: ${esc(pair.code)}</button>
@@ -1931,18 +1931,21 @@
     const open = list.filter((saving) => !savingIsFull(saving));
     const full = list.filter(savingIsFull);
     // Наполнение пространства — только после воссоединения партнёров:
-    // гейт как у всех add-кнопок приложения.
+    // гейт как у всех add-кнопок приложения. Пустой список: кнопка
+    // «Создать копилку» живёт в карточке «Пока пусто» (как в кино).
     const disabledClass = partnerMissing() ? " is-disabled" : "";
-    let html = `<button class="primary full add-button${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>`;
-    if (open.length) {
-      html += open.map(savingItem).join("");
-    } else if (!full.length) {
+    let html = "";
+    if (!open.length && !full.length) {
       html += `
         <section class="card">
           <h3>Пока пусто</h3>
           <p>Создайте копилку на общую мечту или личную цель — пополняйте и следите за прогрессом.</p>
+          <button class="primary full card-action${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>
         </section>
       `;
+    } else {
+      html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>`;
+      html += open.map(savingItem).join("");
     }
     if (full.length) {
       html += `<div class="section-head-inline"><h3>Накопленные · ${full.length}</h3></div>`;
@@ -2419,35 +2422,54 @@
     try { localStorage.setItem(MOVIE_RANDOM_KEY, "1"); } catch {}
   }
 
-  // Тело вкладки «Планы» для вида «Кино».
+  // Тело вкладки «Планы» для вида «Кино». «Рандом» живёт в карточке-информере
+  // до первого запуска рандома (флаг в localStorage); после — карточка
+  // исчезает, и кнопка возвращается отдельной, под «Добавить фильм».
+  // Пустой список: «Добавить фильм» живёт в карточке «Пока пусто»,
+  // карточка «Рандом» — под ней.
   function renderMoviesBody() {
     const open = openMovies();
     const watched = watchedMovies();
     const disabledClass = partnerMissing() ? " is-disabled" : "";
     const pick = currentMoviePick();
+    const empty = !open.length && !watched.length;
+    const heroUsed = movieRandomUsed();
     let html = "";
-    if (!movieRandomUsed()) {
+    if (empty) {
+      html += `
+        <section class="card">
+          <h3>Пока пусто</h3>
+          <p>Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью.</p>
+          <button class="primary full card-action${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>
+        </section>
+      `;
+    }
+    if (!heroUsed) {
+      const hint = empty
+        ? "Пока нечего выбирать — добавьте первый фильм."
+        : open.length ? "" : "Всё из списка уже просмотрено — добавьте новое или верните старое.";
       html += `
         <section class="card place-hero movie-hero">
           <p class="eyebrow">Рандом</p>
           <h3>Не знаете, что посмотреть?</h3>
           <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров.</p>
-          ${open.length ? "" : `<p class="place-count">${open.length + watched.length ? "Всё из списка уже просмотрено — добавьте новое или верните старое." : "Пока нечего выбирать — добавьте первый фильм."}</p>`}
+          ${hint ? `<p class="place-count">${hint}</p>` : ""}
+          <button class="secondary full card-action${disabledClass}" type="button" data-action="random-movie">Рандом</button>
         </section>
       `;
     }
     if (pick) html += renderMoviePick(pick);
-    html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>`;
-    html += `<button class="secondary full place-random" type="button" data-action="random-movie">Рандом</button>`;
-    if (open.length) {
-      html += `<div class="section-head-inline"><h3>Хотим посмотреть · ${open.length}</h3></div>`;
-      html += open.map((movie) => movieItem(movie)).join("");
-    } else if (!open.length && !watched.length) {
-      html += `<section class="card"><h3>Пока пусто</h3><p>Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью.</p></section>`;
-    }
-    if (watched.length) {
-      html += `<div class="section-head-inline"><h3>Просмотренные · ${watched.length}</h3></div>`;
-      html += watched.map((movie) => movieItem(movie)).join("");
+    if (!empty) {
+      html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>`;
+      if (heroUsed) html += `<button class="secondary full place-random" type="button" data-action="random-movie">Рандом</button>`;
+      if (open.length) {
+        html += `<div class="section-head-inline"><h3>Хотим посмотреть · ${open.length}</h3></div>`;
+        html += open.map((movie) => movieItem(movie)).join("");
+      }
+      if (watched.length) {
+        html += `<div class="section-head-inline"><h3>Просмотренные · ${watched.length}</h3></div>`;
+        html += watched.map((movie) => movieItem(movie)).join("");
+      }
     }
     return html;
   }
@@ -2663,6 +2685,11 @@
         : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : renderTasksBody())
           : renderMemoriesBody();
     instance?.setActive(value, true);
+    // aria-selected обновляем у всех сегментов, а не только у желаний:
+    // капля двигается классами, скринридер читает атрибут.
+    document.querySelectorAll(`.seg-switch[data-switch="${key}"] .seg-switch-btn`).forEach((btn) => {
+      btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+    });
     if (key === "pair") mountWishSwitch();
   }
 

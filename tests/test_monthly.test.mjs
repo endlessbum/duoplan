@@ -41,6 +41,8 @@ const load = new Function(
     extractLine("const positiveId = "),
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
+    extractLine("const dateTimeFormatCache = new Map();"),
+    extractBraced("function cachedFormatter"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function monthlyOccursOnDay"),

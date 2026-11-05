@@ -40,9 +40,14 @@ function columnList(windowText) {
 const taskWindows = statementWindows("tasks");
 const openTasks = taskWindows.filter((w) => w.includes("status='open'"));
 const doneTasks = taskWindows.filter((w) => w.includes("status='done'"));
+// Guard-SELECTы (ensureDateVisible/ensureTaskVisible) начинаются с
+// is_private,created_by и нужны только для 404-проверки; списковыми они не
+// считаются, даже если несут day/time для частичного PATCH.
+const isGuardSelect = (w) => columnList(w).trim().startsWith("select is_private,created_by");
 const dateListSelects = statementWindows("dates")
   .filter((w) => !w.includes("COUNT(*)"))
-  .filter((w) => columnList(w).includes("day")); // списковые: guard-SELECT без day отсеивается
+  .filter((w) => !isGuardSelect(w))
+  .filter((w) => columnList(w).includes("day")); // списковые: guard-SELECT отсеян выше
 
 test("SELECT открытых планов найден хотя бы в трёх местах (state, архив, нотификации)", () => {
   equal(openTasks.length >= 3, true, `найдено только ${openTasks.length}`);
@@ -63,7 +68,7 @@ test("списковый SELECT дат несёт monthly (везде, вклю�
 });
 
 test("guard-SELECTы дат (is_private/created_by) не считаются списковыми", () => {
-  const guards = statementWindows("dates").filter((w) => !w.includes("COUNT(*)") && !columnList(w).includes("day"));
+  const guards = statementWindows("dates").filter((w) => !w.includes("COUNT(*)") && isGuardSelect(w));
   equal(guards.length >= 1, true, "ожидался хотя бы один guard-SELECT (ensureDateVisible)");
 });
 

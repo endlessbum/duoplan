@@ -10,7 +10,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.04.7` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.05.2` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -34,7 +34,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 16 миграций схемы D1 (`0001`…`0016`) |
+| `migrations/` | 19 миграций схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, проверка жеста касаниями, упаковка проекта |
@@ -162,7 +162,8 @@ python -m http.server 8080        # из корня репозитория
 | `BOT_TOKEN` | Токен @BotFather |
 | `WEBHOOK_SECRET` | Случайная строка для проверки Telegram webhook (`x-telegram-bot-api-secret-token`) |
 | `SETUP_TOKEN` | Необязательный отдельный секрет для `/api/setup` (иначе используется `BOT_TOKEN`) |
-| `OMDB_API_KEY` | Необязательный ключ [OMDb API](https://www.omdbapi.com/apikey.aspx) — фолбэк для «Кино», если прямой IMDb недоступен. Без него приложение работает только на прямом IMDb (парсинг suggest-эндпоинта и JSON-LD страницы тайтла) |
+| `OMDB_API_KEY` | Ключ [OMDb API](https://www.omdbapi.com/apikey.aspx) (бесплатный, 1000/день) — основной источник карточки фильма: рейтинг, жанр, длительность. Без него карточка собирается с suggest-эндпоинта IMDb без рейтинга (пилюля «IMDb —»); поиск подсказок всегда идёт по IMDb suggest — поиск OMDb слаб на русских и частичных запросах |
+| `TMDB_API_KEY` | Ключ [TMDB](https://www.themoviedb.org/settings/api) (бесплатный) — русские названия подсказок и карточек «Кино» (локализация ru-RU по tt-id). Без него названия остаются английскими; поиск и добавление работают в любом случае |
 
 Активация:
 
@@ -272,7 +273,7 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 | `POST /api/gender` | Пол `{ gender: "male" \| "female" }`, доступно до онбординга |
 | `POST /api/settings` | `accent_color`, `digest_time`, `digest_enabled`, `dates_digest_time`, `dates_digest_enabled`, `show_avatar`, `partner_name` |
 | `GET /api/archive` | Страница архива: `type=memories\|done_tasks\|wishes\|done_wishes`, `page` (по 20, не дальше 500) |
-| `POST /api/data/export` | Выслать в чат «Экспорт.json» с выбранными разделами |
+| `POST /api/data/export` | Выслать в чат «Экспорт.txt» с выбранными разделами |
 | `POST /api/tasks` | План `{ title, day, time, monthly, yearly, is_private }` |
 | `POST /api/dates` | Дата `{ title, day, time, recurs, monthly, is_private, kind }`: `kind='birthday'` — день рождения (всегда ежегодный, без времени и ежемесячного повтора) |
 | `POST /api/memories` | Запись дневника `{ title, body }` (день ставится по часовому поясу пары) |
@@ -306,7 +307,11 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 
 `/api/state` отдаёт до 200 активных записей и 10 последних записей архивов
 (`STATE_ACTIVE_LIMIT` / `STATE_RECENT_LIMIT`); остальное клиент догружает
-страницами через `/api/archive`.
+страницами через `/api/archive`. Догрузка есть у планов, дат, желаний и
+дневника (плюс архивы завершённых планов и вручённых желаний). У цитат, мест,
+кино и копилок архива нет: они ограничены теми же 200 записями — для пары это
+заведомо больше реальных объёмов, но при переполнении «хвост» в интерфейс не
+попадёт.
 
 ## Telegram: кнопка «ОТКРЫТЬ» в списке чатов (Main Mini App)
 

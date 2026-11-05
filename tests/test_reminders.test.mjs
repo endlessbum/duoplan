@@ -40,6 +40,8 @@ function extractLine(prefix) {
 const bundle = [
   extractLine("const REMINDER_3H"),
   extractLine("const REMINDER_1H"),
+  extractLine("const dateTimeFormatCache = new Map();"),
+  extractBraced("function cachedFormatter"),
   extractBraced("function timeZoneOffsetMs("),
   extractBraced("function makeDateInTimeZone("),
   extractBraced("function monthlyOccursOnDay("),

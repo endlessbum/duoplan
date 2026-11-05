@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "duoplan",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-23",
+  "observability": { "enabled": true },
+  // 15-минутный cron для уведомлений (sendDigests): персональное время сводок
+  // и напоминания о планах за 3 часа / за 1 час.
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "vars": {
+    "APP_ORIGIN": "https://duoplan.stacheight.workers.dev",
+    "BOT_USERNAME": "duoplanbot",
+    // Гейт приватного бота: Telegram-ID владельца(ов), через запятую — для
+    // /api/* и /telegram/webhook. Пустой — бот открыт (существующее поведение).
+    "OWNER_IDS": "1218491598"
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/api/*", "/health", "/telegram/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "duoplan",
+      "database_id": "6c5e8724-1652-423f-9fad-b84dda49dfe6",
+      "migrations_dir": "./migrations"
+    }
+  ]
+}

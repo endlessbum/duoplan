@@ -1,8 +1,8 @@
 // Экспорт данных: POST /api/data/export (worker.js) — пользователь выбирает
 // разделы и состав каждого, воркер собирает выбранные коллекции пары в один
-// JSON («Экспорт.json») через sendDocument. Проверяем нормализацию строк
-// (флаги, заглушки автора), валидацию секций, SQL-фильтры приватности,
-// содержимое multipart-формы и счётчики в ответе.
+// человекочитаемый TXT («Экспорт.txt») через sendDocument. Проверяем
+// нормализацию строк (флаги, заглушки автора), валидацию секций,
+// SQL-фильтры приватности, содержимое multipart-формы и счётчики в ответе.
 //
 // Запуск: node --test tests/test_data_export.test.mjs
 import { readFileSync } from "node:fs";
@@ -48,6 +48,7 @@ const loadMappers = new Function(
   ].join("\n")
 );
 const { EXPORT_ROW_MAPPERS } = loadMappers();
+const APP_VERSION = source.match(/const APP_VERSION = "([^"]+)"/)[1];
 
 test("нормализация строк: флаги к булевым, пустые заголовки — null", () => {
   const plan = EXPORT_ROW_MAPPERS.plans({
@@ -144,6 +145,10 @@ const buildApi = new Function(
     extractBraced("function exportMemoryRow"),
     extractBraced("function exportDateRow"),
     extractBraced("const EXPORT_ROW_MAPPERS = {"),
+    extractBraced("function exportTxtTime"),
+    extractBraced("const EXPORT_TXT_ROWS = {"),
+    extractBraced("function exportTxtRecord"),
+    extractBraced("function exportTxtDoc"),
     extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
@@ -199,7 +204,7 @@ function makeApiEnv({ pair, rows = {}, body = {}, tgId = 777 }) {
   return { api, env: { DB: db }, queries, request, uploads };
 }
 
-test("маршрут: фильтры приватности по составам, один файл «Экспорт.json», счётчики", async () => {
+test("маршрут: фильтры приватности по составам, один файл «Экспорт.txt», счётчики", async () => {
   const env0 = makeApiEnv({
     pair: { id: 3, timezone: "Asia/Irkutsk" },
     body: { sections: { plans: "all", movies: "open", dates: "private", birthdays: "private", places: "mine", memories: "mine", quotes: "mine", wishes: "mine" } },
@@ -231,25 +236,60 @@ test("маршрут: фильтры приватности по состава�
   }
   ok(env0.queries.find((q) => q.sql.includes("FROM wishes")).sql.includes("w.done=0"), "желания — только не подаренные");
 
-  // Один sendDocument с файлом «Экспорт.json».
+  // Один sendDocument с файлом «Экспорт.txt» — человекочитаемый документ.
   equal(env0.uploads.length, 1);
   const upload = env0.uploads[0];
   equal(upload.method, "sendDocument");
   equal(upload.form.get("chat_id"), "777");
   match(upload.form.get("caption"), /Экспорт данных — /);
   const doc = upload.form.get("document");
-  equal(doc.name, "Экспорт.json");
-  const payload = JSON.parse(await doc.text());
-  equal(payload.app, "duoplan");
-  ok(!Number.isNaN(Date.parse(payload.exported_at)));
-  deepStrictEqual([...Object.keys(payload.sections)].sort(), ["birthdays", "dates", "memories", "movies", "places", "plans", "quotes", "wishes"].sort());
-  equal(payload.sections.plans[0].title, "Поездка");
-  equal(payload.sections.movies[0].title, "Оппенгеймер");
-  equal(payload.sections.memories[0].title, "Выходные");
+  equal(doc.name, "Экспорт.txt");
+  const txt = await doc.text();
+  ok(txt.startsWith("Общий дневник — экспорт данных\n"), "шапка документа");
+  ok(/Дата выгрузки: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/.test(txt), "метка времени в шапке");
+  match(txt, new RegExp(`Версия: ${APP_VERSION}`));
+  // Пустые секции не печатаются, заполненные — с заголовком и записями.
+  ok(!txt.includes("Места —") && !txt.includes("Желания —"), "пустые секции пропущены");
+  ok(txt.includes("Планы — 1"), "заголовок секции планов с количеством");
+  ok(txt.includes("1. Поездка"), "план: главная строка");
+  ok(txt.includes("Когда: 2026-12-01"), "план: дата");
+  ok(txt.includes("Добавил: Аня"), "автор записи");
+  ok(txt.includes("Кино — 1") && txt.includes("1. Оппенгеймер") && txt.includes("Рейтинг IMDb: 8.4"), "кино-секция");
+  ok(txt.includes("Дневник — 1") && txt.includes("1. Выходные") && txt.includes("Текст: Текст"), "секция дневника");
+  // Личные флаги попадают в файл только когда есть что показывать.
+  ok(!txt.includes("Личный"), "общий план не помечен личным");
   deepStrictEqual(response.data, {
     ok: true,
     counts: { plans: 1, movies: 1, dates: 0, birthdays: 0, places: 0, memories: 1, quotes: 0, wishes: 0 }
   });
+});
+
+test("маршрут: состав «all» общих коллекций — один бинд, дни рождения попадают в TXT", async () => {
+  const env0 = makeApiEnv({
+    pair: { id: 9, timezone: "Europe/Moscow" },
+    body: { sections: { places: "all", memories: "all", quotes: "all", wishes: "all", birthdays: "all" } },
+    rows: {
+      birthdays: [{ id: 30, title: "День рождения Маши", day: "1996-12-03", time: null, recurs: 1, monthly: 0, is_private: 0, kind: "birthday", created_at: 5, author: "Миша" }],
+      memories: [{ id: 31, title: "Выходные", body: "Текст", day: "2026-10-31", created_at: 6, author: "Миша" }]
+    }
+  });
+  const response = await env0.api(env0.request, env0.env, new URL("https://duoplan.test/api/data/export"));
+
+  // Регрессия H1: в составе «all» у общих коллекций в SQL один плейсхолдер —
+  // лишний бинд с tg_id ронял запрос (SQLITE_RANGE).
+  for (const table of ["places", "memories", "quotes", "wishes"]) {
+    const q = env0.queries.find((x) => x.sql.includes(`FROM ${table}`));
+    deepStrictEqual(q.args, [9], `${table}: состав «all» — только бинд пары`);
+    ok(!q.sql.includes("created_by=?") && !q.sql.includes("author_id=?") && !q.sql.includes("owner_id=?"), `${table}: без фильтра автора`);
+  }
+  equal(env0.queries.find((x) => x.sql.includes("kind='birthday'")).args.length, 2, "дни рождения: фильтр видимости в обоих составах");
+
+  // Регрессия H1: секция «Дни рождения» рендерится в TXT (раньше — TypeError).
+  const doc = env0.uploads[0].form.get("document");
+  const txt = await doc.text();
+  ok(txt.includes("Дни рождения — 1"), "заголовок секции дней рождения");
+  ok(txt.includes("1. День рождения Маши"), "запись дня рождения");
+  deepStrictEqual(response.data.counts, { places: 0, memories: 1, quotes: 0, wishes: 0, birthdays: 1 });
 });
 
 test("маршрут без выбранных секций — 400 и без запросов к базе", async () => {

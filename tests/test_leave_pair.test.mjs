@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal } from "node:assert/strict";
+import { deepStrictEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -215,4 +215,22 @@ test("сбой Telegram не отменяет выход из пространс
   equal(notifier.calls.length, 1, "попытка уведомления была");
   deepStrictEqual(executed.some((sql) => sql.includes("user_a=user_b")), true);
   deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pairs")), false);
+});
+
+test("личное имя партнёра сбрасывается у обоих участников (регрессия M5)", async () => {
+  // Иначе кастомное имя, заданное старому партнёру, прилипнет к следующему.
+  const { db, executed } = makeMockDb();
+  const notifier = makeNotifier();
+  const leavePair = load(notifier.openApp, escapeHtml);
+  await leavePair({ DB: db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2 });
+
+  const leaverUpdate = executed.find((sql) => sql.startsWith("UPDATE users SET pair_id=NULL"));
+  ok(leaverUpdate.includes("partner_custom_name=NULL"), "у ушедшего");
+  const remainingUpdate = executed.find((sql) => sql.includes("role='a'") && sql.includes("partner_custom_name=NULL"));
+  ok(remainingUpdate, "у оставшегося партнёра (повышен до владельца)");
+
+  const mockB = makeMockDb();
+  await leavePair({ DB: mockB.db }, { id: 7, tg_id: 2, role: "b", user_a: 1, user_b: 2 });
+  const ownerUpdate = mockB.executed.find((sql) => sql.startsWith("UPDATE users SET partner_custom_name=NULL"));
+  ok(ownerUpdate, "владелец, оставшийся после ухода партнёра (b)");
 });

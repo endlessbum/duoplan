@@ -143,6 +143,6 @@ test("проверка автора не задевает общие разде�
   equal(await route(env, pair, user, "PATCH", "/api/tasks/5", { title: "План" }), true);
   // Первый запрос — guard видимости личного плана, второй — сам UPDATE.
   equal(calls.length, 2);
-  equal(calls[0].sql.startsWith("SELECT is_private,created_by FROM tasks"), true);
+  equal(calls[0].sql.startsWith("SELECT is_private,created_by"), true);
   equal(calls[1].sql.startsWith("UPDATE tasks SET"), true);
 });
