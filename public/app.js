@@ -1091,8 +1091,8 @@
       <section class="card">
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
-        <p>${daily.done ? `Вы отметили ритуал +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP.")}</p>
-        ${daily.done ? "" : `<div style="margin-top:18px;"><button class="primary full" type="button" data-action="daily-done">Мы сделали это +10 XP</button></div>`}
+        <p>${daily.done ? `Вы отметили ритуал +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP")}</p>
+        ${daily.done ? "" : `<div style="margin-top:18px;"><button class="primary full" type="button" data-action="daily-done">Выполнено +10 XP</button></div>`}
       </section>
     ` : "";
 
@@ -1727,22 +1727,22 @@
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" id="show-avatar" ${user.show_avatar !== false ? "checked" : ""}> Отображение аватара</span>
         </label>
-        <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары. Если у пользователя фото нет, остаётся буква, пока аватар не появится. Без галочки всегда показываются буквы.</p>
+        <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары. Если у пользователя фото нет, остаётся буква, пока аватар не появится</p>
         <div class="settings-row">
           <span class="settings-label">Имя партнёра</span>
           <input id="partner-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(partnerName)}" value="${esc(user.partner_custom_name || "")}">
         </div>
-        <p class="settings-hint">Каким вы видите имя партнёра в приложении — например, если в Telegram у него ник. Видно только вам; партнёр у себя ничего не заметит. Пусто — имя из Telegram.</p>
+        <p class="settings-hint">Каким вы видите имя партнёра в приложении — например, если в Telegram у него ник. Меняется только у вас. Пусто — имя из Telegram</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" id="digest-enabled" ${user.digest_enabled ? "checked" : ""}> Утренняя сводка</span>
           <input type="time" id="digest-time" lang="ru" value="${esc(user.digest_time || "09:00")}">
         </label>
-        <p class="settings-hint">Планы и значимые даты на сегодня и завтра — личным сообщением от бота.</p>
+        <p class="settings-hint">Планы и значимые даты на сегодня и завтра — личным сообщением от бота</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" id="dates-digest-enabled" ${user.dates_digest_enabled ? "checked" : ""}> Даты за сутки</span>
           <input type="time" id="dates-digest-time" lang="ru" value="${esc(user.dates_digest_time || "09:00")}">
         </label>
-        <p class="settings-hint">Напомнит о завтрашних датах накануне в выбранное время. Кроме сводок бот предупреждает о плане с точным временем за 3 часа и за час.</p>
+        <p class="settings-hint">Напомнит о завтрашних датах накануне в выбранное время. Кроме сводок бот предупреждает о плане с точным временем за 3 часа и за час</p>
         <div class="settings-row">
           <span class="settings-label">Тема</span>
           <div class="theme-switch">
@@ -1767,7 +1767,7 @@
         <p class="eyebrow">Безопасность</p>
         <h3>Пароль на вход</h3>
         ${pinField("pin-input")}
-        <p class="settings-hint">Четырёхзначный пароль спросится при открытии приложения. Это локальная блокировка экрана: она не шифрует данные и не защищает их при входе в ваш Telegram-аккаунт с другого устройства. Без тайм-аутов при ошибке.</p>
+        <p class="settings-hint">Четырёхзначный пароль будет запрашиваться при открытии приложения</p>
         ${storedPin()
           ? `<button class="secondary full card-action" type="button" data-action="clear-pin">Удалить</button>`
           : `<button class="secondary full card-action" type="button" data-action="save-pin">Задать</button>`}
@@ -1782,7 +1782,7 @@
       <section class="card">
         <p class="eyebrow">Резервная копия</p>
         <h3>Экспорт данных</h3>
-        <p class="settings-hint">Выберите разделы — бот пришлёт один JSON-файл с выбранным. Удобно хранить вне приложения.</p>
+        <p class="settings-hint">Выберите разделы — бот пришлёт один файл с выбранным. Удобно хранить вне приложения</p>
         <button class="secondary full card-action" type="button" data-action="export-data">Экспортировать</button>
       </section>
     `;
@@ -1810,7 +1810,7 @@
         <p class="eyebrow">Общее</p>
         <h3>Часовой пояс</h3>
         <select id="pair-timezone" class="settings-select">${options}</select>
-        <p class="settings-hint">Общий для календаря, ритуала дня и напоминаний у обоих партнёров. При смене пояса пересчитываются «сегодня/завтра» — граница суток сдвинется.</p>
+        <p class="settings-hint">Общий для календаря, ритуала дня и напоминаний у обоих партнёров. При смене пояса пересчитываются «сегодня/завтра»</p>
         <button class="secondary full card-action" type="button" data-action="save-pair-timezone">Сохранить пояс</button>
       </section>
     `;
@@ -1941,7 +1941,7 @@
       html += `
         <section class="card">
           <h3>Пока пусто</h3>
-          <p>Создайте копилку на общую мечту или личную цель — пополняйте и следите за прогрессом.</p>
+          <p>Создайте копилку на общую мечту или личную цель — пополняйте и следите за прогрессом</p>
           <button class="primary full card-action${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>
         </section>
       `;
@@ -1984,7 +1984,7 @@
       html += `
         <section class="card">
           <h3>Всё впереди</h3>
-          <p>Запишите идею свидания, поездки или общего дела.</p>
+          <p>Запишите идею свидания, поездки или общего дела</p>
           <div style="margin-top:12px;">
             <button class="primary full${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>
           </div>
@@ -2022,7 +2022,7 @@
         return `
           <section class="card">
             <h3>Чтобы не забыть</h3>
-            <p>Добавьте день рождения близкого человека — напомним за 3 дня и в сам день.</p>
+            <p>Добавьте день рождения близкого человека — напомним за 3 дня и в сам день</p>
             <div style="margin-top:12px;">
               <button class="primary full${disabledClass}" type="button" data-action="add-birthday">Добавить день рождения</button>
             </div>
@@ -2036,7 +2036,7 @@
     }
     // Порядок приходит отсортированным из /api/state (sortDateRows):
     // повторная сортировка с часовыми поясами на каждое сравнение не нужна.
-    return renderListTab(datesOfKind("date"), "add-date", "Добавить дату", "Хочу запомнить", "Добавьте годовщину, день знакомства или важный праздник.", dateItem)
+    return renderListTab(datesOfKind("date"), "add-date", "Добавить дату", "Хочу запомнить", "Добавьте годовщину, день знакомства или важный праздник", dateItem)
       + archiveMoreHtml("dates", (appState.dates || []).length);
   }
 
@@ -2046,10 +2046,10 @@
   function renderMemoriesBody() {
     if (memoriesView === "quotes") {
       const quotes = appState.quotes || [];
-      return renderListTab(quotes, "add-quote", "Добавить цитату", "Ни одной цитаты", "Сохраните фразу, которая зацепила — из книги, фильма или разговора.", quoteItem);
+      return renderListTab(quotes, "add-quote", "Добавить цитату", "Ни одной цитаты", "Сохраните фразу партнёра, которая зацепила или показалось смешной", quoteItem);
     }
     const recentMemories = appState.memories || [];
-    return renderListTab(mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться.", memoryItem)
+    return renderListTab(mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться", memoryItem)
       + archiveMoreHtml("memories", recentMemories.length);
   }
 
@@ -2264,7 +2264,7 @@
       html += `
         <section class="card">
           <h3>Пока пусто</h3>
-          <p>Добавьте кафе, парк или город, куда давно хотели выбраться.</p>
+          <p>Добавьте кафе, парк или город, куда давно хотели выбраться</p>
           <button class="primary full card-action${disabledClass}" type="button" data-action="add-place">Добавить место</button>
         </section>
       `;
@@ -2274,13 +2274,13 @@
     // возвращается отдельной — под «Добавить место».
     if (!heroUsed) {
       const hint = empty
-        ? "Пока нечего выбирать — добавьте первое место."
-        : open.length ? "" : "Все места уже посещены — добавьте новое или верните старое.";
+        ? "Пока нечего выбирать — добавьте первое место"
+        : open.length ? "" : "Все места уже посещены — добавьте новое";
       html += `
         <section class="card place-hero">
           <p class="eyebrow">Рандом</p>
           <h3>Не знаете, куда пойти?</h3>
-          <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите.</p>
+          <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите</p>
           ${hint ? `<p class="place-count">${hint}</p>` : ""}
           <button class="secondary full card-action${disabledClass}" type="button" data-action="random-place">Рандом</button>
         </section>
@@ -2660,8 +2660,8 @@
         <section class="card">
           <h3>Пока пусто</h3>
           <p>${watched.length
-            ? "Все фильмы просмотрены — добавьте новый или верните старый."
-            : "Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью."}</p>
+            ? "Все фильмы просмотрены — добавьте новый"
+            : "Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью"}</p>
           <button class="primary full card-action${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>
         </section>
       `;
@@ -2674,7 +2674,7 @@
         <section class="card place-hero movie-hero">
           <p class="eyebrow">Рандом</p>
           <h3>Не знаете, что посмотреть?</h3>
-          <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров.</p>
+          <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров</p>
           <button class="secondary full card-action${disabledClass}" type="button" data-action="random-movie">Рандом</button>
         </section>
       `;
@@ -2714,7 +2714,7 @@
         html += `
           <section class="card">
             <h3>Желание</h3>
-            <p>Поделитесь идеями подарков и маленькими мечтами.</p>
+            <p>Поделитесь идеями подарков и маленькими мечтами</p>
             <div style="margin-top:12px;">
               <button class="primary full${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>
             </div>
@@ -2727,7 +2727,7 @@
       html += `
         <section class="card">
           <h3>Пока пусто</h3>
-          <p>${partnerLabel === "Её" ? "Она" : "Он"} ещё не добавил${partnerLabel === "Её" ? "а" : ""} желаний в общий список.</p>
+          <p>${partnerLabel === "Её" ? "Она" : "Он"} ещё не добавил${partnerLabel === "Её" ? "а" : ""} желаний в общий список</p>
         </section>
       `;
     }
