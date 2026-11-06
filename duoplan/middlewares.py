@@ -21,7 +21,9 @@ PRIVATE_BOT_DENIED_TEXT = (
     "и откройте её: через неё вы войдёте в общее пространство."
 )
 
-_START_WITH_PAYLOAD_RE = re.compile(r"^/start(?:\s+(.*))?$", re.IGNORECASE)
+# /start@botname тоже несёт код приглашения: Telegram доставляет упоминание
+# и в личке (например, при ответе из группы), и без ветки с @ код терялся.
+_START_WITH_PAYLOAD_RE = re.compile(r"^/start(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$", re.IGNORECASE)
 
 
 class PrivateBotMiddleware(BaseMiddleware):
@@ -42,6 +44,14 @@ class PrivateBotMiddleware(BaseMiddleware):
     ``service.open_pair_for_code``; пока код не подтвердил вход, пользователь
     НЕ регистрируется (``EnsureUserMiddleware`` после него не доходит), поэтому
     посторонний не оставляет записей в базе.
+
+    Известное ослабление (осознанное): между проверкой кода здесь и
+    ``join_pair`` в обработчике пара может заполниться (гонка) — тогда
+    ``EnsureUserMiddleware`` уже создал строку в ``users``, и пользователь
+    навсегда проходит гейт как «известный», не будучи в паре. Одноразовость
+    кода не enforced; при 32-битном пространстве кодов практический риск
+    низкий. Смена этого поведения требует отката регистрации при несостоявшемся
+    входе — намеренно не делается, чтобы не удалять строки из-под внешних ключей.
     """
 
     async def __call__(
@@ -80,7 +90,7 @@ class PrivateBotMiddleware(BaseMiddleware):
             if match and match.group(1):
                 payload = match.group(1).strip()
 
-        if not payload or await service.open_pair_for_code(payload) is None:
+        if not payload or await service.open_pair_for_code(payload, tg_id=user.id) is None:
             bot: object = data.get("bot")
             chat = getattr(event, "chat", None)
             chat_id = getattr(chat, "id", None)

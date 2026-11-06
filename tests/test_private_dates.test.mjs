@@ -626,6 +626,8 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractBraced("function planTaskReminders"),
       extractBraced("function dateOccursOnDay"),
       extractBraced("function parseTimeMinutes"),
+      extractLine("const CRON_TICK_MINUTES"),
+      extractBraced("function timeDueWithRollover"),
       extractBraced("function localMinutesOfDay"),
       extractBraced("function digestText"),
       extractBraced("function datesDigestText"),

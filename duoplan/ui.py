@@ -60,6 +60,22 @@ HOME_MENU = InlineKeyboardMarkup(
     inline_keyboard=[[button("В наше пространство", "menu:home")]]
 )
 
+# Меню карточки «Наша пара» у соединённой пары: выход — с подтверждением.
+PAIRED_MENU = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [button("Выйти из пространства", "pair:leave")],
+        [button("В наше пространство", "menu:home")],
+    ]
+)
+
+# Подтверждение выхода: случайный тап по кнопке не должен рвать пространство.
+LEAVE_CONFIRM_MENU = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [button("Да, выйти", "pair:leave:yes")],
+        [button("Остаться", "pair:leave:no")],
+    ]
+)
+
 
 GAME_MENU = InlineKeyboardMarkup(
     inline_keyboard=[

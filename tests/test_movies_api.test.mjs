@@ -522,3 +522,12 @@ test("уникальный индекс кино создаётся после �
   ok(migration.indexOf("DELETE FROM movies") !== -1, "0019: нет очистки дублей");
   ok(migrationIndex !== -1 && migration.indexOf("DELETE FROM movies") < migrationIndex, "0019: очистка дублей должна идти до индекса");
 });
+
+// /api/state больше не ждёт обновление рейтингов: OMDb/TMDB отвечают до 8 с
+// на источник, синхронный await подставлял state под клиентский таймаут
+// (репорт аудита 2026-11-06). Обновление уходит в ctx.waitUntil.
+test("/api/state отдаёт ответ, не дожидаясь обновления рейтингов", () => {
+  ok(workerSource.includes("ctx.waitUntil(refresh)"), "нет ctx.waitUntil для refreshMovieRatings");
+  ok(!workerSource.includes("await refreshMovieRatings"), "остался синхронный await refreshMovieRatings");
+  ok(workerSource.includes("async fetch(request, env, ctx)"), "ctx не прокинут в fetch-хендлер");
+});

@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TABLES = {
     "pairs": (
         "id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, "
-        "created_at, updated_at"
+        "awaiting_return, last_partner, created_at, updated_at"
     ),
     "users": (
         "tg_id, username, display_name, role, gender, pair_id, points, streak, "
@@ -39,8 +39,37 @@ TABLES = {
     "dates": "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at",
     "memories": "id, pair_id, author_id, title, body, day, created_at",
     "wishes": "id, pair_id, owner_id, body, done, done_at, url, created_at",
+    # Контентные коллекции после 0016: раньше молча не экспортировались, и
+    # перенос локальной базы в D1 терял цитаты, места, поездки, цели, фильмы
+    # и копилки без единого предупреждения. Порядок важен: родители раньше
+    # детей (goals -> goal_items, savings -> savings_deposits, movies ->
+    # movie_ratings) — INSERT OR REPLACE с внешними ключами.
+    "quotes": "id, pair_id, author_id, body, source, created_at",
+    "places": (
+        "id, pair_id, created_by, title, note, url, visited, visited_at, visited_by, created_at"
+    ),
+    "trips": (
+        "id, pair_id, created_by, title, note, visited, visited_at, visited_by, created_at"
+    ),
+    "goals": "id, pair_id, created_by, title, is_private, created_at",
+    "goal_items": "id, goal_id, pair_id, created_by, title, done, done_at, done_by, created_at",
+    "movies": (
+        "id, pair_id, created_by, imdb_id, title, year, kind, rating, rating_source, "
+        "rating_checked_at, details, genres, runtime, seasons, episodes, url, "
+        "watched, watched_at, watched_by, created_at"
+    ),
+    "movie_ratings": "movie_id, tg_id, rating, created_at, updated_at",
+    "savings": "id, pair_id, created_by, kind, title, target, collected, created_at",
+    "savings_deposits": "id, saving_id, tg_id, amount, created_at",
     "daily_rolls": "pair_id, day, daily_value",
     "daily_completions": "pair_id, tg_id, day, completed_at",
+    # Коды закрытых пространств: без них вход по старому коду даст 404 вместо 410.
+    "closed_codes": "code, closed_at",
+    # Журнал уведомлений: без него после переноса дедупликация пуста и уже
+    # отправленные за сегодня сводки/напоминания уйдут повторно.
+    # rate_limits/join_attempts/fsm_states/meta осознанно не переносим:
+    # счётчики защиты и локальный FSM к D1 не относятся.
+    "notification_log": "tg_id, day, kind, sent_at",
 }
 
 # Колонки, которые в схеме D1 объявлены NOT NULL с DEFAULT. Если в исходной
@@ -48,6 +77,8 @@ TABLES = {
 # иначе INSERT нарушит ограничение NOT NULL при импорте.
 NOT_NULL_FALLBACKS = {
     "timezone": "'Europe/Moscow'",
+    "awaiting_return": "0",
+    "last_partner": "0",
     # NOT NULL DEFAULT 0/1 в D1: NULL из старой базы нарушил бы ограничение,
     # а для is_private ещё и молча раскрыл бы личную запись партнёру.
     "is_private": "0",
@@ -57,6 +88,8 @@ NOT_NULL_FALLBACKS = {
     "digest_enabled": "1",
     "dates_digest_enabled": "1",
     "show_avatar": "1",
+    "visited": "0",
+    "watched": "0",
 }
 
 
@@ -108,7 +141,7 @@ def build_select(db: sqlite3.Connection, table: str, columns: str) -> tuple[str,
     return ", ".join(expressions), names, True
 
 
-def dump(source: Path) -> str:
+def dump(source: Path, skipped: list[str] | None = None) -> str:
     # Экранируем путь для SQLite URI: пробелы, ?, #, % и кириллица
     # превращаются в %XX. Импортируем под своим именем: голый `quote` затенял
     # модульную функцию SQL-квотирования и ронял dump() на первом же значении.
@@ -127,7 +160,12 @@ def dump(source: Path) -> str:
         for table, columns in TABLES.items():
             select_columns, names, table_exists = build_select(db, table, columns)
             if not table_exists:
-                continue  # Пропускаем таблицы, которых нет в пустой базе
+                # Таблицы нет в источнике (пустая/очень старая база): молча
+                # пропустить — значит потерять её данные без следа. Сообщаем
+                # наверх, main печатает предупреждение.
+                if skipped is not None:
+                    skipped.append(table)
+                continue
             rows = db.execute(f"SELECT {select_columns} FROM {table}").fetchall()
             for row in rows:
                 values = ", ".join(quote(row[name]) for name in names)
@@ -160,6 +198,8 @@ def dump(source: Path) -> str:
                     f"SELECT {owner} AS tg_id, id AS pair_id, created_at FROM pairs WHERE {condition}"
                 ).fetchall()
                 for row in rows:
+                    # joined_at для роли 'b' — время создания пары: точный
+                    # момент входа второго участника в SQLite не хранится.
                     lines.append(
                         "INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at) "
                         f"VALUES({quote(row['tg_id'])},{quote(row['pair_id'])},{quote(role)},"
@@ -180,7 +220,16 @@ def main() -> int:
     args = parser.parse_args()
     if not args.source.is_file():
         parser.error(f"SQLite не найден: {args.source}")
-    sql = dump(args.source)
+    skipped: list[str] = []
+    sql = dump(args.source, skipped)
+    if skipped:
+        import sys
+
+        print(
+            "Внимание: в источнике нет таблиц (данные не переносились): "
+            + ", ".join(skipped),
+            file=sys.stderr,
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(sql, encoding="utf-8")
     print(f"Экспортировано в {args.output} ({len(sql.splitlines())} строк).")

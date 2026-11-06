@@ -24,3 +24,14 @@ DuoPlan.zip
 desktop.ini
 .zcode/
 .ruff_cache/
+.devin/config.local.json
+.idea/
+.vscode/
+*.log
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.DS_Store
+Thumbs.db
+.devin/

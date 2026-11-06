@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import sqlite3
+from collections.abc import Awaitable, Callable
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from datetime import tzinfo
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from duoplan.db.base import Database
 from duoplan.db.schema import now
+
+log = logging.getLogger(__name__)
 
 # Канонический список — tests/fixtures/daily_actions.json (источник истины
 # worker.js): тексты и порядок обязаны совпадать с Mini App, иначе одна и та же
@@ -102,6 +109,21 @@ def _time_parts(value: object, default: tuple[int, int] = (12, 0)) -> tuple[int,
     return (hours, minutes) if 0 <= hours <= 23 and 0 <= minutes <= 59 else default
 
 
+def _zoned_local(year: int, month: int, day: int, hour: int, minute: int,
+                 tz: tzinfo) -> datetime:
+    """Локальное время в поясе с коррекцией DST-gap (parity с
+    worker.makeDateInTimeZone): naive→aware; если round-trip через UTC
+    сместил локальные поля — время не существовало (перевод часов вперёд) —
+    пересчитываем через offset, действовавший за сутки до перехода."""
+    naive = datetime(year, month, day, hour, minute)
+    aware = naive.replace(tzinfo=tz)
+    roundtrip = aware.astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None)
+    if roundtrip == naive:
+        return aware
+    pre_offset = (naive - timedelta(hours=24)).replace(tzinfo=tz).utcoffset() or timedelta(0)
+    return (naive - pre_offset).replace(tzinfo=timezone.utc).astimezone(tz)
+
+
 def _monthly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | None:
     """Ближайшее ежемесячное наступление (worker.nextMonthlyOccurrenceMs):
     первый месяц, где такой день месяца существует и локальная дата не раньше
@@ -122,7 +144,8 @@ def _monthly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | Non
         year = now_local.year + month_index // 12
         month = month_index % 12 + 1
         try:
-            candidate = datetime(year, month, day_of_month, *_time_parts(time)).replace(tzinfo=tz)
+            hours, minutes = _time_parts(time)
+            candidate = _zoned_local(year, month, day_of_month, hours, minutes, tz)
         except ValueError:
             continue
         if candidate.date() >= today:
@@ -144,7 +167,8 @@ def _yearly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | None
     today = now_local.date()
     for offset in range(10):
         try:
-            candidate = datetime(now_local.year + offset, month, day_of_month, *_time_parts(time)).replace(tzinfo=tz)
+            hours, minutes = _time_parts(time)
+            candidate = _zoned_local(now_local.year + offset, month, day_of_month, hours, minutes, tz)
         except ValueError:
             continue
         if candidate.date() >= today:
@@ -180,7 +204,7 @@ def task_deadline(task: object, tz: tzinfo) -> float:
         return float("inf")
     hours, minutes = _time_parts(task["time"], default=(23, 59))
     try:
-        return datetime(year, month, day_of_month, hours, minutes, tzinfo=tz).timestamp()
+        return _zoned_local(year, month, day_of_month, hours, minutes, tz).timestamp()
     except ValueError:
         return float("inf")
 
@@ -266,16 +290,65 @@ def sort_date_rows(rows: list[object], tz: tzinfo) -> list[object]:
 
 
 def normalize_code(raw: object) -> str:
-    """Код приглашения: без пробелов, в верхнем регистре. Пустой -> ``""``."""
+    """Код приглашения: пробелы по краям срезаны, верхний регистр. Пустой -> ``""``.
+
+    Внутренние пробелы НЕ вырезаются: worker коды с пробелами не принимает
+    (паттерн 8 hex-символов), и склеенный здесь «AB CD EFGH» прошёл бы в боте,
+    но был бы отклонён приложением. Выравниваем валидацию в сторону отказа —
+    код с внутренними пробелами просто не найдётся.
+    """
     if raw is None:
         return ""
-    return "".join(str(raw).split()).upper()[:32]
+    return str(raw).strip().upper()[:32]
 
 
 class DuoPlanService:
-    def __init__(self, db: Database, tz: tzinfo | None = None) -> None:
+    def __init__(self, db: Database, tz: tzinfo | None = None, tz_name: str = "") -> None:
         self.db = db
         self.tz: tzinfo = tz or timezone.utc
+        # Имя пояса для новых пар: ZoneInfo.key у настроенной зоны, иначе UTC.
+        self.tz_name = tz_name or getattr(self.tz, "key", "") or "UTC"
+        # Кэш ZoneInfo по имени: pairs.timezone читается на каждую операцию.
+        self._tz_cache: dict[str, tzinfo] = {}
+
+    def _resolve_tz(self, name: object) -> tzinfo:
+        """ZoneInfo по имени с откатом на пояс бота; кэширует по строке."""
+        text = str(name or "").strip()
+        if not text:
+            return self.tz
+        cached = self._tz_cache.get(text)
+        if cached is not None:
+            return cached
+        try:
+            resolved = ZoneInfo(text)
+        except Exception:
+            resolved = self.tz
+        self._tz_cache[text] = resolved
+        return resolved
+
+    async def pair_tz(self, pair_id: int) -> tzinfo:
+        """Часовой пояс конкретной пары (parity с pairs.timezone в worker.js)."""
+        row = await self.db.one("SELECT timezone FROM pairs WHERE id = ?", (pair_id,))
+        return self._resolve_tz(row["timezone"] if row else None)
+
+    def today_for(self, tz_name: object, at: datetime | None = None) -> date:
+        """«Сегодня» в поясе, заданном именем (pairs.timezone или fallback).
+
+        Имя, совпадающее с поясом сервиса (или пустое), идёт через
+        ``local_today`` — так сохраняется единая точка подмены «сегодня»
+        в тестах и у вызовов без пары.
+        """
+        text = str(tz_name or "").strip()
+        if not text or text == self.tz_name:
+            return self.local_today(at)
+        moment = at if at is not None else datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(self._resolve_tz(text)).date()
+
+    async def pair_today(self, pair_id: int, at: datetime | None = None) -> date:
+        row = await self.db.one("SELECT timezone FROM pairs WHERE id = ?", (pair_id,))
+        return self.today_for(row["timezone"] if row else None, at)
 
     # ------------------------------------------------------------------ время
 
@@ -285,6 +358,18 @@ class DuoPlanService:
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
         return moment.astimezone(self.tz).date()
+
+    async def _ensure_pair_open(self, pair_id: int) -> None:
+        """Заморозка контента, пока партнёр не вернулся (parity worker.js 403).
+
+        После выхода одного из пары (awaiting_return=1) мутации содержимого
+        запрещены — остаётся только чтение и личные настройки.
+        """
+        row = await self.db.one("SELECT awaiting_return FROM pairs WHERE id = ?", (pair_id,))
+        if row is not None and int(row["awaiting_return"] or 0) == 1:
+            raise ValidationError(
+                "Партнёр вышел из пространства — изменения будут доступны после его возвращения."
+            )
 
     # -------------------------------------------------------------- пользователи
 
@@ -328,17 +413,26 @@ class DuoPlanService:
         )
         return int(row["total"] or 0)
 
-    async def open_pair_for_code(self, code: object):
+    async def open_pair_for_code(self, code: object, tg_id: int | None = None):
         """Открытая пара по коду приглашения — для гейта приватного бота.
 
         Возвращает пару только если она ещё не завершилась (user_b = 0):
-        наличие такой пары — это действенный код для входа.
+        наличие такой пары — это действенный код для входа. Зарезервированный
+        код (партнёр вышел, awaiting_return=1) действителен только для его
+        аккаунта (last_partner) — посторонний гейт не проходит и в users
+        не регистрируется (parity webhook-гейта worker.js).
         """
         normalized = normalize_code(code)
         if not normalized:
             return None
+        if tg_id is not None:
+            return await self.db.one(
+                "SELECT * FROM pairs WHERE code = ? AND user_b = 0 "
+                "AND (awaiting_return = 0 OR last_partner = ?)",
+                (normalized, tg_id),
+            )
         return await self.db.one(
-            "SELECT * FROM pairs WHERE code = ? AND user_b = 0",
+            "SELECT * FROM pairs WHERE code = ? AND user_b = 0 AND awaiting_return = 0",
             (normalized,),
         )
 
@@ -362,12 +456,13 @@ class DuoPlanService:
                 try:
                     pair_id, _ = await self.db.execute_row(
                         "INSERT INTO pairs(code, name1, name2, user_a, user_b, started_at, "
-                        "created_at, updated_at) VALUES(?, ?, '', ?, 0, ?, ?, ?)",
+                        "timezone, created_at, updated_at) VALUES(?, ?, '', ?, 0, ?, ?, ?, ?)",
                         (
                             code,
                             display_name,
                             tg_id,
                             self.local_today().isoformat(),
+                            self.tz_name,
                             timestamp,
                             timestamp,
                         ),
@@ -384,18 +479,32 @@ class DuoPlanService:
                     # Не оставляем пару без владельца.
                     tx.rollback()
                     raise ValidationError("Не удалось создать пространство. Попробуйте ещё раз.")
+                # pair_members — источник членства в worker.js; без строки
+                # таблица в SQLite оставалась бы пустой (parity с D1).
+                await self.db.execute_row(
+                    "INSERT INTO pair_members(tg_id, pair_id, role, joined_at) VALUES(?, ?, 'a', ?)",
+                    (tg_id, pair_id, timestamp),
+                )
                 return code
 
             tx.rollback()
             raise ValidationError("Не удалось подобрать код приглашения. Попробуйте ещё раз.")
 
-    async def join_pair(self, tg_id: int, display_name: str, code: object) -> bool:
-        """Войти в пару по коду. Ровно один успешный вход даже при гонке."""
+    async def join_pair(self, tg_id: int, display_name: str, code: object,
+                        notify: Callable[[int, str], Awaitable[object]] | None = None) -> bool:
+        """Войти в пару по коду. Ровно один успешный вход даже при гонке.
+
+        ``notify(chat_id, text)`` вызывается после фиксации входа, если партнёр
+        возвращался (``awaiting_return``): оставшемуся уходит уведомление —
+        parity с joinPair в worker.js. Сбой уведомления вход не отменяет.
+        """
         normalized = normalize_code(code)
         if not normalized:
             return False
 
         timestamp = now()
+        was_awaiting = False
+        owner_id = 0
         async with self.db.transaction() as tx:
             user = await self.db.one("SELECT pair_id FROM users WHERE tg_id = ?", (tg_id,))
             if user is None:
@@ -405,16 +514,48 @@ class DuoPlanService:
             # иначе пользователь окажется в двух парах одновременно.
             if user["pair_id"] is not None:
                 tx.rollback()
-                return False
+                raise ValidationError(
+                    "Вы уже состоите в пространстве. Чтобы войти в другое, "
+                    "сначала выйдите из текущего."
+                )
 
             pair = await self.db.one("SELECT * FROM pairs WHERE code = ?", (normalized,))
-            if pair is None or pair["user_b"] or pair["user_a"] == tg_id:
+            if pair is None:
+                closed = await self.db.one("SELECT code FROM closed_codes WHERE code = ?", (normalized,))
+                if closed is not None:
+                    raise ValidationError(
+                        "Это пространство закрыто: последний участник вышел. "
+                        "Создайте новое или попросите новый код."
+                    )
                 tx.rollback()
                 return False
+            # Различимые причины, как в worker.joinPair: свой код и занятое
+            # пространство — не «код недоступен», а точное объяснение.
+            if pair["user_a"] == tg_id:
+                tx.rollback()
+                raise ValidationError("Это ваш собственный код — поделитесь им с партнёром.")
+            if pair["user_b"]:
+                tx.rollback()
+                raise ValidationError("Это пространство уже соединено с партнёром.")
+
+            # Резерв кода за ушедшим (parity с worker.js): пока партнёр не
+            # вернулся, тот же код не открывает пространство другому аккаунту.
+            if int(pair["awaiting_return"] or 0) == 1:
+                reserved_for = int(pair["last_partner"] or 0)
+                # Строгое сравнение, как в worker.joinPair (last_partner === tg_id):
+                # last_partner=0 при awaiting_return=1 — повреждённое состояние,
+                # и вход по нему отклоняем, а не пропускаем любого.
+                if reserved_for != tg_id:
+                    raise ValidationError(
+                        "Это пространство ждёт возвращения прежнего партнёра — "
+                        "войти по старому коду может только он."
+                    )
+                was_awaiting = True
+                owner_id = int(pair["user_a"] or 0)
 
             _, pair_changes = await self.db.execute_row(
-                "UPDATE pairs SET user_b = ?, name2 = ?, updated_at = ? "
-                "WHERE id = ? AND user_b = 0",
+                "UPDATE pairs SET user_b = ?, name2 = ?, awaiting_return = 0, "
+                "last_partner = 0, updated_at = ? WHERE id = ? AND user_b = 0",
                 (tg_id, display_name, timestamp, pair["id"]),
             )
             if pair_changes != 1:
@@ -430,12 +571,124 @@ class DuoPlanService:
                 # Пара уже получила user_b — откатываем, чтобы не оставить половинку.
                 tx.rollback()
                 return False
+            # Источник членства parity с worker.js: без этой строки
+            # pair_members в SQLite оставалась бы пустой.
+            await self.db.execute_row(
+                "INSERT INTO pair_members(tg_id, pair_id, role, joined_at) VALUES(?, ?, 'b', ?)",
+                (tg_id, pair["id"], timestamp),
+            )
 
-            return True
+        # Уведомление после фиксации транзакции: сбой Telegram вход не отменяет.
+        if was_awaiting and owner_id and notify is not None:
+            try:
+                await notify(
+                    owner_id,
+                    "«" + (display_name or "Партнёр") + "» снова в вашем пространстве.\n\n"
+                    "Общие планы, даты и воспоминания на месте — можно продолжать.",
+                )
+            except Exception:
+                log.info("join_pair: не удалось уведомить владельца %s", owner_id)
+        return True
+
+    async def leave_pair(self, tg_id: int,
+                         notify: Callable[[int, str], Awaitable[object]] | None = None) -> bool:
+        """Выйти из пространства. Владелец передаёт его партнёру — parity worker.js.
+
+        Пространство без второго участника удаляется целиком. При выходе одного
+        из пары контент остаётся, код резервируется за ушедшим
+        (``awaiting_return=1``, ``last_partner``), а оставшемуся уходит
+        уведомление (``notify``); сбой уведомления сам выход не отменяет.
+        """
+        member = await self.membership(tg_id)
+        if member is None:
+            return False
+        # Роли в pairs нет: users.role — собственная роль пользователя.
+        user = await self.db.one("SELECT display_name, role FROM users WHERE tg_id = ?", (tg_id,))
+        role = user["role"] if user else "a"
+        leaver_name = ((user["display_name"] if user else "")
+                       or (member["name2"] if role == "b" else member["name1"])
+                       or "Партнёр")
+        partner_id = int((member["user_b"] if role == "a" else member["user_a"]) or 0)
+        timestamp = now()
+        async with self.db.transaction() as tx:
+            if not partner_id:
+                # Последний держатель: данные пары удаляются полностью.
+                # movie_ratings/savings_deposits не несут pair_id — дети
+                # movies/savings, удаляются по подзапросу (parity CASCADE в worker).
+                for table in ("tasks", "dates", "memories", "wishes", "daily_rolls",
+                              "daily_completions", "quotes", "places", "trips",
+                              "goal_items", "goals", "movies", "savings", "pair_members"):
+                    await self.db.execute_row(f"DELETE FROM {table} WHERE pair_id = ?", (member["id"],))
+                await self.db.execute_row(
+                    "DELETE FROM movie_ratings WHERE movie_id IN (SELECT id FROM movies WHERE pair_id = ?)",
+                    (member["id"],),
+                )
+                await self.db.execute_row(
+                    "DELETE FROM savings_deposits WHERE saving_id IN (SELECT id FROM savings WHERE pair_id = ?)",
+                    (member["id"],),
+                )
+                # Код остаётся в closed_codes: вход по нему скажет «пространство
+                # закрыто», а не «код не найден» (parity worker.js).
+                await self.db.execute_row(
+                    "INSERT OR IGNORE INTO closed_codes(code, closed_at) VALUES(?, ?)",
+                    (str(member["code"]).upper(), timestamp),
+                )
+                await self.db.execute_row("DELETE FROM pairs WHERE id = ?", (member["id"],))
+            elif role == "a":
+                await self.db.execute_row(
+                    "DELETE FROM pair_members WHERE tg_id = ? AND pair_id = ?",
+                    (tg_id, member["id"]),
+                )
+                await self.db.execute_row(
+                    "UPDATE pairs SET user_a = user_b, "
+                    "name1 = (SELECT display_name FROM users WHERE tg_id = ?), "
+                    "user_b = 0, name2 = '', awaiting_return = 1, last_partner = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (partner_id, tg_id, timestamp, member["id"]),
+                )
+                await self.db.execute_row(
+                    "UPDATE pair_members SET role = 'a' WHERE tg_id = ? AND pair_id = ?",
+                    (partner_id, member["id"]),
+                )
+                # Личное имя оставшегося относилось к ушедшему — сбрасываем.
+                await self.db.execute_row(
+                    "UPDATE users SET role = 'a', partner_custom_name = NULL, updated_at = ? WHERE tg_id = ?",
+                    (timestamp, partner_id),
+                )
+            else:
+                await self.db.execute_row(
+                    "UPDATE pairs SET user_b = 0, name2 = '', awaiting_return = 1, "
+                    "last_partner = ?, updated_at = ? WHERE id = ?",
+                    (tg_id, timestamp, member["id"]),
+                )
+                await self.db.execute_row(
+                    "DELETE FROM pair_members WHERE tg_id = ? AND pair_id = ?",
+                    (tg_id, member["id"]),
+                )
+                await self.db.execute_row(
+                    "UPDATE users SET partner_custom_name = NULL, updated_at = ? WHERE tg_id = ?",
+                    (timestamp, partner_id),
+                )
+            await self.db.execute_row(
+                "UPDATE users SET pair_id = NULL, role = 'a', partner_custom_name = NULL, updated_at = ? WHERE tg_id = ?",
+                (timestamp, tg_id),
+            )
+        if partner_id and notify is not None:
+            try:
+                await notify(
+                    partner_id,
+                    leaver_name + " больше не в вашем пространстве.\n\n"
+                    "Общие планы, даты и воспоминания остались у вас. "
+                    "Чтобы позвать партнёра снова, отправьте ему код приглашения.",
+                )
+            except Exception:
+                log.info("leave_pair: не удалось уведомить партнёра %s", partner_id)
+        return True
 
     # ------------------------------------------------------------------- планы
 
     async def add_task(self, pair_id: int, title: object, created_by: int) -> int:
+        await self._ensure_pair_open(pair_id)
         text = _clean_text(title, TASK_TITLE_MAX, "План", utf16=True)
         return await self.db.execute(
             "INSERT INTO tasks(pair_id, title, created_by, created_at) VALUES(?, ?, ?, ?)",
@@ -448,16 +701,21 @@ class DuoPlanService:
         # бы сюрприз прямо в списке бота.
         private_clause = " AND (is_private = 0 OR created_by = ?)" if viewer_id is not None else ""
         params: tuple = (pair_id, viewer_id) if viewer_id is not None else (pair_id,)
+        # Без SQL LIMIT осознанно: сортировка по дедлайнам (sort_task_rows)
+        # считается по всему набору в Python — срез до сортировки дал бы
+        # произвольные, а не ближайшие строки страницы. У memories (created_at
+        # DESC) лимит уходит в SQL, здесь порядок вычисляемый.
         rows = await self.db.query(
             "SELECT * FROM tasks WHERE pair_id = ? AND status = 'open'"
             f"{private_clause}",
             params,
         )
-        sorted_rows = sort_task_rows(rows, self.tz)
+        sorted_rows = sort_task_rows(rows, await self.pair_tz(pair_id))
         return sorted_rows[offset : offset + limit]
 
     async def complete_task(self, task_id: int, pair_id: int, user_id: int) -> bool:
         """Условное завершение: повторный тап не перезаписывает ``completed_by``."""
+        await self._ensure_pair_open(pair_id)
         _, changes = await self.db.execute_row(
             "UPDATE tasks SET status = 'done', completed_by = ?, completed_at = ? "
             "WHERE id = ? AND pair_id = ? AND status = 'open' "
@@ -468,7 +726,8 @@ class DuoPlanService:
 
     # -------------------------------------------------------------------- даты
 
-    async def add_date(self, pair_id: int, title: object, day: object, recurs: int = 1) -> int:
+    async def add_date(self, pair_id: int, title: object, day: object, recurs: int = 1, created_by: int = 0) -> int:
+        await self._ensure_pair_open(pair_id)
         text = _clean_text(title, DATE_TITLE_MAX, "Дата", utf16=True)
         raw_day = _clean_text(day, 10, "Дата события")
         try:
@@ -479,9 +738,12 @@ class DuoPlanService:
             recurs_value = 1 if int(recurs or 0) else 0
         except (TypeError, ValueError) as exc:
             raise ValidationError("Признак ежегодной даты должен быть 0 или 1.") from exc
+        # created_by обязателен: без него дата навсегда остаётся created_by=0 —
+        # ни приватность в приложении (PATCH меняет is_private только автору),
+        # ни авторство, ни экспорт «только мои» её не привяжут ни к кому.
         return await self.db.execute(
-            "INSERT INTO dates(pair_id, title, day, recurs, created_at) VALUES(?, ?, ?, ?, ?)",
-            (pair_id, text, parsed.isoformat(), recurs_value, now()),
+            "INSERT INTO dates(pair_id, title, day, recurs, created_by, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (pair_id, text, parsed.isoformat(), recurs_value, created_by, now()),
         )
 
     async def dates(self, pair_id: int, limit: int = 30, offset: int = 0, viewer_id: int | None = None):
@@ -493,17 +755,20 @@ class DuoPlanService:
             f"SELECT * FROM dates WHERE pair_id = ?{private_clause}",
             params,
         )
-        sorted_rows = sort_date_rows(rows, self.tz)
+        # Без SQL LIMIT — та же причина, что в tasks(): порядок страниц
+        # вычисляет sort_date_rows по всему набору.
+        sorted_rows = sort_date_rows(rows, await self.pair_tz(pair_id))
         return sorted_rows[offset : offset + limit]
 
     # ------------------------------------------------------------------ дневник
 
     async def add_memory(self, pair_id: int, author_id: int, body: object) -> int:
+        await self._ensure_pair_open(pair_id)
         text = _clean_text(body, MEMORY_MAX, "Запись")
         timestamp = now()
         return await self.db.execute(
             "INSERT INTO memories(pair_id, author_id, body, day, created_at) VALUES(?, ?, ?, ?, ?)",
-            (pair_id, author_id, text, self.local_today().isoformat(), timestamp),
+            (pair_id, author_id, text, (await self.pair_today(pair_id)).isoformat(), timestamp),
         )
 
     async def memories(self, pair_id: int, limit: int = 12, offset: int = 0):
@@ -517,12 +782,28 @@ class DuoPlanService:
     # ------------------------------------------------------------------ вишлист
 
     async def add_wish(self, pair_id: int, owner_id: int, body: object, url: object = "") -> int:
+        await self._ensure_pair_open(pair_id)
         text = _clean_text(body, WISH_MAX, "Желание")
         link = _clean_optional_text(url, WISH_URL_MAX, "Ссылка")
-        # Схему проверяет и worker (wishUrl, worker.js:134–148): не-http(s)
-        # ссылки через window.open недопустимы.
-        if link and not link.startswith(("http://", "https://")):
-            raise ValidationError("Ссылка: только адреса http или https")
+        # Схему проверяет и worker (wishUrl, worker.js:144–158): new URL плюс
+        # http(s). Голого startswith("http://") мало — «http://» без хоста бот
+        # записал бы, а приложение потом не смогло бы ни открыть, ни
+        # отредактировать такое желание (PATCH упал бы с INVALID_URL).
+        # Пробелы запрещены явно: urlsplit их прощает в netloc, WHATWG URL — нет.
+        if link:
+            try:
+                parts = urlsplit(link)
+            except ValueError as exc:
+                # Часть malformed-вводов (битый IPv6-литерал и т.п.) роняет
+                # urlsplit исключением — для пользователя это невалидная
+                # ссылка, а не сбой обработчика.
+                raise ValidationError("Ссылка: только корректные адреса http или https") from exc
+            if (
+                parts.scheme not in ("http", "https")
+                or not parts.netloc
+                or re.search(r"\s", link)
+            ):
+                raise ValidationError("Ссылка: только корректные адреса http или https")
         return await self.db.execute(
             "INSERT INTO wishes(pair_id, owner_id, body, url, created_at) VALUES(?, ?, ?, ?, ?)",
             (pair_id, owner_id, text, link, now()),
@@ -538,6 +819,7 @@ class DuoPlanService:
         )
 
     async def complete_wish(self, wish_id: int, pair_id: int, owner_id: int) -> bool:
+        await self._ensure_pair_open(pair_id)
         _, changes = await self.db.execute_row(
             # done_at нужен календарю Mini App: звезда ставится в день вручения.
             # Закрытие — личное дело каждого: только владелец желания закрывает
@@ -574,7 +856,7 @@ class DuoPlanService:
         хотя ``complete_daily()`` начисляет их каждому. Та же семантика, что
         ``dailyFor(..., userId)`` в worker.js: done/partnerDone на пользователя.
         """
-        today = self.local_today().isoformat()
+        today = (await self.pair_today(pair_id)).isoformat()
         row = await self.db.one(
             "SELECT * FROM daily_rolls WHERE pair_id = ? AND day = ?", (pair_id, today)
         )
@@ -604,7 +886,8 @@ class DuoPlanService:
 
     async def complete_daily(self, pair_id: int, user_id: int) -> bool:
         """Отметить ритуал ровно один раз и начислить XP в той же транзакции."""
-        today_date = self.local_today()
+        await self._ensure_pair_open(pair_id)
+        today_date = await self.pair_today(pair_id)
         today = today_date.isoformat()
         action = self._daily_action(pair_id, today)
         timestamp = now()

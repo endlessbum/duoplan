@@ -84,6 +84,34 @@ async def test_pagination_returns_all_items(pair):
     assert len(ids) == 5
 
 
-def test_normalize_code_handles_media_and_spaces():
+def test_normalize_code_trims_and_uppercases_only():
     assert normalize_code(None) == ""
-    assert normalize_code(" ab cd 12 ") == "ABCD12"
+    assert normalize_code(" abcd1234 ") == "ABCD1234"
+    # Внутренние пробелы больше не склеиваются: worker такой код отклонит,
+    # и бот должен вести себя так же (см. normalize_code).
+    assert normalize_code("AB CD EFGH") == "AB CD EFGH"
+
+
+async def test_wish_url_requires_parseable_http(pair):
+    """Паритет с worker (wishUrl): корректный http(s) адрес, не просто префикс."""
+    service, pair_id, owner_id, _ = pair
+
+    with pytest.raises(ValidationError):
+        await service.add_wish(pair_id, owner_id, "Желание", "http://")
+    with pytest.raises(ValidationError):
+        await service.add_wish(pair_id, owner_id, "Желание", "https:// нет хоста")
+    with pytest.raises(ValidationError):
+        await service.add_wish(pair_id, owner_id, "Желание", "javascript:alert(1)")
+
+    wish_id = await service.add_wish(pair_id, owner_id, "Желание", "http://example.com/a?b=1")
+    row = await service.db.one("SELECT url FROM wishes WHERE id = ?", (wish_id,))
+    assert row["url"] == "http://example.com/a?b=1"
+
+
+async def test_add_date_stores_creator(pair):
+    """created_by обязателен: без него бот-дата навсегда created_by=0 —
+    ни приватность в приложении, ни авторство, ни экспорт «только мои»."""
+    service, pair_id, owner_id, _ = pair
+    date_id = await service.add_date(pair_id, "Годовщина", "2026-02-01", 1, owner_id)
+    row = await service.db.one("SELECT created_by FROM dates WHERE id = ?", (date_id,))
+    assert row["created_by"] == owner_id

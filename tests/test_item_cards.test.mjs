@@ -76,15 +76,19 @@ const load = new Function(
 );
 const { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay } = load();
 
-test("у плана с датой есть «В календаре», у плана без даты — нет", () => {
+test("у плана с датой карточка-кнопка календаря, у плана без даты — нет", () => {
   const withDay = taskItem({ id: 1, title: "План", day: "2026-11-05", time: "19:30", is_private: 0 });
-  ok(withDay.includes('data-action="show-in-calendar"'), "нет кнопки «В календаре»");
+  // Кнопки «В календаре» больше нет — переход по тапу на саму карточку.
+  ok(!withDay.includes("link-btn"), "кнопка «В календаре» вернулась");
+  ok(withDay.includes('data-action="show-in-calendar"'), "карточка не ведёт в календарь");
   ok(withDay.includes('data-day="2026-11-05"'), "data-day не передан");
+  ok(withDay.includes('role="button"'), "карточка без роли кнопки");
   const noDay = taskItem({ id: 2, title: "Идея", day: "", time: "", is_private: 0 });
-  ok(!noDay.includes("show-in-calendar"), "кнопка не должна быть у плана без даты");
+  ok(!noDay.includes("show-in-calendar"), "карточка без даты не должна вести в календарь");
+  ok(!noDay.includes('role="button"'), "карточка без даты не должна быть кнопкой");
 });
 
-test("у значимой даты всегда есть «В календаре» с её днём", () => {
+test("у значимой даты вся карточка ведёт в календарь с её днём", () => {
   for (const item of [
     { id: 3, title: "Ежегодная", day: "2021-05-17", time: "", recurs: 1, is_private: 0 },
     { id: 4, title: "Разовая", day: "2024-01-01", time: "12:00", recurs: 0, is_private: 1 }
@@ -92,6 +96,7 @@ test("у значимой даты всегда есть «В календаре
     const html = dateItem(item);
     ok(html.includes('data-action="show-in-calendar"'), item.title);
     ok(html.includes(`data-day="${item.day}"`), item.title);
+    ok(!html.includes("link-btn"), "кнопка «В календаре» вернулась: " + item.title);
   }
 });
 
@@ -110,9 +115,12 @@ test("карточки рендерятся без ошибок на богат�
 });
 
 test("просрочка старше недели — приглушённый is-stale, свежая и будущая — нет", () => {
-  ok(countdownChip("2025-10-30", "10:00").includes("is-stale"), "годовалая просрочка без is-stale");
-  ok(!countdownChip("2026-10-30", "00:01").includes("is-stale"), "свежая просрочка помечена stale");
-  ok(!countdownChip("2027-01-01", "12:00").includes("is-stale"), "будущий план помечен stale");
+  // Даты относительные: фиксированная «свежая просрочка» устаревала вместе с
+  // календарём и сама превращалась в недельную (2026-10-30 сломалось 2026-11-06).
+  const day = (offsetDays) => new Date(Date.now() + offsetDays * 86400000).toISOString().slice(0, 10);
+  ok(countdownChip(day(-365), "10:00").includes("is-stale"), "годовалая просрочка без is-stale");
+  ok(!countdownChip(day(-2), "00:01").includes("is-stale"), "свежая просрочка помечена stale");
+  ok(!countdownChip(day(30), "12:00").includes("is-stale"), "будущий план помечен stale");
   equal(countdownChip("", ""), "");
 });
 
@@ -200,6 +208,7 @@ test("movieItem: пилюля рейтинга по порогам оценки"
     [
       extractBraced("function esc"),
       extractBraced("function plural"),
+      'const pairTimeZone = () => "UTC";',
       extractBraced("function formatTimestamp"),
       extractBraced("function scorePill"),
       extractBraced("function ratingPill"),
@@ -255,6 +264,7 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       extractLine("  const DELETE_ICON"),
       extractBraced("function esc"),
       extractBraced("function plural"),
+      'const pairTimeZone = () => "UTC";',
       extractBraced("function formatTimestamp"),
       extractBraced("function scorePill"),
       extractBraced("function ratingPill"),

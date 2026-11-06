@@ -55,6 +55,14 @@ MIGRATIONS: dict[int, Sequence[str]] = {
         "ALTER TABLE users ADD COLUMN show_avatar INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE users ADD COLUMN partner_custom_name TEXT",
     ),
+    # Ожидание возвращения партнёра и коды закрытых пространств
+    # (migrations/0027): бот не умеет выходить из пары, но колонка и таблица
+    # обязаны совпадать с D1 (test_schema_parity).
+    6: (
+        "ALTER TABLE pairs ADD COLUMN awaiting_return INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE pairs ADD COLUMN last_partner INTEGER NOT NULL DEFAULT 0",
+        "CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY, closed_at INTEGER NOT NULL)",
+    ),
 }
 
 

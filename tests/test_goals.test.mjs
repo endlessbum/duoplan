@@ -182,3 +182,15 @@ test("миграция 0026: обе таблицы и индексы, соста
   deepStrictEqual(columns(migrationSql, "goals"), columns(workerSource, "goals"), "колонки goals расходятся");
   deepStrictEqual(columns(migrationSql, "goal_items"), columns(workerSource, "goal_items"), "колонки goal_items расходятся");
 });
+
+// Атомарность создания цели: пункты — один batch, при его сбое цель
+// удаляется компенсирующе (репорт аудита 2026-11-06: сбой второго запроса
+// оставлял «осиротевшую» цель без пунктов).
+test("создание цели атомарно: компенсирующее удаление при сбое batch", () => {
+  ok(workerSource.includes('DELETE FROM goals WHERE id=? AND pair_id=?'),
+    "нет компенсирующего удаления цели при сбое batch пунктов");
+  ok(workerSource.includes("goal cleanup failed"), "сбой компенсации не логируется");
+  ok(/catch \(error\) \{[\s\S]*?DELETE FROM goals[\s\S]*?throw error;\s*\}/.test(
+    workerSource.slice(workerSource.indexOf('"/api/goals"'), workerSource.indexOf('"/api/movies"'))
+  ), "компенсация не перехватывает исходную ошибку");
+});

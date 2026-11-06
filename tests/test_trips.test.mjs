@@ -42,6 +42,7 @@ const load = new Function(
     "const DELETE_ICON = '';",
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function partnerMissing"),
+    'const pairTimeZone = () => "UTC";',
     extractBraced(appSource, "function formatTimestamp"),
     extractBraced(appSource, "function tripList"),
     extractBraced(appSource, "function openTrips"),

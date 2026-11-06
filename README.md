@@ -10,7 +10,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.05.16` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.06.35` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -34,11 +34,11 @@ Telegram Mini App для пар: общие планы, значимые дат�
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 26 миграций схемы D1 |
+| `migrations/` | 28 миграций схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
-| `scripts/` | Бэкап D1, экспорт SQLite → D1, проверка жеста касаниями, упаковка проекта |
-| `tests/` | pytest (27 файлов) и `node:test` (54 файла) + браузерные harness'ы |
+| `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
+| `tests/` | pytest (28 файлов) и `node:test` (55 файлов) + браузерные harness'ы |
 
 **Production:** Cloudflare Worker + D1 + static assets. Worker обслуживает только
 `/api/*`, `/health` и `/telegram/*` (`run_worker_first`), остальное отдаёт
@@ -66,11 +66,11 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 
 ## Схема D1
 
-22 таблицы: `pairs`, `users`, `pair_members`, `tasks`, `dates`, `memories`,
+23 таблицы: `pairs`, `users`, `pair_members`, `tasks`, `dates`, `memories`,
 `wishes`, `quotes`, `places`, `trips`, `goals`, `goal_items`, `movies`,
 `movie_ratings`, `savings`, `savings_deposits`, `daily_rolls`,
 `daily_completions`, `rate_limits`, `telegram_updates`, `notification_log`,
-`app_meta`.
+`app_meta`, `closed_codes`.
 
 | Миграция | Что добавляет |
 |---|---|
@@ -100,6 +100,8 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0024_user_custom_name` | `users.custom_name` — личное имя пользователя |
 | `0025_trips` | `trips` — желанные путешествия (сегмент «Путешествие») |
 | `0026_goals` | `goals` + `goal_items` — цели с пунктами выполнения |
+| `0027_awaiting_return_and_closed_codes` | `pairs.awaiting_return`, `pairs.last_partner`, `closed_codes` — заморозка контента после выхода партнёра и коды закрытых пространств |
+| `0028_last_partner` | `pairs.last_partner` — резерв кода за ушедшим до его возвращения |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -134,20 +136,9 @@ cp .env.example .env          # заполните BOT_TOKEN
 
 ### Демо без Telegram и D1
 
-`demo/` — витрина Mini App на настоящем `public/app.js` с фейковым API в памяти
-(`demo/demo-api.js`). Сборка берёт `public/app.html` и подменяет только пути к
-ассетам, Telegram SDK и источник данных:
-
-```bash
-node demo/build.mjs
-python -m http.server 8080        # из корня репозитория
-# http://127.0.0.1:8080/demo/
-```
-
-Данные вымышленные и генерируются заново при каждом открытии; плашка «Демо»
-вверху слева перезагружает страницу с новым набором. Добавление, отметки и
-удаление работают в памяти вкладки и исчезают при перезагрузке. `demo/` лежит
-вне `public/`, поэтому в production не попадает.
+Директория `demo/` удалена из репозитория: витрина Mini App с фейковым API
+больше не поддерживается. Для локальной разработки используйте
+`scripts/dev-stand.mjs` — он поднимает Worker с D1 и Telegram-заглушкой.
 
 ## Cloudflare
 
@@ -280,7 +271,7 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 | `GET /api/state` | Всё состояние: пользователь, пара, активные планы/даты/желания, цитаты, места, последние записи, ритуал |
 | `POST /api/pair/create` | Создать пространство (код приглашения — 8 hex-символов) |
 | `POST /api/pair/join` | Войти по коду `{ code }` |
-| `POST /api/pair/leave` | Выйти из пространства (владелец передаёт его партнёру) |
+| `POST /api/pair/leave` | Выйти из пространства (владелец передаёт его партнёру). После выхода у оставшегося контент заморожен: мутации отвечают `403 PARTNER_ABSENT`, пока партнёр не вернётся по коду; чтение и личное (настройки, часовой пояс, экспорт, выход) работают. Партнёр, вернувшийся по тому же коду, уведомляет оставшегося; код пары, закрывшейся полным выходом, попадает в `closed_codes` — вход по нему отвечает `410 PAIR_CLOSED` (в лимит перебора пишется, как и `404`) |
 | `POST /api/pair/timezone` | Общий часовой пояс пары `{ timezone }` |
 | `POST /api/gender` | Пол `{ gender: "male" \| "female" }`, доступно до онбординга |
 | `POST /api/settings` | `accent_color`, `digest_time`, `digest_enabled`, `dates_digest_time`, `dates_digest_enabled`, `show_avatar`, `partner_name` |
@@ -700,6 +691,12 @@ cp .env.example .env          # заполните BOT_TOKEN
 - Очки и уровни: `duoplan/game/levels.py` — порог следующего уровня
   `100 * level²` (100 XP — второй, 400 XP — третий), восемь званий
   («Искры», «Тёплый свет», … «Штиль»), выше таблицы звания идут по кругу.
+- Часовой пояс у бота один — `TZ` из `.env` (по умолчанию `Europe/Moscow`).
+  Колонку `pairs.timezone`, которую выставляет Mini App, бот не читает: «сегодня»
+  ритуала, день записей дневника и сортировки планов считаются по `TZ`. Бот и
+  Worker не могут работать одновременно на одном `BOT_TOKEN` (polling vs
+  webhook), так что расхождение проявляется только если `TZ` отличается от
+  пояса, выставленного паре через Mini App.
 - Ошибки обработки уходят в `ADMIN_CHAT_ID`, если он задан.
 
 ## Скрипты
@@ -759,5 +756,5 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.05.16`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.06.35`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.

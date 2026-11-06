@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.11.05.16">
+  <link rel="stylesheet" href="/app.css?v=2026.11.06.36">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -107,9 +107,10 @@
   </div>
 
   <!-- Модальное окно создания/редактирования -->
-  <!-- tabindex="-1": диалог сам принимает начальный фокус (вместо кнопки
-       «Закрыть»), без синего системного кольца на кнопках. -->
-  <dialog id="item-dialog" class="sheet-dialog" tabindex="-1">
+  <!-- tabindex="-1" + autofocus: нативные фокус-шаги showModal отдают фокус
+       самому диалогу, а не кнопке «Закрыть» и не строке ввода (автофокус на
+       полях убран — клавиатура выезжает только по тапу пользователя). -->
+  <dialog id="item-dialog" class="sheet-dialog" tabindex="-1" autofocus>
     <form id="item-form" method="dialog" class="sheet-form">
       <div class="sheet-head">
         <h2 id="dialog-title">Новая запись</h2>
@@ -142,9 +143,10 @@
     </div>
   </dialog>
 
+  <div id="pull-refresh" class="pull-refresh" hidden aria-hidden="true"><div class="spinner"></div></div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.11.05.16" defer></script>
-  <script src="/nav.js?v=2026.11.05.16" defer></script>
-  <script src="/app.js?v=2026.11.05.16" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.06.36" defer></script>
+  <script src="/nav.js?v=2026.11.06.36" defer></script>
+  <script src="/app.js?v=2026.11.06.36" defer></script>
 </body>
 </html>

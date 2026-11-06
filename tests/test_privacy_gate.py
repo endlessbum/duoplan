@@ -139,6 +139,32 @@ async def test_stranger_with_open_invite_code_is_allowed(tmp_path) -> None:
     await db.close()
 
 
+async def test_stranger_with_mention_start_is_allowed(tmp_path) -> None:
+    """/start@duoplanbot <код> — тот же вход: упоминание бота не съедает код."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+
+    middleware = _middleware(service, owner_ids=(99,))
+    handled = False
+
+    async def handler(_event: object, _data: dict) -> bool:
+        nonlocal handled
+        handled = True
+        return True
+
+    bot = FakeBot()
+    result = await middleware(
+        handler,
+        FakeMessage(f"/start@duoplanbot {code}"),
+        {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(777)},
+    )
+    assert handled, "код после /start@duoplanbot должен распознаваться"
+    assert result is True
+    await db.close()
+
+
 async def test_stranger_with_closed_or_bad_code_is_denied(tmp_path) -> None:
     """Код, которого пары ещё нет (или она уже занята), не открывает вход."""
     db = await connect_database(tmp_path / "gate.db")
@@ -164,4 +190,64 @@ async def test_stranger_with_closed_or_bad_code_is_denied(tmp_path) -> None:
     )
     assert not handled
     assert result is None
+    await db.close()
+
+
+async def test_reserved_code_denies_stranger_but_allows_partner(tmp_path) -> None:
+    """Код вышедшего партнёра не открывает гейт постороннему (PAIR_RESERVED
+    на этапе гейта, без регистрации в users); сам партнёр проходит."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+    await service.ensure_user(8, None, "Partner")
+    assert await service.join_pair(8, "Partner", code)
+    assert await service.leave_pair(8)
+
+    middleware = _middleware(service, owner_ids=(99,))
+    bot = FakeBot()
+
+    async def handler(_event: object, _data: dict) -> bool:
+        return True
+
+    # Посторонний с «уехавшим» кодом — отказ.
+    result = await middleware(
+        handler,
+        FakeMessage(f"/start {code}"),
+        {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(777)},
+    )
+    assert result is None, "посторонний не должен проходить гейт по зарезервированному коду"
+    assert bot.sent, "должен прийти вежливый отказ"
+
+    # Сам вышедший партнёр проходит и доходит до join_pair.
+    handled = False
+
+    async def joining_handler(_event: object, _data: dict) -> bool:
+        nonlocal handled
+        handled = True
+        return True
+
+    result = await middleware(
+        joining_handler,
+        FakeMessage(f"/start {code}"),
+        {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(8)},
+    )
+    assert handled, "прежний партнёр проходит гейт"
+    assert result is True
+    await db.close()
+
+
+async def test_open_pair_for_code_without_tg_id_ignores_reserved(tmp_path) -> None:
+    """Вызов без tg_id (старые места) не открывает зарезервированный код."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+    await service.ensure_user(8, None, "Partner")
+    assert await service.join_pair(8, "Partner", code)
+    assert await service.leave_pair(8)
+
+    assert await service.open_pair_for_code(code) is None, "без tg_id резерв не открывается"
+    assert await service.open_pair_for_code(code, tg_id=8) is not None, "владелец резерва проходит"
+    assert await service.open_pair_for_code(code, tg_id=777) is None
     await db.close()

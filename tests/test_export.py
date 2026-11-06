@@ -97,7 +97,7 @@ def test_export_substitutes_defaults_for_plain_schema(tmp_path):
     _make_plain_db(db)
     sql = dump(db)
     # timezone в D1 — NOT NULL DEFAULT 'Europe/Moscow': вместо NULL подставляется дефолт.
-    assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, created_at, updated_at) VALUES(1, 'ABC', 'Owner', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 1, 1);" in sql
+    assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, awaiting_return, last_partner, created_at, updated_at) VALUES(1, 'ABC', 'Owner', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 0, 0, 1, 1);" in sql
     assert (
         "INSERT OR REPLACE INTO users(tg_id, username, display_name, role, gender, pair_id, "
         "points, streak, last_activity, best_streak, timezone, digest_time, digest_enabled, "

@@ -5,7 +5,9 @@
 // SELECT — `monthly`/`yearly`; напоминания, сводки и клиент считали
 // повторяющиеся планы разовыми. Инвариант: ЛЮБОЙ SELECT открытых планов
 // обязан нести monthly и yearly, любой списковый SELECT дат (с колонкой day)
-// — monthly. Исключения: done_* (завершённым повтор не нужен), guard-SELECTы
+// — monthly. Завершённые планы — тоже: карточку архива можно редактировать, и
+// PATCH отправляет флаги повтора обратно, поэтому done_* несут monthly/yearly
+// (иначе редактирование обнуляло повтор). Исключения: guard-SELECTы
 // (is_private/created_by для 404-проверок) и COUNT-агрегаты.
 //
 // Запуск: node --test tests/test_column_parity.test.mjs
@@ -72,6 +74,10 @@ test("guard-SELECTы дат (is_private/created_by) не считаются сп
   equal(guards.length >= 1, true, "ожидался хотя бы один guard-SELECT (ensureDateVisible)");
 });
 
-test("завершённым планам повтор не нужен (исключение задокументировано)", () => {
+test("SELECT done-планов несёт monthly и yearly (редактирование архива читает и шлёт флаги)", () => {
   equal(doneTasks.length >= 1, true, "SELECT done-планов не найден");
+  for (const sql of doneTasks) {
+    ok(columnList(sql).includes("monthly"), `monthly пропал в done-SELECT: ${sql.slice(0, 90).replace(/\s+/g, " ")}…`);
+    ok(columnList(sql).includes("yearly"), `yearly пропал в done-SELECT: ${sql.slice(0, 90).replace(/\s+/g, " ")}…`);
+  }
 });

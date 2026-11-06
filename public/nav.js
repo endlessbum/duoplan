@@ -731,8 +731,8 @@
       drag.lastT = now;
       if (state.svgRect) {
         drag.dy = event.clientY - (state.svgRect.top + state.svgRect.height / 2);
+        drag.desired = clampCenter(event.clientX - drag.grabOffset - state.svgRect.left);
       }
-      drag.desired = clampCenter(event.clientX - drag.grabOffset - state.svgRect.left);
       startLoop();
     }
 
@@ -811,7 +811,7 @@
       if (!press || event.pointerId !== press.pointerId) return;
       if (press.dragging) {
         // Финальную позицию фиксируем по последней координате указателя.
-        if (state.drag) {
+        if (state.drag && state.svgRect) {
           state.drag.desired = clampCenter(event.clientX - state.drag.grabOffset - state.svgRect.left);
           state.pos = state.drag.desired;
           render();

@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal, ok } from "node:assert/strict";
+import { deepStrictEqual, equal, ok, throws } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -110,4 +110,35 @@ test("маршруты копилок зарегистрированы в вор
   ok(workerSource.includes("UPDATE savings SET collected=collected+?"), "collected не растёт транзакционно");
   ok(workerSource.includes("INSERT INTO savings_deposits"), "нет записи в историю пополнений");
   ok(workerSource.includes("savings: { title"), "нет PATCH-схемы копилки");
+});
+
+// moneyAmount: дробные суммы отклоняются явно, а не тихо floor-ятся
+// (репорт аудита 2026-11-06: 125.90 превращался в 125 незаметно).
+const loadMoneyAmount = new Function(
+  [
+    extractBraced(workerSource, "class HttpError"),
+    extractBraced(workerSource, "function moneyAmount"),
+    "return moneyAmount;"
+  ].join("\n")
+);
+const moneyAmount = loadMoneyAmount();
+
+test("moneyAmount: дробная сумма — 400, данные не искажаются", () => {
+  throws(() => moneyAmount(125.9, "Цель"),
+    (error) => error.status === 400 && error.code === "INVALID_AMOUNT");
+  throws(() => moneyAmount("125,90", "Цель"),
+    (error) => error.status === 400, "строка с запятой не число — тоже отказ");
+  throws(() => moneyAmount(0, "Цель"), (error) => error.status === 400);
+  throws(() => moneyAmount(-5, "Цель"), (error) => error.status === 400);
+  equal(moneyAmount(125, "Цель"), 125);
+  equal(moneyAmount("30000", "Цель"), 30000);
+});
+
+// Пополнение при гонке «копилку удалили»: UPDATE первым, INSERT под EXISTS —
+// FK-отказ давал 500 вместо честного 404 (репорт аудита 2026-11-06).
+test("deposit: INSERT под EXISTS, UPDATE решает 404", () => {
+  ok(workerSource.includes("WHERE EXISTS(SELECT 1 FROM savings WHERE id=? AND pair_id=?)"),
+    "INSERT пополнения не защищён EXISTS");
+  ok(workerSource.includes('if (!batchResults[0].meta.changes) throw new HttpError(404, "Копилка не найдена"'),
+    "404 должен решаться по UPDATE, а не по второму элементу batch");
 });

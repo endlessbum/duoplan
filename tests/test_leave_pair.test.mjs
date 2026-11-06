@@ -34,10 +34,12 @@ function extractFunction(name) {
 
 const nowDecl = source.match(/const now = \(\) => [^;]+;/)?.[0];
 if (!nowDecl) throw new Error("now() не найдена");
+const cleanDecl = source.match(/const clean = [^;]+;/)?.[0];
+if (!cleanDecl) throw new Error("clean() не найдена");
 const load = new Function(
   "openApp",
   "escapeHtml",
-  `${nowDecl}\n${extractFunction("leavePair")}\nreturn leavePair;`
+  `${nowDecl}\n${cleanDecl}\n${extractFunction("leavePair")}\nreturn leavePair;`
 );
 
 // Мок D1: prepare().bind() только записывает SQL; batch собирает выполненное.
@@ -46,13 +48,13 @@ function makeMockDb(order = []) {
   const db = {
     prepare(sql) {
       return {
-        bind(..._params) {
-          return { sql };
+        bind(...params) {
+          return { sql, params };
         }
       };
     },
     async batch(operations) {
-      executed.push(...operations.map((op) => op.sql));
+      executed.push(...operations);
       order.push("batch");
       return operations.map(() => ({ meta: { changes: 1 } }));
     }
@@ -89,16 +91,16 @@ test("выход последнего держателя удаляет все �
 
   for (const table of CHILD_TABLES) {
     deepStrictEqual(
-      executed.some((sql) => sql.startsWith(`DELETE FROM ${table} WHERE pair_id=?`)),
+      executed.some((op) => op.sql.startsWith(`DELETE FROM ${table} WHERE pair_id=?`)),
       true,
       `ожидается удаление ${table}`
     );
   }
-  deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pair_members WHERE pair_id=?")), true);
-  deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pairs WHERE id=?")), true);
-  deepStrictEqual(executed.some((sql) => sql.startsWith("UPDATE users SET pair_id=NULL")), true);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pair_members WHERE pair_id=?")), true);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs WHERE id=?")), true);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("UPDATE users SET pair_id=NULL")), true);
   // Партнёра повышение не затрагивает.
-  deepStrictEqual(executed.some((sql) => sql.includes("user_a=user_b")), false);
+  deepStrictEqual(executed.some((op) => op.sql.includes("user_a=user_b")), false);
   // Оставшегося нет — уведомлять некого.
   equal(notifier.calls.length, 0);
 });
@@ -111,14 +113,14 @@ test("выход одного из пары сохраняет данные па
 
   for (const table of CHILD_TABLES) {
     deepStrictEqual(
-      executed.some((sql) => sql.startsWith(`DELETE FROM ${table}`)),
+      executed.some((op) => op.sql.startsWith(`DELETE FROM ${table}`)),
       false,
       `${table} не должен удаляться`
     );
   }
-  deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pairs")), false);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs")), false);
   // Пространство переходит партнёру.
-  deepStrictEqual(executed.some((sql) => sql.includes("user_a=user_b")), true);
+  deepStrictEqual(executed.some((op) => op.sql.includes("user_a=user_b")), true);
 });
 
 test("выход партнёра (role b) сохраняет данные пары", async () => {
@@ -128,11 +130,11 @@ test("выход партнёра (role b) сохраняет данные па�
   await leavePair({ DB: db }, { id: 7, tg_id: 2, role: "b", user_a: 1, user_b: 2 });
 
   for (const table of CHILD_TABLES) {
-    deepStrictEqual(executed.some((sql) => sql.startsWith(`DELETE FROM ${table}`)), false);
+    deepStrictEqual(executed.some((op) => op.sql.startsWith(`DELETE FROM ${table}`)), false);
   }
-  deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pairs")), false);
-  deepStrictEqual(executed.some((sql) => sql.startsWith("UPDATE pairs SET user_b=0")), true);
-  deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?")), true);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs")), false);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("UPDATE pairs SET user_b=0")), true);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?")), true);
 });
 
 test("владелец уходит — бот уведомляет оставшегося партнёра", async () => {
@@ -213,8 +215,8 @@ test("сбой Telegram не отменяет выход из пространс
   }, new URL("https://duoplan.example/api/pair/leave"));
 
   equal(notifier.calls.length, 1, "попытка уведомления была");
-  deepStrictEqual(executed.some((sql) => sql.includes("user_a=user_b")), true);
-  deepStrictEqual(executed.some((sql) => sql.startsWith("DELETE FROM pairs")), false);
+  deepStrictEqual(executed.some((op) => op.sql.includes("user_a=user_b")), true);
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs")), false);
 });
 
 test("личное имя партнёра сбрасывается у обоих участников (регрессия M5)", async () => {
@@ -224,13 +226,68 @@ test("личное имя партнёра сбрасывается у обои�
   const leavePair = load(notifier.openApp, escapeHtml);
   await leavePair({ DB: db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2 });
 
-  const leaverUpdate = executed.find((sql) => sql.startsWith("UPDATE users SET pair_id=NULL"));
-  ok(leaverUpdate.includes("partner_custom_name=NULL"), "у ушедшего");
-  const remainingUpdate = executed.find((sql) => sql.includes("role='a'") && sql.includes("partner_custom_name=NULL"));
+  const leaverUpdate = executed.find((op) => op.sql.startsWith("UPDATE users SET pair_id=NULL"));
+  ok(leaverUpdate.sql.includes("partner_custom_name=NULL"), "у ушедшего");
+  const remainingUpdate = executed.find((op) => op.sql.includes("role='a'") && op.sql.includes("partner_custom_name=NULL"));
   ok(remainingUpdate, "у оставшегося партнёра (повышен до владельца)");
 
   const mockB = makeMockDb();
   await leavePair({ DB: mockB.db }, { id: 7, tg_id: 2, role: "b", user_a: 1, user_b: 2 });
-  const ownerUpdate = mockB.executed.find((sql) => sql.startsWith("UPDATE users SET partner_custom_name=NULL"));
+  const ownerUpdate = mockB.executed.find((op) => op.sql.startsWith("UPDATE users SET partner_custom_name=NULL"));
   ok(ownerUpdate, "владелец, оставшийся после ухода партнёра (b)");
+});
+
+test("код закрывшегося пространства остаётся в closed_codes", async () => {
+  // Вход по такому коду позже получит «пространство закрыто», а не «не найден».
+  const { db, executed } = makeMockDb();
+  const notifier = makeNotifier();
+  const leavePair = load(notifier.openApp, escapeHtml);
+  await leavePair({ DB: db }, { id: 7, code: "abcdef12", tg_id: 1, role: "a", user_a: 1, user_b: 0 });
+
+  const tombstone = executed.find((op) => op.sql.startsWith("INSERT OR IGNORE INTO closed_codes"));
+  ok(tombstone, "надгробие кода записано");
+});
+
+test("после выхода партнёра пара помечается awaiting_return=1 (обе роли)", async () => {
+  const { db, executed } = makeMockDb();
+  const notifier = makeNotifier();
+  const leavePair = load(notifier.openApp, escapeHtml);
+
+  await leavePair({ DB: db }, { id: 7, tg_id: 2, role: "b", user_a: 1, user_b: 2 });
+  ok(
+    executed.some((op) => op.sql.startsWith("UPDATE pairs SET user_b=0") && op.sql.includes("awaiting_return=1")),
+    "ушёл партнёр (b): флаг на паре"
+  );
+
+  const mockA = makeMockDb();
+  await leavePair({ DB: mockA.db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2 });
+  ok(
+    mockA.executed.some((op) => op.sql.includes("user_a=user_b") && op.sql.includes("awaiting_return=1")),
+    "ушёл владелец (a): флаг на паре после передачи прав"
+  );
+
+  // Последний держатель: пары больше нет — флага некуда ставить.
+  const mockLast = makeMockDb();
+  await leavePair({ DB: mockLast.db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 0 });
+  ok(
+    !mockLast.executed.some((op) => op.sql.includes("awaiting_return=1")),
+    "флаг не пишется при полном удалении пары"
+  );
+});
+
+test("код резервируется за tg_id ушедшего (обе роли)", async () => {
+  const { db, executed } = makeMockDb();
+  const notifier = makeNotifier();
+  const leavePair = load(notifier.openApp, escapeHtml);
+
+  await leavePair({ DB: db }, { id: 7, tg_id: 2, role: "b", user_a: 1, user_b: 2 });
+  const updateB = executed.find((op) => op.sql.startsWith("UPDATE pairs SET user_b=0"));
+  ok(updateB.sql.includes("last_partner=?"), "ушёл партнёр (b): колонка в UPDATE");
+  deepStrictEqual(updateB.params[0], 2, "в резерве tg_id ушедшего");
+
+  const mockA = makeMockDb();
+  await leavePair({ DB: mockA.db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2 });
+  const updateA = mockA.executed.find((op) => op.sql.includes("user_a=user_b"));
+  ok(updateA.sql.includes("last_partner=?"), "ушёл владелец (a): колонка в UPDATE");
+  deepStrictEqual(updateA.params[1], 1, "в резерве tg_id ушедшего владельца");
 });

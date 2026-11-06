@@ -185,16 +185,22 @@ test("ensureUser пишет валидный https photo_url из initData", asy
   await db0(env, { id: 1, first_name: "Тест", photo_url: "https://t.me/i/userpic/abc.jpg" }, "Europe/Moscow");
   const insert = queries.find(q => q.sql.startsWith("INSERT INTO users"));
   ok(insert.sql.includes("photo_url"), "photo_url не в INSERT");
-  ok(insert.sql.includes("photo_url=excluded.photo_url"), "photo_url не в ON CONFLICT");
+  ok(insert.sql.includes("COALESCE(excluded.photo_url, users.photo_url)"),
+    "ON CONFLICT должен сохранять старый аватар при отсутствии нового");
   deepStrictEqual(insert.args[4], "https://t.me/i/userpic/abc.jpg");
 });
 
-test("ensureUser очищает photo_url, когда аватар удалён (ссылка не https)", async () => {
+test("ensureUser не стирает сохранённый аватар, когда ссылка отсутствует/невалидна", async () => {
+  // Репорт 2026-11-06: photo_url=excluded.photo_url обнулял аватар на каждом
+  // открытии без фото (webhook-путь, часть клиентов). Теперь COALESCE держит
+  // старую ссылку; невалидная строка в bind попадает как null.
   for (const photo_url of [undefined, "", "http://insecure.example/x.jpg", "javascript:alert(1)"]) {
     const { env, queries } = makeEnsureUserDb();
     await buildEnsureUser()(env, { id: 1, first_name: "Тест", photo_url }, "Europe/Moscow");
     const insert = queries.find(q => q.sql.startsWith("INSERT INTO users"));
     deepStrictEqual(insert.args[4], null, `photo_url=${JSON.stringify(photo_url)}`);
+    ok(insert.sql.includes("COALESCE(excluded.photo_url, users.photo_url)"),
+      "NULL должен подставляться через COALESCE, а не затирать фото");
   }
 });
 
@@ -260,7 +266,7 @@ const WISHES = [
   { id: 2, body: "Моё желание", owner_id: 100, created_at: 2, done_at: null, url: "", display_name: "Оля" }
 ];
 
-function makeStateDb({ role, override = null, withCompletedWish = false } = {}) {
+function makeStateDb({ role, override = null, ownName = null, withCompletedWish = false } = {}) {
   const userId = role === "b" ? 200 : 100;
   const pair = makePair(role);
   const pick = (sql) => {
@@ -275,7 +281,8 @@ function makeStateDb({ role, override = null, withCompletedWish = false } = {}) 
       return [{
         tg_id: userId, display_name: "Я", gender: "female", points: 0,
         photo_url: "https://t.me/i/userpic/me.jpg", show_avatar: 1,
-        partner_custom_name: override, timezone: TZ, digest_enabled: 1, dates_digest_enabled: 1
+        partner_custom_name: override, custom_name: ownName,
+        timezone: TZ, digest_enabled: 1, dates_digest_enabled: 1
       }];
     }
     if (sql.includes("FROM pair_members pm JOIN pairs")) return [pair];
@@ -288,8 +295,13 @@ function makeStateDb({ role, override = null, withCompletedWish = false } = {}) 
           return {
             bind() {
               return {
-                all: async () => ({ results: [...pick(sql)] }),
-                first: async () => pick(sql)[0] ?? null
+                // Копии строк: state() мутирует display_name, и без копии
+                // тесты переименовывали бы данные друг у друга.
+                all: async () => ({ results: pick(sql).map((row) => ({ ...row })) }),
+                first: async () => {
+                  const row = pick(sql)[0];
+                  return row ? { ...row } : null;
+                }
               };
             }
           };
@@ -320,9 +332,29 @@ test("state(): без личного имени имена остаются из
   deepStrictEqual([result.pair.name1, result.pair.name2], ["Оля", "@nikita"]);
 });
 
+test("state(): своё личное имя видит только владелец — в карточке пары и в своих записях", async () => {
+  // «Ваше имя» — личный оверрайд, как «Имя партнёра»: свои подписи
+  // (воспоминания, желания) переименованы, партнёрские — нет.
+  const { env } = makeStateDb({ role: "a", ownName: "Котик" });
+  const result = await state(env, 100);
+  deepStrictEqual(result.memories.map(m => m.display_name), ["@nikita", "Котик"]);
+  deepStrictEqual(result.wishes.map(w => w.display_name), ["@nikita", "Котик"]);
+  deepStrictEqual(result.pair.name1, "Котик", "своё имя в карточке пары");
+  deepStrictEqual(result.pair.name2, "@nikita", "имя партнёра не тронуто");
+});
+
+test("state(): личные имена обоих полей работают одновременно", async () => {
+  const { env } = makeStateDb({ role: "a", override: "Миша", ownName: "Котик" });
+  const result = await state(env, 100);
+  deepStrictEqual(result.memories.map(m => m.display_name), ["Миша", "Котик"]);
+  deepStrictEqual(result.wishes.map(w => w.display_name), ["Миша", "Котик"]);
+  deepStrictEqual([result.pair.name1, result.pair.name2], ["Котик", "Миша"]);
+});
+
 test("state(): отдаёт photo1/photo2 пары и своё photo_url/show_avatar", async () => {
   const { env } = makeStateDb({ role: "a", override: null });
   const result = await state(env, 100);
+  deepStrictEqual(result.pair.awaiting_return, 0, "флаг ожидания — в выдаче state");
   deepStrictEqual(result.pair.photo1, "https://t.me/i/userpic/olya.jpg");
   deepStrictEqual(result.pair.photo2, "https://t.me/i/userpic/nikita.jpg");
   deepStrictEqual(result.user.photo_url, "https://t.me/i/userpic/me.jpg");

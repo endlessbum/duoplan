@@ -34,9 +34,12 @@ form.addEventListener("submit", async event => {
   } catch (error) {
     result.textContent = error.name === "AbortError" ? "Сервер не ответил за 40 секунд. Повторите попытку." : error.message;
     secret.disabled = false;
+    // При ошибке поле оставляем заполненным: повторный ввод секрета вручную —
+    // лишняя фрикция. Очищаем только при успехе.
+    return;
   } finally {
     clearTimeout(timeout);
     button.disabled = false;
-    secret.value = "";
   }
+  secret.value = "";
 });

@@ -35,6 +35,16 @@ function loadSort(view, key, dir) {
   )({ [view]: { key, dir } });
 }
 
+function loadFilter(view, kind) {
+  return new Function(
+    "movieKindFilter",
+    [
+      extractBraced("function filterMoviesByKind"),
+      "return filterMoviesByKind;"
+    ].join("\n")
+  )({ [view]: kind });
+}
+
 const MOVIES = [
   { id: 1, title: "Старый", year: 1994, kind: "movie", rating: 9.3, runtime: 142, genres: "Драма", created_at: 10, pair_rating: null },
   { id: 2, title: "Новый", year: 2023, kind: "movie", rating: 8.4, runtime: 181, genres: "Драма, История", created_at: 30, pair_rating: 8 },
@@ -55,11 +65,22 @@ test("длительность: у фильма хронометраж, у се�
   deepStrictEqual(loadSort("open", "runtime", "desc")(MOVIES, "open").map((m) => m.title), ["Новый", "Сериал", "Старый"]);
 });
 
-test("жанр и тип: строковая сортировка, равные — по id", () => {
+test("жанр: строковая сортировка, равные — по id", () => {
   const byGenre = loadSort("open", "genre", "asc")(MOVIES, "open").map((m) => m.title);
   deepStrictEqual(byGenre, ["Старый", "Новый", "Сериал"], "Драма раньше Ужасов, внутри — по id");
-  deepStrictEqual(loadSort("open", "kind", "asc")(MOVIES, "open").map((m) => m.title), ["Старый", "Новый", "Сериал"]);
-  deepStrictEqual(loadSort("open", "kind", "desc")(MOVIES, "open").map((m) => m.title), ["Сериал", "Старый", "Новый"]);
+});
+
+test("тип (фильм/сериал) — фильтр, а не критерий сортировки", () => {
+  ok(!source.includes('["kind", "Фильм/сериал"]'), "«Фильм/сериал» остался в опциях сортировки");
+  ok(!source.includes('if (key === "kind")'), "ветка kind осталась в movieSortValue");
+  ok(source.includes('data-action="movie-filter-kind"'), "нет селекта фильтра типа");
+  ok(source.includes('["series", "Сериалы"]'), "нет опции «Сериалы» у фильтра");
+
+  const seriesOnly = loadFilter("open", "series")(MOVIES, "open").map((m) => m.title);
+  deepStrictEqual(seriesOnly, ["Сериал"], "фильтр сериалов пропустил фильм");
+  const moviesOnly = loadFilter("watched", "movie")(MOVIES, "watched").map((m) => m.title);
+  deepStrictEqual(moviesOnly, ["Старый", "Новый"], "фильтр фильмов пропустил сериал");
+  deepStrictEqual(loadFilter("open", "all")(MOVIES, "open"), MOVIES, "«Все» должен возвращать список как есть");
 });
 
 test("RAofP: по убыванию, без оценки — в конце", () => {

@@ -37,7 +37,7 @@ async def main() -> int:
     db = None
     try:
         db = await connect_database(settings.db_path)
-        service = DuoPlanService(db, tz=settings.tz)
+        service = DuoPlanService(db, tz=settings.tz, tz_name=settings.tz_name)
         storage = SQLiteStorage(db, ttl=settings.fsm_ttl)
         await storage.cleanup()
 

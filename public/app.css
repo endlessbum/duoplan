@@ -383,20 +383,25 @@ html.dialog-locked {
 .movie-sort {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 0 0 12px;
-}
-
-.movie-sort-label {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
 }
 
 .movie-sort-field {
   position: relative;
   flex: 1;
   min-width: 0;
+}
+
+/* Фильтр «Все/Фильмы/Сериалы» уже сортировки: ширина по тексту опций,
+   растягиваться на полбара ему не нужно. */
+.movie-sort-field.is-kind {
+  flex: 0 0 auto;
+}
+
+.movie-sort-field.is-kind select {
+  width: auto;
 }
 
 .movie-sort-field select {
@@ -1123,10 +1128,6 @@ select.settings-select {
   max-width: 100%;
 }
 
-.item-when-row .link-btn {
-  flex-shrink: 0;
-}
-
 .day-chip {
   border-radius: 8px;
   background: var(--sage-soft);
@@ -1301,21 +1302,6 @@ select.settings-select {
   font-size: 14px;
   font-weight: 600;
   color: var(--muted);
-}
-
-.link-btn {
-  border: 0;
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  padding: 2px 4px;
-}
-
-.link-btn:active {
-  color: var(--berry);
 }
 
 .sheet-dialog {
@@ -1617,7 +1603,38 @@ input[type="checkbox"]:active {
   border-radius: 999px;
   font-size: 13px;
   font-weight: 500;
+  /* Одна строка, если текст влезает; длинный — переносится по центру
+     пилюли, а не прижимается к левому краю. */
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  text-align: center;
+  text-wrap: balance;
   z-index: 60;
+}
+
+/* Pull-to-refresh: индикатор сверху по центру, появляется при протяжке
+   страницы вниз от самого верха. Не перехватывает скролл — только показывает
+   прогресс жеста. */
+.pull-refresh {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 55;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+.pull-refresh:not([hidden]) {
+  opacity: 1;
+}
+.pull-refresh .spinner {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow);
 }
 
 /* ------------------------------------------------------------------

@@ -16,7 +16,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal, rejects } from "node:assert/strict";
+import { deepStrictEqual, equal, ok, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,6 +48,7 @@ const buildApi = new Function(
   "rateLimit", "readJson", "state", "membership", "ownerIds",
   [
     extractBraced("class HttpError"),
+    extractLine("const ACCENT_KEYS"),
     extractLine("const now = "),
     extractLine("const clean = "),
     extractBraced("function validateSchema"),
@@ -115,4 +116,30 @@ test("POST /api/gender работает и для пользователя в п
   await api(request, env, new URL("https://duoplan.test/api/gender"));
   const update = queries.find(q => q.sql.startsWith("UPDATE users SET gender"));
   equal(update.args[0], "male");
+});
+
+// Партнёр вышел (awaiting_return=1): контент заморожен до его возвращения.
+test("ожидающее пространство: мутация контента — 403 PARTNER_ABSENT", async () => {
+  const { api, env, request } = makeEnv({ pair: { id: 1, awaiting_return: 1 }, body: { title: "План" } });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/tasks")),
+    error => error.status === 403 && error.code === "PARTNER_ABSENT"
+  );
+});
+
+test("ожидающее пространство: личные настройки доступны (allowlist)", async () => {
+  const { api, env, request } = makeEnv({ pair: { id: 1, awaiting_return: 1 }, body: { accent_color: "berry" } });
+  const response = await api(request, env, new URL("https://duoplan.test/api/settings"));
+  deepStrictEqual(response.data.user.tg_id, 777, "настройки сохранились, state вернулся");
+});
+
+test("свежая пара без партнёра не заморожена (awaiting_return=0)", async () => {
+  const { api, env, request } = makeEnv({ pair: { id: 1, awaiting_return: 0 }, body: { title: "План" } });
+  let caught = null;
+  try {
+    await api(request, env, new URL("https://duoplan.test/api/tasks"));
+  } catch (error) {
+    caught = error;
+  }
+  ok(!(caught && caught.code === "PARTNER_ABSENT"), "гейт не должен срабатывать на новой паре");
 });

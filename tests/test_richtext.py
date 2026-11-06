@@ -97,6 +97,9 @@ class FakeService:
     async def pair_for(self, user_id):
         return {"id": 7}
 
+    async def membership(self, user_id):
+        return {"id": 7, "user_b": 2, "awaiting_return": 0}
+
     async def tasks(self, pair_id, limit=20, offset=0, viewer_id=None):
         return self._tasks
 

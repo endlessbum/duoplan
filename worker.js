@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.05.16";
+const APP_VERSION = "2026.11.06.36";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.05.16";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.05.16";
+const DB_SCHEMA_VERSION = "2026.11.06.36";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -49,7 +49,10 @@ const ARCHIVE_QUERIES = {
   },
   done_tasks: {
     userScoped: true,
-    sql: "SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
+    // monthly/yearly нужны и завершённым: карточку архива можно редактировать,
+    // диалог читает item.monthly/item.yearly — без колонок PATCH обнулял флаги
+    // повтора, и повторяющийся план необратимо становился разовым.
+    sql: "SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
   },
   done_wishes: {
     sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
@@ -129,13 +132,25 @@ function textField(body, key, max, label) {
   return value;
 }
 
-// Деньги копилки: целое положительное число (без дробей — копим рублями).
+// Деньги копилки: целое положительное число. Дробное отклоняется явно:
+// Math.floor молча резал копейки (125.90 -> 125), незаметно меняя данные.
 function moneyAmount(value, label) {
-  const amount = Math.floor(Number(value));
-  if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000000) {
-    throw new HttpError(400, `${label}: целое число больше нуля`, "INVALID_AMOUNT");
+  const amount = Number(value);
+  if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 1000000000) {
+    throw new HttpError(400, `${label}: целое число рублей больше нуля, без копеек`, "INVALID_AMOUNT");
   }
   return amount;
+}
+
+// /start с кодом приглашения: Telegram позволяет писать /start@botname,
+// и такой текст раньше не матчился префиксом "/start " — код после упоминания
+// терялся, пользователь получал generic-ответ. Аргумент может быть и после
+// простого /start, и после /start@упоминание.
+const START_PAYLOAD_RE = /^\/start(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$/i;
+
+function startPayload(text) {
+  const match = START_PAYLOAD_RE.exec(String(text || "").trim());
+  return match?.[1]?.trim() || "";
 }
 
 // Ссылка желания: опциональна (пусто — у желания нет ссылки), но если
@@ -380,6 +395,11 @@ async function tmdbLocalize(env, imdbId) {
       }
     : null;
   tmdbRuCache.set(imdbId, { at: Date.now(), value });
+  // Гигиена памяти изолята — как у imdbSuggestCache: без потолка карта росла
+  // на каждый новый imdbId всю жизнь изолята.
+  if (tmdbRuCache.size > 200) {
+    tmdbRuCache.delete(tmdbRuCache.keys().next().value);
+  }
   return value;
 }
 
@@ -755,9 +775,13 @@ async function ensureUser(env, tgUser, requestedTimeZone) {
   // открытии приложения — здесь она обновляется при смене аватара и
   // очищается, когда аватар удалён (тогда клиент показывает букву).
   const photoUrl = /^https:\/\//.test(String(tgUser.photo_url || "")) ? tgUser.photo_url : null;
+  // Отсутствие photo_url (webhook-путь, часть клиентов) не стирает сохранённый
+  // аватар: COALESCE держит старую ссылку. Цена — после удаления аватара в
+  // Telegram может остаться устаревшая ссылка; это мягче обнуления при каждом
+  // открытии без фото.
   await env.DB.prepare(`INSERT INTO users(tg_id,username,display_name,timezone,photo_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
     ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,
-      timezone=excluded.timezone,photo_url=excluded.photo_url,updated_at=excluded.updated_at`)
+      timezone=excluded.timezone,photo_url=COALESCE(excluded.photo_url, users.photo_url),updated_at=excluded.updated_at`)
     .bind(tgUser.id, tgUser.username || null, displayName(tgUser), timezone, photoUrl, timestamp, timestamp).run();
   return env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
 }
@@ -797,28 +821,54 @@ async function createPair(env, user) {
   throw new HttpError(500, "Не удалось создать пространство", "PAIR_CREATE_FAILED");
 }
 
-async function joinPair(env, user, rawCode) {
+async function joinPair(env, user, rawCode, requestUrl = null) {
   const code = clean(rawCode).toUpperCase().slice(0, 16);
   if (!/^[A-F0-9]{8}$/.test(code)) throw new HttpError(400, "Код должен состоять из 8 символов", "INVALID_CODE");
   if (await membership(env, user.tg_id)) throw new HttpError(409, "Вы уже состоите в пространстве", "ALREADY_PAIRED");
   await checkJoinAttempts(env, user.tg_id);
   const pair = await env.DB.prepare("SELECT * FROM pairs WHERE code=?").bind(code).first();
   if (!pair) {
+    // Кода нет среди живых пар: возможно, пространство закрылось (последний
+    // участник вышел) — тогда отвечаем об этом, а не «код не найден».
+    // Неудача пишется в обоих случаях: различие 410/404 не должно помогать
+    // перебору кодов.
+    const closed = await env.DB.prepare("SELECT code FROM closed_codes WHERE code=?").bind(code).first();
     await recordJoinFailure(env, user.tg_id);
+    if (closed) {
+      throw new HttpError(410, "Это пространство закрыто: последний участник вышел. Создайте новое или попросите новый код.", "PAIR_CLOSED");
+    }
     throw new HttpError(404, "Код не найден", "CODE_NOT_FOUND");
   }
   if (pair.user_a === user.tg_id) throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
   if (pair.user_b) throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
   const timestamp = now();
+  // Партнёр выходил и возвращается по тому же коду — оставшемуся уходит
+  // уведомление (зеркально уведомлению о выходе).
+  const wasAwaitingReturn = Number(pair.awaiting_return) === 1;
+  // Код зарезервирован за ушедшим: пока он не вернулся, тот же код не откроет
+  // пространство другому аккаунту, даже если код «уехал» в пересланных
+  // сообщениях. Свежие пары (awaiting_return=0) открыты любому по коду.
+  if (wasAwaitingReturn && Number(pair.last_partner) !== Number(user.tg_id)) {
+    // Неудача пишется и здесь: иначе зарезервированный код можно было бы
+    // перебирать безлимитно (в пределах общего лимита на пользователя).
+    await recordJoinFailure(env, user.tg_id);
+    throw new HttpError(403, "Это пространство ждёт возвращения прежнего партнёра — войти по старому коду может только он. Попросите владельца создать новое пространство.", "PAIR_RESERVED");
+  }
   let results;
   try {
+    // Два следующих оператора условны на успех UPDATE pairs: D1 batch не
+    // откатывается при changes=0, и без EXISTS-проверки конкурентный вход
+    // оставил бы pair_members/users.pair_id у пары с user_b=0 — «фантомное»
+    // членство, которое ensureSchema-repair уже не починит.
     results = await env.DB.batch([
-      env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,updated_at=? WHERE id=? AND user_b=0")
+      env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,awaiting_return=0,last_partner=0,updated_at=? WHERE id=? AND user_b=0")
         .bind(user.tg_id, user.display_name, timestamp, pair.id),
-      env.DB.prepare("INSERT INTO pair_members(tg_id,pair_id,role,joined_at) VALUES(?,?,'b',?)")
-        .bind(user.tg_id, pair.id, timestamp),
-      env.DB.prepare("UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?")
-        .bind(pair.id, timestamp, user.tg_id)
+      env.DB.prepare(`INSERT INTO pair_members(tg_id,pair_id,role,joined_at)
+        SELECT ?,?,'b',? WHERE EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
+        .bind(user.tg_id, pair.id, timestamp, pair.id, user.tg_id),
+      env.DB.prepare(`UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?
+        AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
+        .bind(pair.id, timestamp, user.tg_id, pair.id, user.tg_id)
     ]);
   } catch (error) {
     const message = String(error?.message || error).toLowerCase();
@@ -829,6 +879,17 @@ async function joinPair(env, user, rawCode) {
   }
   if (!results?.[0]?.meta?.changes) {
     throw new HttpError(409, "Не удалось войти: пространство уже занято", "JOIN_CONFLICT");
+  }
+  if (wasAwaitingReturn && positiveId(pair.user_a)) {
+    const returnerName = user.display_name || "Партнёр";
+    try {
+      // Сбой Telegram не отменяет вход: запись в базе уже применена.
+      await openApp(env, pair.user_a, requestUrl || { origin: "" },
+        `<b>${escapeHtml(returnerName)}</b> снова в вашем пространстве.\n\n`
+        + "Общие планы, даты и воспоминания на месте — можно продолжать.");
+    } catch (error) {
+      // Молча: уведомление вторично по отношению к самому входу.
+    }
   }
   return membership(env, user.tg_id);
 }
@@ -845,7 +906,11 @@ async function leavePair(env, member, requestUrl) {
   if (!partnerId) {
     // Последний держатель покидает пространство: данные пары удаляются
     // полностью, освобождая место в базе (восстановить пару по коду нельзя).
+    // Код остаётся в closed_codes: попытка входа по нему получит внятное
+    // «пространство закрыто» вместо «код не найден».
     operations.push(
+      env.DB.prepare("INSERT OR IGNORE INTO closed_codes(code,closed_at) VALUES(?,?)")
+        .bind(clean(member.code).toUpperCase(), timestamp),
       env.DB.prepare("DELETE FROM tasks WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM dates WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM memories WHERE pair_id=?").bind(member.id),
@@ -861,6 +926,11 @@ async function leavePair(env, member, requestUrl) {
       env.DB.prepare("DELETE FROM trips WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM goal_items WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM goals WHERE pair_id=?").bind(member.id),
+      // Внуки явно, до родителей: movie_ratings/savings_deposits не имеют
+      // pair_id и держатся только на FK CASCADE — если enforcement выключен,
+      // после удаления movies/savings остались бы сироты.
+      env.DB.prepare("DELETE FROM movie_ratings WHERE movie_id IN (SELECT id FROM movies WHERE pair_id=?)").bind(member.id),
+      env.DB.prepare("DELETE FROM savings_deposits WHERE saving_id IN (SELECT id FROM savings WHERE pair_id=?)").bind(member.id),
       env.DB.prepare("DELETE FROM movies WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM savings WHERE pair_id=?").bind(member.id),
       env.DB.prepare("DELETE FROM pairs WHERE id=?").bind(member.id)
@@ -868,8 +938,11 @@ async function leavePair(env, member, requestUrl) {
   } else if (member.role === "a") {
     operations.push(
       env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id),
+      // awaiting_return=1 + last_partner: партнёр вышел, пространство «в
+      // ожидании возвращения» — joinPair по этому флагу уведомит оставшегося,
+      // API заморозит контент, а войти по коду сможет только тот же аккаунт.
       env.DB.prepare(`UPDATE pairs SET user_a=user_b,name1=(SELECT display_name FROM users WHERE tg_id=?),
-        user_b=0,name2='',updated_at=? WHERE id=?`).bind(partnerId, timestamp, member.id),
+        user_b=0,name2='',awaiting_return=1,last_partner=?,updated_at=? WHERE id=?`).bind(partnerId, member.tg_id, timestamp, member.id),
       env.DB.prepare("UPDATE pair_members SET role='a' WHERE tg_id=? AND pair_id=?").bind(partnerId, member.id),
       // Личное имя партнёра оставшегося относилось к ушедшему — сбрасываем,
       // иначе оно прилипнет к следующему присоединившемуся партнёру.
@@ -877,7 +950,7 @@ async function leavePair(env, member, requestUrl) {
     );
   } else {
     operations.push(
-      env.DB.prepare("UPDATE pairs SET user_b=0,name2='',updated_at=? WHERE id=?").bind(timestamp, member.id),
+      env.DB.prepare("UPDATE pairs SET user_b=0,name2='',awaiting_return=1,last_partner=?,updated_at=? WHERE id=?").bind(member.tg_id, timestamp, member.id),
       env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id),
       // Оставшийся партнёр (владелец) тоже держал личное имя для ушедшего.
       env.DB.prepare("UPDATE users SET partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
@@ -1010,7 +1083,7 @@ function timeZoneOffsetMs(timeZone, date) {
   const get = (type) => parts.find((part) => part.type === type)?.value || "0";
   const asUtc = Date.UTC(
     Number(get("year")), Number(get("month")) - 1, Number(get("day")),
-    Number(get("hour")), Number(get("minute")), Number(get("second"))
+    Number(get("hour")) % 24, Number(get("minute")), Number(get("second"))
   );
   return asUtc - date.getTime();
 }
@@ -1027,7 +1100,7 @@ function makeDateInTimeZone(year, monthIndex, day, hour, minute, timeZone) {
     return Number(get("year")) === year &&
       Number(get("month")) === monthIndex + 1 &&
       Number(get("day")) === day &&
-      Number(get("hour")) === hour &&
+      Number(get("hour")) % 24 === hour &&
       Number(get("minute")) === minute;
   }
   // Обычный случай: итеративно уточняем смещение.
@@ -1151,12 +1224,10 @@ function byRowId(a, b) {
 function sortByTaskDeadline(rows, timeZone) {
   const decorated = rows.map((row) => ({ row, at: taskTargetMs(row, timeZone) }));
   decorated.sort((a, b) => {
+    // taskTargetMs возвращает конечное число или MAX_SAFE_INTEGER: обе
+    // «бесконечности» равны и уходят в конец, tie-break по id.
     const ta = a.at, tb = b.at;
-    if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
-    // Обе Infinity равны, сортируем по id.
-    if (!Number.isFinite(ta) && !Number.isFinite(tb)) return byRowId(a.row.id, b.row.id);
-    // Только одна Infinity — она уходит в конец (больше любое число).
-    return ta === Infinity ? 1 : -1;
+    return ta - tb || byRowId(a.row.id, b.row.id);
   });
   return decorated.map(({ row }) => row);
 }
@@ -1258,7 +1329,9 @@ async function state(env, userId) {
   const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, goals, goalItems, savings, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
-    env.DB.prepare("SELECT id,title,status,day,time,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
+    // monthly/yearly — как в ARCHIVE_QUERIES.done_tasks: редактирование
+    // завершённой карточки читает флаги повтора и отправляет их обратно в PATCH.
+    env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
@@ -1305,17 +1378,25 @@ async function state(env, userId) {
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
   // Личное имя партнёра видно только просматривающему — подставляем его и в
   // подписи авторов воспоминаний/желаний (author_id/owner_id совпадает с
-  // tg_id партнёра в одной паре), чтобы «везде» значило везде.
+  // tg_id партнёра в одной паре), чтобы «везде» значило везде. Своё личное
+  // имя (custom_name) работает точно так же: меняет имя только у того, кто
+  // его задал, и во всех подписях его собственных записей. Партнёру уходит
+  // сырое display_name из Telegram.
   const override = clean(user.partner_custom_name) || null;
-  if (override && partnerId) {
+  const ownName = clean(user.custom_name) || null;
+  if (override || ownName) {
+    const viewerId = Number(user.tg_id);
+    const partnerIdNum = partnerId ? Number(partnerId) : null;
     for (const list of [memories.results || [], quotes.results || []]) {
       for (const row of list) {
-        if (Number(row.author_id) === Number(partnerId)) row.display_name = override;
+        if (override && partnerIdNum !== null && Number(row.author_id) === partnerIdNum) row.display_name = override;
+        if (ownName && Number(row.author_id) === viewerId) row.display_name = ownName;
       }
     }
     for (const list of [wishes.results || [], completedWishes.results || []]) {
       for (const row of list) {
-        if (Number(row.owner_id) === Number(partnerId)) row.display_name = override;
+        if (override && partnerIdNum !== null && Number(row.owner_id) === partnerIdNum) row.display_name = override;
+        if (ownName && Number(row.owner_id) === viewerId) row.display_name = ownName;
       }
     }
   }
@@ -1329,6 +1410,9 @@ async function state(env, userId) {
       name2: names.name2,
       user_b: pair.user_b,
       role: pair.role,
+      // Партнёр вышел и не вернулся: код работает только для него самого
+      // (last_partner), интерфейс подписывает инвайт соответствующе.
+      awaiting_return: Number(pair.awaiting_return) === 1 ? 1 : 0,
       started_at: pair.started_at,
       // Ссылки на фото профиля Telegram: photo1 — владелец, photo2 — партнёр.
       // Свежесть гарантируется ensureUser (обновляется при каждом открытии
@@ -1423,12 +1507,27 @@ async function archivePage(env, pair, type, page, userId = null) {
   };
 }
 
+// Все тела запросов приложения — маленькие JSON (диалоги, настройки, код).
+// Лимит отсекает гигантские тела до парсинга: без него request.json() читал
+// бы сколько прислали, держа всё в памяти изолята (риск OOM до валидации).
+const MAX_BODY_BYTES = 1_000_000;
+
 async function readJson(request) {
+  const declared = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    throw new HttpError(413, "Тело запроса слишком большое", "PAYLOAD_TOO_LARGE");
+  }
+  let body;
   try {
-    const body = await request.json();
+    const text = await request.text();
+    if (text.length > MAX_BODY_BYTES) {
+      throw new HttpError(413, "Тело запроса слишком большое", "PAYLOAD_TOO_LARGE");
+    }
+    body = JSON.parse(text);
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("not object");
     return body;
-  } catch {
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
     throw new HttpError(400, "Некорректный запрос", "INVALID_JSON");
   }
 }
@@ -1449,7 +1548,7 @@ async function ensureWishOwner(env, pair, user, id) {
 // Копилка видна автору всегда, общая — обоим партнёрам. Личная копилка
 // партнёра по прямому id отвечает 404, как несуществующая запись.
 async function ensureSavingVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=? AND (kind='shared' OR created_by=?)")
+  const row = await env.DB.prepare("SELECT id,collected FROM savings WHERE id=? AND pair_id=? AND (kind='shared' OR created_by=?)")
     .bind(id, pair.id, user.tg_id).first();
   if (!row) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
   return row;
@@ -1474,7 +1573,7 @@ async function ensureDateVisible(env, pair, user, id) {
 // может выполнить/изменить по прямому id; 404 вместо 403 не раскрывает факт
 // существования. Как и у дат, строка нужна PATCH'у для частичного обновления.
 async function ensureTaskVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT is_private,created_by,day,time FROM tasks WHERE id=? AND pair_id=?")
+  const row = await env.DB.prepare("SELECT is_private,created_by,day,time,monthly,yearly FROM tasks WHERE id=? AND pair_id=?")
     .bind(id, pair.id).first();
   if (!row) return null;
   if (Number(row.is_private) === 1 && Number(row.created_by) !== Number(user.tg_id)) {
@@ -1507,7 +1606,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   // частично (UPDATE ... WHERE не сработал бы, но 403 точнее 404).
   const mutating = method === "DELETE" || method === "PATCH" || (method === "POST" && action);
   if (type === "wishes" && mutating) await ensureWishOwner(env, pair, user, id);
-  if (type === "savings" && mutating) await ensureSavingVisible(env, pair, user, id);
+  const savingRow = type === "savings" && mutating ? await ensureSavingVisible(env, pair, user, id) : null;
   const dateRow = type === "dates" && mutating ? await ensureDateVisible(env, pair, user, id) : null;
   const taskRow = type === "tasks" && mutating ? await ensureTaskVisible(env, pair, user, id) : null;
   // Личные цели и их пункты: партнёр получает 404, как на личные планы.
@@ -1521,7 +1620,11 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   }
   if (method === "PATCH") {
     // Фильм приходит из IMDb целиком: точечных правок у карточки нет.
-    if (type === "movies") throw new HttpError(405, "Карточку фильма отредактировать нельзя", "METHOD_NOT_ALLOWED");
+    // У целей и пунктов PATCH не реализован: без явного 405 запрос падал бы
+    // в ветку wishes и умирал на «no such column: body» с 500.
+    if (type === "movies" || type === "goals" || type === "goal_items") {
+      throw new HttpError(405, "Запись этого раздела нельзя отредактировать", "METHOD_NOT_ALLOWED");
+    }
     const patchSchemas = {
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
       dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
@@ -1553,12 +1656,25 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         values.push(day, time);
       }
       if (body.monthly !== undefined || body.yearly !== undefined) {
-        const monthly = body.monthly === true ? 1 : 0;
-        const yearly = monthly ? 0 : (body.yearly === true ? 1 : 0);
+        // Частичный PATCH: неприсланный флаг берём из строки — иначе запрос
+        // с одним полем снимал бы и второй (ежемесячный план терял monthly).
+        const monthly = body.monthly !== undefined
+          ? (body.monthly === true ? 1 : 0)
+          : (Number(taskRow?.monthly) === 1 ? 1 : 0);
+        const yearly = body.yearly !== undefined
+          ? (body.yearly === true ? 1 : 0)
+          : (Number(taskRow?.yearly) === 1 ? 1 : 0);
+        // Флаги взаимоисключающие: явный «true» одного при незаданном другом —
+        // переключение режима повтора, а не попытка включить оба.
+        let finalMonthly = monthly;
+        let finalYearly = yearly;
+        if (body.yearly === true && body.monthly !== true) { finalMonthly = 0; finalYearly = 1; }
+        else if (body.monthly === true && body.yearly !== true) { finalMonthly = 1; finalYearly = 0; }
+        else if (finalMonthly) finalYearly = 0;
         const effectiveDay = body.day !== undefined ? optionalDay(body.day) : taskRow?.day;
-        if ((monthly || yearly) && !effectiveDay) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
+        if ((finalMonthly || finalYearly) && !effectiveDay) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
         fields.push("monthly=?", "yearly=?");
-        values.push(monthly, yearly);
+        values.push(finalMonthly, finalYearly);
       }
       // Приватность переключает только автор (зеркально личным датам).
       if (body.is_private !== undefined && Number(taskRow?.created_by) === Number(user.tg_id)) {
@@ -1606,23 +1722,31 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         values.push(body.is_private === true || body.is_private === 1 ? 1 : 0);
       }
     } else if (type === "memories") {
-      fields.push("body=?");
-      values.push(textField(body, "body", 2000, "Воспоминание"));
+      // PATCH частичный, как у plans/dates: правим только присланные поля,
+      // иначе запрос с одним title стирал бы текст воспоминания.
+      if (body.body !== undefined) {
+        fields.push("body=?");
+        values.push(textField(body, "body", 2000, "Воспоминание"));
+      }
       if (body.title !== undefined) {
         fields.push("title=?");
         values.push(clean(body.title) || null);
       }
     } else if (type === "quotes") {
-      fields.push("body=?");
-      values.push(textField(body, "body", 600, "Цитата"));
+      if (body.body !== undefined) {
+        fields.push("body=?");
+        values.push(textField(body, "body", 600, "Цитата"));
+      }
       // Источник необязателен: пустая строка очищает подпись.
       if (body.source !== undefined) {
         fields.push("source=?");
         values.push(clean(body.source) || null);
       }
     } else if (type === "places") {
-      fields.push("title=?");
-      values.push(textField(body, "title", 120, "Место"));
+      if (body.title !== undefined) {
+        fields.push("title=?");
+        values.push(textField(body, "title", 120, "Место"));
+      }
       if (body.note !== undefined) {
         fields.push("note=?");
         values.push(clean(body.note) || null);
@@ -1634,34 +1758,56 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         values.push(wishUrl(body.url) || null);
       }
     } else if (type === "trips") {
-      fields.push("title=?");
-      values.push(textField(body, "title", 120, "Поездка"));
+      if (body.title !== undefined) {
+        fields.push("title=?");
+        values.push(textField(body, "title", 120, "Поездка"));
+      }
       if (body.note !== undefined) {
         fields.push("note=?");
         values.push(clean(body.note) || null);
       }
     } else if (type === "savings") {
-      fields.push("title=?");
-      values.push(textField(body, "title", 120, "Название копилки"));
+      if (body.title !== undefined) {
+        fields.push("title=?");
+        values.push(textField(body, "title", 120, "Название копилки"));
+      }
       // Цель правится вместе с названием; собранное не трогаем — оно
-      // складывается только из пополнений.
+      // складывается только из пополнений. Цель ниже собранного отклоняем:
+      // collected > target ломал бы прогресс и историю пополнений.
       if (body.target !== undefined) {
+        const target = moneyAmount(body.target, "Цель");
+        if (Number(savingRow?.collected) > target) {
+          throw new HttpError(400, "Цель не может быть меньше уже собранной суммы", "TARGET_BELOW_COLLECTED");
+        }
         fields.push("target=?");
-        values.push(moneyAmount(body.target, "Цель"));
+        values.push(target);
       }
     } else {
-      fields.push("body=?");
-      values.push(textField(body, "body", 300, "Желание"));
+      if (body.body !== undefined) {
+        fields.push("body=?");
+        values.push(textField(body, "body", 300, "Желание"));
+      }
       // Ссылка валидируется ДО UPDATE и пишется тем же запросом: иначе при
       // некорректном URL текст уже был бы изменён, а клиент получил бы 400.
+      // Пустая строка пишется как NULL — как у places, чтобы не плодить
+      // в базе смесь '' и NULL для «ссылки нет».
       if (body.url !== undefined) {
         fields.push("url=?");
-        values.push(wishUrl(body.url));
+        values.push(wishUrl(body.url) || null);
       }
     }
-    // Пустой PATCH (ни одного известного поля) — не ошибка, но и UPDATE
-    // собирать не из чего: «SET  WHERE» был бы синтаксической ошибкой.
-    if (!fields.length) return true;
+    // Пустой PATCH (ни одного известного поля) — не ошибка, но и «успех»
+    // на несуществующей записи выдавать нельзя: 404, как у DELETE и у
+    // UPDATE с changes=0. Строки tasks/dates/savings уже прочитаны guard'ами,
+    // wishes — ensureWishOwner; для остальных делаем дешёвый SELECT.
+    if (!fields.length) {
+      const exists = type === "tasks" ? taskRow
+        : type === "dates" ? dateRow
+        : type === "savings" ? savingRow
+        : await env.DB.prepare(`SELECT id FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).first();
+      if (!exists) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+      return true;
+    }
     const result = await env.DB.prepare(`UPDATE ${table} SET ${fields.join(",")} WHERE id=? AND pair_id=?`)
       .bind(...values, id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
@@ -1756,13 +1902,15 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (action !== "deposit") throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
       validateSchema(body, { amount: { type: "number", required: true, errorCode: "INVALID_AMOUNT" } });
       const amount = moneyAmount(body.amount, "Сумма");
+      // UPDATE первым, INSERT — под EXISTS в той же транзакции: если копилку
+      // удалили в гонке, голый INSERT упал бы по FK на 500 вместо честного 404.
       const batchResults = await env.DB.batch([
-        env.DB.prepare("INSERT INTO savings_deposits(saving_id,tg_id,amount,created_at) VALUES(?,?,?,?)")
-          .bind(id, user.tg_id, amount, now()),
         env.DB.prepare("UPDATE savings SET collected=collected+? WHERE id=? AND pair_id=?")
-          .bind(amount, id, pair.id)
+          .bind(amount, id, pair.id),
+        env.DB.prepare("INSERT INTO savings_deposits(saving_id,tg_id,amount,created_at) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM savings WHERE id=? AND pair_id=?)")
+          .bind(id, user.tg_id, amount, now(), id, pair.id)
       ]);
-      if (!batchResults[1].meta.changes) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
+      if (!batchResults[0].meta.changes) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
       return true;
     } else {
       throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
@@ -1802,7 +1950,7 @@ function ownerIds(env) {
   return ids;
 }
 
-async function api(request, env, url) {
+async function api(request, env, url, ctx = null) {
   if (!env.DB) throw new HttpError(503, "База данных ещё не подключена", "DB_UNAVAILABLE");
   const initData = request.headers.get("x-telegram-init-data");
   const tgUser = await telegramUser(initData, env.BOT_TOKEN);
@@ -1833,8 +1981,13 @@ async function api(request, env, url) {
     const t0 = Date.now();
     const result = await state(env, user.tg_id);
     // Один фильм за открытие: старые строки дозаполняются, а TMDB-оценки
-    // перепроверяются — вдруг IMDb уже поставил свою.
-    await refreshMovieRatings(env, result.movies);
+    // перепроверяются — вдруг IMDb уже поставил свою. Обновление уходит в фон
+    // (ctx.waitUntil): OMDb/TMDB отвечают до 8 секунд на источник, и ждать их
+    // синхронно — значит подставлять /api/state под клиентский таймаут.
+    // Свежая оценка доедет к следующему открытию состояния.
+    const refresh = refreshMovieRatings(env, result.movies)
+      .catch((error) => console.error("movie rating refresh failed", error));
+    if (ctx) ctx.waitUntil(refresh);
     console.log(`[metric] api_state_ms=${Date.now() - t0}`);
     return json(result);
   }
@@ -1846,7 +1999,7 @@ async function api(request, env, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/pair/join") {
     validateSchema(body, { code: { type: "string", required: true } });
-    await joinPair(env, user, body.code);
+    await joinPair(env, user, body.code, url);
     return json(await state(env, user.tg_id));
   }
   // Пол запрашивается гейтом до онбординга, поэтому маршрут обязан работать
@@ -1933,6 +2086,15 @@ async function api(request, env, url) {
 
   const pair = await membership(env, user.tg_id);
   if (!pair) throw new HttpError(409, "Сначала создайте или соедините пространство", "NO_PAIR");
+  // Партнёр вышел (awaiting_return=1): пространство «в ожидании возвращения».
+  // Контент заморожен — добавлять, менять и удалять нельзя до возврата
+  // партнёра. Остаются доступны чтение (GET) и личное: настройки, часовой
+  // пояс, экспорт, выход. Свежая пара без партнёра (awaiting_return=0)
+  // ведёт себя как раньше.
+  const SOLO_ALLOWED_PATHS = new Set(["/api/pair/leave", "/api/settings", "/api/pair/timezone", "/api/data/export"]);
+  if (Number(pair.awaiting_return) === 1 && request.method !== "GET" && !SOLO_ALLOWED_PATHS.has(url.pathname)) {
+    throw new HttpError(403, "Партнёр вышел из пространства — изменения будут доступны после его возвращения", "PARTNER_ABSENT");
+  }
   if (request.method === "GET" && url.pathname === "/api/archive") {
     const type = String(url.searchParams.get("type") || "");
     const page = Math.min(500, Math.max(0, Math.floor(Number(url.searchParams.get("page")) || 0)));
@@ -1963,8 +2125,12 @@ async function api(request, env, url) {
       LEFT JOIN users u ON u.tg_id=d.tg_id WHERE d.saving_id=? ORDER BY d.created_at DESC, d.id DESC LIMIT ?`)
       .bind(savingId, STATE_ACTIVE_LIMIT).all();
     const override = clean(user.partner_custom_name) || null;
+    const ownName = clean(user.custom_name) || null;
     for (const row of deposits.results || []) {
+      // Личные имена — зеркально state(): партнёру — свой оверрайд,
+      // своим пополнениям — собственное личное имя.
       if (override && Number(row.tg_id) !== Number(user.tg_id)) row.display_name = override;
+      if (ownName && Number(row.tg_id) === Number(user.tg_id)) row.display_name = ownName;
     }
     return json({ deposits: deposits.results || [] });
   }
@@ -2051,7 +2217,7 @@ async function api(request, env, url) {
   if (request.method === "POST" && url.pathname === "/api/wishes") {
     validateSchema(body, { body: { type: "string", required: true, maxLength: 300 }, url: { type: "string" } });
     const text = textField(body, "body", 300, "Желание");
-    const wishLink = wishUrl(body.url);
+    const wishLink = wishUrl(body.url) || null;
     await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,created_at) VALUES(?,?,?,?,?)")
       .bind(pair.id, user.tg_id, text, wishLink, now()).run();
     return json(await state(env, user.tg_id));
@@ -2098,13 +2264,30 @@ async function api(request, env, url) {
     for (const item of items) {
       if (Array.from(item).length > 180) throw new HttpError(400, "Пункт превышает 180 символов", "INVALID_ITEMS");
     }
+    // Атомарность создания: пункты уходят одним batch (D1 исполняет его
+    // единой транзакцией — либо все пункты, либо ни одного), а при его сбое
+    // цель удаляется компенсирующе. «Осиротевшая» цель без пунктов не
+    // остаётся. Один общий batch здесь невозможен: goal_id для пунктов — это
+    // meta.last_row_id цели, а last_insert_rowid() внутри batch после первого
+    // же пункта возвращал бы rowid пункта, не цели.
     const goalResult = await env.DB.prepare("INSERT INTO goals(pair_id,created_by,title,is_private,created_at) VALUES(?,?,?,?,?)")
       .bind(pair.id, user.tg_id, title, body.is_private === true ? 1 : 0, now()).run();
     const goalId = goalResult.meta.last_row_id;
-    await env.DB.batch(items.map((item) =>
-      env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
-        .bind(goalId, pair.id, user.tg_id, item, now())
-    ));
+    try {
+      await env.DB.batch(items.map((item) =>
+        env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
+          .bind(goalId, pair.id, user.tg_id, item, now())
+      ));
+    } catch (error) {
+      // Компенсация откатывает цель, если пункты не записались. Сбой самой
+      // компенсации логируем — исходная ошибка важнее.
+      try {
+        await env.DB.prepare("DELETE FROM goals WHERE id=? AND pair_id=?").bind(goalId, pair.id).run();
+      } catch (cleanupError) {
+        console.error("goal cleanup failed", cleanupError);
+      }
+      throw error;
+    }
     return json(await state(env, user.tg_id));
   }
   // Добавление фильма по выбору из подсказок: карточка собирается из IMDb
@@ -2301,42 +2484,65 @@ async function webhook(request, env, url) {
   if (ownerIdList.length && !isBotOwner && !knownUser) {
     // Приватный бот: незнакомцам — только /start <код открытой пары>.
     const text = clean(message.text || message.caption || "");
-    const inviteCode = text.startsWith("/start ") ? text.slice(7).trim() : "";
+    const inviteCode = startPayload(text);
     const inviteCodeUpper = inviteCode.toUpperCase();
-    const openPair = /^[A-F0-9]{8}$/i.test(inviteCode) ? await env.DB.prepare("SELECT id FROM pairs WHERE code=? AND user_b=0").bind(inviteCodeUpper).first() : null;
+    // Резерв кода (parity open_pair_for_code в боте): зарезервированный код
+// открывает гейт только прежнему партнёру — посторонний не регистрируется.
+const openPair = /^[A-F0-9]{8}$/i.test(inviteCode)
+  ? await env.DB.prepare("SELECT id FROM pairs WHERE code=? AND user_b=0 AND (awaiting_return=0 OR last_partner=?)").bind(inviteCodeUpper, message.from.id).first()
+  : null;
     if (!openPair) {
-      await telegram(env, "sendMessage", {
-        chat_id: message.chat.id,
-        text: "Это приватный бот DuoPlan — доступ по приглашению. Попросите владельца прислать ссылку-приглашение (t.me/<бот>?start=КОД) и откройте её."
-      });
+      // Отказ — некритичный путь: update_id уже записан в telegram_updates,
+      // и упавший сюда 500 привёл бы к повтору апдейта, который дедуп вернёт
+      // как {ok:true} — отказ так и не был бы доставлен. Гасим сбой тихо.
+      try {
+        await telegram(env, "sendMessage", {
+          chat_id: message.chat.id,
+          text: "Это приватный бот DuoPlan — доступ по приглашению. Попросите владельца прислать ссылку-приглашение (t.me/<бот>?start=КОД) и откройте её."
+        });
+      } catch (error) {
+        console.error("private gate denial failed", error);
+      }
       return json({ ok: true });
     }
   }
   try {
     const user = await ensureUser(env, message.from, null);
     const text = clean(msgText);
-    const code = text.startsWith("/start ") ? text.slice(7).trim() : "";
+    const code = startPayload(text);
     if (code) {
       let joined = false;
+      let joinFailText = "";
       const existingMembership = await membership(env, user.tg_id);
       if (existingMembership) {
         joined = clean(existingMembership.code).toUpperCase() === code.toUpperCase();
+        // Чужой код при живом членстве — не «приглашение недоступно»,
+        // а «вы уже в пространстве» (зеркально ответу бота).
+        if (!joined) joinFailText = "Вы уже в пространстве — этот код к другой паре. Новый код можно применить только после выхода из текущей.";
       } else {
         try {
-          await joinPair(env, user, code);
+          await joinPair(env, user, code, url);
           joined = true;
         } catch (error) {
           const racedMembership = await membership(env, user.tg_id);
           joined = !!racedMembership && clean(racedMembership.code).toUpperCase() === code.toUpperCase();
           if (!racedMembership) {
-            if (error instanceof HttpError) joined = false;
-            else throw error;
+            if (error instanceof HttpError) {
+              joined = false;
+              // «Пространство закрыто» и «код зарезервирован» честнее общего
+              // «приглашение недоступно».
+              joinFailText = error.code === "PAIR_CLOSED"
+                ? "Это пространство закрыто: последний участник вышел. Попросите партнёра отправить вам код нового пространства."
+                : error.code === "PAIR_RESERVED"
+                  ? "Это пространство ждёт возвращения прежнего партнёра — старый код на другого аккаунта не действует."
+                  : "";
+            } else throw error;
           }
         }
       }
       await openApp(env, message.chat.id, url, joined
         ? "Готово — теперь у вас одно пространство на двоих."
-        : "Это приглашение недоступно. Проверьте код у партнёра.");
+        : (joinFailText || "Это приглашение недоступно. Проверьте код у партнёра."));
     } else if (text.startsWith("/help")) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
@@ -2386,6 +2592,21 @@ function parseTimeMinutes(value, fallbackMinutes = 9 * 60) {
   const minutes = Number(match[2]);
   if (hours > 23 || minutes > 59) return fallbackMinutes;
   return hours * 60 + minutes;
+}
+
+// Cron тикает раз в 15 минут (wrangler.jsonc), поэтому время из хвоста суток
+// (23:46–23:59) иначе не срабатывает никогда: тик 23:45 ещё раньше назначенного,
+// а тик 00:00 уже попадает на новые сутки, где minutes=0 и условие «время
+// наступило» ложно до следующих суток — и снова мимо. Считаем время наступившим,
+// если до него дошло сегодня, ИЛИ если текущий тик уложился в одно 15-минутное
+// окно после времени прошлых суток (полуночная сводка уйдёт с уже новыми
+// «сегодня/завтра»; одну отправку гарантирует дедуп-журнал notification_log).
+const CRON_TICK_MINUTES = 15;
+
+function timeDueWithRollover(minutes, timeValue) {
+  const scheduled = parseTimeMinutes(timeValue);
+  if (minutes >= scheduled) return true;
+  return 1440 - scheduled + minutes <= CRON_TICK_MINUTES;
 }
 
 function localMinutesOfDay(timeZone, stamp) {
@@ -2937,8 +3158,13 @@ function planTaskReminders(tasks, timeZone, nowMs) {
     const target = taskTargetMs(task, timeZone);
     if (!Number.isFinite(target) || target <= nowMs) continue;
     const left = target - nowMs;
-    if (left <= REMINDER_1H) planned.push({ task, kind: `task1h:${task.id}`, lead: "Через час" });
-    else if (left <= REMINDER_3H) planned.push({ task, kind: `task3h:${task.id}`, lead: "Через 3 часа" });
+    if (left <= REMINDER_1H) {
+      // Тик 15-минутный, поэтому «через час» почти всегда неточно: задача
+      // может быть хоть через минуту. Называем фактическое время.
+      const minutes = Math.max(1, Math.round(left / 60000));
+      const lead = minutes >= 55 ? "Через час" : `Через ${minutes} мин`;
+      planned.push({ task, kind: `task1h:${task.id}`, lead });
+    } else if (left <= REMINDER_3H) planned.push({ task, kind: `task3h:${task.id}`, lead: "Через 3 часа" });
   }
   return planned;
 }
@@ -2996,7 +3222,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
     // Личные планы — только их автору; заголовок скрыт спойлером в maskTitle.
     const visibleTasks = tasks.filter(t => Number(t.is_private) !== 1 || Number(t.created_by) === Number(member));
     // Утренняя сводка в персональное время (по умолчанию 09:00).
-    if (Number(user?.digest_enabled ?? 1) === 1 && minutes >= parseTimeMinutes(user?.digest_time)) {
+    if (Number(user?.digest_enabled ?? 1) === 1 && timeDueWithRollover(minutes, user?.digest_time)) {
       const text = digestText(today, tomorrow, visibleDates, visibleTasks);
       if (text) {
         if (budget.left < 2) break;
@@ -3005,7 +3231,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
       }
     }
     // Сводка о датах за сутки: завтрашние даты в персональное время.
-    if (Number(user?.dates_digest_enabled ?? 1) === 1 && minutes >= parseTimeMinutes(user?.dates_digest_time)) {
+    if (Number(user?.dates_digest_enabled ?? 1) === 1 && timeDueWithRollover(minutes, user?.dates_digest_time)) {
       const text = datesDigestText(timeZone, tomorrow, visibleDates);
       if (text) {
         if (budget.left < 2) break;
@@ -3117,7 +3343,10 @@ async function ensureSchema(env) {
   }
 
   const statements = [
-    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',awaiting_return INTEGER NOT NULL DEFAULT 0,last_partner INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    // Коды удалённых пространств (последний участник вышел): вход по такому
+    // коду отвечает «пространство закрыто», а не «код не найден».
+    `CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY,closed_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
@@ -3176,6 +3405,8 @@ async function ensureSchema(env) {
     ["users", "partner_custom_name", "TEXT"],
     ["users", "custom_name", "TEXT"],
     ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
+    ["pairs", "awaiting_return", "INTEGER NOT NULL DEFAULT 0"],
+    ["pairs", "last_partner", "INTEGER NOT NULL DEFAULT 0"],
     ["tasks", "day", "TEXT"],
     ["tasks", "time", "TEXT"],
     ["tasks", "is_private", "INTEGER NOT NULL DEFAULT 0"],
@@ -3269,7 +3500,7 @@ async function setup(request, env, url) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/health") {
@@ -3286,7 +3517,7 @@ export default {
         }, database ? 200 : 503);
       }
       if (url.pathname === "/api/setup" && request.method === "POST") return await setup(request, env, url);
-      if (url.pathname.startsWith("/api/")) return await api(request, env, url);
+      if (url.pathname.startsWith("/api/")) return await api(request, env, url, ctx);
       if (url.pathname === "/telegram/webhook" && request.method === "POST") return await webhook(request, env, url);
       return env.ASSETS.fetch(request);
     } catch (error) {

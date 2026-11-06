@@ -51,7 +51,9 @@ from duoplan.services import ValidationError
 from duoplan.services import normalize_code
 from duoplan.ui import GAME_MENU
 from duoplan.ui import HOME_MENU
+from duoplan.ui import LEAVE_CONFIRM_MENU
 from duoplan.ui import MAIN_MENU
+from duoplan.ui import PAIRED_MENU
 from duoplan.ui import PAIR_MENU
 from duoplan.ui import START_MENU
 from duoplan.ui import button
@@ -319,6 +321,17 @@ def home_text(pair, user, today: date) -> str:
 
 
 def waiting_text(pair, link: str) -> str:
+    if int(pair["awaiting_return"] or 0) == 1:
+        # Код зарезервирован за вышедшим партнёром (last_partner): рассылать
+        # его третьим лицам бессмысленно.
+        text = (
+            "Партнёр вышел из пространства. Оно ждёт его возвращения: "
+            "код действует только для его аккаунта.\n\n"
+            f"Код для возврата партнёра: {pair['code']}"
+        )
+        if link:
+            text += f"\nСсылка: {link}"
+        return text + "\n\nИзменения в пространстве заморожены до его возвращения."
     text = (
         "Ваше пространство готово и ждёт партнёра.\n\n"
         f"Код для партнёра: {pair['code']}"
@@ -326,7 +339,6 @@ def waiting_text(pair, link: str) -> str:
     if link:
         text += f"\nИли отправьте ссылку: {link}"
     return text + "\n\nПосле входа партнёра откройте /menu."
-
 
 # ------------------------------------------------------------------ навигация
 
@@ -344,7 +356,9 @@ async def send_home(message: Message, service: DuoPlanService, user_id: int) -> 
         )
         return
     user = await service.user(user_id)
-    await message.answer(home_text(pair, user, service.local_today()), reply_markup=MAIN_MENU)
+    # «Сегодня» — в поясе пары (parity с worker displayStreak/dailyFor),
+    # а не в поясе сервера бота.
+    await message.answer(home_text(pair, user, service.today_for(pair["timezone"])), reply_markup=MAIN_MENU)
 
 
 async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
@@ -360,7 +374,7 @@ async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
         )
         return
     user = await service.user(call.from_user.id)
-    await safe_edit(call.message, home_text(pair, user, service.local_today()), MAIN_MENU)
+    await safe_edit(call.message, home_text(pair, user, service.today_for(pair["timezone"])), MAIN_MENU)
 
 
 # -------------------------------------------------------------------- команды
@@ -369,7 +383,10 @@ async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
 @router.message(CommandStart())
 async def start(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     await state.clear()
-    code = message.text.partition(" ")[2].strip() if message.text else ""
+    # split(None, 1) режет по любым пробелам (включая таб): partition(" ") на
+    # «/start\tCODE» отдавал бы в код весь хвост с мусором.
+    parts = message.text.split(None, 1) if message.text else []
+    code = parts[1].strip() if len(parts) > 1 else ""
     if code:
         member = await service.membership(message.from_user.id)
         if member is not None:
@@ -378,13 +395,26 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
                 "Если нужно сменить пару, сначала выйдите из текущей в "
                 "приложении: «Наша пара» → «Выйти из пространства».",
             )
-        elif await service.join_pair(message.from_user.id, name_of(message.from_user), code):
-            await message.answer("Готово — теперь у вас одно пространство на двоих.")
         else:
-            await message.answer(
-                "Этот код недоступен. Проверьте его или попросите партнёра "
-                "прислать приглашение ещё раз."
-            )
+            try:
+                joined = await service.join_pair(
+                    message.from_user.id,
+                    name_of(message.from_user),
+                    code,
+                    notify=lambda chat_id, text: message.bot.send_message(chat_id, text),
+                )
+            except ValidationError as exc:
+                # Резерв кода за ушедшим: чужой аккаунт получает объяснение,
+                # а не общий «код недоступен».
+                await message.answer(str(exc))
+                return
+            if joined:
+                await message.answer("Готово — теперь у вас одно пространство на двоих.")
+            else:
+                await message.answer(
+                    "Этот код недоступен. Проверьте его или попросите партнёра "
+                    "прислать приглашение ещё раз."
+                )
     await send_home(message, service, message.from_user.id)
 
 
@@ -484,7 +514,21 @@ async def receive_code(message: Message, service: DuoPlanService, state: FSMCont
             "Пришлите код из приглашения или /cancel."
         )
         return
-    if await service.join_pair(message.from_user.id, name_of(message.from_user), code):
+    try:
+        joined = await service.join_pair(
+            message.from_user.id,
+            name_of(message.from_user),
+            code,
+            notify=lambda chat_id, text: message.bot.send_message(chat_id, text),
+        )
+    except ValidationError as exc:
+        # Резерв кода за ушедшим: без обёртки исключение уходило бы в on_error,
+        # пользователь молчал, а состояние FSM зависало до /cancel.
+        await state.clear()
+        await message.answer(str(exc))
+        await send_home(message, service, message.from_user.id)
+        return
+    if joined:
         await state.clear()
         await message.answer("Вы на связи. Пространство теперь общее!")
         await send_home(message, service, message.from_user.id)
@@ -527,7 +571,7 @@ async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
     together = await service.together_points(pair["id"])
     level, _, _ = level_for(together)
     title, symbol = title_for(level)
-    streak = display_streak(user, service.local_today())
+    streak = display_streak(user, service.today_for(pair["timezone"]))
     await safe_edit(
         call.message,
         f"{pair['name1']} и {pair['name2']}\n\n"
@@ -535,7 +579,58 @@ async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
         f"Общий запас: {together} XP\n"
         f"{symbol} Общий уровень: {level} · {title}\n"
         f"Личная серия: {streak} дн.",
-        HOME_MENU,
+        PAIRED_MENU,
+    )
+    await call.answer()
+
+
+# --------------------------------------------------------------- выход из пары
+
+@router.callback_query(F.data == "pair:leave")
+async def leave_ask(call: CallbackQuery, service: DuoPlanService) -> None:
+    pair = await service.membership(call.from_user.id)
+    if not pair:
+        await call.answer("Сначала создайте пространство")
+        return
+    if not pair["user_b"]:
+        # Ожидание партнёра: выходящий — единственный держатель, пространство
+        # будет удалено целиком.
+        await safe_edit(
+            call.message,
+            "Выйти и удалить пространство целиком? "
+            "Все общие планы, даты, записи и списки будут удалены безвозвратно.",
+            LEAVE_CONFIRM_MENU,
+        )
+    else:
+        await safe_edit(
+            call.message,
+            "Выйти из пространства? Контент останется у партнёра, "
+            "а код приглашения будет зарезервирован за вами.",
+            LEAVE_CONFIRM_MENU,
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "pair:leave:no")
+async def leave_no(call: CallbackQuery, service: DuoPlanService) -> None:
+    await edit_home(call, service)
+    await call.answer("Остались в пространстве")
+
+
+@router.callback_query(F.data == "pair:leave:yes")
+async def leave_yes(call: CallbackQuery, service: DuoPlanService) -> None:
+    left = await service.leave_pair(
+        call.from_user.id,
+        notify=lambda chat_id, text: call.bot.send_message(chat_id, text),
+    )
+    if not left:
+        await safe_edit(call.message, "Сначала соедините пространство.", START_MENU)
+        await call.answer()
+        return
+    await safe_edit(
+        call.message,
+        "Вы вышли из пространства. Код можно применить снова — только этим же аккаунтом.",
+        START_MENU,
     )
     await call.answer()
 
@@ -543,8 +638,43 @@ async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
 # ------------------------------------------------------------------- разделы
 
 
+FROZEN_TEXT = (
+    "Партнёр вышел из пространства — изменения будут доступны "
+    "после его возвращения."
+)
+
+
+async def _viewable_pair(user_id: int, service: DuoPlanService):
+    """Пара для чтения разделов.
+
+   Parity с GET /api/state в worker.js: при awaiting_return контент
+    остаётся читаемым, запись отсекают сервисные _ensure_pair_open.
+    Свежая пара без второго участника (user_b=0, awaiting_return=0)
+    по-прежнему считается «не соединённой».
+    """
+    member = await service.membership(user_id)
+    if member is None:
+        return None
+    if not member["user_b"] and not int(member["awaiting_return"] or 0):
+        return None
+    return member
+
+
+async def _write_pair(user_id: int, service: DuoPlanService):
+    """Пара для записи: (pair|None, frozen). frozen отличает заморозку
+    awaiting_return от «нет пары», чтобы не показывать неверный текст."""
+    member = await service.membership(user_id)
+    if member is None:
+        return None, False
+    if not member["user_b"] and not int(member["awaiting_return"] or 0):
+        return None, False
+    if int(member["awaiting_return"] or 0):
+        return member, True
+    return member, False
+
+
 async def _guard_pair(call: CallbackQuery, service: DuoPlanService):
-    pair = await service.pair_for(call.from_user.id)
+    pair = await _viewable_pair(call.from_user.id, service)
     if pair is None:
         await safe_edit(call.message, "Сначала соедините пространство.", START_MENU)
         return None
@@ -601,7 +731,25 @@ async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
     rows = rows[:PAGE_SIZE]
 
     if rows:
-        items = [(f"{format_day(row['day'])} · ", row["title"], "") for row in rows]
+        # Косметический паритет с приложением: время, повтор и приватность.
+        items = []
+        for row in rows:
+            keys = set(row.keys())
+            prefix = f"{format_day(row['day'])}"
+            if keys.issuperset({'time', 'monthly', 'recurs', 'is_private'}):
+                if row["time"]:
+                    prefix += f" {row['time']}"
+                marks = []
+                if int(row["monthly"] or 0) == 1:
+                    marks.append("ежемесячная")
+                elif int(row["recurs"] or 0) == 1:
+                    marks.append("ежегодная")
+                if int(row["is_private"] or 0) == 1:
+                    marks.append("личное")
+            else:
+                marks = []
+            suffix = f" · {', '.join(marks)}" if marks else ""
+            items.append((f"{prefix} · ", row["title"], suffix))
         text = "Значимые даты\n\n" + render_list_items(items)
     elif page == 0:
         text = "Значимые даты\n\nДобавьте дату, которую хочется беречь."
@@ -734,7 +882,7 @@ async def paginate(call: CallbackQuery, service: DuoPlanService) -> None:
 
 @router.callback_query(F.data == "menu:game")
 async def game(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
+    pair = await _viewable_pair(call.from_user.id, service)
     if not pair:
         await call.answer("Сначала соедините пространство")
         return
@@ -752,7 +900,10 @@ async def game(call: CallbackQuery, service: DuoPlanService) -> None:
 
 @router.callback_query(F.data == "game:done")
 async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
+    pair, frozen = await _write_pair(call.from_user.id, service)
+    if frozen:
+        await call.answer(FROZEN_TEXT)
+        return
     if not pair:
         await call.answer("Сначала соедините пространство")
         return
@@ -777,7 +928,10 @@ async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
 
 @router.callback_query(F.data.startswith("task:done:"))
 async def task_done(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
+    pair, frozen = await _write_pair(call.from_user.id, service)
+    if frozen:
+        await call.answer(FROZEN_TEXT)
+        return
     if not pair:
         await call.answer("Сначала соедините пространство")
         return
@@ -793,7 +947,10 @@ async def task_done(call: CallbackQuery, service: DuoPlanService) -> None:
 
 @router.callback_query(F.data.startswith("wish:done:"))
 async def wish_done(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.pair_for(call.from_user.id)
+    pair, frozen = await _write_pair(call.from_user.id, service)
+    if frozen:
+        await call.answer(FROZEN_TEXT)
+        return
     if not pair:
         await call.answer("Сначала соедините пространство")
         return
@@ -812,7 +969,11 @@ async def wish_done(call: CallbackQuery, service: DuoPlanService) -> None:
 
 @router.callback_query(F.data.in_({"add:tasks", "add:dates", "add:memories", "add:wishes"}))
 async def add_item(call: CallbackQuery, service: DuoPlanService, state: FSMContext) -> None:
-    if not await service.pair_for(call.from_user.id):
+    pair, frozen = await _write_pair(call.from_user.id, service)
+    if frozen:
+        await call.answer(FROZEN_TEXT)
+        return
+    if not pair:
         await call.answer("Сначала соедините пространство")
         return
     prompts = {
@@ -829,7 +990,11 @@ async def add_item(call: CallbackQuery, service: DuoPlanService, state: FSMConte
 
 @router.message(StateFilter(Form.task), F.text)
 async def receive_task(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair = await service.pair_for(message.from_user.id)
+    pair, frozen = await _write_pair(message.from_user.id, service)
+    if frozen:
+        await state.clear()
+        await message.answer(FROZEN_TEXT)
+        return
     if not pair:
         await state.clear()
         await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
@@ -883,19 +1048,22 @@ def parse_date_input(raw: str, current_year: int) -> str:
 
 @router.message(StateFilter(Form.date_day), F.text)
 async def receive_date_day(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    pair, frozen = await _write_pair(message.from_user.id, service)
+    if frozen:
+        await state.clear()
+        await message.answer(FROZEN_TEXT)
+        return
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return
     raw = (message.text or "").strip()
     try:
-        day = parse_date_input(raw, service.local_today().year)
+        day = parse_date_input(raw, service.today_for(pair["timezone"]).year)
     except ValueError:
         await message.answer(
             "Не распознал дату. Попробуйте ещё раз: ДД.ММ или ДД.ММ.ГГГГ (год — четырьмя цифрами)."
         )
-        return
-
-    pair = await service.pair_for(message.from_user.id)
-    if not pair:
-        await state.clear()
-        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
         return
     # 29 февраля существует не в каждом году: календарь и уведомления
     # пропускают эту дату в невисокосный год — предупреждаем сразу, а не
@@ -916,13 +1084,26 @@ async def receive_date_recurs(message: Message, service: DuoPlanService, state: 
         await message.answer("Ответьте «да» или «нет» (или /cancel).")
         return
     data = await state.get_data()
-    pair = await service.pair_for(message.from_user.id)
+    pair, frozen = await _write_pair(message.from_user.id, service)
+    if frozen:
+        await state.clear()
+        await message.answer(FROZEN_TEXT)
+        return
     if not pair:
         await state.clear()
         await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
         return
+    title = data.get("title", "")
+    day = data.get("day", "")
+    if not title or not day:
+        # FSM-данные истекли (TTL) или потерялись: без них add_date отклонит
+        # ввод, а состояние останется — пользователь зациклится до /cancel.
+        # Честно перезапускаем сценарий.
+        await state.clear()
+        await message.answer("Ввод даты прерван — начните заново кнопкой «Добавить дату».", reply_markup=section_menu("dates"))
+        return
     try:
-        await service.add_date(pair["id"], data.get("title", ""), data.get("day", ""), 1 if answer else 0)
+        await service.add_date(pair["id"], title, day, 1 if answer else 0, message.from_user.id)
     except ValidationError as exc:
         await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
         return
@@ -933,7 +1114,11 @@ async def receive_date_recurs(message: Message, service: DuoPlanService, state: 
 
 @router.message(StateFilter(Form.memory), F.text)
 async def receive_memory(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair = await service.pair_for(message.from_user.id)
+    pair, frozen = await _write_pair(message.from_user.id, service)
+    if frozen:
+        await state.clear()
+        await message.answer(FROZEN_TEXT)
+        return
     if not pair:
         await state.clear()
         await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
@@ -949,7 +1134,11 @@ async def receive_memory(message: Message, service: DuoPlanService, state: FSMCo
 
 @router.message(StateFilter(Form.wish), F.text)
 async def receive_wish(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair = await service.pair_for(message.from_user.id)
+    pair, frozen = await _write_pair(message.from_user.id, service)
+    if frozen:
+        await state.clear()
+        await message.answer(FROZEN_TEXT)
+        return
     if not pair:
         await state.clear()
         await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)

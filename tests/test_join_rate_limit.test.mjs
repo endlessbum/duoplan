@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, strictEqual, throws, rejects } from "node:assert/strict";
+import { deepStrictEqual, equal, ok, strictEqual, throws, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,6 +32,12 @@ function extractBraced(declaration) {
   throw new Error(`незакрытая функция: ${declaration}`);
 }
 
+function extractLine(prefix) {
+  const start = source.indexOf(prefix);
+  if (start === -1) throw new Error(`${prefix} не найдено`);
+  return source.slice(start, source.indexOf("\n", start));
+}
+
 const nowDecl = source.match(/const now = \(\) => [^;]+;/)?.[0];
 if (!nowDecl) throw new Error("now() не найдена");
 const cleanDecl = source.match(/const clean = [^;]+;/)?.[0];
@@ -46,6 +52,7 @@ const preamble = [
   limitDecl,
   windowDecl,
   extractBraced("class HttpError"),
+  extractLine("const positiveId = "),
   extractBraced("async function checkJoinAttempts"),
   extractBraced("async function recordJoinFailure"),
   extractBraced("async function membership"),
@@ -55,10 +62,21 @@ const preamble = [
 const load = new Function(`${preamble}\nreturn { joinPair, checkJoinAttempts, recordJoinFailure, HttpError, now };`);
 const { joinPair, checkJoinAttempts, recordJoinFailure, HttpError, now } = load();
 
+// Вариант с открытым openApp: нужен тесту возврата партнёра (уведомление
+// оставшемуся). escapeHtml внутри joinPair — рабочий из worker.js не нужен,
+// достаточно простой подмены.
+function loadWithNotifier(openApp) {
+  return new Function(
+    "openApp",
+    "escapeHtml",
+    `${preamble}\nreturn { joinPair, HttpError, now };`
+  )(openApp, (value) => String(value ?? ""));
+}
+
 // Мок D1 с маршрутизацией по SQL: rate_limits — счётчик в Map,
 // membership и pairs — настраиваемые таблицы. Успешный batch (вход)
 // заполняет membership, как реальная БД после INSERT в pair_members.
-function makeJoinMockDb({ membershipRow = null, pairs = {} } = {}) {
+function makeJoinMockDb({ membershipRow = null, pairs = {}, closedCodes = [] } = {}) {
   const counters = new Map();
   const batches = [];
   let member = membershipRow;
@@ -74,6 +92,7 @@ function makeJoinMockDb({ membershipRow = null, pairs = {} } = {}) {
               }
               if (sql.includes("FROM pair_members pm JOIN pairs p")) return member;
               if (sql.startsWith("SELECT * FROM pairs WHERE code=?")) return pairs[params[0]] || null;
+              if (sql.includes("FROM closed_codes")) return closedCodes.includes(params[0]) ? { code: params[0] } : null;
               throw new Error("неожиданный first(): " + sql);
             },
             async run() {
@@ -146,6 +165,58 @@ test("участник пары не тратит лимит: ALREADY_PAIRED д�
   await rejects(() => joinPair({ DB: db }, USER, VALID_CODE),
     (error) => error.status === 409 && error.code === "ALREADY_PAIRED");
   strictEqual(counters.size, 0);
+});
+
+test("код закрытого пространства — 410 PAIR_CLOSED, лимит перебора пишется", async () => {
+  // Последний участник вышел: пары нет, но код остался в closed_codes.
+  // Отличать «закрыто» от «не найдено» безопасно: неудача в обоих случаях
+  // пополняет лимит, перебор не узнаёт, какие коды существовали.
+  const { db, counters } = makeJoinMockDb({ closedCodes: [VALID_CODE] });
+  await rejects(() => joinPair({ DB: db }, USER, VALID_CODE),
+    (error) => error.status === 410 && error.code === "PAIR_CLOSED" && /закрыто/i.test(error.message));
+  strictEqual(counters.size, 1, "неудача с закрытым кодом тратит лимит");
+});
+
+test("возвращение того же аккаунта уведомляет оставшегося и снимает резерв", async () => {
+  const calls = [];
+  const openApp = async (env, chatId, requestUrl, text) => { calls.push({ chatId, text }); };
+  const { joinPair: joinWithNotify } = loadWithNotifier(openApp);
+  const { db, batches } = makeJoinMockDb({
+    pairs: { [VALID_CODE]: { ...OPEN_PAIR, awaiting_return: 1, last_partner: 42 } }
+  });
+  const joined = await joinWithNotify({ DB: db }, USER, VALID_CODE);
+  strictEqual(joined.id, 7, "вход состоялся");
+  equal(calls.length, 1, "уведомление оставшемуся отправлено");
+  equal(calls[0].chatId, 1, "получатель — владелец пары (user_a)");
+  ok(calls[0].text.includes("Атакующий"), "в тексте имя вернувшегося");
+  ok(calls[0].text.includes("снова в вашем пространстве"));
+  ok(batches.flat().some((sql) => sql.includes("awaiting_return=0")), "флаг ожидания снят");
+  ok(batches.flat().some((sql) => sql.includes("last_partner=0")), "резерв кода снят");
+});
+
+test("чужой аккаунт по коду вышедшего партнёра не входит (PAIR_RESERVED)", async () => {
+  // Код «уехал» в пересланные сообщения: пространство ждёт tg_id 42, а не 43.
+  const { db } = makeJoinMockDb({
+    pairs: { [VALID_CODE]: { ...OPEN_PAIR, awaiting_return: 1, last_partner: 42 } }
+  });
+  const other = { tg_id: 43, display_name: "Другой" };
+  await rejects(() => joinPair({ DB: db }, other, VALID_CODE),
+    (error) => error.status === 403 && error.code === "PAIR_RESERVED" && /прежнего партнёра/.test(error.message));
+});
+
+test("свежая пара без вышедшего партнёра открыта любому по коду", async () => {
+  const { db } = makeJoinMockDb({ pairs: { [VALID_CODE]: OPEN_PAIR } });
+  const joined = await joinPair({ DB: db }, { tg_id: 43, display_name: "Другой" }, VALID_CODE);
+  strictEqual(joined.id, 7, "awaiting_return=0 — резерв не проверяется");
+});
+
+test("первый вход по коду (партнёр не выходил) уведомления не шлёт", async () => {
+  const calls = [];
+  const openApp = async (env, chatId, requestUrl, text) => { calls.push({ chatId, text }); };
+  const { joinPair: joinWithNotify } = loadWithNotifier(openApp);
+  const { db } = makeJoinMockDb({ pairs: { [VALID_CODE]: OPEN_PAIR } });
+  await joinWithNotify({ DB: db }, USER, VALID_CODE);
+  equal(calls.length, 0, "без awaiting_return=1 уведомления нет");
 });
 
 test("recordJoinFailure пишет окно с expires_at, checkJoinAttempts читает тот же ключ", async () => {

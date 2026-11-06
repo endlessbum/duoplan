@@ -104,9 +104,9 @@ test("гонка isolate: duplicate column name обрабатывается п�
   // users.timezone упал с "duplicate column name" и был отработан,
   // pairs.timezone добавлен этим isolate штатно.
   deepStrictEqual(log.alters.sort(), [
-    "accent_color", "created_by", "custom_name", "dates_digest_enabled", "dates_digest_time", "day",
+    "accent_color", "awaiting_return", "created_by", "custom_name", "dates_digest_enabled", "dates_digest_time", "day",
     "details", "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
-    "is_private", "kind", "monthly", "monthly", "partner_custom_name", "photo_url",
+    "is_private", "kind", "last_partner", "monthly", "monthly", "partner_custom_name", "photo_url",
     "rating_checked_at", "rating_source", "show_avatar",
     "time", "time", "timezone", "timezone", "title", "url", "yearly"
   ]);
@@ -120,7 +120,9 @@ test("чистый проход миграции без гонки записы�
   // (wishes) + url (wishes) + timezone (users, pairs) + expires_at (rate_limits)
   // + 5 настроек (users) + photo_url/show_avatar/partner_custom_name/custom_name (users)
   // + rating_source/rating_checked_at/details (movies, items 88/89/92)
-  deepStrictEqual(log.alters.length, 29);
+  // + awaiting_return/last_partner (pairs, заморозка контента после выхода
+  // партнёра и резерв кода за ушедшим)
+  deepStrictEqual(log.alters.length, 31);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

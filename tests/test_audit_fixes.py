@@ -76,7 +76,7 @@ class FakeJoinService:
         self.result = result
         self.tried: list[str] = []
 
-    async def join_pair(self, user_id: int, name: str, code: str) -> bool:
+    async def join_pair(self, user_id: int, name: str, code: str, notify=None) -> bool:
         self.tried.append(code)
         return self.result
 
@@ -295,6 +295,24 @@ def test_task_deadline_garbage_is_infinity():
     assert task_deadline(None, TZ) == inf
     assert task_deadline({"day": None, "monthly": 0, "yearly": 0}, TZ) == inf
     assert task_deadline({"day": "мусор", "monthly": 0, "yearly": 0}, TZ) == inf
+
+
+def test_dst_gap_local_time_is_shifted_like_worker():
+    """Паритет worker.makeDateInTimeZone: локальное время в «дыру» перевода
+    часов (не существует) сдвигается на реальное ближайшее, а не молча
+    получает случайный offset от zoneinfo."""
+    from duoplan.services import _zoned_local
+
+    berlin = ZoneInfo("Europe/Berlin")
+    # 2026-03-29 02:30 в Берлине не существует: часы прыгают 02:00 → 03:00.
+    result = _zoned_local(2026, 3, 29, 2, 30, berlin)
+    back = result.astimezone(ZoneInfo("UTC")).astimezone(berlin)
+    # Сдвиг как у worker: naive-as-UTC минус offset до перехода (CET +1)
+    # → 01:30 UTC → 03:30 CEST.
+    assert (back.hour, back.minute, back.day) == (3, 30, 29)
+    # Обычное существующее время не сдвигается.
+    normal = _zoned_local(2026, 3, 28, 2, 30, berlin)
+    assert (normal.hour, normal.minute) == (2, 30)
 
 
 def test_utf16_limit_matches_worker_validation():
