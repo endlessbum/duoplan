@@ -1140,10 +1140,10 @@
     const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
     // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
     // На главной каждая группа — не больше трёх карточек, остальное за «Все →».
-    // День рождения показываем своей карточкой: без года и с «через N дней».
-    const previewDates = dates.slice(0, 3)
-      .map((item) => (item.kind === "birthday" ? birthdayItem(item) : dateItem(item)))
-      .join("");
+    // Дни рождения и значимые даты — разные списки с разными заголовками,
+    // поэтому смешанный срез заменён двумя фильтрами.
+    const previewDates = dates.filter((item) => item.kind !== "birthday").slice(0, 3).map(dateItem).join("");
+    const previewBirthdays = dates.filter((item) => item.kind === "birthday").slice(0, 3).map(birthdayItem).join("");
     const latestMemory = memories[0];
 
     return `
@@ -1173,6 +1173,13 @@
         <h3>Значимые даты</h3>
       </div>
       ${previewDates}
+      ` : ""}
+
+      ${previewBirthdays ? `
+      <div class="section-head-inline">
+        <h3>Дни рождения</h3>
+      </div>
+      ${previewBirthdays}
       ` : ""}
 
       ${latestMemory ? `
@@ -2274,6 +2281,7 @@
         <div class="place-actions">
           <button class="primary full" type="button" data-action="place-visited" data-id="${place.id}">Посетили</button>
           <button class="secondary full" type="button" data-action="random-place">Следующее</button>
+          <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
           ${place.url ? `<button class="secondary full" type="button" data-action="open-url" data-url="${esc(place.url)}">Открыть ссылку</button>` : ""}
         </div>
       </article>
@@ -2332,7 +2340,6 @@
         : open.length ? "" : "Все места уже посещены — добавьте новое";
       html += `
         <section class="card place-hero">
-          <p class="eyebrow">Рандом</p>
           <h3>Не знаете, куда пойти?</h3>
           <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите</p>
           ${hint ? `<p class="place-count">${hint}</p>` : ""}
@@ -2653,6 +2660,7 @@
         <div class="place-actions">
           <button class="primary full" type="button" data-action="movie-watched" data-id="${movie.id}">Просмотрели</button>
           <button class="secondary full" type="button" data-action="random-movie">Следующее</button>
+          <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
         </div>
       </article>
     `;
@@ -2832,7 +2840,6 @@
         : "";
       html += `
         <section class="card place-hero movie-hero">
-          <p class="eyebrow">Рандом</p>
           <h3>Не знаете, что посмотреть?</h3>
           <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров</p>
           ${hint ? `<p class="place-count">${hint}</p>` : ""}
@@ -4017,6 +4024,12 @@
         } finally {
           btn.disabled = false;
         }
+      } else if (action === "close-pick") {
+        // «Закрыть» на карточке результата рандома: выбор сбрасывается,
+        // hero-информер и кнопка «Рандом» остаются как были.
+        placePickId = null;
+        moviePickId = null;
+        render();
       } else if (action === "random-place") {
         if (!drawPlace()) {
           // Пустой список и «всё посещено» — разные ситуации: предлагать
