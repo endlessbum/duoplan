@@ -68,15 +68,19 @@ const load = new Function(
     extractBraced("function plural"),
     extractBraced("function countdownFromDiff"),
     extractBraced("function countdownChip"),
+    extractBraced("function calendarKeyFromDate"),
+    extractBraced("function formatBirthday"),
+    extractBraced("function nextDaysLabel"),
     extractBraced("function taskItem"),
     extractBraced("function dateItem"),
+    extractBraced("function birthdayItem"),
     extractBraced("function wishItem"),
     extractBraced("function completedTaskItem"),
     extractBraced("function completedWishItem"),
-    "return { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay };"
+    "return { taskItem, dateItem, birthdayItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay };"
   ].join("\n")
 );
-const { taskItem, dateItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay } = load();
+const { taskItem, dateItem, birthdayItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay } = load();
 
 test("у плана с датой карточка-кнопка календаря, у плана без даты — нет", () => {
   const withDay = taskItem({ id: 1, title: "План", day: "2026-11-05", time: "19:30", is_private: 0 });
@@ -100,6 +104,23 @@ test("у значимой даты вся карточка ведёт в кал�
     ok(html.includes(`data-day="${item.day}"`), item.title);
     ok(!html.includes("link-btn"), "кнопка «В календаре» вернулась: " + item.title);
   }
+});
+
+test("карточка дня рождения ведёт в календарь на ближайшее наступление", () => {
+  // Регрессия 2026-11-06: у birthdayCard тапа не было вовсе — карточка
+  // «Дней рождения» и главная не открывали календарь.
+  const html = birthdayItem({ id: 11, title: "Маша", day: "1990-05-14", time: "", is_private: 0 });
+  ok(html.includes('data-action="show-in-calendar"'), "тап не повешен");
+  ok(html.includes('role="button"'), "карточка без роли кнопки");
+  ok(!html.includes("link-btn"), "кнопка «В календаре» вернулась");
+  // Сырой день рождения увёл бы календарь в 1990 год: проекция — месяц/день
+  // в текущем или следующем году.
+  const day = html.match(/data-day="(\d{4}-\d{2}-\d{2})"/)?.[1];
+  ok(day, "data-day без валидной даты");
+  const currentYear = new Date().getFullYear();
+  const year = Number(day.slice(0, 4));
+  ok((year === currentYear || year === currentYear + 1) && day.slice(5) === "05-14",
+    `проекция неверна: ${day}`);
 });
 
 test("карточки рендерятся без ошибок на богатом наборе состояний", () => {

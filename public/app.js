@@ -2192,8 +2192,14 @@
 
   function birthdayItem(item) {
     const label = nextDaysLabel(item);
+    // Тап по карточке открывает календарь на ближайшем наступлении: день
+    // рождения ежегодный, сырой item.day увёл бы календарь в год рождения.
+    // recurs не читаем: сервер ставит его всем дням рождения, но карточка не
+    // должна зависеть от того, доехал ли флаг до старых записей.
+    const next = nextOccurrence({ ...item, recurs: 1 });
+    const targetDay = (next && calendarKeyFromDate(next)) || item.day || "";
     return `
-      <article class="card birthday-card">
+      <article class="card birthday-card" role="button" tabindex="0" data-action="show-in-calendar" data-day="${esc(targetDay)}" aria-label="Показать в календаре">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
@@ -3952,7 +3958,7 @@
           fields: `
             <label class="field"><span>Кто именинник?</span><input name="title" maxlength="120" required placeholder="Маша"></label>
             <label class="field"><span>Дата рождения</span><input type="date" name="day" required></label>
-            <label class="field"><span><input type="checkbox" name="is_private"> Личное — партнёр не увидит и не получит напоминание</span></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личное — видите только вы</span></label>
           `,
           onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), kind: "birthday", is_private: fd.get("is_private") === "on" } })
         });
@@ -4288,7 +4294,7 @@
               fields: `
                 <label class="field"><span>Кто именинник?</span><input name="title" maxlength="120" required value="${esc(item.title || "")}"></label>
                 <label class="field"><span>Дата рождения</span><input type="date" name="day" required value="${esc(item.day || "")}"></label>
-                ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личное — партнёр не увидит и не получит напоминание</span></label>` : ""}
+                ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личное — видите только вы</span></label>` : ""}
               `,
               onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined } })
             });
@@ -4626,45 +4632,6 @@
     if (document.visibilityState === "visible") refreshState();
   });
 
-  // Pull-to-refresh: протяжка страницы вниз от самого верха. Жест только
-  // читаем — нативный скролл/overscroll не блокируем; по завершении
-  // достаточной протяжки запускаем обычный refreshState (он сам отсеивает
-  // параллельные тики, фокус в поле ввода и drag капли).
-  const pullIndicator = document.getElementById("pull-refresh");
-  const PULL_THRESHOLD = 64;
-  let pullStartY = null;
-  let pullDistance = 0;
-  function hidePullIndicator() {
-    pullIndicator?.setAttribute("hidden", "");
-    pullDistance = 0;
-  }
-  document.addEventListener("touchstart", (e) => {
-    pullStartY = null;
-    pullDistance = 0;
-    if (dialog?.open || window.scrollY > 0 || e.touches.length !== 1) return;
-    pullStartY = e.touches[0].clientY;
-  }, { passive: true });
-  document.addEventListener("touchmove", (e) => {
-    if (pullStartY === null || !pullIndicator) return;
-    const dy = e.touches[0].clientY - pullStartY;
-    // Ушли выше верха или начали скроллить контент — жест отменяем.
-    if (dy <= 0 || window.scrollY > 0) { pullStartY = null; hidePullIndicator(); return; }
-    pullDistance = dy;
-    pullIndicator.removeAttribute("hidden");
-    pullIndicator.style.transform = `translateX(-50%) translateY(${Math.min(dy * 0.35, 40)}px)`;
-    pullIndicator.style.opacity = String(0.35 + Math.min(dy / PULL_THRESHOLD, 1) * 0.65);
-  }, { passive: true });
-  document.addEventListener("touchend", () => {
-    if (pullStartY === null) return;
-    const shouldRefresh = pullDistance >= PULL_THRESHOLD;
-    pullStartY = null;
-    hidePullIndicator();
-    if (shouldRefresh) refreshState();
-  }, { passive: true });
-  document.addEventListener("touchcancel", () => {
-    pullStartY = null;
-    hidePullIndicator();
-  }, { passive: true });
 
   if (tg?.BackButton?.onClick) tg.BackButton.onClick(goBack);
 

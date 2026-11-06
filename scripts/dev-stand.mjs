@@ -119,7 +119,10 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === "GET" && ["/app", "/app.html", "/app/"].includes(url.pathname)) {
-      const up = await fetchUpstream(req, null);
+      // HTML читаем строкой — сжатие от wrangler запрещаем, иначе в html
+      // попадут сырые gzip-байты.
+      const plainReq = { ...req, headers: { ...req.headers, "accept-encoding": "identity" } };
+      const up = await fetchUpstream(plainReq, null);
       let html = "";
       up.on("data", (d) => (html += d));
       up.on("end", () => {
