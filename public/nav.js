@@ -150,18 +150,24 @@
     return ratio > MAJORITY + MAJORITY_EPSILON;
   }
 
-  // Строго больше половины ПОЛНОЙ площади капли — иначе оставляем последнюю
-  // однозначную цель (в том числе при 50/50 и когда капля «размазана»).
-  function pickTarget(ratios, fallback) {
-    let bestTab = fallback;
-    let best = 0;
+  // Вкладка с максимальной долей накрытия: общая точка analyze()/pickTarget().
+  function bestCoverage(ratios) {
+    let bestTab = null;
+    let bestRatio = 0;
     for (const [tab, ratio] of Object.entries(ratios || {})) {
-      if (ratio > best) {
-        best = ratio;
+      if (ratio > bestRatio) {
+        bestRatio = ratio;
         bestTab = tab;
       }
     }
-    return isMajority(best) ? bestTab : fallback;
+    return { tab: bestTab, ratio: bestRatio };
+  }
+
+  // Строго больше половины ПОЛНОЙ площади капли — иначе оставляем последнюю
+  // однозначную цель (в том числе при 50/50 и когда капля «размазана»).
+  function pickTarget(ratios, fallback) {
+    const { tab, ratio } = bestCoverage(ratios);
+    return isMajority(ratio) ? tab : fallback;
   }
 
   // ------------------------------------------------------------------
@@ -531,14 +537,7 @@
     function analyze() {
       const polygon = samplePolygon();
       const { total, ratios } = coverageRatios(polygon, state.rects);
-      let bestTab = null;
-      let bestRatio = 0;
-      for (const [tab, ratio] of Object.entries(ratios)) {
-        if (ratio > bestRatio) {
-          bestRatio = ratio;
-          bestTab = tab;
-        }
-      }
+      const { tab: bestTab, ratio: bestRatio } = bestCoverage(ratios);
       return { ratios, dropletArea: total, bestTab, bestRatio };
     }
 
@@ -575,44 +574,48 @@
       state.lastTs = 0;
     }
 
+    // Капля под пальцем догоняет точку захвата с инерцией; скорость для
+    // деформации берём у пальца, а не у сглаженной позиции.
+    function stepDrag(dt, timestamp) {
+      const k = 1 - Math.exp(-dt / FOLLOW_TAU);
+      state.pos += (state.drag.desired - state.pos) * k;
+      if (timestamp - state.drag.lastT > 40) {
+        state.drag.speed *= Math.exp(-dt / 0.08);
+      }
+      state.vel = state.drag.speed;
+      return true;
+    }
+
+    // Пружинный возврат к цели: зона прилунения гасит скорость плавно,
+    // остановка с заметным доездом запускает вертикальное приседание.
+    function stepSpring(dt) {
+      const accel = -SPRING_K * (state.pos - state.target) - SPRING_C * state.vel;
+      state.vel += accel * dt;
+      state.pos += state.vel * dt;
+      // Зона прилунения: подъезжая к цели, капля вязнет — скорость гаснет
+      // плавно, а не обрубается пружиной.
+      const zone = state.geom ? state.geom.slotW * ARRIVAL_ZONE : 24;
+      if (Math.abs(state.pos - state.target) < zone) {
+        state.vel *= Math.exp(-ARRIVAL_DAMP * dt);
+      }
+      const speedBefore = Math.abs(state.vel);
+      if (Math.abs(state.pos - state.target) < 0.4 && Math.abs(state.vel) < 6) {
+        state.pos = state.target;
+        state.vel = 0;
+        // Прилунение: заметный доезд сплющивает каплю по вертикали.
+        if (speedBefore > IMPACT_MIN_SPEED) {
+          state.impact = Math.min(1, speedBefore / 420);
+        }
+        return false;
+      }
+      return true;
+    }
+
     function tick(timestamp) {
       state.raf = 0;
       const dt = state.lastTs ? Math.min((timestamp - state.lastTs) / 1000, 1 / 30) : 1 / 60;
       state.lastTs = timestamp;
-      let moving = false;
-
-      if (state.drag) {
-        // Под пальцем капля догоняет точку захвата с небольшой инерцией.
-        const k = 1 - Math.exp(-dt / FOLLOW_TAU);
-        state.pos += (state.drag.desired - state.pos) * k;
-        // Скорость для деформации берём у пальца, а не у сглаженной позиции.
-        if (timestamp - state.drag.lastT > 40) {
-          state.drag.speed *= Math.exp(-dt / 0.08);
-        }
-        state.vel = state.drag.speed;
-        moving = true;
-      } else {
-        const accel = -SPRING_K * (state.pos - state.target) - SPRING_C * state.vel;
-        state.vel += accel * dt;
-        state.pos += state.vel * dt;
-        // Зона прилунения: подъезжая к цели, капля вязнет — скорость гаснет
-        // плавно, а не обрубается пружиной.
-        const zone = state.geom ? state.geom.slotW * ARRIVAL_ZONE : 24;
-        if (Math.abs(state.pos - state.target) < zone) {
-          state.vel *= Math.exp(-ARRIVAL_DAMP * dt);
-        }
-        const speedBefore = Math.abs(state.vel);
-        if (Math.abs(state.pos - state.target) < 0.4 && Math.abs(state.vel) < 6) {
-          state.pos = state.target;
-          state.vel = 0;
-          // Прилунение: заметный доезд сплющивает каплю по вертикали.
-          if (speedBefore > IMPACT_MIN_SPEED) {
-            state.impact = Math.min(1, speedBefore / 420);
-          }
-        } else {
-          moving = true;
-        }
-      }
+      let moving = state.drag ? stepDrag(dt, timestamp) : stepSpring(dt);
       // Форма отпускается после прилунения.
       if (state.impact > 0) {
         state.impact = Math.max(0, state.impact - IMPACT_DECAY * dt);

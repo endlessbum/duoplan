@@ -1638,13 +1638,18 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
     const fields = [];
     const values = [];
-    if (type === "tasks") {
+    const field = (name, value) => {
+      fields.push(`${name}=?`);
+      values.push(value);
+    };
+    // Каждая ветка — сборка пар «колонка=значение» для частичного PATCH.
+    // Общие строки (body/taskRow/dateRow/savingRow/user) — из замыкания.
+    function patchTaskFields() {
       // PATCH частичный: в UPDATE попадают только присланные поля. Раньше
       // title/day/time писались всегда, и запрос с одним title стирал дату и
       // время плана (схема при этом объявляет все поля необязательными).
       if (body.title !== undefined) {
-        fields.push("title=?");
-        values.push(textField(body, "title", 180, "План"));
+        field("title", textField(body, "title", 180, "План"));
       }
       // День и время — одна пара: неприсланное значение берём из строки,
       // чтобы перенос даты не сбрасывал время (и наоборот).
@@ -1652,8 +1657,8 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         const day = body.day !== undefined ? optionalDay(body.day) : optionalDay(taskRow?.day);
         const time = body.time !== undefined ? optionalTime(body.time) : optionalTime(taskRow?.time);
         if (time && !day) throw new HttpError(400, "Выберите дату, чтобы указать время", "INVALID_DATE");
-        fields.push("day=?", "time=?");
-        values.push(day, time);
+        field("day", day);
+        field("time", time);
       }
       if (body.monthly !== undefined || body.yearly !== undefined) {
         // Частичный PATCH: неприсланный флаг берём из строки — иначе запрос
@@ -1673,18 +1678,17 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         else if (finalMonthly) finalYearly = 0;
         const effectiveDay = body.day !== undefined ? optionalDay(body.day) : taskRow?.day;
         if ((finalMonthly || finalYearly) && !effectiveDay) throw new HttpError(400, "Для повтора выберите дату", "INVALID_DATE");
-        fields.push("monthly=?", "yearly=?");
-        values.push(finalMonthly, finalYearly);
+        field("monthly", finalMonthly);
+        field("yearly", finalYearly);
       }
       // Приватность переключает только автор (зеркально личным датам).
       if (body.is_private !== undefined && Number(taskRow?.created_by) === Number(user.tg_id)) {
-        fields.push("is_private=?");
-        values.push(body.is_private === true || body.is_private === 1 ? 1 : 0);
+        field("is_private", body.is_private === true || body.is_private === 1 ? 1 : 0);
       }
-    } else if (type === "dates") {
+    }
+    function patchDateFields() {
       if (body.title !== undefined) {
-        fields.push("title=?");
-        values.push(textField(body, "title", 120, "Название"));
+        field("title", textField(body, "title", 120, "Название"));
       }
       // День/время/повтор — одна группа: правка названия не должна сбрасывать
       // расписание, а перенос даты — терять время и флаги повтора.
@@ -1703,13 +1707,13 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         const recurs = isBirthday ? 1 : (monthly === 1 ? 0 : (body.recurs !== undefined
           ? (body.recurs === false || body.recurs === 0 ? 0 : 1)
           : (Number(dateRow?.recurs) === 1 ? 1 : 0)));
-        fields.push("day=?", "recurs=?", "time=?");
-        values.push(dayValue, recurs, optionalTime(body.time !== undefined ? body.time : dateRow?.time));
+        field("day", dayValue);
+        field("recurs", recurs);
+        field("time", optionalTime(body.time !== undefined ? body.time : dateRow?.time));
         // У дня рождения monthly пишется всегда (как и раньше); у обычной даты —
         // только когда поле пришло, иначе PATCH названия трогал бы флаг.
         if (isBirthday || body.monthly !== undefined) {
-          fields.push("monthly=?");
-          values.push(monthly);
+          field("monthly", monthly);
         }
       }
       // Приватность переключает только автор: партнёр, пометивший чужую общую
@@ -1718,58 +1722,52 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       // с никем — дата исчезла бы у обоих. Чужие/старые флаги молча игнорируем:
       // диалог партнёра чекбокс не показывает, поле приходит только от автора.
       if (body.is_private !== undefined && Number(dateRow?.created_by) === Number(user.tg_id)) {
-        fields.push("is_private=?");
-        values.push(body.is_private === true || body.is_private === 1 ? 1 : 0);
+        field("is_private", body.is_private === true || body.is_private === 1 ? 1 : 0);
       }
-    } else if (type === "memories") {
+    }
+    function patchMemoryFields() {
       // PATCH частичный, как у plans/dates: правим только присланные поля,
       // иначе запрос с одним title стирал бы текст воспоминания.
       if (body.body !== undefined) {
-        fields.push("body=?");
-        values.push(textField(body, "body", 2000, "Воспоминание"));
+        field("body", textField(body, "body", 2000, "Воспоминание"));
       }
       if (body.title !== undefined) {
-        fields.push("title=?");
-        values.push(clean(body.title) || null);
+        field("title", clean(body.title) || null);
       }
-    } else if (type === "quotes") {
+    }
+    function patchQuoteFields() {
       if (body.body !== undefined) {
-        fields.push("body=?");
-        values.push(textField(body, "body", 600, "Цитата"));
+        field("body", textField(body, "body", 600, "Цитата"));
       }
       // Источник необязателен: пустая строка очищает подпись.
       if (body.source !== undefined) {
-        fields.push("source=?");
-        values.push(clean(body.source) || null);
+        field("source", clean(body.source) || null);
       }
-    } else if (type === "places") {
+    }
+    function patchPlaceFields() {
       if (body.title !== undefined) {
-        fields.push("title=?");
-        values.push(textField(body, "title", 120, "Место"));
+        field("title", textField(body, "title", 120, "Место"));
       }
       if (body.note !== undefined) {
-        fields.push("note=?");
-        values.push(clean(body.note) || null);
+        field("note", clean(body.note) || null);
       }
       // Ссылка валидируется до UPDATE: иначе при битом URL название уже
       // изменилось бы, а клиент получил бы 400.
       if (body.url !== undefined) {
-        fields.push("url=?");
-        values.push(wishUrl(body.url) || null);
+        field("url", wishUrl(body.url) || null);
       }
-    } else if (type === "trips") {
+    }
+    function patchTripFields() {
       if (body.title !== undefined) {
-        fields.push("title=?");
-        values.push(textField(body, "title", 120, "Поездка"));
+        field("title", textField(body, "title", 120, "Поездка"));
       }
       if (body.note !== undefined) {
-        fields.push("note=?");
-        values.push(clean(body.note) || null);
+        field("note", clean(body.note) || null);
       }
-    } else if (type === "savings") {
+    }
+    function patchSavingFields() {
       if (body.title !== undefined) {
-        fields.push("title=?");
-        values.push(textField(body, "title", 120, "Название копилки"));
+        field("title", textField(body, "title", 120, "Название копилки"));
       }
       // Цель правится вместе с названием; собранное не трогаем — оно
       // складывается только из пополнений. Цель ниже собранного отклоняем:
@@ -1779,23 +1777,29 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         if (Number(savingRow?.collected) > target) {
           throw new HttpError(400, "Цель не может быть меньше уже собранной суммы", "TARGET_BELOW_COLLECTED");
         }
-        fields.push("target=?");
-        values.push(target);
+        field("target", target);
       }
-    } else {
+    }
+    function patchWishFields() {
       if (body.body !== undefined) {
-        fields.push("body=?");
-        values.push(textField(body, "body", 300, "Желание"));
+        field("body", textField(body, "body", 300, "Желание"));
       }
       // Ссылка валидируется ДО UPDATE и пишется тем же запросом: иначе при
       // некорректном URL текст уже был бы изменён, а клиент получил бы 400.
       // Пустая строка пишется как NULL — как у places, чтобы не плодить
       // в базе смесь '' и NULL для «ссылки нет».
       if (body.url !== undefined) {
-        fields.push("url=?");
-        values.push(wishUrl(body.url) || null);
+        field("url", wishUrl(body.url) || null);
       }
     }
+    if (type === "tasks") patchTaskFields();
+    else if (type === "dates") patchDateFields();
+    else if (type === "memories") patchMemoryFields();
+    else if (type === "quotes") patchQuoteFields();
+    else if (type === "places") patchPlaceFields();
+    else if (type === "trips") patchTripFields();
+    else if (type === "savings") patchSavingFields();
+    else patchWishFields();
     // Пустой PATCH (ни одного известного поля) — не ошибка, но и «успех»
     // на несуществующей записи выдавать нельзя: 404, как у DELETE и у
     // UPDATE с changes=0. Строки tasks/dates/savings уже прочитаны guard'ами,
@@ -1813,47 +1817,47 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
     return true;
   }
-  if (method === "POST" && action) {
-    let result;
-    if (type === "tasks") {
+  // POST-действия над записью. Обработчик возвращает либо true (ветка
+  // завершилась сама), либо результат D1 — тогда проверяем changes() на
+  // «запись уже в этом состоянии».
+  // Посещение/поездка — совместные отметки с одинаковой механикой:
+  // ставит любой партнёр, *_by нужен только для подписи «кто отметил».
+  const visitToggle = async () => {
+    if (!["visited", "unvisited"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+    return action === "visited"
+      ? env.DB.prepare(`UPDATE ${table} SET visited=1,visited_at=?,visited_by=? WHERE id=? AND pair_id=? AND visited=0`)
+        .bind(now(), user.tg_id, id, pair.id).run()
+      : env.DB.prepare(`UPDATE ${table} SET visited=0,visited_at=NULL,visited_by=NULL WHERE id=? AND pair_id=? AND visited=1`)
+        .bind(id, pair.id).run();
+  };
+  const ACTION_HANDLERS = {
+    async tasks() {
       if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
-      result = action === "done"
-        ? await env.DB.prepare("UPDATE tasks SET status='done',completed_by=?,completed_at=? WHERE id=? AND pair_id=? AND status='open'")
+      return action === "done"
+        ? env.DB.prepare("UPDATE tasks SET status='done',completed_by=?,completed_at=? WHERE id=? AND pair_id=? AND status='open'")
           .bind(user.tg_id, now(), id, pair.id).run()
-        : await env.DB.prepare("UPDATE tasks SET status='open',completed_by=NULL,completed_at=NULL WHERE id=? AND pair_id=? AND status='done'")
+        : env.DB.prepare("UPDATE tasks SET status='open',completed_by=NULL,completed_at=NULL WHERE id=? AND pair_id=? AND status='done'")
           .bind(id, pair.id).run();
-    } else if (type === "wishes") {
+    },
+    async wishes() {
       if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
-      result = action === "done"
-        ? await env.DB.prepare("UPDATE wishes SET done=1,done_at=? WHERE id=? AND pair_id=? AND owner_id=? AND done=0").bind(now(), id, pair.id, user.tg_id).run()
-        : await env.DB.prepare("UPDATE wishes SET done=0,done_at=NULL WHERE id=? AND pair_id=? AND owner_id=? AND done=1").bind(id, pair.id, user.tg_id).run();
-    } else if (type === "places") {
-      // Посещение — совместное: отметку ставит любой партнёр, visited_by
-      // нужен только для подписи «кто отметил».
-      if (!["visited", "unvisited"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
-      result = action === "visited"
-        ? await env.DB.prepare("UPDATE places SET visited=1,visited_at=?,visited_by=? WHERE id=? AND pair_id=? AND visited=0")
-          .bind(now(), user.tg_id, id, pair.id).run()
-        : await env.DB.prepare("UPDATE places SET visited=0,visited_at=NULL,visited_by=NULL WHERE id=? AND pair_id=? AND visited=1")
-          .bind(id, pair.id).run();
-    } else if (type === "trips") {
-      // «Съездили» — совместная отметка, механика та же, что у мест.
-      if (!["visited", "unvisited"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
-      result = action === "visited"
-        ? await env.DB.prepare("UPDATE trips SET visited=1,visited_at=?,visited_by=? WHERE id=? AND pair_id=? AND visited=0")
-          .bind(now(), user.tg_id, id, pair.id).run()
-        : await env.DB.prepare("UPDATE trips SET visited=0,visited_at=NULL,visited_by=NULL WHERE id=? AND pair_id=? AND visited=1")
-          .bind(id, pair.id).run();
-    } else if (type === "goal_items") {
+      return action === "done"
+        ? env.DB.prepare("UPDATE wishes SET done=1,done_at=? WHERE id=? AND pair_id=? AND owner_id=? AND done=0").bind(now(), id, pair.id, user.tg_id).run()
+        : env.DB.prepare("UPDATE wishes SET done=0,done_at=NULL WHERE id=? AND pair_id=? AND owner_id=? AND done=1").bind(id, pair.id, user.tg_id).run();
+    },
+    places: visitToggle,
+    trips: visitToggle,
+    async goal_items() {
       // Отметка пункта цели — совместная, как посещение места: отметившего
       // запоминаем для подписи, на доступность она не влияет.
       if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
-      result = action === "done"
-        ? await env.DB.prepare("UPDATE goal_items SET done=1,done_at=?,done_by=? WHERE id=? AND pair_id=? AND done=0")
+      return action === "done"
+        ? env.DB.prepare("UPDATE goal_items SET done=1,done_at=?,done_by=? WHERE id=? AND pair_id=? AND done=0")
           .bind(now(), user.tg_id, id, pair.id).run()
-        : await env.DB.prepare("UPDATE goal_items SET done=0,done_at=NULL,done_by=NULL WHERE id=? AND pair_id=? AND done=1")
+        : env.DB.prepare("UPDATE goal_items SET done=0,done_at=NULL,done_by=NULL WHERE id=? AND pair_id=? AND done=1")
           .bind(id, pair.id).run();
-    } else if (type === "movies") {
+    },
+    async movies() {
       // Просмотр — совместный, как посещение места: отметку ставит любой
       // партнёр, watched_by нужен только для подписи «кто отметил».
       if (!["watched", "unwatched", "rate"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
@@ -1896,7 +1900,8 @@ async function itemRoute(env, pair, user, method, pathname, body) {
           .bind(id, pair.id)
       ]);
       return true;
-    } else if (type === "savings") {
+    },
+    async savings() {
       // Пополнение: запись в историю и прирост collected — одна транзакция
       // (batch), чтобы сумма никогда не разошлась с историей.
       if (action !== "deposit") throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
@@ -1912,10 +1917,14 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       ]);
       if (!batchResults[0].meta.changes) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
       return true;
-    } else {
-      throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
     }
-    if (!result.meta.changes) throw new HttpError(409, "Запись уже в этом состоянии", "NO_CHANGE");
+  };
+  if (method === "POST" && action) {
+    const handler = ACTION_HANDLERS[type];
+    if (!handler) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+    const outcome = await handler();
+    if (outcome === true) return true;
+    if (!outcome.meta.changes) throw new HttpError(409, "Запись уже в этом состоянии", "NO_CHANGE");
     return true;
   }
   throw new HttpError(405, "Метод не поддерживается", "METHOD_NOT_ALLOWED");
@@ -2013,7 +2022,7 @@ async function api(request, env, url, ctx = null) {
   }
   // Персональные настройки (карточка «Настройки» на вкладке «Наша пара»):
   // время сводок, их вкл/выкл и акцентный цвет. Доступно и без пары.
-  if (request.method === "POST" && url.pathname === "/api/settings") {
+  async function saveSettings() {
     validateSchema(body, {
       accent_color: { type: "string" },
       digest_time: { type: "string" },
@@ -2083,6 +2092,9 @@ async function api(request, env, url, ctx = null) {
     await env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE tg_id=?`).bind(...values).run();
     return json(await state(env, user.tg_id));
   }
+  if (request.method === "POST" && url.pathname === "/api/settings") {
+    return saveSettings();
+  }
 
   const pair = await membership(env, user.tg_id);
   if (!pair) throw new HttpError(409, "Сначала создайте или соедините пространство", "NO_PAIR");
@@ -2150,7 +2162,7 @@ async function api(request, env, url, ctx = null) {
   // Экспорт данных: бот запрашивающему партнёру высылается один TXT-файл —
   // человекочитаемый документ с выбранными разделами. Личные даты партнёра
   // не включаются — фильтры как в UI.
-  if (request.method === "POST" && url.pathname === "/api/data/export") {
+  async function exportData() {
     await rateLimit(env, `export:${user.tg_id}`, 5, 3600);
     const sections = exportSections(body);
     const counts = {};
@@ -2174,6 +2186,9 @@ async function api(request, env, url, ctx = null) {
       throw new HttpError(502, "Telegram не принял файл «Экспорт». Попробуйте позже.", "EXPORT_FAILED");
     }
     return json({ ok: true, counts });
+  }
+  if (request.method === "POST" && url.pathname === "/api/data/export") {
+    return exportData();
   }
   if (request.method === "POST" && url.pathname === "/api/tasks") {
     validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } });
@@ -2251,7 +2266,7 @@ async function api(request, env, url, ctx = null) {
   }
   // Создание цели: название + пункты выполнения (хотя бы один). Пункты без
   // текста не сохраняем — пустая строка в диалоге означает «строку не заполнили».
-  if (request.method === "POST" && url.pathname === "/api/goals") {
+  async function createGoal() {
     validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, is_private: { type: "boolean" } });
     const title = textField(body, "title", 180, "Цель");
     if (!Array.isArray(body.items)) throw new HttpError(400, "Добавьте хотя бы один пункт", "INVALID_ITEMS");
@@ -2290,9 +2305,12 @@ async function api(request, env, url, ctx = null) {
     }
     return json(await state(env, user.tg_id));
   }
+  if (request.method === "POST" && url.pathname === "/api/goals") {
+    return createGoal();
+  }
   // Добавление фильма по выбору из подсказок: карточка собирается из IMDb
   // целиком (название/рейтинг/жанр/длительность), ручной ввод названий нет.
-  if (request.method === "POST" && url.pathname === "/api/movies") {
+  async function addMovie() {
     validateSchema(body, { imdb_id: { type: "string", required: true } });
     const imdbId = clean(body.imdb_id);
     if (!/^tt\d+$/.test(imdbId)) throw new HttpError(400, "Некорректный идентификатор фильма", "INVALID_IMDB_ID");
@@ -2330,6 +2348,9 @@ async function api(request, env, url, ctx = null) {
     }
     return json(await state(env, user.tg_id));
   }
+  if (request.method === "POST" && url.pathname === "/api/movies") {
+    return addMovie();
+  }
   // Новая копилка: личная (видна только автору) или общая (вся пара).
   if (request.method === "POST" && url.pathname === "/api/savings") {
     validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, target: { type: "number", required: true, errorCode: "INVALID_AMOUNT" }, kind: { type: "string", required: true, enum: ["personal", "shared"] } });
@@ -2339,7 +2360,7 @@ async function api(request, env, url, ctx = null) {
       .bind(pair.id, user.tg_id, clean(body.kind), title, target, now()).run();
     return json(await state(env, user.tg_id));
   }
-  if (request.method === "POST" && url.pathname === "/api/daily/done") {
+  async function completeDaily() {
     if (!pair.user_b) throw new HttpError(409, "Ритуал дня откроется, когда партнёр присоединится", "PAIR_INCOMPLETE");
     const daily = await dailyFor(env, pair.id, pair.timezone, user.tg_id);
     if (daily.done) return json({ ...(await state(env, user.tg_id)), awarded: false });
@@ -2382,6 +2403,9 @@ async function api(request, env, url, ctx = null) {
       return json({ ...(await state(env, user.tg_id)), awarded: false });
     }
     return json({ ...(await state(env, user.tg_id)), awarded: true });
+  }
+  if (request.method === "POST" && url.pathname === "/api/daily/done") {
+    return completeDaily();
   }
   if (await itemRoute(env, pair, user, request.method, url.pathname, body)) {
     return json(await state(env, user.tg_id));

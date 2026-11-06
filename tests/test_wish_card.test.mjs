@@ -38,6 +38,8 @@ const loadWishItem = new Function(
     "const EDIT_ICON = " + appSource.match(/const EDIT_ICON = ('.*');/)?.[1] + ";",
     "const DELETE_ICON = " + appSource.match(/const DELETE_ICON = ('.*');/)?.[1] + ";",
     extractBraced(appSource, "function esc"),
+    extractBraced(appSource, "function itemActionButton"),
+    extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function richInline"),
     extractBraced(appSource, "function renderRichText"),
     extractBraced(appSource, "function wishItem"),

@@ -42,8 +42,11 @@ function loadDeck() {
       extractBraced(source, "function placeList()"),
       extractBraced(source, "function unvisitedPlaces()"),
       extractBraced(source, "function visitedPlaces()"),
-      extractBraced(source, "function currentPlacePick()"),
+      extractBraced(source, "function findLivePick("),
       extractBraced(source, "function shuffleIds("),
+      extractBraced(source, "function syncDeckIds("),
+      extractBraced(source, "function shuffledDeck("),
+      extractBraced(source, "function currentPlacePick()"),
       extractBraced(source, "function syncPlaceDeck("),
       extractBraced(source, "function drawPlace("),
       `return {

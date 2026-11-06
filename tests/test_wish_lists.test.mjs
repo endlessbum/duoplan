@@ -46,6 +46,8 @@ function makeLoader() {
       "const archiveCache = { tasks: { items: [], page: -1, hasMore: null, remaining: null }, dates: { items: [], page: -1, hasMore: null, remaining: null }, wishes: { items: [], page: -1, hasMore: null, remaining: null }, memories: { items: [], page: -1, hasMore: null, remaining: null }, done_tasks: { items: [], page: -1, hasMore: null, remaining: null }, done_wishes: { items: [], page: -1, hasMore: null, remaining: null } };",
       "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'] };",
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractLine("  const RICH_TOKENS"),
       extractLine("  const REOPEN_ICON"),
       extractLine("  const DONE_ICON"),

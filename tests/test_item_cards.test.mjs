@@ -46,6 +46,8 @@ const load = new Function(
     extractLine("  const EDIT_ICON"),
     extractLine("  const DELETE_ICON"),
     extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
     extractBraced("function formatDay"),
     extractBraced("function formatTimestamp"),
     extractBraced("function completionMeta"),
@@ -158,6 +160,8 @@ test("quoteAuthorOptions: только пользователи простран
     [
       'const appState = { pair: { name1: "Аня", name2: "Боря" }, user: { tg_id: 1 } };',
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractBraced("function quoteAuthorOptions"),
       "return quoteAuthorOptions;"
     ].join("\n")
@@ -180,6 +184,8 @@ test("quoteAuthorOptions: только пользователи простран
     [
       'const appState = { pair: { name1: "Аня", name2: "" }, user: { tg_id: 1 } };',
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractBraced("function quoteAuthorOptions"),
       "return quoteAuthorOptions;"
     ].join("\n")
@@ -207,6 +213,8 @@ test("movieItem: пилюля рейтинга по порогам оценки"
   const loadMovie = new Function(
     [
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractBraced("function plural"),
       'const pairTimeZone = () => "UTC";',
       extractBraced("function formatTimestamp"),
@@ -263,6 +271,8 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       extractLine("  const EDIT_ICON"),
       extractLine("  const DELETE_ICON"),
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractBraced("function plural"),
       'const pairTimeZone = () => "UTC";',
       extractBraced("function formatTimestamp"),
@@ -313,6 +323,8 @@ test("renderMovieDetails: описание, актёры, все жанры, р�
     [
       extractBraced("const MOVIE_STATUS_RU = "),
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractBraced("function plural"),
       extractBraced("function formatDay"),
       extractBraced("function scorePill"),
@@ -369,6 +381,8 @@ test("memoryItem: заголовок, свёрнутое тело и клик-р
       extractLine("  const EDIT_ICON"),
       extractLine("  const DELETE_ICON"),
       extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
       extractBraced("function formatDay"),
       extractBraced("function richInline"),
       extractBraced("function renderRichText"),

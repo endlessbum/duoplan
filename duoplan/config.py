@@ -74,6 +74,18 @@ def _parse_ttl(raw: str) -> int:
         return DEFAULT_FSM_TTL
 
 
+def _parse_owner_ids(raw: str) -> tuple[int, ...]:
+    """Telegram-ID владельцев через запятую или точку с запятой, без дублей."""
+    ids: list[int] = []
+    for chunk in raw.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if chunk.isdigit():
+            value = int(chunk)
+            if value not in ids:
+                ids.append(value)
+    return tuple(ids)
+
+
 @dataclass(slots=True)
 class Settings:
     bot_token: str
@@ -116,15 +128,6 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         db_path = PROJECT_ROOT / db_path
 
     tz, tz_name = resolve_timezone(get("TZ", DEFAULT_TZ) or DEFAULT_TZ)
-    owner_ids: tuple[int, ...] = ()
-    raw_owner_ids = get("OWNER_IDS")
-    for chunk in raw_owner_ids.replace(";", ",").split(","):
-        chunk = chunk.strip()
-        if not chunk.isdigit():
-            continue
-        owner_id = int(chunk)
-        if owner_id not in owner_ids:
-            owner_ids = (*owner_ids, owner_id)
     return Settings(
         bot_token=get("BOT_TOKEN"),
         admin_chat_id=admin_chat_id,
@@ -134,5 +137,5 @@ def load_settings(env_file: Path | str | None = None) -> Settings:
         tz_name=tz_name,
         tz=tz,
         fsm_ttl=_parse_ttl(get("FSM_TTL", str(DEFAULT_FSM_TTL))),
-        owner_ids=owner_ids,
+        owner_ids=_parse_owner_ids(get("OWNER_IDS")),
     )

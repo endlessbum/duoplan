@@ -67,7 +67,7 @@ test("wishes.url нормализуется к NULL при POST и PATCH", () =>
   const patchStart = worker.indexOf("async function itemRoute(");
   const patchBody = worker.slice(patchStart, worker.indexOf("async function api(", patchStart));
   ok(
-    (patchBody.match(/values\.push\(wishUrl\(body\.url\) \|\| null\)/g) || []).length >= 1,
+    (patchBody.match(/field\("url", wishUrl\(body\.url\) \|\| null\)/g) || []).length >= 1,
     "PATCH wishes должен писать url как NULL, а не ''"
   );
 });

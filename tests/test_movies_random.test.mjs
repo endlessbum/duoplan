@@ -38,8 +38,11 @@ function loadDeck() {
       extractBraced(source, "function movieList()"),
       extractBraced(source, "function openMovies()"),
       extractBraced(source, "function watchedMovies()"),
-      extractBraced(source, "function currentMoviePick()"),
+      extractBraced(source, "function findLivePick("),
       extractBraced(source, "function shuffleIds("),
+      extractBraced(source, "function syncDeckIds("),
+      extractBraced(source, "function shuffledDeck("),
+      extractBraced(source, "function currentMoviePick()"),
       extractBraced(source, "function syncMovieDeck("),
       extractBraced(source, "function drawMovie("),
       `return {

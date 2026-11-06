@@ -38,6 +38,8 @@ const load = new Function(
     "const DELETE_ICON = '';",
     "const PLUS_ICON = '';",
     extractBraced(appSource, "function esc"),
+    extractBraced(appSource, "function itemActionButton"),
+    extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function partnerMissing"),
     extractBraced(appSource, "function formatTimestamp"),
     extractBraced(appSource, "function formatAmount"),

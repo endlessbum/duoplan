@@ -25,8 +25,7 @@ test("ссылка пишется тем же UPDATE, что и текст", () 
     !/UPDATE wishes SET url=\?/.test(source),
     "отдельного UPDATE для ссылки быть не должно — он ломал атомарность"
   );
-  match(itemRoute, /fields\.push\("url=\?"\)/);
-  match(itemRoute, /values\.push\(wishUrl\(body\.url\) \|\| null\)/);
+  match(itemRoute, /field\("url", wishUrl\(body\.url\) \|\| null\)/);
 });
 
 test("валидация ссылки идёт до выполнения UPDATE", () => {

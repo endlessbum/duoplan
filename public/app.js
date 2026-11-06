@@ -1213,11 +1213,11 @@
               </div>
             </div>
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="done-item" data-type="tasks" data-id="${item.id}" aria-label="Выполнено">${DONE_ICON}</button>
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton({ action: "done-item", type: "tasks", id: item.id, label: "Выполнено", icon: DONE_ICON }),
+            itemActionButton({ action: "edit-item", type: "tasks", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "tasks", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -1260,10 +1260,10 @@
               </div>
             </div>
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="dates" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="dates" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "dates", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "dates", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -1283,10 +1283,10 @@
               <span>· ${esc(formatDay(item.day))}</span>
             </div>
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="memories" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="memories" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "memories", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "memories", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -1294,11 +1294,11 @@
 
   function wishItem(item, editable = true) {
     const canEdit = editable && item.owner_id === appState.user.tg_id;
-    const actions = canEdit ? `
-      <button class="icon-btn" type="button" data-action="done-item" data-type="wishes" data-id="${item.id}" aria-label="Исполнено">${DONE_ICON}</button>
-      <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-      <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-    ` : "";
+    const actions = canEdit ? [
+      itemActionButton({ action: "done-item", type: "wishes", id: item.id, label: "Исполнено", icon: DONE_ICON }),
+      itemActionButton({ action: "edit-item", type: "wishes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+      itemActionButton({ action: "delete-item", type: "wishes", id: item.id, label: "Удалить", icon: DELETE_ICON })
+    ].join("\n      ") : "";
     // Кнопка «Ссылка» — действие карточки: по центру, с симметричным отступом
     // (как «Сохранить пояс» и прочие card-action), а не прижата к заголовку.
     return `
@@ -1307,7 +1307,7 @@
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.body)}</h3>
           </div>
-          ${actions ? `<div class="item-actions">${actions}</div>` : ""}
+          ${itemActions(actions)}
         </div>
         ${item.url ? `<button class="secondary full card-action" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
       </article>
@@ -1338,6 +1338,22 @@
   const DONE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
   const EDIT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4.5L19.5 9a2.1 2.1 0 0 0-3-3L5.5 17 4 20Z"/><path d="M13.5 7.5 16.5 10.5"/></svg>';
   const DELETE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></svg>';
+
+  // Кнопки действий карточек собираются из одного шаблона: иконка, data-action
+  // и подпись. data-type/data-id/data-url добавляются только когда заданы —
+  // у deposit-saving и open-url своих атрибутов нет.
+  function itemActionButton(opts) {
+    const { action, type, id, url, label, icon } = opts;
+    const typeAttr = type !== undefined ? ` data-type="${esc(type)}"` : "";
+    const idAttr = id !== undefined ? ` data-id="${esc(id)}"` : "";
+    const urlAttr = url !== undefined ? ` data-url="${esc(url)}"` : "";
+    return `<button class="icon-btn" type="button" data-action="${action}"${typeAttr}${idAttr}${urlAttr} aria-label="${esc(label)}">${icon}</button>`;
+  }
+
+  // Обёртка кнопок справа от карточки; пустой набор — без пустого div.
+  function itemActions(buttons) {
+    return buttons ? `<div class="item-actions">${buttons}</div>` : "";
+  }
 
   // Монохромный огонёк серии: тонкий штрих в стиле иконок приложения вместо
   // эмодзи 🔥, выбивавшегося из монохромных пилюль статистики.
@@ -1377,11 +1393,11 @@
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.title)}</h3>
             ${completionMeta(created, completed)}
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="reopen-item" data-type="tasks" data-id="${item.id}" aria-label="Вернуть в планы">${REOPEN_ICON}</button>
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="tasks" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="tasks" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton({ action: "reopen-item", type: "tasks", id: item.id, label: "Вернуть в планы", icon: REOPEN_ICON }),
+            itemActionButton({ action: "edit-item", type: "tasks", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "tasks", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -1389,11 +1405,11 @@
 
   function completedWishItem(item, editable = true) {
     const canEdit = editable && item.owner_id === appState.user.tg_id;
-    const actions = canEdit ? `
-      <button class="icon-btn" type="button" data-action="reopen-item" data-type="wishes" data-id="${item.id}" aria-label="Вернуть в желания">${REOPEN_ICON}</button>
-      <button class="icon-btn" type="button" data-action="edit-item" data-type="wishes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-      <button class="icon-btn" type="button" data-action="delete-item" data-type="wishes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-    ` : "";
+    const actions = canEdit ? [
+      itemActionButton({ action: "reopen-item", type: "wishes", id: item.id, label: "Вернуть в желания", icon: REOPEN_ICON }),
+      itemActionButton({ action: "edit-item", type: "wishes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+      itemActionButton({ action: "delete-item", type: "wishes", id: item.id, label: "Удалить", icon: DELETE_ICON })
+    ].join("\n      ") : "";
     const created = formatTimestamp(item.created_at);
     const completed = formatTimestamp(item.done_at);
     return `
@@ -1403,7 +1419,7 @@
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
             ${completionMeta(created, completed)}
           </div>
-          ${actions ? `<div class="item-actions">${actions}</div>` : ""}
+          ${itemActions(actions)}
         </div>
         ${item.url ? `<button class="secondary full card-action" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
       </article>
@@ -1785,7 +1801,7 @@
           <span class="settings-label">Ваше имя</span>
           <input id="display-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(user.display_name || "")}" value="${esc(user.custom_name || "")}">
         </div>
-        <p class="settings-hint">Как ваше имя отображается у вас в приложении — например, если в Telegram у вас ник. Меняется только у вас: партнёр видит имя из Telegram. Пусто — имя из Telegram</p>
+        <p class="settings-hint">Как ваше имя отображается у вас в приложении — например, если в Telegram у вас ник. Меняется только у вас. Пусто — имя из Telegram</p>
         <div class="settings-row">
           <span class="settings-label">Имя партнёра</span>
           <input id="partner-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(partnerName)}" value="${esc(user.partner_custom_name || "")}">
@@ -1964,12 +1980,12 @@
     // У полной копилки цель достигнута: «Пополнить» и «Редактировать» не нужны —
     // остаётся только удаление; история по-прежнему открывается тапом.
     const actions = full
-      ? `<button class="icon-btn" type="button" data-action="delete-item" data-type="savings" data-id="${saving.id}" aria-label="Удалить">${DELETE_ICON}</button>`
-      : `
-        <button class="icon-btn" type="button" data-action="deposit-saving" data-id="${saving.id}" aria-label="Пополнить">${PLUS_ICON}</button>
-        <button class="icon-btn" type="button" data-action="edit-saving" data-id="${saving.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-        <button class="icon-btn" type="button" data-action="delete-item" data-type="savings" data-id="${saving.id}" aria-label="Удалить">${DELETE_ICON}</button>
-      `;
+      ? itemActionButton({ action: "delete-item", type: "savings", id: saving.id, label: "Удалить", icon: DELETE_ICON })
+      : [
+          itemActionButton({ action: "deposit-saving", id: saving.id, label: "Пополнить", icon: PLUS_ICON }),
+          itemActionButton({ action: "edit-saving", id: saving.id, label: "Редактировать", icon: EDIT_ICON }),
+          itemActionButton({ action: "delete-item", type: "savings", id: saving.id, label: "Удалить", icon: DELETE_ICON })
+        ].join("\n        ");
     return `
       <article class="card${full ? " saving-full" : ""}" data-action="open-saving" data-id="${saving.id}"
         role="button" tabindex="0" aria-label="История пополнений копилки «${esc(saving.title)}»">
@@ -1982,7 +1998,7 @@
             </div>
             <div class="saving-progress" aria-hidden="true"><i style="width:${percent}%"></i></div>
           </div>
-          <div class="item-actions">${actions}</div>
+          ${itemActions(actions)}
         </div>
       </article>
     `;
@@ -2141,10 +2157,10 @@
               <span>${esc(formatTimestamp(item.created_at))}</span>
             </div>
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="quotes" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="quotes" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "quotes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "quotes", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -2187,10 +2203,10 @@
               ${label ? `<span class="day-chip">${esc(label)}</span>` : ""}
             </div>
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="dates" data-id="${item.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="dates" data-id="${item.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "dates", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "dates", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -2199,6 +2215,53 @@
   // ------------------------------------------------------------------
   // Места: список «куда сходить» и «Рандом»
   // ------------------------------------------------------------------
+
+  // Общие помощники «случайного выбора» для мест и кино: флаг первого
+  // запуска в localStorage, актуальность выпавшей карточки и колода id.
+  function randomFlagUsed(key) {
+    try { return localStorage.getItem(key) === "1"; } catch { return false; }
+  }
+  function markRandomFlagUsed(key) {
+    try { localStorage.setItem(key, "1"); } catch {}
+  }
+
+  // Текущий выбор, если он ещё актуален: элемент удалён или отмечен
+  // с другого устройства — stale, вызывающий сбрасывает pickId.
+  function findLivePick(list, pickId, isDone) {
+    if (!pickId) return { pick: null, stale: false };
+    const item = list.find((entry) => Number(entry.id) === Number(pickId));
+    if (!item || isDone(item)) return { pick: null, stale: true };
+    return { pick: item, stale: false };
+  }
+
+  function shuffleIds(list) {
+    for (let i = list.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [list[i], list[j]] = [list[j], list[i]];
+    }
+    return list;
+  }
+
+  // Синхронизация колоды с текущим списком: отмеченные и удалённые элементы
+  // выпадают. Новые попадают в начале следующего цикла — дописывать их на ходу
+  // нельзя: уже выпавшее снова считалось бы «новым» и повторялось через раз.
+  function syncDeckIds(deck, pool) {
+    const ids = new Set(pool.map((item) => Number(item.id)));
+    return deck.filter((id) => ids.has(id));
+  }
+
+  // Колода, а не Math.random() на каждый тап: перемешанный список id, тянем
+  // по одному, пока не кончится. Иначе на коротком списке «случайность»
+  // возвращала бы одно и то же через раз.
+  function shuffledDeck(pool, currentPickId) {
+    const deck = shuffleIds(pool.map((item) => Number(item.id)));
+    // Не показывать то же место дважды подряд, если есть из чего выбрать.
+    if (deck.length > 1 && deck[deck.length - 1] === Number(currentPickId)) {
+      [deck[deck.length - 1], deck[0]] = [deck[0], deck[deck.length - 1]];
+    }
+    return deck;
+  }
+
   function placeList() {
     return appState.places || [];
   }
@@ -2216,42 +2279,22 @@
   // как PIN и тема — серверу он не нужен).
   const PLACE_RANDOM_KEY = "duoplan.placeRandomUsed";
   function placeRandomUsed() {
-    try { return localStorage.getItem(PLACE_RANDOM_KEY) === "1"; } catch { return false; }
+    return randomFlagUsed(PLACE_RANDOM_KEY);
   }
   function markPlaceRandomUsed() {
-    try { localStorage.setItem(PLACE_RANDOM_KEY, "1"); } catch {}
+    markRandomFlagUsed(PLACE_RANDOM_KEY);
   }
 
   // Текущий выпавший выбор. Если место успели удалить или отметить с другого
   // устройства, карточка тихо снимается — показывать нечего.
   function currentPlacePick() {
-    if (!placePickId) return null;
-    const place = placeList().find((item) => Number(item.id) === Number(placePickId));
-    if (!place || Number(place.visited) === 1) {
-      placePickId = null;
-      return null;
-    }
-    return place;
+    const { pick, stale } = findLivePick(placeList(), placePickId, (place) => Number(place.visited) === 1);
+    if (stale) placePickId = null;
+    return pick;
   }
 
-  // Колода, а не Math.random() на каждый тап: перемешанный список id, тянем
-  // по одному, пока не кончится. Иначе на коротком списке из трёх мест
-  // «случайность» возвращала бы одно и то же через раз.
-  function shuffleIds(list) {
-    for (let i = list.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [list[i], list[j]] = [list[j], list[i]];
-    }
-    return list;
-  }
-
-  // Синхронизация с текущим списком: посещённые и удалённые места выпадают из
-  // колоды. Новые места попадут в неё в начале следующего цикла — дописывать
-  // их на ходу нельзя: уже выпавшее место снова считалось бы «новым» и
-  // повторялось через раз (репорт 2026-11-04).
   function syncPlaceDeck(pool) {
-    const ids = new Set(pool.map((place) => Number(place.id)));
-    placeDeck = placeDeck.filter((id) => ids.has(id));
+    placeDeck = syncDeckIds(placeDeck, pool);
     return pool;
   }
 
@@ -2262,11 +2305,7 @@
       return null;
     }
     if (!placeDeck.length) {
-      placeDeck = shuffleIds(pool.map((place) => Number(place.id)));
-      // Не показывать то же место дважды подряд, если есть из чего выбрать.
-      if (placeDeck.length > 1 && placeDeck[placeDeck.length - 1] === Number(placePickId)) {
-        [placeDeck[placeDeck.length - 1], placeDeck[0]] = [placeDeck[0], placeDeck[placeDeck.length - 1]];
-      }
+      placeDeck = shuffledDeck(pool, placePickId);
     }
     placePickId = placeDeck.pop();
     return placePickId;
@@ -2298,14 +2337,14 @@
             ${place.note ? `<p class="place-note">${esc(place.note)}</p>` : ""}
             ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(place.visited_at) || "Посещено")}</span></div>` : ""}
           </div>
-          <div class="item-actions">
-            ${visited
-              ? `<button class="icon-btn" type="button" data-action="place-unvisited" data-id="${place.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
-              : `<button class="icon-btn" type="button" data-action="place-visited" data-id="${place.id}" aria-label="Отметить посещённым">${DONE_ICON}</button>`}
-            ${place.url ? `<button class="icon-btn" type="button" data-action="open-url" data-url="${esc(place.url)}" aria-label="Ссылка">${LINK_ICON}</button>` : ""}
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="places" data-id="${place.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="places" data-id="${place.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton(visited
+              ? { action: "place-unvisited", id: place.id, label: "Вернуть в список", icon: REOPEN_ICON }
+              : { action: "place-visited", id: place.id, label: "Отметить посещённым", icon: DONE_ICON }),
+            ...(place.url ? [itemActionButton({ action: "open-url", url: place.url, label: "Ссылка", icon: LINK_ICON })] : []),
+            itemActionButton({ action: "edit-item", type: "places", id: place.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "places", id: place.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -2391,13 +2430,13 @@
             ${trip.note ? `<p class="place-note">${esc(trip.note)}</p>` : ""}
             ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(trip.visited_at) || "Съездили")}</span></div>` : ""}
           </div>
-          <div class="item-actions">
-            ${visited
-              ? `<button class="icon-btn" type="button" data-action="trip-unvisited" data-id="${trip.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
-              : `<button class="icon-btn" type="button" data-action="trip-visited" data-id="${trip.id}" aria-label="Отметить съездили">${DONE_ICON}</button>`}
-            <button class="icon-btn" type="button" data-action="edit-item" data-type="trips" data-id="${trip.id}" aria-label="Редактировать">${EDIT_ICON}</button>
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="trips" data-id="${trip.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton(visited
+              ? { action: "trip-unvisited", id: trip.id, label: "Вернуть в список", icon: REOPEN_ICON }
+              : { action: "trip-visited", id: trip.id, label: "Отметить съездили", icon: DONE_ICON }),
+            itemActionButton({ action: "edit-item", type: "trips", id: trip.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "trips", id: trip.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>
     `;
@@ -2597,13 +2636,13 @@
             ${watched ? `<div class="item-meta">${raofpPill(movie)}</div>` : ""}
             ${watched ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(movie.watched_at) || "Просмотрено")}</span></div>` : ""}
           </div>
-          <div class="item-actions">
-            ${watched
-              ? `<button class="icon-btn" type="button" data-action="movie-unwatched" data-id="${movie.id}" aria-label="Вернуть в список">${REOPEN_ICON}</button>`
-              : `<button class="icon-btn" type="button" data-action="movie-watched" data-id="${movie.id}" aria-label="Просмотрено">${DONE_ICON}</button>`}
-            ${movie.url ? `<button class="icon-btn" type="button" data-action="open-url" data-url="${esc(movie.url)}" aria-label="Ссылка">${LINK_ICON}</button>` : ""}
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="movies" data-id="${movie.id}" aria-label="Удалить">${DELETE_ICON}</button>
-          </div>
+          ${itemActions([
+            itemActionButton(watched
+              ? { action: "movie-unwatched", id: movie.id, label: "Вернуть в список", icon: REOPEN_ICON }
+              : { action: "movie-watched", id: movie.id, label: "Просмотрено", icon: DONE_ICON }),
+            ...(movie.url ? [itemActionButton({ action: "open-url", url: movie.url, label: "Ссылка", icon: LINK_ICON })] : []),
+            itemActionButton({ action: "delete-item", type: "movies", id: movie.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
         ${watched && movie.my_rating == null ? `<button class="secondary full card-action" type="button" data-action="rate-movie" data-id="${movie.id}">Оценить</button>` : ""}
       </article>
@@ -2613,20 +2652,15 @@
   // Текущий выпавший фильм. Удалённый или просмотренный с другого устройства
   // тихо снимается с карточки — показывать нечего.
   function currentMoviePick() {
-    if (!moviePickId) return null;
-    const movie = movieList().find((item) => Number(item.id) === Number(moviePickId));
-    if (!movie || Number(movie.watched) === 1) {
-      moviePickId = null;
-      return null;
-    }
-    return movie;
+    const { pick, stale } = findLivePick(movieList(), moviePickId, (movie) => Number(movie.watched) === 1);
+    if (stale) moviePickId = null;
+    return pick;
   }
 
-  // Колода «Кино» — клон местской: перемешанный список id без повторов,
-  // посещённое/удалённое выпадает, новое попадает в следующем цикле.
+  // Колода «Кино» — та же механика, что у мест: перемешанный список id
+  // без повторов, отмеченное/удалённое выпадает, новое — в следующем цикле.
   function syncMovieDeck(pool) {
-    const ids = new Set(pool.map((movie) => Number(movie.id)));
-    movieDeck = movieDeck.filter((id) => ids.has(id));
+    movieDeck = syncDeckIds(movieDeck, pool);
     return pool;
   }
 
@@ -2637,11 +2671,7 @@
       return null;
     }
     if (!movieDeck.length) {
-      movieDeck = shuffleIds(pool.map((movie) => Number(movie.id)));
-      // Не показывать то же место дважды подряд, если есть из чего выбрать.
-      if (movieDeck.length > 1 && movieDeck[movieDeck.length - 1] === Number(moviePickId)) {
-        [movieDeck[movieDeck.length - 1], movieDeck[0]] = [movieDeck[0], movieDeck[movieDeck.length - 1]];
-      }
+      movieDeck = shuffledDeck(pool, moviePickId);
     }
     moviePickId = movieDeck.pop();
     return moviePickId;
@@ -2670,10 +2700,10 @@
   // на этом устройстве (флаг в localStorage), потом не нужна.
   const MOVIE_RANDOM_KEY = "duoplan.movieRandomUsed";
   function movieRandomUsed() {
-    try { return localStorage.getItem(MOVIE_RANDOM_KEY) === "1"; } catch { return false; }
+    return randomFlagUsed(MOVIE_RANDOM_KEY);
   }
   function markMovieRandomUsed() {
-    try { localStorage.setItem(MOVIE_RANDOM_KEY, "1"); } catch {}
+    markRandomFlagUsed(MOVIE_RANDOM_KEY);
   }
 
   // Тело вкладки «Планы» для вида «Кино». «Рандом» живёт в карточке-информере
@@ -3136,9 +3166,7 @@
             <h3 class="item-title">${esc(goal.title)}</h3>
             ${Number(goal.is_private) === 1 ? `<div class="item-meta"><span class="day-chip is-muted">Личная</span></div>` : ""}
           </div>
-          <div class="item-actions">
-            <button class="icon-btn" type="button" data-action="delete-item" data-type="goals" data-id="${goal.id}" aria-label="Удалить цель">${DELETE_ICON}</button>
-          </div>
+          ${itemActions(itemActionButton({ action: "delete-item", type: "goals", id: goal.id, label: "Удалить цель", icon: DELETE_ICON }))}
         </div>
         <div class="goal-items">
           ${items.map(goalItemRow).join("")}
@@ -3800,7 +3828,7 @@
             <label class="field"><span>Время (необязательно)</span><input type="time" name="time" data-requires-day lang="ru"></label>
             <label class="field"><span><input type="checkbox" name="monthly" data-requires-day data-excludes="yearly"> Повторять каждый месяц</span></label>
             <label class="field"><span><input type="checkbox" name="yearly" data-requires-day data-excludes="monthly"> Повторять каждый год</span></label>
-            <label class="field"><span><input type="checkbox" name="is_private"> Личный — партнёр не увидит, в уведомлениях будет «Скрытый»</span></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личный — видите только вы</span></label>
           `,
           onSubmit: (fd) => request("/api/tasks", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", yearly: fd.get("yearly") === "on", is_private: fd.get("is_private") === "on" } })
         });
@@ -4239,7 +4267,7 @@
               <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" data-requires-day lang="ru"></label>
               <label class="field"><span><input type="checkbox" name="monthly" data-requires-day data-excludes="yearly" ${Number(item.monthly) === 1 ? "checked" : ""}> Повторять каждый месяц</span></label>
               <label class="field"><span><input type="checkbox" name="yearly" data-requires-day data-excludes="monthly" ${Number(item.monthly) !== 1 && item.yearly ? "checked" : ""}> Повторять каждый год</span></label>
-              ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личный — партнёр не увидит, в уведомлениях будет «Скрытый»</span></label>` : ""}
+              ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личный — видите только вы</span></label>` : ""}
             `,
             onSubmit: async (fd) => {
               const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", yearly: fd.get("yearly") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };

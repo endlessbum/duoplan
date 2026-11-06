@@ -41,6 +41,8 @@ const load = new Function(
     "const DONE_ICON = '';",
     "const DELETE_ICON = '';",
     extractBraced(appSource, "function esc"),
+    extractBraced(appSource, "function itemActionButton"),
+    extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function partnerMissing"),
     extractBraced(appSource, "function goalList"),
     extractBraced(appSource, "function goalCompleted"),
@@ -124,7 +126,7 @@ test("worker: маршруты целей на месте", () => {
   ok(workerSource.includes("places|trips|goals|goal_items|movies|savings)"), "goals нет в regex itemRoute");
   ok(workerSource.includes('goals: "goals"') && workerSource.includes('goal_items: "goal_items"'), "goals нет в карте таблиц itemRoute");
   ok(workerSource.includes('if (request.method === "POST" && url.pathname === "/api/goals")'), "нет POST /api/goals");
-  ok(workerSource.includes('} else if (type === "goal_items") {'), "нет ветки done/reopen у пунктов цели");
+  ok(/async goal_items\(\)/.test(workerSource), "нет ветки done/reopen у пунктов цели");
   ok(workerSource.includes("async function ensureGoalVisible"), "нет проверки видимости личных целей");
   ok(workerSource.includes("DELETE FROM goal_items WHERE pair_id=?") && workerSource.includes("DELETE FROM goals WHERE pair_id=?"), "goals нет в каскаде leavePair");
   ok(/INVALID_ITEMS/.test(workerSource), "нет валидации пунктов");
@@ -191,6 +193,6 @@ test("создание цели атомарно: компенсирующее �
     "нет компенсирующего удаления цели при сбое batch пунктов");
   ok(workerSource.includes("goal cleanup failed"), "сбой компенсации не логируется");
   ok(/catch \(error\) \{[\s\S]*?DELETE FROM goals[\s\S]*?throw error;\s*\}/.test(
-    workerSource.slice(workerSource.indexOf('"/api/goals"'), workerSource.indexOf('"/api/movies"'))
+    workerSource.slice(workerSource.indexOf("async function createGoal"), workerSource.indexOf('"/api/movies"'))
   ), "компенсация не перехватывает исходную ошибку");
 });

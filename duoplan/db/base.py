@@ -222,14 +222,18 @@ class Database:
 
     # ------------------------------------------------------------------ чтение
 
+    @asynccontextmanager
+    async def _guard(self) -> AsyncIterator[None]:
+        """Внутри транзакции — без лока (её держит transaction()), иначе под lock."""
+        if self._owns_transaction():
+            yield
+            return
+        async with self._lock:
+            yield
+
     async def query(self, sql: str, params: Sequence[object] = ()) -> list[aiosqlite.Row]:
         conn = self._require_conn()
-        if self._owns_transaction():
-            cur = await conn.execute(sql, params)
-            rows = await cur.fetchall()
-            await cur.close()
-            return list(rows)
-        async with self._lock:
+        async with self._guard():
             cur = await conn.execute(sql, params)
             rows = await cur.fetchall()
             await cur.close()
@@ -248,19 +252,14 @@ class Database:
         проверяют, что условный ``UPDATE`` действительно сработал.
         """
         conn = self._require_conn()
-        if self._owns_transaction():
+        in_transaction = self._owns_transaction()
+        async with self._guard():
             cur = await conn.execute(sql, params)
             row_id = cur.lastrowid or 0
             changes = cur.rowcount if cur.rowcount is not None else 0
             await cur.close()
-            return int(row_id), int(changes)
-
-        async with self._lock:
-            cur = await conn.execute(sql, params)
-            row_id = cur.lastrowid or 0
-            changes = cur.rowcount if cur.rowcount is not None else 0
-            await cur.close()
-            await conn.commit()
+            if not in_transaction:
+                await conn.commit()
         return int(row_id), int(changes)
 
     async def execute(self, sql: str, params: Sequence[object] = ()) -> int:

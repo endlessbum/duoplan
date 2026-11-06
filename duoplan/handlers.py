@@ -343,41 +343,45 @@ def waiting_text(pair, link: str) -> str:
 # ------------------------------------------------------------------ навигация
 
 
-async def send_home(message: Message, service: DuoPlanService, user_id: int) -> None:
+async def _home_content(event, user_id: int, service: DuoPlanService):
+    """Текст и клавиатура главного экрана для send/edit вариантов.
+
+    ``event`` — Message или CallbackQuery: ``bot`` нужен только для
+    ссылки-приглашения, поэтому достаётся лениво в ветке пустой пары.
+    """
     pair = await service.membership(user_id)
     if pair is None:
-        await message.answer(welcome_text(), reply_markup=START_MENU)
-        return
+        return welcome_text(), START_MENU
     if not pair["user_b"]:
         # Владелец пустой пары видит своё пространство и код, а не приветствие.
-        await message.answer(
-            waiting_text(pair, await invite_link(message.bot, pair["code"])),
-            reply_markup=PAIR_MENU,
-        )
-        return
+        return waiting_text(pair, await invite_link(getattr(event, "bot", None), pair["code"])), PAIR_MENU
     user = await service.user(user_id)
     # «Сегодня» — в поясе пары (parity с worker displayStreak/dailyFor),
     # а не в поясе сервера бота.
-    await message.answer(home_text(pair, user, service.today_for(pair["timezone"])), reply_markup=MAIN_MENU)
+    return home_text(pair, user, service.today_for(pair["timezone"])), MAIN_MENU
+
+
+async def send_home(message: Message, service: DuoPlanService, user_id: int) -> None:
+    text, markup = await _home_content(message, user_id, service)
+    await message.answer(text, reply_markup=markup)
 
 
 async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair = await service.membership(call.from_user.id)
-    if pair is None:
-        await safe_edit(call.message, welcome_text(), START_MENU)
-        return
-    if not pair["user_b"]:
-        await safe_edit(
-            call.message,
-            waiting_text(pair, await invite_link(call.bot, pair["code"])),
-            PAIR_MENU,
-        )
-        return
-    user = await service.user(call.from_user.id)
-    await safe_edit(call.message, home_text(pair, user, service.today_for(pair["timezone"])), MAIN_MENU)
+    text, markup = await _home_content(call, call.from_user.id, service)
+    await safe_edit(call.message, text, markup)
 
 
 # -------------------------------------------------------------------- команды
+
+
+async def _try_join(message: Message, service: DuoPlanService, code: str) -> bool:
+    """Войти по коду от имени автора сообщения; ValidationError — ответом."""
+    return await service.join_pair(
+        message.from_user.id,
+        name_of(message.from_user),
+        code,
+        notify=lambda chat_id, text: message.bot.send_message(chat_id, text),
+    )
 
 
 @router.message(CommandStart())
@@ -397,12 +401,7 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
             )
         else:
             try:
-                joined = await service.join_pair(
-                    message.from_user.id,
-                    name_of(message.from_user),
-                    code,
-                    notify=lambda chat_id, text: message.bot.send_message(chat_id, text),
-                )
+                joined = await _try_join(message, service, code)
             except ValidationError as exc:
                 # Резерв кода за ушедшим: чужой аккаунт получает объяснение,
                 # а не общий «код недоступен».
@@ -515,12 +514,7 @@ async def receive_code(message: Message, service: DuoPlanService, state: FSMCont
         )
         return
     try:
-        joined = await service.join_pair(
-            message.from_user.id,
-            name_of(message.from_user),
-            code,
-            notify=lambda chat_id, text: message.bot.send_message(chat_id, text),
-        )
+        joined = await _try_join(message, service, code)
     except ValidationError as exc:
         # Резерв кода за ушедшим: без обёртки исключение уходило бы в on_error,
         # пользователь молчал, а состояние FSM зависало до /cancel.
@@ -681,33 +675,50 @@ async def _guard_pair(call: CallbackQuery, service: DuoPlanService):
     return pair
 
 
-async def tasks_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+async def _list_page(call: CallbackQuery, service: DuoPlanService, fetch):
+    """Общий каркас списка: guard пары, страница ``PAGE_SIZE + 1`` строк,
+    флаг ``has_next``. ``fetch(pair)`` — корутина выборки сервиса."""
     pair = await _guard_pair(call, service)
     if pair is None:
-        return False
-    rows = await service.tasks(
-        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, viewer_id=call.from_user.id
-    )
+        return None, [], False
+    rows = await fetch(pair)
     has_next = len(rows) > PAGE_SIZE
-    rows = rows[:PAGE_SIZE]
+    return pair, rows[:PAGE_SIZE], has_next
 
-    if rows:
-        items = [
-            (f"{index + 1 + page * PAGE_SIZE}. ", row["title"], "")
-            for index, row in enumerate(rows)
-        ]
-        text = "Наши планы\n\n" + render_list_items(items)
-    elif page == 0:
-        text = "Наши планы\n\nПока свободно. Добавьте первый общий шаг."
-    else:
-        text = "Наши планы\n\nНа этой странице планов нет."
 
-    buttons = [
-        [button(f"Готово: {_button_label(row['title'], 22)}", f"task:done:{row['id']}:{page}")]
-        for row in rows
-    ]
-    buttons.append([button("Добавить план", "add:tasks")])
-    pager = pager_row("tasks", page, page > 0, has_next)
+# Заголовок, подсказка пустого первого экрана, существительное для
+# «На этой странице … нет» и подпись кнопки добавления — у каждого раздела свои.
+_SECTION_TEXT = {
+    "tasks": ("Наши планы", "Пока свободно. Добавьте первый общий шаг.", "планов", "Добавить план"),
+    "dates": ("Значимые даты", "Добавьте дату, которую хочется беречь.", "дат", "Добавить дату"),
+    "memories": ("Общий дневник", "Здесь появятся ваши маленькие истории и важные моменты.", "записей", "Добавить запись"),
+    "wishes": ("Вишлист", "Добавьте желание — большое или совсем маленькое.", "желаний", "Добавить желание"),
+}
+
+
+def _section_text(section: str, page: int, body: str | None) -> str:
+    """Текст страницы раздела: тело списка или пустое состояние."""
+    title, hint, noun, add_label = _SECTION_TEXT[section]
+    if body is not None:
+        return f"{title}\n\n{body}"
+    if page == 0:
+        return f"{title}\n\n{hint}"
+    return f"{title}\n\nНа этой странице {noun} нет."
+
+
+async def _render_section(
+    call: CallbackQuery,
+    section: str,
+    page: int,
+    has_next: bool,
+    text: str,
+    action_rows: list[list] | None = None,
+) -> bool:
+    """Клавиатура и отправка страницы раздела: действия над строками,
+    «Добавить», пейджер и возврат в пространство."""
+    buttons = [row for row in (action_rows or []) if row]
+    buttons.append([button(_SECTION_TEXT[section][3], f"add:{section}")])
+    pager = pager_row(section, page, page > 0, has_next)
     if pager:
         buttons.append(pager)
     buttons.append([button("В наше пространство", "menu:home")])
@@ -720,16 +731,37 @@ async def tasks_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
     return True
 
 
-async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
-    pair = await _guard_pair(call, service)
+async def tasks_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+    pair, rows, has_next = await _list_page(call, service, lambda pair: service.tasks(
+        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, viewer_id=call.from_user.id
+    ))
     if pair is None:
         return False
-    rows = await service.dates(
-        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, viewer_id=call.from_user.id
-    )
-    has_next = len(rows) > PAGE_SIZE
-    rows = rows[:PAGE_SIZE]
 
+    body = None
+    if rows:
+        items = [
+            (f"{index + 1 + page * PAGE_SIZE}. ", row["title"], "")
+            for index, row in enumerate(rows)
+        ]
+        body = render_list_items(items)
+    action_rows = [
+        [button(f"Готово: {_button_label(row['title'], 22)}", f"task:done:{row['id']}:{page}")]
+        for row in rows
+    ]
+    return await _render_section(
+        call, "tasks", page, has_next, _section_text("tasks", page, body), action_rows
+    )
+
+
+async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
+    pair, rows, has_next = await _list_page(call, service, lambda pair: service.dates(
+        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, viewer_id=call.from_user.id
+    ))
+    if pair is None:
+        return False
+
+    body = None
     if rows:
         # Косметический паритет с приложением: время, повтор и приватность.
         items = []
@@ -750,99 +782,54 @@ async def dates_view(call: CallbackQuery, service: DuoPlanService, page: int = 0
                 marks = []
             suffix = f" · {', '.join(marks)}" if marks else ""
             items.append((f"{prefix} · ", row["title"], suffix))
-        text = "Значимые даты\n\n" + render_list_items(items)
-    elif page == 0:
-        text = "Значимые даты\n\nДобавьте дату, которую хочется беречь."
-    else:
-        text = "Значимые даты\n\nНа этой странице дат нет."
-
-    buttons = [[button("Добавить дату", "add:dates")]]
-    pager = pager_row("dates", page, page > 0, has_next)
-    if pager:
-        buttons.append(pager)
-    buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(
-        call.message,
-        text,
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-        html=True,
+        body = render_list_items(items)
+    return await _render_section(
+        call, "dates", page, has_next, _section_text("dates", page, body)
     )
-    return True
 
 
 async def memories_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
-    pair = await _guard_pair(call, service)
+    pair, rows, has_next = await _list_page(call, service, lambda pair: service.memories(
+        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE
+    ))
     if pair is None:
         return False
-    rows = await service.memories(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
-    has_next = len(rows) > PAGE_SIZE
-    rows = rows[:PAGE_SIZE]
 
-    header = "Общий дневник"
+    header = _SECTION_TEXT["memories"][0]
     rendered = fit_entries(header, memory_entries(rows))
     has_next = has_next or len(rendered) < len(rows)
+    body = None
     if rendered:
         # Каждая запись — отдельный блок: незакрытый маркер в одной записи
         # не «протекает» в следующую, а цитата в теле остаётся цитатой.
-        text = header + "\n\n" + "\n\n".join(rich_to_html(entry) for entry in rendered)
-    elif page == 0:
-        text = (
-            "Общий дневник\n\n"
-            "Здесь появятся ваши маленькие истории и важные моменты."
-        )
-    else:
-        text = "Общий дневник\n\nНа этой странице записей нет."
-
-    buttons = [[button("Добавить запись", "add:memories")]]
-    pager = pager_row("memories", page, page > 0, has_next)
-    if pager:
-        buttons.append(pager)
-    buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(
-        call.message,
-        text,
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-        html=True,
+        body = "\n\n".join(rich_to_html(entry) for entry in rendered)
+    return await _render_section(
+        call, "memories", page, has_next, _section_text("memories", page, body)
     )
-    return True
 
 
 async def wishes_view(call: CallbackQuery, service: DuoPlanService, page: int = 0) -> bool:
-    pair = await _guard_pair(call, service)
+    pair, rows, has_next = await _list_page(call, service, lambda pair: service.wishes(
+        pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE
+    ))
     if pair is None:
         return False
-    rows = await service.wishes(pair["id"], limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE)
-    has_next = len(rows) > PAGE_SIZE
-    rows = rows[:PAGE_SIZE]
 
+    body = None
     if rows:
         items = [
             ("• ", row["body"], f" — {row['display_name'] or 'Один из вас'}")
             for row in rows
         ]
-        text = "Вишлист\n\n" + render_list_items(items)
-    elif page == 0:
-        text = "Вишлист\n\nДобавьте желание — большое или совсем маленькое."
-    else:
-        text = "Вишлист\n\nНа этой странице желаний нет."
-
-    buttons = [
+        body = render_list_items(items)
+    action_rows = [
         [button(f"Исполнено: {_button_label(row['body'], 19)}", f"wish:done:{row['id']}:{page}")]
         for row in rows
         if row["owner_id"] == call.from_user.id
     ]
-    buttons.append([button("Добавить желание", "add:wishes")])
-    pager = pager_row("wishes", page, page > 0, has_next)
-    if pager:
-        buttons.append(pager)
-    buttons.append([button("В наше пространство", "menu:home")])
-    await safe_edit(
-        call.message,
-        text,
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-        html=True,
+    return await _render_section(
+        call, "wishes", page, has_next, _section_text("wishes", page, body), action_rows
     )
-    return True
 
 
 LIST_VIEWS = {
@@ -926,8 +913,17 @@ async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
 # ------------------------------------------------------------- завершение дел
 
 
-@router.callback_query(F.data.startswith("task:done:"))
-async def task_done(call: CallbackQuery, service: DuoPlanService) -> None:
+async def _done_item(
+    call: CallbackQuery,
+    service: DuoPlanService,
+    prefix: str,
+    complete,
+    view,
+    done_text: str,
+    closed_text: str,
+) -> None:
+    """Общий каркас «отметить исполненным»: guard пары, разбор callback_data,
+    условное завершение и перерисовка списка."""
     pair, frozen = await _write_pair(call.from_user.id, service)
     if frozen:
         await call.answer(FROZEN_TEXT)
@@ -935,36 +931,62 @@ async def task_done(call: CallbackQuery, service: DuoPlanService) -> None:
     if not pair:
         await call.answer("Сначала соедините пространство")
         return
-    parsed = parse_tail(call.data, "task:done:")
+    parsed = parse_tail(call.data, prefix)
     if parsed is None or parsed[0] <= 0:
         await call.answer("Кнопка устарела")
         return
-    task_id, page = parsed
-    done = await service.complete_task(task_id, pair["id"], call.from_user.id)
-    await call.answer("План завершён" if done else "План уже закрыт")
-    await tasks_view(call, service, page)
+    item_id, page = parsed
+    done = await complete(item_id, pair["id"], call.from_user.id)
+    await call.answer(done_text if done else closed_text)
+    await view(call, service, page)
+
+
+@router.callback_query(F.data.startswith("task:done:"))
+async def task_done(call: CallbackQuery, service: DuoPlanService) -> None:
+    await _done_item(
+        call, service, "task:done:",
+        service.complete_task, tasks_view, "План завершён", "План уже закрыт",
+    )
 
 
 @router.callback_query(F.data.startswith("wish:done:"))
 async def wish_done(call: CallbackQuery, service: DuoPlanService) -> None:
-    pair, frozen = await _write_pair(call.from_user.id, service)
-    if frozen:
-        await call.answer(FROZEN_TEXT)
-        return
-    if not pair:
-        await call.answer("Сначала соедините пространство")
-        return
-    parsed = parse_tail(call.data, "wish:done:")
-    if parsed is None or parsed[0] <= 0:
-        await call.answer("Кнопка устарела")
-        return
-    wish_id, page = parsed
-    done = await service.complete_wish(wish_id, pair["id"], call.from_user.id)
-    await call.answer("Желание исполнено" if done else "Желание уже закрыто")
-    await wishes_view(call, service, page)
+    await _done_item(
+        call, service, "wish:done:",
+        service.complete_wish, wishes_view, "Желание исполнено", "Желание уже закрыто",
+    )
 
 
 # ----------------------------------------------------------------------- ввод
+
+
+async def _guarded_write_pair(message: Message, service: DuoPlanService, state: FSMContext):
+    """Пара для записи из текстового ввода.
+
+    При заморозке или отсутствии пары сам очищает FSM и отвечает
+    пользователю — обработчик получает ``None`` и просто выходит.
+    """
+    pair, frozen = await _write_pair(message.from_user.id, service)
+    if frozen:
+        await state.clear()
+        await message.answer(FROZEN_TEXT)
+        return None
+    if not pair:
+        await state.clear()
+        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+        return None
+    return pair
+
+
+async def _submit_item(message: Message, state: FSMContext, submit, success_text: str, section: str) -> None:
+    """Записать элемент раздела: ValidationError — подсказка, успех — экран раздела."""
+    try:
+        await submit()
+    except ValidationError as exc:
+        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
+        return
+    await state.clear()
+    await message.answer(success_text, reply_markup=section_menu(section))
 
 
 @router.callback_query(F.data.in_({"add:tasks", "add:dates", "add:memories", "add:wishes"}))
@@ -990,22 +1012,14 @@ async def add_item(call: CallbackQuery, service: DuoPlanService, state: FSMConte
 
 @router.message(StateFilter(Form.task), F.text)
 async def receive_task(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair, frozen = await _write_pair(message.from_user.id, service)
-    if frozen:
-        await state.clear()
-        await message.answer(FROZEN_TEXT)
+    pair = await _guarded_write_pair(message, service, state)
+    if pair is None:
         return
-    if not pair:
-        await state.clear()
-        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
-        return
-    try:
-        await service.add_task(pair["id"], message.text, message.from_user.id)
-    except ValidationError as exc:
-        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
-        return
-    await state.clear()
-    await message.answer("План добавлен в ваше пространство.", reply_markup=section_menu("tasks"))
+    await _submit_item(
+        message, state,
+        lambda: service.add_task(pair["id"], message.text, message.from_user.id),
+        "План добавлен в ваше пространство.", "tasks",
+    )
 
 
 @router.message(StateFilter(Form.date_title), F.text)
@@ -1048,14 +1062,8 @@ def parse_date_input(raw: str, current_year: int) -> str:
 
 @router.message(StateFilter(Form.date_day), F.text)
 async def receive_date_day(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair, frozen = await _write_pair(message.from_user.id, service)
-    if frozen:
-        await state.clear()
-        await message.answer(FROZEN_TEXT)
-        return
-    if not pair:
-        await state.clear()
-        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+    pair = await _guarded_write_pair(message, service, state)
+    if pair is None:
         return
     raw = (message.text or "").strip()
     try:
@@ -1084,14 +1092,8 @@ async def receive_date_recurs(message: Message, service: DuoPlanService, state: 
         await message.answer("Ответьте «да» или «нет» (или /cancel).")
         return
     data = await state.get_data()
-    pair, frozen = await _write_pair(message.from_user.id, service)
-    if frozen:
-        await state.clear()
-        await message.answer(FROZEN_TEXT)
-        return
-    if not pair:
-        await state.clear()
-        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
+    pair = await _guarded_write_pair(message, service, state)
+    if pair is None:
         return
     title = data.get("title", "")
     day = data.get("day", "")
@@ -1114,42 +1116,26 @@ async def receive_date_recurs(message: Message, service: DuoPlanService, state: 
 
 @router.message(StateFilter(Form.memory), F.text)
 async def receive_memory(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair, frozen = await _write_pair(message.from_user.id, service)
-    if frozen:
-        await state.clear()
-        await message.answer(FROZEN_TEXT)
+    pair = await _guarded_write_pair(message, service, state)
+    if pair is None:
         return
-    if not pair:
-        await state.clear()
-        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
-        return
-    try:
-        await service.add_memory(pair["id"], message.from_user.id, message.text)
-    except ValidationError as exc:
-        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
-        return
-    await state.clear()
-    await message.answer("Момент сохранён в дневнике.", reply_markup=section_menu("memories"))
+    await _submit_item(
+        message, state,
+        lambda: service.add_memory(pair["id"], message.from_user.id, message.text),
+        "Момент сохранён в дневнике.", "memories",
+    )
 
 
 @router.message(StateFilter(Form.wish), F.text)
 async def receive_wish(message: Message, service: DuoPlanService, state: FSMContext) -> None:
-    pair, frozen = await _write_pair(message.from_user.id, service)
-    if frozen:
-        await state.clear()
-        await message.answer(FROZEN_TEXT)
+    pair = await _guarded_write_pair(message, service, state)
+    if pair is None:
         return
-    if not pair:
-        await state.clear()
-        await message.answer("Сначала соедините пространство.", reply_markup=START_MENU)
-        return
-    try:
-        await service.add_wish(pair["id"], message.from_user.id, message.text)
-    except ValidationError as exc:
-        await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
-        return
-    await state.clear()
-    await message.answer("Желание добавлено.", reply_markup=section_menu("wishes"))
+    await _submit_item(
+        message, state,
+        lambda: service.add_wish(pair["id"], message.from_user.id, message.text),
+        "Желание добавлено.", "wishes",
+    )
 
 
 @router.message(ALL_FORMS)

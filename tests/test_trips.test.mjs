@@ -41,6 +41,8 @@ const load = new Function(
     "const EDIT_ICON = '';",
     "const DELETE_ICON = '';",
     extractBraced(appSource, "function esc"),
+    extractBraced(appSource, "function itemActionButton"),
+    extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function partnerMissing"),
     'const pairTimeZone = () => "UTC";',
     extractBraced(appSource, "function formatTimestamp"),
@@ -107,7 +109,7 @@ test("worker: маршруты поездок на месте", () => {
   ok(workerSource.includes("places|trips|goals|goal_items|movies|savings)"), "trips нет в regex itemRoute");
   ok(workerSource.includes('trips: "trips"'), "trips нет в карте таблиц itemRoute");
   ok(workerSource.includes('if (request.method === "POST" && url.pathname === "/api/trips")'), "нет POST /api/trips");
-  ok(workerSource.includes('} else if (type === "trips") {'), "нет ветки visited/unvisited у поездок");
+  ok(workerSource.includes("const visitToggle") && workerSource.includes("trips: visitToggle"), "нет ветки visited/unvisited у поездок");
   ok(/trips: \{ title: \{ type: "string", maxLength: 120 \}, note: \{ type: "string", maxLength: 600 \} \}/.test(workerSource), "trips нет в patchSchemas");
   ok(workerSource.includes("DELETE FROM trips WHERE pair_id=?"), "trips нет в каскаде leavePair");
 });
@@ -134,7 +136,7 @@ test("app: сегмент «Посетить/Путешествие» на вк�
   ok(/else if \(key === "places"\) placesView = value;/.test(appSource), "setSwitchValue не знает places");
   ok(/placesView === "trips" \? renderTripsBody\(\) : renderPlacesBody\(\)/.test(appSource), "нет ветки тела в render()");
   ok(/key === "places" \? \(placesView === "trips" \? renderTripsBody\(\) : renderPlacesBody\(\)\)/.test(appSource), "commitSwitch не перерисовывает тело мест");
-  ok(appSource.includes('data-action="trip-visited"'), "нет действия trip-visited");
+  ok(/action: "trip-visited"/.test(appSource), "нет действия trip-visited");
   ok(/action === "trip-visited" \|\| action === "trip-unvisited"/.test(appSource), "нет обработчика отметки поездки");
   ok(appSource.includes('trips: appState?.trips || []'), "trips нет в findItem");
   ok(appSource.includes('trips: "поездку"'), "trips нет в typeNames удаления");
