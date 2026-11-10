@@ -887,10 +887,11 @@ html.dialog-locked {
   left: 0;
   right: 0;
   bottom: 3px;
-  height: 9px;
   display: flex;
   align-items: center;
   gap: 3px;
+  row-gap: 2px;
+  flex-wrap: wrap;
   justify-content: center;
 }
 
@@ -904,8 +905,21 @@ html.dialog-locked {
 
 .cal-dot.is-task { background: var(--cal-task); }
 .cal-dot.is-date { background: var(--cal-date); }
-/* Личные планы и даты: серый маркер, чтобы не путать с общими. */
+/* Личные записи: серый маркер — задняя точка пары в сетке, одиночная в списке дня. */
 .cal-dot.is-private { background: var(--cal-private); }
+
+/* Пара склеенных точек личного события — как аватары в шапке: цветная
+   точка наезжает на серую и отделяется кольцом цвета фона. */
+.cal-dot-pair {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.cal-dot-pair .cal-dot + .cal-dot {
+  margin-left: -2px;
+  box-shadow: 0 0 0 1px var(--surface);
+}
 
 /* Звезда — вручённое желание. Жёлтая, крупнее точки. */
 .cal-star {
@@ -923,7 +937,7 @@ html.dialog-locked {
   color: var(--muted);
 }
 
-.cal-legend span {
+.cal-legend > span {
   display: inline-flex;
   align-items: center;
   gap: 6px;

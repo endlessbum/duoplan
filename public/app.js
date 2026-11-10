@@ -54,6 +54,8 @@
   let tasksView = "plans";
   // «Предстоящие / Выполненные» — виды сегмента «Цели».
   let goalsView = "open";
+  // «Предстоящие / Выполненные» — виды сегмента «Планы».
+  let plansView = "open";
   // «Посетить / Путешествие» — виды вкладки «Места».
   let placesView = "visit";
   // «В планах / Просмотрено» — виды сегмента «Кино» и их сортировки.
@@ -1675,6 +1677,27 @@
     return rows.sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
   }
 
+  // Точка одного события под числом. Личное (is_private) — пара склеенных
+  // точек, как у аватаров в шапке: серая выглядывает из-за цветной («личное
+  // спрятано»), а цвет передней показывает тип — план, дата или день рождения.
+  function calendarEventDot(item, typeClass) {
+    if (Number(item.is_private) === 1) {
+      return `<span class="cal-dot-pair"><i class="cal-dot is-private"></i><i class="cal-dot ${typeClass}"></i></span>`;
+    }
+    return `<i class="cal-dot ${typeClass}"></i>`;
+  }
+
+  // Все события дня: по точке на каждое, звезда — вручённое желание.
+  function calendarCellDots(bucket) {
+    const dots = [];
+    if (!bucket) return dots;
+    if (bucket.wishes?.length) dots.push(`<span class="cal-star">${STAR_ICON}</span>`);
+    for (const task of bucket.tasks || []) dots.push(calendarEventDot(task, "is-task"));
+    for (const date of bucket.dates || []) dots.push(calendarEventDot(date, "is-date"));
+    for (const birthday of bucket.birthdays || []) dots.push(calendarEventDot(birthday, "is-birthday"));
+    return dots;
+  }
+
   // Календарь показывает все загруженные записи: state + страницы архива.
   // Приватность уже обеспечена сервером — /api/archive фильтрует is_private
   // по текущему пользователю, здесь никаких обходов нет.
@@ -1694,22 +1717,7 @@
 
     const cellsHtml = calendarGrid(year, month).map((cell) => {
       const bucket = index.get(cell.key);
-      const cellTasks = bucket?.tasks || [];
-      const cellDates = bucket?.dates || [];
-      const cellBirthdays = bucket?.birthdays || [];
-      const dots = [];
-      // Звезда — вручённое желание, точки — планы, даты и дни рождения.
-      // Личные записи (is_private) помечаем серым, чтобы не путать с общими.
-      if (bucket?.wishes.length) dots.push(`<span class="cal-star">${STAR_ICON}</span>`);
-      if (cellTasks.length) {
-        dots.push(`<i class="cal-dot ${cellTasks.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-task"}"></i>`);
-      }
-      if (cellDates.length) {
-        dots.push(`<i class="cal-dot ${cellDates.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-date"}"></i>`);
-      }
-      if (cellBirthdays.length) {
-        dots.push(`<i class="cal-dot ${cellBirthdays.every((item) => Number(item.is_private) === 1) ? "is-private" : "is-birthday"}"></i>`);
-      }
+      const dots = calendarCellDots(bucket);
       const classes = ["cal-day"];
       if (!cell.inMonth) classes.push("is-outside");
       // «Сегодня» подсвечиваем только в своём месяце: в сетке соседнего
@@ -1764,7 +1772,7 @@
           <span><i class="cal-dot is-date" aria-hidden="true"></i> Значимые даты</span>
           <span><i class="cal-dot is-birthday" aria-hidden="true"></i> Дни рождения</span>
           <span><span class="cal-star" aria-hidden="true">${STAR_ICON}</span> Желания</span>
-          <span><i class="cal-dot is-private" aria-hidden="true"></i> Личное</span>
+          <span><span class="cal-dot-pair" aria-hidden="true"><i class="cal-dot is-private"></i><i class="cal-dot is-task"></i></span> Личное</span>
         </div>
         ${details}
       </section>
@@ -2085,9 +2093,28 @@
   // Планы: вид «Планы» сегмента вкладки «Планы»
   // ------------------------------------------------------------------
   function renderTasksBody() {
-    const openTasks = mergedArchive("tasks", sortByTaskDeadline(appState.tasks || []));
-    const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
+    return `
+      ${renderSegment("plans", plansView, [["open", "Предстоящие"], ["done", "Выполненные"]], "is-sub")}
+      <div id="plans-body">${renderPlansList()}</div>
+    `;
+  }
+
+  // Список сегмента «Планы»: ветки те же, что до появления переключателя,
+  // «Завершённые» переехали из хвоста списка в отдельный вид.
+  function renderPlansList() {
     const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
+    const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
+    if (plansView === "done") {
+      if (!doneTasks.length) {
+        return `<section class="card"><h3>Пока ничего не завершено</h3><p>Отметьте план выполненным — он переедет сюда</p></section>`;
+      }
+      return `
+        <div class="section-head-inline"><h3>Завершённые · ${doneTasks.length}</h3></div>
+        ${doneTasks.map(completedTaskItem).join("")}
+        ${archiveMoreHtml("done_tasks", (appState.completedTasks || []).length)}
+      `;
+    }
+    const openTasks = mergedArchive("tasks", sortByTaskDeadline(appState.tasks || []));
     let html = "";
     if (openTasks.length) {
       html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
@@ -2105,11 +2132,6 @@
     } else {
       html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
     }
-    if (doneTasks.length) {
-      html += `<div class="section-head-inline"><h3>Завершённые · ${doneTasks.length}</h3></div>`;
-      html += doneTasks.map(completedTaskItem).join("");
-    }
-    html += archiveMoreHtml("done_tasks", (appState.completedTasks || []).length);
     html += archiveMoreHtml("tasks", (appState.tasks || []).length);
     return html;
   }
@@ -3049,6 +3071,7 @@
     mountWishSwitch();
     mountMovieSwitch();
     mountGoalsSwitch();
+    mountPlansSwitch();
     mountPinFields();
   }
 
@@ -3065,6 +3088,7 @@
   let wishSwitchPrevView = null;
   let movieSwitch = null;    // внутренний «В планах / Просмотрено» в кино
   let goalsSwitch = null;    // внутренний «Предстоящие / Выполненные» в целях
+  let plansSwitch = null;    // внутренний «Предстоящие / Выполненные» в планах
 
   function switchValue(key) {
     if (key === "pair") return pairView;
@@ -3073,6 +3097,7 @@
     if (key === "tasks") return tasksView;
     if (key === "places") return placesView;
     if (key === "goals") return goalsView;
+    if (key === "plans") return plansView;
     return wishView;
   }
 
@@ -3083,6 +3108,7 @@
     else if (key === "tasks") tasksView = value;
     else if (key === "places") placesView = value;
     else if (key === "goals") goalsView = value;
+    else if (key === "plans") plansView = value;
     else wishView = value;
   }
 
@@ -3091,6 +3117,7 @@
     if (wishSwitch) { wishSwitch.destroy(); wishSwitch = null; }
     if (movieSwitch) { movieSwitch.destroy(); movieSwitch = null; }
     if (goalsSwitch) { goalsSwitch.destroy(); goalsSwitch = null; }
+    if (plansSwitch) { plansSwitch.destroy(); plansSwitch = null; }
   }
 
   function createSwitch(container, key) {
@@ -3269,6 +3296,26 @@
     goalsSwitch = instance;
   }
 
+  function mountPlansSwitch() {
+    if (plansSwitch) {
+      plansSwitch.destroy();
+      plansSwitch = null;
+    }
+    const container = document.querySelector('.seg-switch[data-switch="plans"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitSwitch("plans", value, instance)
+    });
+    if (!instance) return;
+    instance.setActive(plansView, false);
+    plansSwitch = instance;
+  }
+
   // Перерисовка только списка: бар и его капля остаются на месте.
   function refreshMoviesList() {
     const body = document.getElementById("movies-body");
@@ -3315,6 +3362,17 @@
       });
       return;
     }
+    if (key === "plans") {
+      // Внутренний бар планов: меняем только список, капля и бар остаются живыми.
+      const list = document.getElementById("plans-body");
+      if (!list) { render(); return; }
+      list.innerHTML = renderPlansList();
+      instance?.setActive(value, true);
+      document.querySelectorAll('.seg-switch[data-switch="plans"] .seg-switch-btn').forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
     if (key === "wishes") {
       const lists = document.getElementById("wish-lists");
       if (!lists) { render(); return; }
@@ -3344,6 +3402,11 @@
       goalsSwitch.destroy();
       goalsSwitch = null;
     }
+    // И в теле «Планы» — тот же внутренний бар.
+    if (key === "tasks" && plansSwitch) {
+      plansSwitch.destroy();
+      plansSwitch = null;
+    }
     body.innerHTML = key === "pair" ? renderPairView()
       : key === "dates" ? renderDatesBody()
         : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : tasksView === "goals" ? renderGoalsBody() : renderTasksBody())
@@ -3358,6 +3421,7 @@
     if (key === "pair") mountWishSwitch();
     if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
     if (key === "tasks" && tasksView === "goals") mountGoalsSwitch();
+    if (key === "tasks" && tasksView === "plans") mountPlansSwitch();
   }
 
   // ------------------------------------------------------------------
@@ -3850,6 +3914,10 @@
           commitSwitch("goals", value, goalsSwitch);
           return;
         }
+        if (key === "plans") {
+          commitSwitch("plans", value, plansSwitch);
+          return;
+        }
         if (!["pair", "dates", "memories", "tasks", "places"].includes(key)) return;
         commitSwitch(key, value, segSwitch);
       } else if (action === "movie-sort-dir") {
@@ -3924,7 +3992,7 @@
               </div>
             </div>
             <button class="goal-add" type="button" data-action="add-goal-step" aria-label="Добавить пункт">+</button>
-            <label class="field"><span><input type="checkbox" name="is_private"> Личная — партнёр не увидит эту цель</span></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личная — видите только вы</span></label>
           `,
           onSubmit: (fd) => request("/api/goals", {
             method: "POST",
@@ -3944,7 +4012,7 @@
             <label class="field"><span>Время (необязательно)</span><input type="time" name="time" lang="ru"></label>
             <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs"> Повторять каждый месяц</span></label>
             <label class="field"><span><input type="checkbox" name="recurs" checked data-excludes="monthly"> Повторять каждый год</span></label>
-            <label class="field"><span><input type="checkbox" name="is_private"> Личная — партнёр не увидит эту дату</span></label>
+            <label class="field"><span><input type="checkbox" name="is_private"> Личная — видите только вы</span></label>
           `,
           onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: fd.get("is_private") === "on" } })
         });
@@ -4013,7 +4081,7 @@
             <label class="field"><span>Сколько нужно накопить</span><input name="target" type="number" inputmode="numeric" min="1" step="1" required placeholder="30000"></label>
             <label class="field"><span>Тип копилки</span><select name="kind">
               <option value="shared">Общая — пополняете вдвоём</option>
-              <option value="personal">Личная — видна только вам</option>
+              <option value="personal">Личная — видите только вы</option>
             </select></label>
           `,
           onSubmit: (fd) => request("/api/savings", {
@@ -4383,7 +4451,7 @@
               <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" lang="ru"></label>
               <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs" ${Number(item.monthly) === 1 ? "checked" : ""}> Повторять каждый месяц</span></label>
               <label class="field"><span><input type="checkbox" name="recurs" data-excludes="monthly" ${Number(item.monthly) === 1 ? "" : item.recurs ? "checked" : ""}> Повторять каждый год</span></label>
-              ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личная — партнёр не увидит эту дату</span></label>` : ""}
+              ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личная — видите только вы</span></label>` : ""}
             `,
             onSubmit: (fd) => request(`/api/dates/${id}`, { method: "PATCH", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined } })
           });

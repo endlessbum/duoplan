@@ -31,6 +31,7 @@ function extractBraced(declaration) {
 
 const calendar = new Function(
   "appState",
+  "STAR_ICON",
   [
     extractBraced("function pairTimeZone"),
     extractBraced("function calendarPad"),
@@ -44,9 +45,11 @@ const calendar = new Function(
     extractBraced("function calendarKeyFromDate"),
     extractBraced("function calendarTodayKey"),
     extractBraced("function calendarEventRows"),
-    "return { calendarPad, calendarDayKey, calendarDaysInMonth, calendarGrid, calendarEventIndex, calendarMonthTitle, calendarLongDate, calendarKeyFromDate, calendarTodayKey, calendarEventRows };"
+    extractBraced("function calendarEventDot"),
+    extractBraced("function calendarCellDots"),
+    "return { calendarPad, calendarDayKey, calendarDaysInMonth, calendarGrid, calendarEventIndex, calendarMonthTitle, calendarLongDate, calendarKeyFromDate, calendarTodayKey, calendarEventRows, calendarEventDot, calendarCellDots };"
   ].join("\n")
-)({ pair: { timezone: "Europe/Moscow" } });
+)({ pair: { timezone: "Europe/Moscow" } }, "<star>");
 
 const {
   calendarDayKey,
@@ -56,7 +59,9 @@ const {
   calendarMonthTitle,
   calendarLongDate,
   calendarTodayKey,
-  calendarEventRows
+  calendarEventRows,
+  calendarEventDot,
+  calendarCellDots
 } = calendar;
 
 const task = (id, day, time = null, title = `План ${id}`) => ({ id, title, day, time, is_private: 0 });
@@ -257,6 +262,38 @@ test("личные записи помечены в строках событи�
   equal(rows.every((row) => row.isPrivate === true), true);
 });
 
+// ------------------------------------------------- точки под числом
+
+test("каждое событие дня получает свою точку", () => {
+  const dots = calendarCellDots({
+    tasks: [{ is_private: 0 }, { is_private: 1 }],
+    dates: [{ is_private: 1 }],
+    birthdays: [{ is_private: 0 }],
+    wishes: []
+  });
+  equal(dots.length, 4);
+  equal(dots[0], `<i class="cal-dot is-task"></i>`);
+  equal(dots[1], `<span class="cal-dot-pair"><i class="cal-dot is-private"></i><i class="cal-dot is-task"></i></span>`);
+  equal(dots[2], `<span class="cal-dot-pair"><i class="cal-dot is-private"></i><i class="cal-dot is-date"></i></span>`);
+  equal(dots[3], `<i class="cal-dot is-birthday"></i>`);
+});
+
+test("в паре личного события серая точка первая, цветная — вторая", () => {
+  const dot = calendarEventDot({ is_private: 1 }, "is-birthday");
+  equal(dot.startsWith(`<span class="cal-dot-pair">`), true);
+  equal(dot.indexOf("is-private") < dot.indexOf("is-birthday"), true);
+  equal(calendarEventDot({ is_private: 0 }, "is-date"), `<i class="cal-dot is-date"></i>`);
+});
+
+test("звезда желаний первая, пустой день точек не даёт", () => {
+  const withWish = calendarCellDots({ tasks: [], dates: [], birthdays: [], wishes: [{ body: "x" }] });
+  equal(withWish.length, 1);
+  equal(withWish[0].includes("cal-star"), true);
+  deepStrictEqual(calendarCellDots(null), []);
+  deepStrictEqual(calendarCellDots({ tasks: [], dates: [], birthdays: [], wishes: [] }), []);
+  deepStrictEqual(calendarCellDots({ wishes: [] }), []);
+});
+
 test("маркеры: звезда жёлтая, личное — серое, и не от акцента", () => {
   equal(cssSource.includes(".cal-star"), true);
   equal(cssSource.includes("var(--cal-wish)"), true);
@@ -304,6 +341,19 @@ test("маркеры семантические и не зависят от ак
   // Цвета не должны быть привязаны к акцентной палитре.
   equal(cssSource.includes("--cal-task: var(--berry"), false);
   equal(cssSource.includes("--cal-date: var(--berry"), false);
+});
+
+test("пара точек личного события склеена по образцу аватаров", () => {
+  equal(cssSource.includes(".cal-dot-pair"), true);
+  const ruleAt = cssSource.indexOf(".cal-dot-pair .cal-dot + .cal-dot");
+  equal(ruleAt > -1, true, "правило перекрытия пары не найдено");
+  const rule = cssSource.slice(ruleAt, ruleAt + 140);
+  equal(rule.includes("margin-left: -"), true, rule);
+  equal(rule.includes("box-shadow: 0 0 0 1px var(--surface)"), true, rule);
+  // Сетка не режет полосу точек по высоте: много событий переносится строками.
+  const strip = cssSource.slice(cssSource.indexOf(".cal-dots"), cssSource.indexOf("}", cssSource.indexOf(".cal-dots")));
+  equal(strip.includes("flex-wrap: wrap"), true, strip);
+  equal(strip.includes("height:"), false, strip);
 });
 
 test("сегодня и выбранный день — разные классы", () => {
