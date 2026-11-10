@@ -66,6 +66,7 @@ const load = new Function(
     extractBraced("function annualDate"),
     extractBraced("function nextOccurrence"),
     extractBraced("function plural"),
+    extractBraced("function calendarDaysFromNow"),
     extractBraced("function countdownFromDiff"),
     extractBraced("function countdownChip"),
     extractBraced("function calendarKeyFromDate"),

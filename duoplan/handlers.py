@@ -46,6 +46,7 @@ from duoplan.richtext import escape_html
 from duoplan.richtext import rich_to_html
 from duoplan.richtext import rich_to_plain
 from duoplan.services import DATE_TITLE_MAX
+from duoplan.services import DAILY_XP
 from duoplan.services import DuoPlanService
 from duoplan.services import ValidationError
 from duoplan.services import normalize_code
@@ -404,9 +405,10 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
                 joined = await _try_join(message, service, code)
             except ValidationError as exc:
                 # Резерв кода за ушедшим: чужой аккаунт получает объяснение,
-                # а не общий «код недоступен».
+                # а не общий «код недоступен». Без return — send_home ниже
+                # отдаёт клавиатуру: новичок с протухшей ссылкой оставался
+                # без кнопок и был вынужден вторично отправлять /start.
                 await message.answer(str(exc))
-                return
             if joined:
                 await message.answer("Готово — теперь у вас одно пространство на двоих.")
             else:
@@ -463,6 +465,13 @@ async def create_pair(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer(str(exc))
         return
     link = await invite_link(call.bot, code)
+    if pair and int(pair["awaiting_return"] or 0) == 1:
+        # Код зарезервирован за ушедшим партнёром: generic-текст «Код для
+        # партнёра» провоцировал рассылку его третьим лицам — waiting_text
+        # честно объясняет, что код действует только для его аккаунта.
+        await safe_edit(call.message, waiting_text(pair, link), PAIR_MENU)
+        await call.answer()
+        return
     await safe_edit(
         call.message,
         f"Пространство создано. Код для партнёра:\n\n{code}"
@@ -485,11 +494,11 @@ async def invite(call: CallbackQuery, service: DuoPlanService) -> None:
         await edit_home(call, service)
         return
     link = await invite_link(call.bot, pair["code"])
-    await safe_edit(
-        call.message,
-        f"Код приглашения: {pair['code']}" + (f"\n\n{link}" if link else ""),
-        PAIR_MENU,
-    )
+    # Зарезервированный код не рассылаем как открытый: waiting_text объясняет
+    # резерв (parity с _home_content, который это уже делает).
+    text = waiting_text(pair, link) if int(pair["awaiting_return"] or 0) == 1 \
+        else f"Код приглашения: {pair['code']}" + (f"\n\n{link}" if link else "")
+    await safe_edit(call.message, text, PAIR_MENU)
     await call.answer()
 
 
@@ -857,7 +866,9 @@ async def paginate(call: CallbackQuery, service: DuoPlanService) -> None:
     except ValueError:
         await call.answer("Кнопка устарела")
         return
-    if page < 0:
+    # Подделанный callback с гигантским номером не должен уводить OFFSET в
+    # миллионы (и сортировать весь набор пары ради пустой страницы).
+    if page < 0 or page > 10000:
         await call.answer("Кнопка устарела")
         return
     handled = await LIST_VIEWS[parts[1]](call, service, page)
@@ -897,9 +908,10 @@ async def game_done(call: CallbackQuery, service: DuoPlanService) -> None:
     completed = await service.complete_daily(pair["id"], call.from_user.id)
     daily = await service.daily(pair["id"], call.from_user.id)
     if completed:
-        # Кнопка и текст отражают фактический результат, а не ожидание.
-        await call.answer("+10 XP · ритуал отмечен")
-        tail = "Сегодняшний ритуал отмечен. +10 XP в вашу личную копилку."
+        # Кнопка и текст отражают фактический результат, а не ожидание; XP —
+        # из константы DAILY_XP, чтобы текст не разошёлся с начислением.
+        await call.answer(f"+{DAILY_XP} XP · ритуал отмечен")
+        tail = f"Сегодняшний ритуал отмечен. +{DAILY_XP} XP в вашу личную копилку."
     else:
         await call.answer("Сегодня уже отмечено")
         tail = "Сегодняшний ритуал уже отмечен. До завтра!"
@@ -1028,7 +1040,9 @@ async def receive_date_title(message: Message, state: FSMContext) -> None:
     if not title:
         await message.answer("Название не может быть пустым. Попробуйте ещё раз или /cancel.")
         return
-    if _utf16_len(title) > DATE_TITLE_MAX:
+    # Лимит — кодпоинты, как worker.validateSchema и add_date ниже (UTF-16
+    # мерял эмодзи двойным весом и отклонял валидные для приложения названия).
+    if len(title) > DATE_TITLE_MAX:
         await message.answer(
             f"Название длиннее {DATE_TITLE_MAX} символов. Сократите его или /cancel."
         )

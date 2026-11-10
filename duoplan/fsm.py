@@ -25,9 +25,14 @@ _EMPTY = "{}"
 class SQLiteStorage(BaseStorage):
     """FSM-состояния в SQLite с необязательным TTL (в секундах)."""
 
+    # Ленивая чистка просрочки раз в N записей: cleanup() вызывался только
+    # при старте процесса, и TTL-строки жили до рестарта (репорт 2026-11-10).
+    _CLEANUP_EVERY = 100
+
     def __init__(self, db: Database, ttl: int = 7 * 24 * 60 * 60) -> None:
         self.db = db
         self.ttl = max(0, int(ttl))
+        self._writes_until_cleanup = self._CLEANUP_EVERY
 
     # ------------------------------------------------------------------ ключи
 
@@ -46,6 +51,17 @@ class SQLiteStorage(BaseStorage):
     def _fresh_after(self) -> int:
         return now() - self.ttl if self.ttl else 0
 
+    async def _maybe_cleanup(self) -> None:
+        self._writes_until_cleanup -= 1
+        if self._writes_until_cleanup > 0:
+            return
+        self._writes_until_cleanup = self._CLEANUP_EVERY
+        try:
+            await self.cleanup()
+        except Exception:
+            # Чистка — домохозяйство: сбой не должен ломать запись состояния.
+            log.warning("Ленивая чистка fsm_states не удалась", exc_info=True)
+
     # --------------------------------------------------------------- запись
 
     async def set_state(self, key: StorageKey, state: State | str | None = None) -> None:
@@ -56,6 +72,7 @@ class SQLiteStorage(BaseStorage):
             "updated_at = excluded.updated_at",
             (self._key(key), value, _EMPTY, now()),
         )
+        await self._maybe_cleanup()
 
     async def set_data(self, key: StorageKey, data: Mapping[str, Any]) -> None:
         try:
@@ -69,6 +86,7 @@ class SQLiteStorage(BaseStorage):
             "updated_at = excluded.updated_at",
             (self._key(key), payload, now()),
         )
+        await self._maybe_cleanup()
 
     # ---------------------------------------------------------------- чтение
 

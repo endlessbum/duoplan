@@ -315,20 +315,21 @@ def test_dst_gap_local_time_is_shifted_like_worker():
     assert (normal.hour, normal.minute) == (2, 30)
 
 
-def test_utf16_limit_matches_worker_validation():
-    """Эффективный лимит заголовков в worker — UTF-16 (validateSchema), а не
-    кодпоинты: бот не должен записывать заголовок, который PATCH отклонит."""
+def test_title_limit_matches_worker_validation():
+    """Единица лимита заголовков — кодпоинты, как validateSchema/textField в
+    worker.js (Array.from): 95 эмодзи = 95 «символов» и проходят лимит 180.
+    UTF-16 мерил эмодзи двойным весом, и бот отклонял заголовки, валидные
+    для приложения (репорт 2026-11-10)."""
     import pytest
 
     from duoplan.services import _clean_text
-    from duoplan.services import _utf16_len
 
-    assert _utf16_len("🎁") == 2
-    emoji_title = "🎁" * 95  # 95 кодпоинтов = 190 UTF-16 > 180
-    with pytest.raises(ValueError, match="План"):
-        _clean_text(emoji_title, 180, "План", utf16=True)
-    # Для memory/wish worker меряет кодпоинтами (textField) — флаг не включается.
+    emoji_title = "🎁" * 95  # 95 кодпоинтов — в лимите, как в worker
+    assert _clean_text(emoji_title, 180, "План") == emoji_title
     assert _clean_text(emoji_title, 180, "Запись") == emoji_title
+    # 181 кодпоинт отклоняется на любой поверхности.
+    with pytest.raises(ValueError, match="План"):
+        _clean_text("а" * 181, 180, "План")
 
 
 def test_button_label_flattens_newlines():
@@ -353,3 +354,45 @@ async def test_add_wish_rejects_non_http_url(pair):
     wish = await service.wish_for(wish_id) if hasattr(service, "wish_for") else None
     if wish is not None:
         assert wish["url"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_join_rate_limit_after_five_failures(db):
+    """Перебор кодов в боте ограничен, как в worker.js: 5 неудач за 15 минут
+    блокируют вход (репорт 2026-11-10 — раньше отказы были бесплатными)."""
+    import pytest as _pytest
+
+    from duoplan.services import JOIN_ATTEMPT_LIMIT
+    from duoplan.services import DuoPlanService
+    from duoplan.services import ValidationError
+
+    service = DuoPlanService(db)
+    await service.ensure_user(50, "try", "Пытливый")
+    for _ in range(JOIN_ATTEMPT_LIMIT):
+        assert await service.join_pair(50, "Пытливый", "00000000") is False
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service.join_pair(50, "Пытливый", "00000000")
+
+
+@pytest.mark.asyncio
+async def test_join_rate_limit_counts_exact_rejections(db):
+    """Точные отказы (занятое пространство) тоже расходуют лимит: иначе
+    «живой» код отличим от «мёртвого» бесплатно (parity worker PAIR_FULL)."""
+    import pytest as _pytest
+
+    from duoplan.services import JOIN_ATTEMPT_LIMIT
+    from duoplan.services import DuoPlanService
+    from duoplan.services import ValidationError
+
+    service = DuoPlanService(db)
+    await service.ensure_user(60, "owner", "Владелец")
+    code = await service.create_pair(60, "Владелец")
+    # Соединяем пару: третий пользователь по тому же коду получает точный отказ.
+    await service.ensure_user(61, "partner", "Партнёр")
+    assert await service.join_pair(61, "Партнёр", code) is True
+    await service.ensure_user(62, "third", "Третий")
+    for _ in range(JOIN_ATTEMPT_LIMIT):
+        with _pytest.raises(ValidationError, match="уже соединено"):
+            await service.join_pair(62, "Третий", code)
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service.join_pair(62, "Третий", "00000000")

@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.06.39";
+const APP_VERSION = "2026.11.10.40";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.06.39";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.06.39";
+const DB_SCHEMA_VERSION = "2026.11.10.40";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -656,10 +656,13 @@ function movieRatingValue(value) {
 function safeEqual(left, right) {
   const a = new TextEncoder().encode(String(left ?? ""));
   const b = new TextEncoder().encode(String(right ?? ""));
-  if (!a.length || a.length !== b.length) return false;
-  let difference = 0;
-  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
-  return difference === 0;
+  // Ходим до конца более длинного буфера: ранний выход при несовпадении длин
+  // раскрывал длину секрета замером времени ответа. Разница длин закладывается
+  // в разницу сразу (ответ всегда ложь), но число итераций от секрета не зависит.
+  const length = Math.max(a.length, b.length);
+  let difference = a.length ^ b.length;
+  for (let i = 0; i < length; i++) difference |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return a.length > 0 && difference === 0;
 }
 
 async function hmac(keyData, data) {
@@ -730,9 +733,11 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
       throw error;
     }
   }
-  if (bucket % 10 === 0) {
-    // Удаляем только устаревшие окна того же ключа, сравнивая номер окна численно,
-    // а не лексикографически по всей строке bucket_key (иначе затрагиваются другие ключи).
+  if (Math.random() < 0.02) {
+    // Вероятностная чистка (~1 из 50 запросов): фиксированное окно bucket%10
+    // выполняло DELETE всей таблицы на каждом запросе раз в 10 минут, а в
+    // остальные 9 минут устаревшие строки росли. Удаляем только устаревшие
+    // окна по expires_at — это затрагивает все ключи корректно.
     await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(nowSeconds).run();
   }
   if ((row?.count || 0) > limit) {
@@ -783,7 +788,11 @@ async function ensureUser(env, tgUser, requestedTimeZone) {
     ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,
       timezone=excluded.timezone,photo_url=COALESCE(excluded.photo_url, users.photo_url),updated_at=excluded.updated_at`)
     .bind(tgUser.id, tgUser.username || null, displayName(tgUser), timezone, photoUrl, timestamp, timestamp).run();
-  return env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
+  const fresh = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(tgUser.id).first();
+  // Конкурентное удаление строки users (внешняя очистка) уронило бы /api/state
+  // на TypeError от publicUser(null) — отвечаем как истекшей сессии.
+  if (!fresh) throw new HttpError(401, "Сессия Telegram истекла. Откройте приложение заново.", "AUTH_EXPIRED");
+  return fresh;
 }
 
 async function membership(env, userId) {
@@ -821,7 +830,7 @@ async function createPair(env, user) {
   throw new HttpError(500, "Не удалось создать пространство", "PAIR_CREATE_FAILED");
 }
 
-async function joinPair(env, user, rawCode, requestUrl = null) {
+async function joinPair(env, user, rawCode, requestUrl = null, ctx = null) {
   const code = clean(rawCode).toUpperCase().slice(0, 16);
   if (!/^[A-F0-9]{8}$/.test(code)) throw new HttpError(400, "Код должен состоять из 8 символов", "INVALID_CODE");
   if (await membership(env, user.tg_id)) throw new HttpError(409, "Вы уже состоите в пространстве", "ALREADY_PAIRED");
@@ -839,8 +848,17 @@ async function joinPair(env, user, rawCode, requestUrl = null) {
     }
     throw new HttpError(404, "Код не найден", "CODE_NOT_FOUND");
   }
-  if (pair.user_a === user.tg_id) throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
-  if (pair.user_b) throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
+  // «Свой код» и «пространство занято» тоже расходуют лимит: иначе ответы
+  // 400/409 отличимы от 404 «не найден» и подтверждали существование живого
+  // кода бесплатно, ослабляя лимит 5 неудач за 15 минут (репорт 2026-11-10).
+  if (pair.user_a === user.tg_id) {
+    await recordJoinFailure(env, user.tg_id);
+    throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
+  }
+  if (pair.user_b) {
+    await recordJoinFailure(env, user.tg_id);
+    throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
+  }
   const timestamp = now();
   // Партнёр выходил и возвращается по тому же коду — оставшемуся уходит
   // уведомление (зеркально уведомлению о выходе).
@@ -882,94 +900,133 @@ async function joinPair(env, user, rawCode, requestUrl = null) {
   }
   if (wasAwaitingReturn && positiveId(pair.user_a)) {
     const returnerName = user.display_name || "Партнёр";
-    try {
-      // Сбой Telegram не отменяет вход: запись в базе уже применена.
-      await openApp(env, pair.user_a, requestUrl || { origin: "" },
-        `<b>${escapeHtml(returnerName)}</b> снова в вашем пространстве.\n\n`
-        + "Общие планы, даты и воспоминания на месте — можно продолжать.");
-    } catch (error) {
-      // Молча: уведомление вторично по отношению к самому входу.
-    }
+    // Сбой Telegram не отменяет вход: запись в базе уже применена. Уведомление
+    // не блокирует ответ (зеркально leavePair): await на api.telegram.org
+    // (таймаут 12с + ретраи) растягивал ответ на «Войти» до десятков секунд.
+    const notify = openApp(env, pair.user_a, requestUrl || { origin: "" },
+      `<b>${escapeHtml(returnerName)}</b> снова в вашем пространстве.\n\n`
+      + "Общие планы, даты и воспоминания на месте — можно продолжать.")
+      .catch(() => {}); // Молча: уведомление вторично по отношению к самому входу.
+    if (ctx?.waitUntil) ctx.waitUntil(notify);
+    else await notify;
   }
   return membership(env, user.tg_id);
 }
 
-async function leavePair(env, member, requestUrl) {
-  const partnerId = member.role === "a" ? member.user_b : member.user_a;
-  // Имя ушедшего для уведомления: display_name из users свежее, чем
-  // денормализованные name1/name2 в pairs.
-  const leaverName = (member.role === "a" ? member.owner_name : member.partner_name)
-    || (member.role === "a" ? member.name1 : member.name2)
-    || "Партнёр";
-  const timestamp = now();
-  const operations = [];
-  if (!partnerId) {
-    // Последний держатель покидает пространство: данные пары удаляются
-    // полностью, освобождая место в базе (восстановить пару по коду нельзя).
-    // Код остаётся в closed_codes: попытка входа по нему получит внятное
-    // «пространство закрыто» вместо «код не найден».
-    operations.push(
-      env.DB.prepare("INSERT OR IGNORE INTO closed_codes(code,closed_at) VALUES(?,?)")
-        .bind(clean(member.code).toUpperCase(), timestamp),
-      env.DB.prepare("DELETE FROM tasks WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM dates WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM memories WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM wishes WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM daily_rolls WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM daily_completions WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM pair_members WHERE pair_id=?").bind(member.id),
-      // Все коллекции после 0016 тоже явно (страховка поверх FK CASCADE):
-      // quotes, places, trips, goals+goal_items, movies (вместе с
-      // unique-индексом не мешает), savings.
-      env.DB.prepare("DELETE FROM quotes WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM places WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM trips WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM goal_items WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM goals WHERE pair_id=?").bind(member.id),
-      // Внуки явно, до родителей: movie_ratings/savings_deposits не имеют
-      // pair_id и держатся только на FK CASCADE — если enforcement выключен,
-      // после удаления movies/savings остались бы сироты.
-      env.DB.prepare("DELETE FROM movie_ratings WHERE movie_id IN (SELECT id FROM movies WHERE pair_id=?)").bind(member.id),
-      env.DB.prepare("DELETE FROM savings_deposits WHERE saving_id IN (SELECT id FROM savings WHERE pair_id=?)").bind(member.id),
-      env.DB.prepare("DELETE FROM movies WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM savings WHERE pair_id=?").bind(member.id),
-      env.DB.prepare("DELETE FROM pairs WHERE id=?").bind(member.id)
-    );
-  } else if (member.role === "a") {
-    operations.push(
-      env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id),
+async function leavePair(env, member, requestUrl, ctx = null) {
+  // Гонка двух одновременных выходов (репорт 2026-11-10): member — снимок,
+  // прочитанный до batch, и безусловные UPDATE по нему оставляли «зомби»-пару
+  // user_a=0/user_b=0, которую никто не может занять или удалить. Каждый
+  // оператор условен на состояние пары (EXISTS-гвард по снимку): при
+  // конкурентном изменении весь batch становится no-op, а по changes=0 парного
+  // оператора попытка повторяется со свежим membership(). Гвардированные
+  // операторы идут ДО парного (гварды должны видеть пар ещё не изменённым),
+  // парный — последним: его meta.changes и есть критерий «снимок был свеж».
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const timestamp = now();
+    const partnerId = member.role === "a" ? member.user_b : member.user_a;
+    // Имя ушедшего для уведомления: display_name из users свежее, чем
+    // денормализованные name1/name2 в pairs.
+    const leaverName = (member.role === "a" ? member.owner_name : member.partner_name)
+      || (member.role === "a" ? member.name1 : member.name2)
+      || "Партнёр";
+    const guardBinds = [member.id, member.user_a, member.user_b];
+    const guard = (sql, ...params) => env.DB.prepare(`${sql} AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_a=? AND user_b=?)`)
+      .bind(...params, ...guardBinds);
+    const operations = [];
+    // Отвязка ушедшего — первой: после DELETE/UPDATE pairs EXISTS-гвард был бы
+    // всегда ложен. Партнёрские записи — тоже до парного оператора.
+    operations.push(guard("UPDATE users SET pair_id=NULL,role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?", timestamp, member.tg_id));
+    if (!partnerId) {
+      // Последний держатель покидает пространство: данные пары удаляются
+      // полностью, освобождая место в базе (восстановить пару по коду нельзя).
+      // Код остаётся в closed_codes: попытка входа по нему получит внятное
+      // «пространство закрыто» вместо «код не найден».
+      operations.push(
+        env.DB.prepare("INSERT OR IGNORE INTO closed_codes(code,closed_at) VALUES(?,?)")
+          .bind(clean(member.code).toUpperCase(), timestamp),
+        guard("DELETE FROM tasks WHERE pair_id=?", member.id),
+        guard("DELETE FROM dates WHERE pair_id=?", member.id),
+        guard("DELETE FROM memories WHERE pair_id=?", member.id),
+        guard("DELETE FROM wishes WHERE pair_id=?", member.id),
+        guard("DELETE FROM daily_rolls WHERE pair_id=?", member.id),
+        guard("DELETE FROM daily_completions WHERE pair_id=?", member.id),
+        guard("DELETE FROM pair_members WHERE pair_id=?", member.id),
+        // Все коллекции после 0016 тоже явно (страховка поверх FK CASCADE):
+        // quotes, places, trips, goals+goal_items, movies (вместе с
+        // unique-индексом не мешает), savings.
+        guard("DELETE FROM quotes WHERE pair_id=?", member.id),
+        guard("DELETE FROM places WHERE pair_id=?", member.id),
+        guard("DELETE FROM trips WHERE pair_id=?", member.id),
+        guard("DELETE FROM goal_items WHERE pair_id=?", member.id),
+        guard("DELETE FROM goals WHERE pair_id=?", member.id),
+        // Внуки явно, до родителей: movie_ratings/savings_deposits не имеют
+        // pair_id и держатся только на FK CASCADE — если enforcement выключен,
+        // после удаления movies/savings остались бы сироты.
+        guard("DELETE FROM movie_ratings WHERE movie_id IN (SELECT id FROM movies WHERE pair_id=?)", member.id),
+        guard("DELETE FROM savings_deposits WHERE saving_id IN (SELECT id FROM savings WHERE pair_id=?)", member.id),
+        guard("DELETE FROM movies WHERE pair_id=?", member.id),
+        guard("DELETE FROM savings WHERE pair_id=?", member.id),
+        env.DB.prepare("DELETE FROM pairs WHERE id=? AND user_a=? AND user_b=?").bind(...guardBinds)
+      );
+    } else if (member.role === "a") {
+      operations.push(
+        guard("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?", member.tg_id, member.id),
+        guard("UPDATE pair_members SET role='a' WHERE tg_id=? AND pair_id=?", partnerId, member.id),
+        // Личное имя партнёра оставшегося относилось к ушедшему — сбрасываем,
+        // иначе оно прилипнет к следующему присоединившемуся партнёру.
+        guard("UPDATE users SET role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?", timestamp, partnerId)
+      );
       // awaiting_return=1 + last_partner: партнёр вышел, пространство «в
       // ожидании возвращения» — joinPair по этому флагу уведомит оставшегося,
       // API заморозит контент, а войти по коду сможет только тот же аккаунт.
-      env.DB.prepare(`UPDATE pairs SET user_a=user_b,name1=(SELECT display_name FROM users WHERE tg_id=?),
-        user_b=0,name2='',awaiting_return=1,last_partner=?,updated_at=? WHERE id=?`).bind(partnerId, member.tg_id, timestamp, member.id),
-      env.DB.prepare("UPDATE pair_members SET role='a' WHERE tg_id=? AND pair_id=?").bind(partnerId, member.id),
-      // Личное имя партнёра оставшегося относилось к ушедшему — сбрасываем,
-      // иначе оно прилипнет к следующему присоединившемуся партнёру.
-      env.DB.prepare("UPDATE users SET role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
-    );
-  } else {
-    operations.push(
-      env.DB.prepare("UPDATE pairs SET user_b=0,name2='',awaiting_return=1,last_partner=?,updated_at=? WHERE id=?").bind(member.tg_id, timestamp, member.id),
-      env.DB.prepare("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?").bind(member.tg_id, member.id),
-      // Оставшийся партнёр (владелец) тоже держал личное имя для ушедшего.
-      env.DB.prepare("UPDATE users SET partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, partnerId)
-    );
-  }
-  operations.push(env.DB.prepare("UPDATE users SET pair_id=NULL,role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?").bind(timestamp, member.tg_id));
-  await env.DB.batch(operations);
-  // Оставшийся партнёр узнаёт о выходе сообщением бота — иначе он просто
-  // однажды не находит партнёра в пространстве. Сбой Telegram не отменяет
-  // сам выход: запись в базе уже применена.
-  if (partnerId) {
-    try {
-      await openApp(env, partnerId, requestUrl,
+      operations.push(env.DB.prepare(`UPDATE pairs SET user_a=user_b,name1=(SELECT display_name FROM users WHERE tg_id=?),
+        user_b=0,name2='',awaiting_return=1,last_partner=?,updated_at=? WHERE id=? AND user_a=? AND user_b=?`)
+        .bind(partnerId, member.tg_id, timestamp, member.id, ...guardBinds));
+    } else {
+      operations.push(
+        // Оставшийся партнёр (владелец) тоже держал личное имя для ушедшего.
+        guard("UPDATE users SET partner_custom_name=NULL,updated_at=? WHERE tg_id=?", timestamp, partnerId),
+        guard("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?", member.tg_id, member.id)
+      );
+      operations.push(env.DB.prepare("UPDATE pairs SET user_b=0,name2='',awaiting_return=1,last_partner=?,updated_at=? WHERE id=? AND user_a=? AND user_b=?")
+        .bind(member.tg_id, timestamp, member.id, ...guardBinds));
+    }
+    const results = await env.DB.batch(operations);
+    const applied = (results?.[results.length - 1]?.meta?.changes || 0) > 0;
+    if (!applied) {
+      // Снимок устарел: пара изменилась между membership() и batch. Перечитываем
+      // и пересчитываем ветку; три неудачи подряд — отдаём ошибку, состояние
+      // аномально нестабильно (практически недостижимо).
+      if (attempt === 2) {
+        throw new HttpError(409, "Не удалось выйти: состояние пространства изменилось. Попробуйте ещё раз.", "LEAVE_CONFLICT");
+      }
+      const fresh = await membership(env, member.tg_id);
+      if (!fresh || fresh.id !== member.id) {
+        // Пользователь уже не участник (конкурентный выход/удаление применился):
+        // отвязываем его users-строку, если она ещё смотрит на эту пару.
+        await env.DB.prepare("UPDATE users SET pair_id=NULL,role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=? AND pair_id=?")
+          .bind(now(), member.tg_id, member.id).run();
+        return;
+      }
+      member = fresh;
+      continue;
+    }
+    // Оставшийся партнёр узнаёт о выходе сообщением бота — иначе он просто
+    // однажды не находит партнёра в пространстве. Сбой Telegram не отменяет
+    // сам выход: запись в базе уже применена. Уведомление уходит через
+    // ctx.waitUntil: await на api.telegram.org (таймаут 12с + ретраи) растягивал
+    // ответ на «Выйти» до десятков секунд при деградации Telegram.
+    if (partnerId) {
+      const notify = openApp(env, partnerId, requestUrl,
         `<b>${escapeHtml(leaverName)}</b> больше не в вашем пространстве.\n\n`
         + "Общие планы, даты и воспоминания остались у вас. "
-        + "Чтобы позвать партнёра снова, отправьте ему код приглашения.");
-    } catch (error) {
-      // Молча: уведомление вторично по отношению к самому выходу.
+        + "Чтобы позвать партнёра снова, отправьте ему код приглашения.")
+        .catch(() => {}); // Молча: уведомление вторично по отношению к самому выходу.
+      if (ctx?.waitUntil) ctx.waitUntil(notify);
+      else await notify;
     }
+    return;
   }
 }
 
@@ -988,7 +1045,10 @@ async function dailyFor(env, pairId, timeZone, userId = null) {
   const completed = new Set((completions.results || []).map((r) => Number(r.tg_id)));
   const myDone = userId != null && completed.has(Number(userId));
   const partnerDone = userId != null ? completed.size > (myDone ? 1 : 0) : completed.size > 0;
-  return { day, action: row.daily_value, done: myDone, partnerDone, completedCount: completed.size };
+  // row может быть null в микро-гонке (партнёры одновременно выходят: пара
+  // удалена между INSERT OR IGNORE и повторным SELECT) — откатываемся к
+  // детерминированному действию дня вместо TypeError → 500.
+  return { day, action: row ? row.daily_value : dailyAction(pairId, day), done: myDone, partnerDone, completedCount: completed.size };
 }
 
 // users.streak хранит последнее достигнутое значение и не обнуляется сам по
@@ -1425,7 +1485,8 @@ async function state(env, userId) {
       partner_accent: partnerUser?.accent_color || null,
       timezone: pair.timezone,
       partner_gender: partnerUser?.gender || null,
-      bot_name: env.BOT_NAME || "DuoPlan",
+      // bot_name убран: env.BOT_NAME в wrangler.jsonc не задан, поле всегда
+      // было «DuoPlan», клиент его не читает (использует только bot_username).
       bot_username: env.BOT_USERNAME || "duoplanbot"
     },
     tasks: sortByTaskDeadline(tasks.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT),
@@ -1605,6 +1666,9 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   // Проверяем владельца до любой записи, чтобы чужая строка не менялась даже
   // частично (UPDATE ... WHERE не сработал бы, но 403 точнее 404).
   const mutating = method === "DELETE" || method === "PATCH" || (method === "POST" && action);
+  // wishes — «личный» раздел (гвард по автору). memories/quotes/places/trips
+  // сознательно общие: оба партнёра могут править и удалять любые записи пары
+  // (решение владельца, 2026-11-10) — гвардов по автору у них нет и не нужно.
   if (type === "wishes" && mutating) await ensureWishOwner(env, pair, user, id);
   const savingRow = type === "savings" && mutating ? await ensureSavingVisible(env, pair, user, id) : null;
   const dateRow = type === "dates" && mutating ? await ensureDateVisible(env, pair, user, id) : null;
@@ -1687,6 +1751,10 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       }
     }
     function patchDateFields() {
+      // PATCH несуществующей даты с полями расписания валидировался на
+      // dateRow?.day → undefined и отвечал 400 «Проверьте дату» вместо 404
+      // «Запись не найдена», как у DELETE и пустого PATCH.
+      if (!dateRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
       if (body.title !== undefined) {
         field("title", textField(body, "title", 120, "Название"));
       }
@@ -2008,7 +2076,7 @@ async function api(request, env, url, ctx = null) {
   }
   if (request.method === "POST" && url.pathname === "/api/pair/join") {
     validateSchema(body, { code: { type: "string", required: true } });
-    await joinPair(env, user, body.code, url);
+    await joinPair(env, user, body.code, url, ctx);
     return json(await state(env, user.tg_id));
   }
   // Пол запрашивается гейтом до онбординга, поэтому маршрут обязан работать
@@ -2147,7 +2215,7 @@ async function api(request, env, url, ctx = null) {
     return json({ deposits: deposits.results || [] });
   }
   if (request.method === "POST" && url.pathname === "/api/pair/leave") {
-    await leavePair(env, pair, url);
+    await leavePair(env, pair, url, ctx);
     return json(await state(env, user.tg_id));
   }
   // Часовой пояс пары общий: от него считаются календарь, локальный день
@@ -2318,6 +2386,16 @@ async function api(request, env, url, ctx = null) {
       .bind(pair.id, imdbId).first();
     if (existing) throw new HttpError(409, "Этот фильм уже в списке", "ALREADY_ADDED");
     const info = await movieInfo(env, imdbId);
+    // Год из тела запроса — фолбэк, когда IMDb/TMDB не вернули год (новинки).
+    // Валидируем только при реальном использовании: иначе прямой POST писал
+    // в movies.year любое число (отрицательное, 99999999).
+    let manualYear = null;
+    if (info.year == null && body.year !== undefined) {
+      manualYear = Number(body.year);
+      if (!Number.isInteger(manualYear) || manualYear < 1880 || manualYear > new Date().getUTCFullYear() + 1) {
+        throw new HttpError(400, "Некорректный год фильма", "INVALID_YEAR");
+      }
+    }
     // Источник оценки: IMDb (OMDb) или TMDB-фолбэк для новинок без голосов.
     const ratingSource = info.rating ? (info.ratingSource || "imdb") : null;
     const stamp = now();
@@ -2326,7 +2404,7 @@ async function api(request, env, url, ctx = null) {
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(pair.id, user.tg_id, imdbId,
           clean(info.title) || "Без названия",
-          info.year ?? (Number(body.year) || null),
+          info.year ?? manualYear,
           info.kind,
           info.rating,
           ratingSource,
@@ -3536,7 +3614,8 @@ export default {
         return json({
           ok: database,
           service: "duoplan",
-          version: APP_VERSION,
+          // APP_VERSION наружу не отдаём: точная версия упрощает таргетинг
+          // известных уязвимостей; живость и БД — всё, что нужно мониторингу.
           database,
         }, database ? 200 : 503);
       }

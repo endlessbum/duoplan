@@ -32,7 +32,11 @@ DAILY_ACTIONS = (
     "Отправьте партнёру пять эмодзи, которые описывают ваш день, — пусть угадает",
 )
 
-# Лимиты совпадают с Worker/Mini App, чтобы обе поверхности обрезали текст одинаково.
+# Лимиты совпадают с Worker/Mini App, чтобы обе поверхности обрезали текст
+# одинаково. Единица — кодпоинты (len), как validateSchema/textField в worker.js
+# (Array.from): UTF-16 мерял эмодзи двойным весом, и бот отклонял заголовки,
+# валидные для приложения (95 эмодзи считались «190 символами»,
+# репорт 2026-11-10).
 TASK_TITLE_MAX = 180
 DATE_TITLE_MAX = 120
 MEMORY_MAX = 2000
@@ -40,6 +44,12 @@ WISH_MAX = 300
 WISH_URL_MAX = 2048
 
 DAILY_XP = 10
+
+# Перебор кодов приглашения — главная точка подбора (parity с worker.js
+# JOIN_ATTEMPT_LIMIT/JOIN_ATTEMPT_WINDOW): считаем только неудачные попытки,
+# 5 за 15 минут на аккаунт. Хранится в общей с D1 таблице rate_limits.
+JOIN_ATTEMPT_LIMIT = 5
+JOIN_ATTEMPT_WINDOW = 15 * 60
 
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -50,25 +60,14 @@ class ValidationError(ValueError):
     """Пользовательский ввод не прошёл проверку; текст безопасно показать в чате."""
 
 
-def _utf16_len(text: str) -> int:
-    """Длина в UTF-16 единицах — так меряет validateSchema в worker.js.
-
-    Заголовки планов и дат worker проверяет дважды: validateSchema по UTF-16
-    и textField по кодпоинтам, эффективный лимит — UTF-16. Бот обязан применять
-    тот же лимит, иначе запишет заголовок, который PATCH в приложении отклонит.
-    """
-    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
-
-
-def _clean_text(value: object, limit: int, label: str, utf16: bool = False) -> str:
+def _clean_text(value: object, limit: int, label: str) -> str:
     if value is None:
         raise ValidationError(f"{label}: пришлите текст сообщением.")
     text = str(value).strip()
     if not text:
         raise ValidationError(f"{label}: текст не может быть пустым.")
-    length = _utf16_len(text) if utf16 else len(text)
-    if length > limit:
-        raise ValidationError(f"{label}: не длиннее {limit} символов (сейчас {length}).")
+    if len(text) > limit:
+        raise ValidationError(f"{label}: не длиннее {limit} символов (сейчас {len(text)}).")
     return text
 
 
@@ -229,7 +228,9 @@ def next_date_occurrence(
 
     Ежемесячная — ближайший месяц, где день существует; у ежегодной — ближайший
     год из текущего..текущий+8, у разовой — сама дата. У «невозможной» даты
-    возвращается ``None`` (worker — ``Number.MAX_SAFE_INTEGER``).
+    (например, разовая 2024-02-30) возвращается ``None``, worker же в этом
+    месте перекатывает Date.UTC до реального дня — расхождение недостижимо:
+    такие строки не проходят валидацию ни на одной поверхности.
     """
     raw_day = day if day is not None else None
     if not raw_day:
@@ -528,23 +529,50 @@ class DuoPlanService:
         if not normalized:
             return False
 
+        # Порядок паритета с worker.joinPair: «уже в паре» отвечает раньше
+        # счётчика попыток и сам счётчик не расходует.
+        user = await self.db.one("SELECT pair_id FROM users WHERE tg_id = ?", (tg_id,))
+        if user is not None and user["pair_id"] is not None:
+            raise ValidationError(
+                "Вы уже состоите в пространстве. Чтобы войти в другое, "
+                "сначала выйдите из текущего."
+            )
+        await self._check_join_attempts(tg_id)
+
         timestamp = now()
         was_awaiting = False
         owner_id = 0
-        async with self.db.transaction() as tx:
-            candidate = await self._join_candidate(normalized, tg_id)
-            if candidate is None:
-                tx.rollback()
-                return False
-            pair = candidate
-            # Резерв кода за ушедшим (parity с worker.js): пока партнёр не
-            # вернулся, тот же код не открывает пространство другому аккаунту.
-            was_awaiting, owner_id = self._join_awaiting(pair, tg_id)
-            if not await self._commit_join(pair, tg_id, display_name, timestamp):
-                # Условный UPDATE не сработал — половинчатого состояния нет,
-                # но rollback помечаем явно, как в исходной версии.
-                tx.rollback()
-                return False
+        joined = False
+        failed = False
+        try:
+            async with self.db.transaction() as tx:
+                candidate = await self._join_candidate(normalized, tg_id)
+                if candidate is None:
+                    # Мягкий отказ «код не найден» — тоже расходуемая неудача.
+                    tx.rollback()
+                    failed = True
+                else:
+                    pair = candidate
+                    # Резерв кода за ушедшим (parity с worker.js): пока партнёр не
+                    # вернулся, тот же код не открывает пространство другому аккаунту.
+                    was_awaiting, owner_id = self._join_awaiting(pair, tg_id)
+                    if not await self._commit_join(pair, tg_id, display_name, timestamp):
+                        # Условный UPDATE не сработал — половинчатого состояния нет,
+                        # но rollback помечаем явно, как в исходной версии. Гонка
+                        # захвата не «перебор»: лимит попыток не расходует.
+                        tx.rollback()
+                    else:
+                        joined = True
+        except ValidationError:
+            # Точные отказы (закрыто/свой код/занято/резерв) расходуют лимит:
+            # иначе «занятый» код отличим от «мёртвого» бесплатно (parity worker).
+            await self._record_join_failure(tg_id)
+            raise
+        if failed:
+            await self._record_join_failure(tg_id)
+            return False
+        if not joined:
+            return False
 
         # Уведомление после фиксации транзакции: сбой Telegram вход не отменяет.
         if was_awaiting and owner_id and notify is not None:
@@ -557,6 +585,26 @@ class DuoPlanService:
             except Exception:
                 log.info("join_pair: не удалось уведомить владельца %s", owner_id)
         return True
+
+    async def _check_join_attempts(self, tg_id: int) -> None:
+        """Лимит неудачных попыток входа: parity с worker.checkJoinAttempts."""
+        bucket = f"jf:{tg_id}:{now() // JOIN_ATTEMPT_WINDOW}"
+        row = await self.db.one("SELECT count FROM rate_limits WHERE bucket_key = ?", (bucket,))
+        if (int(row["count"]) if row else 0) >= JOIN_ATTEMPT_LIMIT:
+            raise ValidationError(
+                "Слишком много неудачных попыток входа по коду. "
+                "Попробуйте снова через 15 минут."
+            )
+
+    async def _record_join_failure(self, tg_id: int) -> None:
+        """Записать неудачную попытку входа: parity с worker.recordJoinFailure."""
+        bucket = now() // JOIN_ATTEMPT_WINDOW
+        await self.db.execute_row(
+            "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, 1, ?) "
+            "ON CONFLICT(bucket_key) DO UPDATE SET count = count + 1, "
+            "expires_at = excluded.expires_at",
+            (f"jf:{tg_id}:{bucket}", (bucket + 1) * JOIN_ATTEMPT_WINDOW),
+        )
 
     async def _join_candidate(self, normalized: str, tg_id: int):
         """Проверки входа по коду до захвата слота.
@@ -749,7 +797,7 @@ class DuoPlanService:
 
     async def add_task(self, pair_id: int, title: object, created_by: int) -> int:
         await self._ensure_pair_open(pair_id)
-        text = _clean_text(title, TASK_TITLE_MAX, "План", utf16=True)
+        text = _clean_text(title, TASK_TITLE_MAX, "План")
         return await self.db.execute(
             "INSERT INTO tasks(pair_id, title, created_by, created_at) VALUES(?, ?, ?, ?)",
             (pair_id, text, created_by, now()),
@@ -796,7 +844,7 @@ class DuoPlanService:
 
     async def add_date(self, pair_id: int, title: object, day: object, recurs: int = 1, created_by: int = 0) -> int:
         await self._ensure_pair_open(pair_id)
-        text = _clean_text(title, DATE_TITLE_MAX, "Дата", utf16=True)
+        text = _clean_text(title, DATE_TITLE_MAX, "Дата")
         raw_day = _clean_text(day, 10, "Дата события")
         try:
             parsed = date.fromisoformat(raw_day)

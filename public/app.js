@@ -120,10 +120,32 @@
     }
   }
   function patchArchiveItem(type, id, patch) {
+    // undefined-поля отбрасываем: spread перезаписал бы ими значения кэша —
+    // is_private: undefined у чужого плана (право приватности только у автора)
+    // стирал чип «Личное» и серую точку в календаре до ревалидации архива
+    // (репорт 2026-11-10).
+    const cleanPatch = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
     for (const key of ARCHIVE_KEYS_BY_TYPE[type] || []) {
-      archiveCache[key].items = archiveCache[key].items.map((x) => Number(x.id) === Number(id) ? { ...x, ...patch } : x);
+      archiveCache[key].items = archiveCache[key].items.map((x) => Number(x.id) === Number(id) ? { ...x, ...cleanPatch } : x);
     }
   }
+  // Фоновая догрузка архива перерисовывает экран: если в этот момент открыт
+  // диалог или пользователь печатает, полный render() пересоздаёт поля и
+  // стирал бы ввод (репорт 2026-11-10). Откладываем перерисовку до безопасного
+  // момента — данные никуда не деваются, следующий рендер их подхватит.
+  let archiveRenderTimer = null;
+  function renderArchiveSafe() {
+    if (archiveRenderTimer) return;
+    const safe = () => !dialog?.open && !isTypingNow();
+    if (safe()) { render(); return; }
+    const retry = () => {
+      archiveRenderTimer = null;
+      if (safe()) render();
+      else archiveRenderTimer = setTimeout(retry, 1500);
+    };
+    archiveRenderTimer = setTimeout(retry, 1500);
+  }
+
   // Загрузка страницы архива. Флаг loading на тип не даёт двойному тапу
   // запросить один и тот же page дважды (кэш задвоился бы, а следующая
   // страница пропустилась); дедуп по id страхует от повторов; ответ,
@@ -142,7 +164,7 @@
       cache.page += 1;
       cache.hasMore = Boolean(next.hasMore);
       cache.remaining = Number.isFinite(next.remaining) ? Number(next.remaining) : null;
-      render();
+      renderArchiveSafe();
     } finally {
       cache.loading = false;
       if (button) button.disabled = false;
@@ -414,11 +436,9 @@
     tg.expand();
     applyTheme();
     tg.onEvent?.("themeChanged", applyTheme);
-    // Полный экран (Bot API 8.0+). На старых клиентах и Telegram Desktop
-    // прилетит fullscreenFailed или бросок метода — молча остаёмся в оконном режиме.
-    tg.onEvent?.("fullscreenChanged", () => {
-      document.body.classList.toggle("tg-fullscreen", Boolean(tg.isFullscreen));
-    });
+    // Класс tg-fullscreen (тоггл на fullscreenChanged, Bot API 8.0+) убран:
+    // правила для него в app.css не осталось, тоггл был мёртвым кодом.
+    // Safe-area закрыта CSS-переменными — полноэкранный режим работает и без него.
     // Свайп вниз сворачивает мини-апп — отключаем: сворачивание только кнопкой
     // закрытия, случайный жест не должен сворачивать приложение (Bot API 7.7+).
     safeTg(() => tg.disableVerticalSwipes());
@@ -963,11 +983,24 @@
     return many;
   }
 
+  // Календарные сутки до цели в поясе пары (как в dateItem): «Через N дн.»
+  // считалось ceil по часам, и план через 25 часов показывал «Через 2 дн.»,
+  // тогда как значимая дата в тот же момент — «Завтра» (репорт 2026-11-10).
+  function calendarDaysFromNow(target) {
+    const tz = pairTimeZone();
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    const [year, month, day] = parts.split("-").map(Number);
+    const midnight = makeDateInTimeZone(year, month - 1, day, 12, 0, tz);
+    return Math.round((target.getTime() - midnight.getTime()) / 86400000);
+  }
+
   function countdownFromDiff(diff) {
     // Просрочка старше недели помечается stale: событие давно позади, и яркий
     // чип выглядит как ошибка, а не как статус (см. .day-chip.is-stale).
     if (diff <= 0) return { overdue: true, stale: -diff > 7 * 86400000, text: "Время пришло" };
     const totalMinutes = Math.floor(diff / 60000);
+    // Меньше минуты — «Через 0 часов 0 минут» выглядит как сбой (репорт 2026-11-10).
+    if (totalMinutes < 1) return { overdue: false, text: "Через минуту" };
     const minutes = totalMinutes % 60;
     const hours = Math.floor(totalMinutes / 60) % 24;
     const days = Math.floor(totalMinutes / 1440);
@@ -993,14 +1026,17 @@
       const stale = -diff > 7 * 86400000;
       return `<span class="day-chip is-overdue${stale ? " is-stale" : ""}" data-countdown="${ctx}">Время пришло</span>`;
     }
-    const hours = Math.floor(diff / 3600000);
-    const mins = Math.max(1, Math.floor((diff % 3600000) / 60000));
-    if (hours < 24) {
+    // Почасовой отсчёт — только на текущий календарный день: план на 02:00
+    // ночи показывал «Через 16 ч», хотя дата в тот же момент — «Завтра».
+    const days = calendarDaysFromNow(target);
+    if (days === 0) {
+      const hours = Math.floor(diff / 3600000);
+      const mins = Math.max(1, Math.floor((diff % 3600000) / 60000));
       const label = hours > 0 ? `Через ${hours} ч ${mins} мин` : `Через ${mins} мин`;
       return `<span class="day-chip is-countdown" data-countdown="${ctx}">${esc(label)}</span>`;
     }
-    const days = Math.ceil(diff / 86400000);
-    return `<span class="day-chip" data-countdown="${ctx}">Через ${days} дн.</span>`;
+    if (days === 1) return `<span class="day-chip" data-countdown="${ctx}">Завтра</span>`;
+    return `<span class="day-chip" data-countdown="${ctx}">Через ${days} ${plural(days, "день", "дня", "дней")}</span>`;
   }
 
   function refreshCountdowns() {
@@ -3363,6 +3399,11 @@
   }
 
   dialog.addEventListener("close", () => {
+    // Guard как в обработчике выше (app.js:19-24): close асинхронен, и в
+    // цепочке диалогов (confirmLeaveSpace → chain → openDialog) событие close
+    // предыдущего окна прибывало уже ПОСЛЕ открытия следующего — trap нового
+    // диалога удалялся, а старый оставался висеть навсегда (репорт 2026-11-10).
+    if (dialog.open) return;
     if (dialog._focusTrap) { dialog.removeEventListener("keydown", dialog._focusTrap); dialog._focusTrap = null; }
     // Нативное закрытие возвращает фокус на нажатую кнопку/карточку — в
     // мобильном WebView вокруг неё остаётся синее выделение. Снимаем фокус.
@@ -3402,6 +3443,9 @@
   }
 
   let dialogSubmitting = false;
+  // Флаг сабмита входа по коду: кнопка живёт вне диалога, dialogSubmitting её
+  // не покрывает, а сервер на повторный запрос после успеха отвечает 409.
+  let joinSubmitting = false;
   // У планов дата обязательна, если указано время (ограничение API) — такие
   // поля time помечены data-requires-day. У значимых дат дата обязательна
   // всегда, поэтому общий обработчик их не трогает: иначе очистка времени
@@ -3413,7 +3457,17 @@
     // Повторы требуют дату: без неё повторять нечего.
     if (target.hasAttribute("data-requires-day")) {
       const dayInput = form?.querySelector('input[name="day"]');
-      if (dayInput) dayInput.required = Boolean(target.value);
+      if (dayInput) {
+        // Дата нужна, если задано время ИЛИ включён любой из повторов.
+        // Пересчитываем по состоянию всех трёх полей: target.value у чекбокса
+        // всегда "on" (даже когда снят), и снятие галочки «Повторять…» раньше
+        // никогда не снимало required — необязательная дата навсегда
+        // блокировала сабмит (репорт 2026-11-10).
+        const timeInput = form?.querySelector('input[name="time"]');
+        const monthly = form?.querySelector('input[name="monthly"]');
+        const yearly = form?.querySelector('input[name="yearly"]');
+        dayInput.required = Boolean(timeInput?.value) || Boolean(monthly?.checked) || Boolean(yearly?.checked);
+      }
     }
     // Ежемесячный и ежегодный повторы взаимоисключающие.
     if (target.type === "checkbox" && target.dataset.excludes) {
@@ -3733,7 +3787,14 @@
 
   document.addEventListener("click", (e) => {
     const spoiler = e.target.closest?.("[data-spoiler]");
-    if (spoiler) spoiler.classList.toggle("is-revealed");
+    if (!spoiler) return;
+    spoiler.classList.toggle("is-revealed");
+    // Останавливаем всплытие (обработчик зарегистрирован раньше делегата
+    // [data-action]): спойлеры рендерятся внутри карточек-кнопок планов/дат/
+    // дневника, и тап по спойлеру одновременно «нажимал» карточку —
+    // раскрывал текст и перебрасывал на календарь/открывал диалог
+    // (репорт 2026-11-10).
+    e.stopImmediatePropagation();
   });
 
   // Обработчики кликов
@@ -3819,12 +3880,20 @@
         appState = await request("/api/pair/create", { method: "POST", body: {} });
         switchTab("home");
       } else if (action === "join-code") {
-        const inputId = btn.dataset.input;
-        const input = inputId ? document.getElementById(inputId) : null;
-        const code = input?.value?.trim() || "";
-        appState = await request("/api/pair/join", { method: "POST", body: { code } });
-        if (input) input.value = "";
-        switchTab("home");
+        // Двойной тап: второй запрос при уже успешном первом отвечал
+        // 409 «Вы уже состоите в пространстве» поверх успеха (репорт 2026-11-10).
+        if (joinSubmitting) return;
+        joinSubmitting = true;
+        try {
+          const inputId = btn.dataset.input;
+          const input = inputId ? document.getElementById(inputId) : null;
+          const code = input?.value?.trim() || "";
+          appState = await request("/api/pair/join", { method: "POST", body: { code } });
+          if (input) input.value = "";
+          switchTab("home");
+        } finally {
+          joinSubmitting = false;
+        }
       } else if (action === "add-task") {
         openDialog({
           title: "Новый план",
@@ -4186,8 +4255,13 @@
           fields: `<div class="saving-history" aria-live="polite"><p class="movie-suggest-hint">Загружаем историю…</p></div>`,
           onSubmit: async () => appState
         });
+        // Гонка (репорт 2026-11-10): окно закрывали и открывали другое —
+        // история первой копилки вставлялась в диалог второй. Паттерн —
+        // как openMovieDetails: захват dialogContext и сверка перед вставкой.
+        const context = dialogContext;
         try {
           const data = await request(`/api/savings/${saving.id}/history`);
+          if (dialogContext !== context || !dialog.open) return;
           const box = dialogFields.querySelector(".saving-history");
           if (!box) return;
           const rows = data.deposits || [];
@@ -4201,6 +4275,7 @@
               `).join("")
             : `<p class="movie-suggest-hint">Пополнений пока не было — нажмите «Плюс» на карточке.</p>`;
         } catch (error) {
+          if (dialogContext !== context || !dialog.open) return;
           handleRequestError(error);
           dialog.close();
         }
@@ -4573,15 +4648,29 @@
     return true;
   }
 
+  // Фокус ушёл из поля недавно: между blur и кликом по «Сохранить» тик с
+  // render() успевал перерисовать настройки старыми значениями, и клик
+  // сохранял их вместо правок (репорт 2026-11-10). Grace 1.5с закрывает окно.
+  let lastInputBlur = 0;
+  document.addEventListener("focusout", (e) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) lastInputBlur = Date.now();
+  });
+  function isTypingNow() {
+    return document.activeElement instanceof HTMLInputElement
+      || document.activeElement instanceof HTMLTextAreaElement
+      || Date.now() - lastInputBlur < 1500;
+  }
+
   let refreshInProgress = false;
   async function refreshState() {
     if (sessionExpired || refreshInProgress) return;
     if (dialog?.open) return;
+    // За PIN-замком сеть не нужна (initApp выходит рано): тик с render()
+    // перерисовывал экран блокировки и стирал недобранный PIN (репорт 2026-11-10).
+    if (!appUnlocked && storedPin()) return;
     // Пользователь печатает (код приглашения в онбординге) — тик пропускаем
     // целиком, данные придут снова на следующем тике после ухода фокуса.
-    const isTyping = () => document.activeElement instanceof HTMLInputElement
-      || document.activeElement instanceof HTMLTextAreaElement;
-    if (isTyping()) return;
+    if (isTypingNow()) return;
     // Жест по капле в разгаре: перерисовка пересоздала бы переключатель и
     // оборвала движение. Пропускаем тик — данные придут на следующем.
     if (liquidNav?.getState?.().dragging || segSwitch?.getState?.().dragging || wishSwitch?.getState?.().dragging) return;
@@ -4591,7 +4680,7 @@
       const next = await request("/api/state");
       // Фокус могли включить, пока запрос летел, — тогда данные не забираем,
       // чтобы не потерять изменение для следующего тика.
-      if (isTyping()) return;
+      if (isTypingNow()) return;
       // Партнёр зашёл в пространство, пока приложение было открыто —
       // минутный тик заметит это без действия пользователя.
       const gainedPartner = !hadPartner && Boolean(next?.pair?.user_b);
@@ -4673,7 +4762,9 @@
         });
         document.getElementById("reauth-link").addEventListener("click", (e) => {
           e.preventDefault();
-          tg?.initData && location.reload();
+          // Перезапуск нужен и в обычном браузере (там initData пуст): клик с
+          // preventDefault без reload молча умирал (репорт 2026-11-10).
+          location.reload();
         });
       } else {
         appEl.innerHTML = `

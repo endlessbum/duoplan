@@ -39,6 +39,8 @@ if (!cleanDecl) throw new Error("clean() не найдена");
 const load = new Function(
   "openApp",
   "escapeHtml",
+  "membership",
+  "HttpError",
   `${nowDecl}\n${cleanDecl}\n${extractFunction("leavePair")}\nreturn leavePair;`
 );
 
@@ -290,4 +292,122 @@ test("код резервируется за tg_id ушедшего (обе ро
   const updateA = mockA.executed.find((op) => op.sql.includes("user_a=user_b"));
   ok(updateA.sql.includes("last_partner=?"), "ушёл владелец (a): колонка в UPDATE");
   deepStrictEqual(updateA.params[1], 1, "в резерве tg_id ушедшего владельца");
+});
+
+// ------------------------------------------------------------------
+// Гонки выхода (репорт 2026-11-10): снимок member устаревает между
+// membership() и batch — гварды превращают batch в no-op (changes=0),
+// и leavePair пересобирает попытку со свежим membership().
+// ------------------------------------------------------------------
+class FakeHttpError {
+  constructor(status, message, code) { this.status = status; this.message = message; this.code = code; }
+}
+
+test("гонка: партнёр вышел первым — retry пересобирает выход как последний держатель", async () => {
+  // Первый batch: гварды не совпали с изменившейся парой → changes=0 на
+  // парном операторе; membership возвращает свежий снимок без партнёра;
+  // второй batch удаляет пару целиком, hand-over по зомби-снимку не выполняется.
+  const batches = [];
+  let batchNo = 0;
+  const db = {
+    prepare(sql) {
+      return { bind(...params) { return { sql, params }; } };
+    },
+    async batch(operations) {
+      batches.push(operations);
+      const results = operations.map(() => ({ meta: { changes: 1 } }));
+      if (batchNo === 0) results[results.length - 1] = { meta: { changes: 0 } };
+      batchNo++;
+      return results;
+    }
+  };
+  const notifier = makeNotifier();
+  const membership = async () => ({ id: 7, code: "abcdef12", tg_id: 1, role: "a", user_a: 1, user_b: 0 });
+  const leavePair = load(notifier.openApp, escapeHtml, membership, FakeHttpError);
+  // Устаревший снимок: уходит как владелец с партнёром, хотя партнёр уже вышел.
+  await leavePair({ DB: db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2, owner_name: "Игорь" });
+
+  equal(batches.length, 2, "две попытки: changes=0 → retry");
+  deepStrictEqual(
+    batches[0].some((op) => op.sql.includes("user_a=user_b")),
+    true,
+    "первая попытка — hand-over по устаревшему снимку"
+  );
+  deepStrictEqual(
+    batches[1].some((op) => op.sql.startsWith("DELETE FROM pairs WHERE id=?")),
+    true,
+    "вторая попытка — полное удаление: партнёра уже нет"
+  );
+  deepStrictEqual(
+    batches[1].some((op) => op.sql.includes("user_a=user_b")),
+    false,
+    "hand-over по зомби-снимку не выполняется — «зомби»-пар не возникает"
+  );
+  equal(notifier.calls.length, 0, "уведомлять некого: partner уже вышел");
+});
+
+test("гонка: пара удалена конкурентно — пользователь отвязывается без уведомления", async () => {
+  const executed = [];
+  let batchNo = 0;
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...params) {
+          return {
+            sql, params,
+            async run() { executed.push({ sql, params }); return { meta: { changes: 1 } }; }
+          };
+        }
+      };
+    },
+    async batch(operations) {
+      const results = operations.map(() => ({ meta: { changes: 1 } }));
+      if (batchNo === 0) results[results.length - 1] = { meta: { changes: 0 } };
+      batchNo++;
+      return results;
+    }
+  };
+  const notifier = makeNotifier();
+  const membership = async () => null; // пары больше нет
+  const leavePair = load(notifier.openApp, escapeHtml, membership, FakeHttpError);
+  await leavePair({ DB: db }, { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2 },
+    new URL("https://duoplan.example/api/pair/leave"));
+
+  equal(notifier.calls.length, 0);
+  deepStrictEqual(
+    executed.some((op) => op.sql.startsWith("UPDATE users SET pair_id=NULL") && op.sql.includes("pair_id=?")),
+    true,
+    "users-строка отвязана от исчезнувшей пары"
+  );
+});
+
+test("уведомление о выходе уходит через ctx.waitUntil и не блокирует ответ", async () => {
+  const order = [];
+  const { db, executed } = makeMockDb(order);
+  // Telegram «висит»: промис разрешится только после release(). Если бы
+  // leavePair ждал уведомление, await leavePair не вернулся бы до release.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const openApp = async (env, chatId, requestUrl, text) => {
+    calls.push({ chatId, text });
+    await gate;
+  };
+  const leavePair = load(openApp, escapeHtml);
+  const waited = [];
+  const ctx = { waitUntil: (promise) => waited.push(promise) };
+  await leavePair(
+    { DB: db },
+    { id: 7, tg_id: 1, role: "a", user_a: 1, user_b: 2, owner_name: "Игорь" },
+    new URL("https://duoplan.example/api/pair/leave"),
+    ctx
+  );
+  // Дошли сюда при неразрешённом Telegram-промисе — ответ не блокировался.
+  equal(executed.length > 0, true, "batch выполнен");
+  equal(waited.length, 1, "промис уведомления передан в waitUntil");
+  equal(calls.length, 1);
+  equal(calls[0].chatId, 2, "уведомление уходит оставшемуся партнёру");
+  equal(calls[0].text.includes("<b>Игорь</b>"), true);
+  release();
+  await Promise.all(waited);
 });

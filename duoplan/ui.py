@@ -1,6 +1,8 @@
 from aiogram.types import InlineKeyboardButton
 from aiogram.types import InlineKeyboardMarkup
 
+from duoplan.services import DAILY_XP
+
 
 def button(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
@@ -79,7 +81,9 @@ LEAVE_CONFIRM_MENU = InlineKeyboardMarkup(
 
 GAME_MENU = InlineKeyboardMarkup(
     inline_keyboard=[
-        [button("Мы это сделали · +10 XP", "game:done")],
+        # XP из DAILY_XP: захардкоженное «+10» разошлось бы с начислением
+        # при изменении константы.
+        [button(f"Мы это сделали · +{DAILY_XP} XP", "game:done")],
         [button("В наше пространство", "menu:home")],
     ]
 )

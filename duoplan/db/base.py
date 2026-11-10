@@ -24,7 +24,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -62,6 +62,11 @@ MIGRATIONS: dict[int, Sequence[str]] = {
         "ALTER TABLE pairs ADD COLUMN awaiting_return INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pairs ADD COLUMN last_partner INTEGER NOT NULL DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY, closed_at INTEGER NOT NULL)",
+    ),
+    # rate_limits (migrations/0002): неудачные попытки входа по коду.
+    7: (
+        "CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, "
+        "count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)",
     ),
 }
 

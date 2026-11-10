@@ -45,6 +45,12 @@ const load = new Function(
     extractBraced("function syncArchiveCachePair"),
     extractBraced("function removeFromArchiveCache"),
     extractBraced("function patchArchiveItem"),
+    // renderArchiveSafe теперь рендерит догрузку: в сандбоксе диалога нет и
+    // пользователь не печатает — функция всегда идёт в render() сразу.
+    "const dialog = null;",
+    "function isTypingNow() { return false; }",
+    "let archiveRenderTimer = null;",
+    extractBraced("function renderArchiveSafe"),
     extractBraced("async function loadArchivePage"),
     extractBraced("async function revalidateArchiveCache"),
     extractBraced("function mergedArchive"),
@@ -363,7 +369,11 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
     [
       "class HTMLInputElement {}",
       "class HTMLTextAreaElement {}",
-      "const document = { activeElement: null };", // isTyping смотрит только activeElement
+      "const document = { activeElement: null };", // isTypingNow смотрит только activeElement
+      // Гейты refreshState: PIN не задан, из поля фокус не уходил.
+      "const appUnlocked = true;",
+      "function storedPin() { return null; }",
+      "function isTypingNow() { return false; }",
       "let sessionExpired = false;",
       "let refreshInProgress = false;",
       "let appState = null;",
