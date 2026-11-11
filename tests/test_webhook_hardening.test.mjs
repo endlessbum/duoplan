@@ -109,7 +109,9 @@ test("версии не опережают текущую дату и схема
   ok(compare(schemaParts, today) <= 0, `DB_SCHEMA_VERSION ${schema} в будущем`);
   ok(compare(appParts, today) <= 0, `APP_VERSION ${app} в будущем`);
   ok(compare(schemaParts, appParts) <= 0, "версия схемы новее версии приложения");
-  deepStrictEqual(schema, app, "на релизе версии совпадают");
+  // Версии схемы и приложения совпадают на релизе (текущая версия — 2026.11.11.54).
+  deepStrictEqual(schema, "2026.11.11.54", "версия схемы обновлена");
+  deepStrictEqual(app, "2026.11.11.54", "версия приложения обновлена");
 });
 
 // Резерв кода на этапе гейта: зарезервированный код открывает приватный бот
@@ -120,4 +122,41 @@ test("гейт вебхука проверяет резерв кода (awaiting
     source.includes("AND (awaiting_return=0 OR last_partner=?)"),
     "openPair-запрос гейта не проверяет резерв кода",
   );
+});
+
+// Аудит 2026-11-11 (P2): допущенный по коду, но проигравший гонку пользователь
+// не должен остаться в users — иначе /api/* пустит его как knownUser.
+test("гонка приглашения снимает регистрацию проигравшего", () => {
+  const webhook = source.slice(source.indexOf("async function webhook"));
+  match(webhook, /const invitedNow = Boolean\(ownerIdList\.length && !isBotOwner && !knownUser\)/);
+  match(webhook, /if \(invitedNow && !joined\) await dropUnconfirmedUser\(env, user\.tg_id\)/);
+});
+
+test("dropUnconfirmedUser удаляет только запись без пары и без членства", async () => {
+  const start = source.indexOf("async function dropUnconfirmedUser");
+  ok(start > 0, "dropUnconfirmedUser не найдена");
+  let depth = 0;
+  let end = -1;
+  for (let i = source.indexOf("{", start); i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") { depth--; if (depth === 0) { end = i + 1; break; } }
+  }
+  const calls = [];
+  const env = {
+    DB: {
+      prepare(sql) {
+        return {
+          bind(...params) {
+            return { async run() { calls.push({ sql, params }); return { meta: { changes: 1 } }; } };
+          }
+        };
+      }
+    }
+  };
+  const drop = new Function("env", `${source.slice(start, end)}\nreturn dropUnconfirmedUser;`)(env);
+  await drop(env, 777);
+  equal(calls.length, 1);
+  match(calls[0].sql, /DELETE FROM users WHERE tg_id=\? AND pair_id IS NULL/);
+  match(calls[0].sql, /NOT EXISTS\(SELECT 1 FROM pair_members WHERE tg_id=\?\)/);
+  deepStrictEqual(calls[0].params, [777, 777]);
 });

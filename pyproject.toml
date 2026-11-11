@@ -8,14 +8,16 @@ dynamic = ["version"]
 description = "DuoPlan — приложение для пар: общие планы, значимые даты, общий дневник и вишлисты."
 readme = "README.md"
 requires-python = ">=3.11"
+# Точные версии совпадают с requirements.txt: без pin разные среды получали
+# разные minor-версии aiogram/pytest и результаты проверок расходились.
 dependencies = [
-    "aiogram>=3.31,<4",
-    "aiosqlite>=0.20,<1",
-    "tzdata>=2024.1",
+    "aiogram==3.31.0",
+    "aiosqlite==0.22.1",
+    "tzdata==2026.5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "pillow>=10"]
+dev = ["pytest==9.2.0", "pytest-asyncio==1.4.1", "pillow==13.0.0"]
 
 [project.scripts]
 duoplan = "duoplan.__main__:run"
@@ -32,3 +34,26 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra"
+
+# Единый стандарт проверок: ruff — стиль, mypy — типы.
+# line-length 100: код и русские комментарии исторически пишутся до ~100 колонок;
+# всё, что длиннее, обязано быть перенесено (E501 включён в select).
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "BLE", "ISC", "RUF"]
+# RUF001-003 ловят «неоднозначные» кириллические буквы в русских текстах —
+# для этого проекта это ложные срабатывания, а не дефект.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# В тестах длинные строки — это SQL-фикстуры и сообщения assert'ов:
+# переносить их значит менять смысл фикстуры ради ширины колонки.
+"tests/**" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+files = ["duoplan", "tests"]

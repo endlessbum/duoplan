@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { equal } from "node:assert/strict";
+import { equal, match, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,4 +91,44 @@ test("желание с ссылкой: кнопка «Ссылка», сама 
 test("желание без ссылки: кнопки «Ссылка» нет", () => {
   const html = wishItem(PARTNER_WISH, false);
   equal(html.includes("data-action=\"open-url\""), false);
+});
+
+// --------------------------------------------- уточнение к желанию (2026-11-11)
+
+const WISH_WITH_COMMENT = {
+  id: 9, body: "Плед", owner_id: 2, comment: "Тёплый, **серый**, 150×200"
+};
+
+test("уточнение показывается под названием и поддерживает разметку", () => {
+  const html = wishItem(WISH_WITH_COMMENT, false);
+  equal(html.includes('<div class="wish-comment">'), true, "блок уточнения не отрисован");
+  equal(html.includes("<b>серый</b>"), true, "разметка уточнения не применена");
+  ok(html.indexOf("item-title") < html.indexOf("wish-comment"), "уточнение должно быть под названием");
+});
+
+test("уточнение экранируется: сырой HTML из базы не попадает в карточку", () => {
+  const html = wishItem({ ...WISH_WITH_COMMENT, comment: "<script>alert(1)</script>" }, false);
+  equal(html.includes("<script>"), false);
+  equal(html.includes("&lt;script&gt;"), true);
+});
+
+test("желание без уточнения не получает пустой блок", () => {
+  equal(wishItem(PARTNER_WISH, false).includes("wish-comment"), false);
+  equal(wishItem({ ...WISH_WITH_COMMENT, comment: "  " }, false).includes("wish-comment"), true,
+    "пробельное значение всё ещё строка — решает сервер, пишущий NULL");
+});
+
+test("wishShareText: название, уточнение и ссылка идут по строкам", () => {
+  equal(
+    wishShareText({ body: "Плед", comment: "Серый, 150×200", url: "https://example.com" }),
+    "Плед\nСерый, 150×200\nhttps://example.com"
+  );
+  equal(wishShareText({ body: "Плед", comment: "  ", url: "" }), "Плед");
+  equal(wishShareText({ body: "Плед", comment: "Серый" }), "Плед\nСерый");
+});
+
+test("формы создания и редактирования желания работают с полем comment", () => {
+  match(appSource, /<textarea name="comment" rows="3" maxlength="500"/);
+  match(appSource, /request\("\/api\/wishes", \{ method: "POST", body: \{ body: fd\.get\("body"\), comment: fd\.get\("comment"\)/);
+  match(appSource, /if \(fd\.get\("comment"\) !== undefined\) body\.comment = fd\.get\("comment"\)/);
 });

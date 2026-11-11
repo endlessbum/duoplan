@@ -33,10 +33,12 @@ function extractFunction(name) {
 }
 
 const schemaVersion = source.match(/const DB_SCHEMA_VERSION = "[^"]+";/)?.[0];
+const nowDecl = source.match(/const now = \(\) => [^;]+;/)?.[0];
 const weakMap = "const schemaReady = new WeakMap();";
 if (!schemaVersion) throw new Error("DB_SCHEMA_VERSION не найдена");
+if (!nowDecl) throw new Error("now() не найдена");
 const load = new Function(
-  `${schemaVersion}\n${weakMap}\n${extractFunction("ensureSchema")}\n${extractFunction("ensureSchemaOnce")}\n` +
+  `${schemaVersion}\n${nowDecl}\n${weakMap}\n${extractFunction("ensureSchema")}\n${extractFunction("ensureSchemaOnce")}\n` +
   "return { ensureSchemaOnce, DB_SCHEMA_VERSION };"
 );
 const { ensureSchemaOnce, DB_SCHEMA_VERSION } = load();
@@ -104,7 +106,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
   // users.timezone упал с "duplicate column name" и был отработан,
   // pairs.timezone добавлен этим isolate штатно.
   deepStrictEqual(log.alters.sort(), [
-    "accent_color", "awaiting_return", "created_by", "custom_name", "dates_digest_enabled", "dates_digest_time", "day",
+    "accent_color", "awaiting_return", "comment", "created_by", "custom_name", "dates_digest_enabled", "dates_digest_time", "day",
     "details", "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
     "is_private", "kind", "last_partner", "monthly", "monthly", "partner_custom_name", "photo_url",
     "rating_checked_at", "rating_source", "show_avatar",
@@ -117,13 +119,13 @@ test("чистый проход миграции без гонки записы�
   await ensureSchemaOnce({ DB: db });
   deepStrictEqual(log.versionWrite, DB_SCHEMA_VERSION);
   // time + is_private (tasks) + time/is_private/created_by/kind (dates) + done_at
-  // (wishes) + url (wishes) + timezone (users, pairs) + expires_at (rate_limits)
+  // (wishes) + url/comment (wishes) + timezone (users, pairs) + expires_at (rate_limits)
   // + 5 настроек (users) + photo_url/show_avatar/partner_custom_name/custom_name (users)
   // + rating_source/rating_checked_at/details (movies, items 88/89/92)
   // + awaiting_return/last_partner (pairs, заморозка контента после выхода
   // партнёра и резерв кода за ушедшим)
   // + 3 настройки недельной сводки (users)
-  deepStrictEqual(log.alters.length, 34);
+  deepStrictEqual(log.alters.length, 35);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

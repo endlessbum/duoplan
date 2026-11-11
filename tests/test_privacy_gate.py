@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import cast
+
+from aiogram.types import TelegramObject
 
 from duoplan.config import Settings
 from duoplan.db.base import connect_database
@@ -25,19 +29,40 @@ class FakeMessage:
         self.text = text
 
 
+class TestMiddleware(PrivateBotMiddleware):
+    """Middleware с полями, объявленными явно.
+
+    Продакшн-класс читает ``settings``/``service`` из ``data`` апдейта и своих
+    атрибутов не имеет; тесту удобнее положить их на экземпляр, чтобы не
+    дублировать словарь в каждом вызове.
+    """
+
+    settings: Settings
+    service: DuoPlanService
+
+
+def _as_event(text: str) -> TelegramObject:
+    """FakeMessage в роли TelegramObject: middleware читает только text/chat."""
+    return cast(TelegramObject, FakeMessage(text))
+
+
 class FakeBot:
-    sent: list[str] = []
+    def __init__(self) -> None:
+        # Список на экземпляр, а не на класс: общий ClassVar протекал между
+        # тестами, и assert bot.sent мог проходить за счёт соседнего теста.
+        self.sent: list[str] = []
 
     async def send_message(self, chat_id: int, text: str) -> None:
         self.sent.append(text)
 
 
-def _middleware(service: DuoPlanService, owner_ids: tuple[int, ...]) -> PrivateBotMiddleware:
-    middleware = PrivateBotMiddleware()
+def _middleware(service: DuoPlanService, owner_ids: tuple[int, ...]) -> TestMiddleware:
+    middleware = TestMiddleware()
     middleware.settings = Settings(
         bot_token="TEST_TOKEN",
         admin_chat_id=None,
-        db_path=None,
+        # Путь гейту не нужен: база в тесте открывается отдельно.
+        db_path=Path("unused.db"),
         bot_name="DuoPlan",
         bot_username="duoplanbot",
         tz_name="UTC",
@@ -47,7 +72,7 @@ def _middleware(service: DuoPlanService, owner_ids: tuple[int, ...]) -> PrivateB
     return middleware
 
 
-async def _run(middleware: PrivateBotMiddleware, event: object, data: dict) -> bool:
+async def _run(middleware: TestMiddleware, event: TelegramObject, data: dict) -> bool:
     """False — событие гасится (возвращено None), True — прошло дальше."""
     handled = False
 
@@ -64,7 +89,7 @@ async def test_open_bot_when_owner_ids_empty(tmp_path) -> None:
     db = await connect_database(tmp_path / "gate.db")
     service = DuoPlanService(db)
     middleware = _middleware(service, owner_ids=())
-    allowed = await _run(middleware, FakeMessage("/menu"), {"service": service, "event_from_user": FakeUser()})
+    allowed = await _run(middleware, _as_event("/menu"), {"service": service, "event_from_user": FakeUser()})
     assert allowed
     await db.close()
 
@@ -73,7 +98,7 @@ async def test_owner_is_allowed(tmp_path) -> None:
     db = await connect_database(tmp_path / "gate.db")
     service = DuoPlanService(db)
     middleware = _middleware(service, owner_ids=(42,))
-    allowed = await _run(middleware, FakeMessage("/start ABCDEFGH"), {"service": service, "event_from_user": FakeUser(42)})
+    allowed = await _run(middleware, _as_event("/start ABCDEFGH"), {"service": service, "event_from_user": FakeUser(42)})
     assert allowed
     await db.close()
 
@@ -83,7 +108,7 @@ async def test_known_user_is_allowed(tmp_path) -> None:
     service = DuoPlanService(db)
     await service.ensure_user(42, "u", "User")
     middleware = _middleware(service, owner_ids=(99,))
-    allowed = await _run(middleware, FakeMessage("/menu"), {"service": service, "event_from_user": FakeUser(42)})
+    allowed = await _run(middleware, _as_event("/menu"), {"service": service, "event_from_user": FakeUser(42)})
     assert allowed
     await db.close()
 
@@ -102,7 +127,7 @@ async def test_stranger_without_invite_is_denied(tmp_path) -> None:
     bot = FakeBot()
     result = await middleware(
         handler,
-        FakeMessage("/menu"),
+        _as_event("/menu"),
         {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(777)},
     )
     assert not handled
@@ -131,7 +156,7 @@ async def test_stranger_with_open_invite_code_is_allowed(tmp_path) -> None:
     bot = FakeBot()
     result = await middleware(
         handler,
-        FakeMessage(f"/start {code}"),
+        _as_event(f"/start {code}"),
         {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(777)},
     )
     assert handled
@@ -157,7 +182,7 @@ async def test_stranger_with_mention_start_is_allowed(tmp_path) -> None:
     bot = FakeBot()
     result = await middleware(
         handler,
-        FakeMessage(f"/start@duoplanbot {code}"),
+        _as_event(f"/start@duoplanbot {code}"),
         {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(777)},
     )
     assert handled, "код после /start@duoplanbot должен распознаваться"
@@ -185,7 +210,7 @@ async def test_stranger_with_closed_or_bad_code_is_denied(tmp_path) -> None:
     bot = FakeBot()
     result = await middleware(
         handler,
-        FakeMessage(f"/start {code}"),
+        _as_event(f"/start {code}"),
         {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(9)},
     )
     assert not handled
@@ -213,7 +238,7 @@ async def test_reserved_code_denies_stranger_but_allows_partner(tmp_path) -> Non
     # Посторонний с «уехавшим» кодом — отказ.
     result = await middleware(
         handler,
-        FakeMessage(f"/start {code}"),
+        _as_event(f"/start {code}"),
         {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(777)},
     )
     assert result is None, "посторонний не должен проходить гейт по зарезервированному коду"
@@ -229,7 +254,7 @@ async def test_reserved_code_denies_stranger_but_allows_partner(tmp_path) -> Non
 
     result = await middleware(
         joining_handler,
-        FakeMessage(f"/start {code}"),
+        _as_event(f"/start {code}"),
         {"service": service, "bot": bot, "settings": middleware.settings, "event_from_user": FakeUser(8)},
     )
     assert handled, "прежний партнёр проходит гейт"
@@ -250,4 +275,81 @@ async def test_open_pair_for_code_without_tg_id_ignores_reserved(tmp_path) -> No
     assert await service.open_pair_for_code(code) is None, "без tg_id резерв не открывается"
     assert await service.open_pair_for_code(code, tg_id=8) is not None, "владелец резерва проходит"
     assert await service.open_pair_for_code(code, tg_id=777) is None
+    await db.close()
+
+
+# ------------------------------------------ гонка приглашений (аудит 2026-11-11)
+
+async def _invited_event(service: DuoPlanService, middleware: TestMiddleware,
+                         code: str, handler) -> object:
+    bot = FakeBot()
+    return await middleware(
+        handler,
+        _as_event(f"/start {code}"),
+        {"service": service, "bot": bot, "settings": middleware.settings,
+         "event_from_user": FakeUser(777)},
+    )
+
+
+async def test_invite_race_does_not_leave_known_user(tmp_path) -> None:
+    """Проигравший гонку за код не числится «известным» (P2 аудита)."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+    middleware = _middleware(service, owner_ids=(99,))
+
+    async def losing_handler(_event: object, _data: dict) -> bool:
+        # EnsureUserMiddleware регистрирует гостя, а другой аккаунт успевает
+        # занять слот раньше, чем join_pair гостя дойдёт до пары.
+        await service.ensure_user(777, "guest", "Гость")
+        await service.ensure_user(8, "winner", "Победитель")
+        assert await service.join_pair(8, "Победитель", code)
+        return True
+
+    assert await _invited_event(service, middleware, code, losing_handler) is True
+    assert await service.user(777) is None, "проигравший не должен остаться в users"
+    # Следующее обращение без кода — гейт закрыт.
+    assert await _run(middleware, _as_event("/menu"), {
+        "service": service, "bot": FakeBot(), "settings": middleware.settings,
+        "event_from_user": FakeUser(777),
+    }) is False
+    await db.close()
+
+
+async def test_successful_invite_keeps_registered_user(tmp_path) -> None:
+    """Успешный вход по приглашению не должен удалять users-строку."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+    middleware = _middleware(service, owner_ids=(99,))
+
+    async def joining_handler(_event: object, _data: dict) -> bool:
+        await service.ensure_user(777, "guest", "Гость")
+        assert await service.join_pair(777, "Гость", code)
+        return True
+
+    assert await _invited_event(service, middleware, code, joining_handler) is True
+    assert await service.user(777) is not None
+    assert await service.membership(777) is not None
+    await db.close()
+
+
+async def test_user_who_left_pair_keeps_gate_access(tmp_path) -> None:
+    """Политика «зарегистрирован = доступ» сохранена для вышедших из пары."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+    await service.ensure_user(8, None, "Partner")
+    assert await service.join_pair(8, "Partner", code)
+    assert await service.leave_pair(8)
+
+    middleware = _middleware(service, owner_ids=(99,))
+    assert await _run(middleware, _as_event("/menu"), {
+        "service": service, "bot": FakeBot(), "settings": middleware.settings,
+        "event_from_user": FakeUser(8),
+    }) is True
+    assert await service.user(8) is not None, "вышедший из пары не теряет доступ к боту"
     await db.close()

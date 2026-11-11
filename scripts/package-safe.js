@@ -16,6 +16,7 @@ const allowedTopLevel = [
   "README.md",
   "requirements.txt",
   "pyproject.toml",
+  "package.json",
   "worker.js",
   "wrangler.jsonc",
   "public",

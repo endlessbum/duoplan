@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from datetime import date
 
-from duoplan.handlers import game
-from duoplan.handlers import game_done
+from duoplan.handlers import game, game_done
 from duoplan.services import DAILY_XP
-from duoplan.ui import HOME_MENU
-from duoplan.ui import GAME_MENU
+from duoplan.ui import GAME_MENU, HOME_MENU
 
 # Репорт 2026-10-29: сервис начислял XP каждому партнёру, но до пользователя
 # это не доходило — game() показывал HOME_MENU по парному done, и у второго
@@ -92,7 +90,7 @@ async def test_owner_sees_marked_state(pair, monkeypatch):
 
 
 async def test_second_press_does_not_double_xp(pair, monkeypatch):
-    service, pair_id, owner_id, partner_id = pair
+    service, _pair_id, _owner_id, partner_id = pair
     monkeypatch.setattr(service, "local_today", lambda at=None: date(2026, 3, 2))
 
     first = FakeCallback(partner_id, "game:done")

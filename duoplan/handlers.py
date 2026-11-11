@@ -1,5 +1,47 @@
 from __future__ import annotations
 
+import logging
+import re
+from datetime import date
+
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InaccessibleMessage,
+    InlineKeyboardMarkup,
+    Message,
+    User,
+)
+
+from duoplan.config import Settings
+from duoplan.game.levels import level_for, title_for
+from duoplan.richtext import escape_html, rich_to_html, rich_to_plain
+from duoplan.services import (
+    DAILY_XP,
+    DATE_TITLE_MAX,
+    WISH_MAX,
+    DuoPlanService,
+    ValidationError,
+    normalize_code,
+)
+from duoplan.ui import (
+    GAME_MENU,
+    HOME_MENU,
+    LEAVE_CONFIRM_MENU,
+    MAIN_MENU,
+    PAIR_MENU,
+    PAIRED_MENU,
+    START_MENU,
+    button,
+    pager_row,
+    section_menu,
+)
+
+
 def _utf16_len(s: str) -> int:
     """Длина строки в UTF-16 единицах, как считает Telegram API."""
     return len(s.encode("utf-16-le")) // 2
@@ -22,44 +64,7 @@ def _truncate_utf16(s: str, max_len: int) -> str:
     truncated = encoded[: (max_len - 1) * 2].decode("utf-16-le", errors="ignore")
     return truncated.rstrip() + "…"
 
-
-from datetime import date
-import re
-
-from aiogram import F
-from aiogram import Router
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
-from aiogram.filters import CommandStart
-from aiogram.filters import StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State
-from aiogram.fsm.state import StatesGroup
-from aiogram.types import CallbackQuery
-from aiogram.types import InlineKeyboardMarkup
-from aiogram.types import Message
-
-from duoplan.config import Settings
-from duoplan.game.levels import level_for
-from duoplan.game.levels import title_for
-from duoplan.richtext import escape_html
-from duoplan.richtext import rich_to_html
-from duoplan.richtext import rich_to_plain
-from duoplan.services import DATE_TITLE_MAX
-from duoplan.services import DAILY_XP
-from duoplan.services import DuoPlanService
-from duoplan.services import ValidationError
-from duoplan.services import normalize_code
-from duoplan.ui import GAME_MENU
-from duoplan.ui import HOME_MENU
-from duoplan.ui import LEAVE_CONFIRM_MENU
-from duoplan.ui import MAIN_MENU
-from duoplan.ui import PAIRED_MENU
-from duoplan.ui import PAIR_MENU
-from duoplan.ui import START_MENU
-from duoplan.ui import button
-from duoplan.ui import pager_row
-from duoplan.ui import section_menu
+log = logging.getLogger(__name__)
 
 router = Router()
 router.message.filter(F.chat.type == "private")
@@ -181,6 +186,7 @@ class Form(StatesGroup):
     date_recurs = State()
     memory = State()
     wish = State()
+    wish_comment = State()  # необязательное уточнение к желанию
 
 
 ALL_FORMS = StateFilter(
@@ -191,6 +197,7 @@ ALL_FORMS = StateFilter(
     Form.date_recurs,
     Form.memory,
     Form.wish,
+    Form.wish_comment,
 )
 
 
@@ -207,12 +214,35 @@ def _button_label(text: object, limit: int) -> str:
     return " ".join(rich_to_plain(text).split())[:limit]
 
 
-def name_of(user) -> str:
+def name_of(user: User) -> str:
     return user.full_name or user.first_name or "Без имени"
 
 
+def _sender(message: Message) -> User:
+    """Автор сообщения.
+
+    В личном чате ``from_user`` есть всегда, но в типах aiogram он Optional —
+    без явной проверки mypy считает каждое обращение к ``.id`` ошибкой.
+    """
+    if message.from_user is None:
+        raise RuntimeError("Сообщение без отправителя")
+    return message.from_user
+
+
+def _require_bot(bot: Bot | None) -> Bot:
+    """Бот из апдейта (в типах aiogram — Optional)."""
+    if bot is None:
+        raise RuntimeError("Апдейт без бота")
+    return bot
+
+
+def _bot(message: Message) -> Bot:
+    """Бот, доставивший сообщение (в типах aiogram — Optional)."""
+    return _require_bot(message.bot)
+
+
 async def safe_edit(
-    message: Message | None,
+    message: Message | InaccessibleMessage | None,
     text: str,
     markup: InlineKeyboardMarkup | None = None,
     *,
@@ -224,7 +254,9 @@ async def safe_edit(
     :func:`duoplan.richtext.rich_to_html` (там же экранирование), иначе
     Telegram вернёт 400 на первом же «<» из пользовательского ввода.
     """
-    if message is None:
+    # InaccessibleMessage — заглушка Telegram для недоступного сообщения:
+    # редактировать нечего, но и падать незачем.
+    if message is None or isinstance(message, InaccessibleMessage):
         return
     kwargs: dict = {"reply_markup": markup}
     # parse_mode передаём только для HTML-текстов: обычные сообщения остаются
@@ -267,10 +299,13 @@ def parse_tail(data: str | None, prefix: str) -> tuple[int, int] | None:
     return None
 
 
-async def invite_link(bot, code: str) -> str:
+async def invite_link(bot: Bot, code: str) -> str:
     try:
         me = await bot.me()
-    except Exception:  # pragma: no cover - сеть/Telegram
+    except TelegramAPIError as exc:
+        # Сеть/Telegram недоступны: ссылка не критична, показываем только код,
+        # но причину логируем — иначе пустая строка выглядит как «нет username».
+        log.warning("invite_link: не удалось получить данные бота: %s", exc)
         return ""
     username = getattr(me, "username", None)
     return f"https://t.me/{username}?start={code}" if username else ""
@@ -355,7 +390,9 @@ async def _home_content(event, user_id: int, service: DuoPlanService):
         return welcome_text(), START_MENU
     if not pair["user_b"]:
         # Владелец пустой пары видит своё пространство и код, а не приветствие.
-        return waiting_text(pair, await invite_link(getattr(event, "bot", None), pair["code"])), PAIR_MENU
+        return waiting_text(
+            pair, await invite_link(_require_bot(getattr(event, "bot", None)), pair["code"])
+        ), PAIR_MENU
     user = await service.user(user_id)
     # «Сегодня» — в поясе пары (parity с worker displayStreak/dailyFor),
     # а не в поясе сервера бота.
@@ -378,10 +415,10 @@ async def edit_home(call: CallbackQuery, service: DuoPlanService) -> None:
 async def _try_join(message: Message, service: DuoPlanService, code: str) -> bool:
     """Войти по коду от имени автора сообщения; ValidationError — ответом."""
     return await service.join_pair(
-        message.from_user.id,
-        name_of(message.from_user),
+        _sender(message).id,
+        name_of(_sender(message)),
         code,
-        notify=lambda chat_id, text: message.bot.send_message(chat_id, text),
+        notify=lambda chat_id, text: _bot(message).send_message(chat_id, text),
     )
 
 
@@ -393,7 +430,7 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
     parts = message.text.split(None, 1) if message.text else []
     code = parts[1].strip() if len(parts) > 1 else ""
     if code:
-        member = await service.membership(message.from_user.id)
+        member = await service.membership(_sender(message).id)
         if member is not None:
             await message.answer(
                 "Вы уже в пространстве, поэтому новый код не применяю. "
@@ -408,6 +445,7 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
                 # а не общий «код недоступен». Без return — send_home ниже
                 # отдаёт клавиатуру: новичок с протухшей ссылкой оставался
                 # без кнопок и был вынужден вторично отправлять /start.
+                joined = False
                 await message.answer(str(exc))
             if joined:
                 await message.answer("Готово — теперь у вас одно пространство на двоих.")
@@ -416,13 +454,13 @@ async def start(message: Message, service: DuoPlanService, state: FSMContext) ->
                     "Этот код недоступен. Проверьте его или попросите партнёра "
                     "прислать приглашение ещё раз."
                 )
-    await send_home(message, service, message.from_user.id)
+    await send_home(message, service, _sender(message).id)
 
 
 @router.message(Command("menu"))
 async def menu(message: Message, service: DuoPlanService, state: FSMContext) -> None:
     await state.clear()
-    await send_home(message, service, message.from_user.id)
+    await send_home(message, service, _sender(message).id)
 
 
 @router.message(Command("help"))
@@ -442,7 +480,7 @@ async def cancel(message: Message, service: DuoPlanService, state: FSMContext) -
         await message.answer("Сейчас ничего не вводится.")
         return
     await state.clear()
-    pair = await service.membership(message.from_user.id)
+    pair = await service.membership(_sender(message).id)
     markup = MAIN_MENU if pair and pair["user_b"] else (PAIR_MENU if pair else START_MENU)
     await message.answer("Ввод отменён.", reply_markup=markup)
 
@@ -464,7 +502,7 @@ async def create_pair(call: CallbackQuery, service: DuoPlanService) -> None:
     except ValidationError as exc:
         await call.answer(str(exc))
         return
-    link = await invite_link(call.bot, code)
+    link = await invite_link(_require_bot(call.bot), code)
     if pair and int(pair["awaiting_return"] or 0) == 1:
         # Код зарезервирован за ушедшим партнёром: generic-текст «Код для
         # партнёра» провоцировал рассылку его третьим лицам — waiting_text
@@ -493,7 +531,7 @@ async def invite(call: CallbackQuery, service: DuoPlanService) -> None:
         await call.answer("Партнёр уже с вами — код не нужен")
         await edit_home(call, service)
         return
-    link = await invite_link(call.bot, pair["code"])
+    link = await invite_link(_require_bot(call.bot), pair["code"])
     # Зарезервированный код не рассылаем как открытый: waiting_text объясняет
     # резерв (parity с _home_content, который это уже делает).
     text = waiting_text(pair, link) if int(pair["awaiting_return"] or 0) == 1 \
@@ -529,20 +567,20 @@ async def receive_code(message: Message, service: DuoPlanService, state: FSMCont
         # пользователь молчал, а состояние FSM зависало до /cancel.
         await state.clear()
         await message.answer(str(exc))
-        await send_home(message, service, message.from_user.id)
+        await send_home(message, service, _sender(message).id)
         return
     if joined:
         await state.clear()
         await message.answer("Вы на связи. Пространство теперь общее!")
-        await send_home(message, service, message.from_user.id)
+        await send_home(message, service, _sender(message).id)
         return
-    if await service.membership(message.from_user.id) is not None:
+    if await service.membership(_sender(message).id) is not None:
         await state.clear()
         await message.answer(
             "Вы уже участник пространства — второй код не применяю. "
             "Показать ваше пространство: /menu."
         )
-        await send_home(message, service, message.from_user.id)
+        await send_home(message, service, _sender(message).id)
         return
     await message.answer(
         "Не получилось войти по этому коду. Проверьте код и попробуйте ещё раз "
@@ -565,7 +603,7 @@ async def pair_info(call: CallbackQuery, service: DuoPlanService) -> None:
     if not pair["user_b"]:
         await safe_edit(
             call.message,
-            waiting_text(pair, await invite_link(call.bot, pair["code"])),
+            waiting_text(pair, await invite_link(_require_bot(call.bot), pair["code"])),
             PAIR_MENU,
         )
         await call.answer()
@@ -624,7 +662,7 @@ async def leave_no(call: CallbackQuery, service: DuoPlanService) -> None:
 async def leave_yes(call: CallbackQuery, service: DuoPlanService) -> None:
     left = await service.leave_pair(
         call.from_user.id,
-        notify=lambda chat_id, text: call.bot.send_message(chat_id, text),
+        notify=lambda chat_id, text: _require_bot(call.bot).send_message(chat_id, text),
     )
     if not left:
         await safe_edit(call.message, "Сначала соедините пространство.", START_MENU)
@@ -700,14 +738,24 @@ async def _list_page(call: CallbackQuery, service: DuoPlanService, fetch):
 _SECTION_TEXT = {
     "tasks": ("Наши планы", "Пока свободно. Добавьте первый общий шаг.", "планов", "Добавить план"),
     "dates": ("Значимые даты", "Добавьте дату, которую хочется беречь.", "дат", "Добавить дату"),
-    "memories": ("Общий дневник", "Здесь появятся ваши маленькие истории и важные моменты.", "записей", "Добавить запись"),
-    "wishes": ("Вишлист", "Добавьте желание — большое или совсем маленькое.", "желаний", "Добавить желание"),
+    "memories": (
+        "Общий дневник",
+        "Здесь появятся ваши маленькие истории и важные моменты.",
+        "записей",
+        "Добавить запись",
+    ),
+    "wishes": (
+        "Вишлист",
+        "Добавьте желание — большое или совсем маленькое.",
+        "желаний",
+        "Добавить желание",
+    ),
 }
 
 
 def _section_text(section: str, page: int, body: str | None) -> str:
     """Текст страницы раздела: тело списка или пустое состояние."""
-    title, hint, noun, add_label = _SECTION_TEXT[section]
+    title, hint, noun, _add_label = _SECTION_TEXT[section]
     if body is not None:
         return f"{title}\n\n{body}"
     if page == 0:
@@ -851,7 +899,9 @@ LIST_VIEWS = {
 
 @router.callback_query(F.data.in_({"menu:tasks", "menu:dates", "menu:memories", "menu:wishes"}))
 async def sections(call: CallbackQuery, service: DuoPlanService) -> None:
-    handled = await LIST_VIEWS[call.data.split(":", 1)[1]](call, service, 0)
+    # Фильтр выше гарантирует одно из значений; ``or ""`` — только для типа.
+    section = (call.data or "").split(":", 1)[1]
+    handled = await LIST_VIEWS[section](call, service, 0)
     await call.answer(None if handled else "Сначала соедините пространство")
 
 
@@ -978,7 +1028,7 @@ async def _guarded_write_pair(message: Message, service: DuoPlanService, state: 
     При заморозке или отсутствии пары сам очищает FSM и отвечает
     пользователю — обработчик получает ``None`` и просто выходит.
     """
-    pair, frozen = await _write_pair(message.from_user.id, service)
+    pair, frozen = await _write_pair(_sender(message).id, service)
     if frozen:
         await state.clear()
         await message.answer(FROZEN_TEXT)
@@ -990,7 +1040,9 @@ async def _guarded_write_pair(message: Message, service: DuoPlanService, state: 
     return pair
 
 
-async def _submit_item(message: Message, state: FSMContext, submit, success_text: str, section: str) -> None:
+async def _submit_item(
+    message: Message, state: FSMContext, submit, success_text: str, section: str
+) -> None:
     """Записать элемент раздела: ValidationError — подсказка, успех — экран раздела."""
     try:
         await submit()
@@ -1016,7 +1068,7 @@ async def add_item(call: CallbackQuery, service: DuoPlanService, state: FSMConte
         "add:memories": (Form.memory, "Запишите момент, который хочется сохранить."),
         "add:wishes": (Form.wish, "Чего вы хотите? Запишите одно желание."),
     }
-    next_state, prompt = prompts[call.data]
+    next_state, prompt = prompts[call.data or ""]
     await state.set_state(next_state)
     await safe_edit(call.message, prompt + "\n\nДля отмены: /cancel")
     await call.answer()
@@ -1029,7 +1081,7 @@ async def receive_task(message: Message, service: DuoPlanService, state: FSMCont
         return
     await _submit_item(
         message, state,
-        lambda: service.add_task(pair["id"], message.text, message.from_user.id),
+        lambda: service.add_task(pair["id"], message.text, _sender(message).id),
         "План добавлен в ваше пространство.", "tasks",
     )
 
@@ -1049,7 +1101,10 @@ async def receive_date_title(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(title=title)
     await state.set_state(Form.date_day)
-    await message.answer("Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ — после этого уточню, ежегодная ли она.")
+    await message.answer(
+        "Введите дату в формате ДД.ММ или ДД.ММ.ГГГГ — после этого уточню, "
+        "ежегодная ли она."
+    )
 
 
 def parse_date_input(raw: str, current_year: int) -> str:
@@ -1116,10 +1171,13 @@ async def receive_date_recurs(message: Message, service: DuoPlanService, state: 
         # ввод, а состояние останется — пользователь зациклится до /cancel.
         # Честно перезапускаем сценарий.
         await state.clear()
-        await message.answer("Ввод даты прерван — начните заново кнопкой «Добавить дату».", reply_markup=section_menu("dates"))
+        await message.answer(
+            "Ввод даты прерван — начните заново кнопкой «Добавить дату».",
+            reply_markup=section_menu("dates"),
+        )
         return
     try:
-        await service.add_date(pair["id"], title, day, 1 if answer else 0, message.from_user.id)
+        await service.add_date(pair["id"], title, day, 1 if answer else 0, _sender(message).id)
     except ValidationError as exc:
         await message.answer(f"{exc}\n\nПопробуйте ещё раз или /cancel.")
         return
@@ -1135,7 +1193,7 @@ async def receive_memory(message: Message, service: DuoPlanService, state: FSMCo
         return
     await _submit_item(
         message, state,
-        lambda: service.add_memory(pair["id"], message.from_user.id, message.text),
+        lambda: service.add_memory(pair["id"], _sender(message).id, message.text),
         "Момент сохранён в дневнике.", "memories",
     )
 
@@ -1145,9 +1203,36 @@ async def receive_wish(message: Message, service: DuoPlanService, state: FSMCont
     pair = await _guarded_write_pair(message, service, state)
     if pair is None:
         return
+    text = (message.text or "").strip()
+    if not text or len(text) > WISH_MAX:
+        await message.answer(
+            f"Желание: не длиннее {WISH_MAX} символов. Попробуйте ещё раз или /cancel."
+        )
+        return
+    # Уточнение спрашиваем отдельным шагом: пользователь может добавить
+    # контекст подарка в момент публикации, а может сразу пропустить шаг.
+    await state.update_data(wish_body=text)
+    await state.set_state(Form.wish_comment)
+    await message.answer(
+        "Хотите уточнить? Напишите, какой именно подарок, размер, цвет или где "
+        "его найти — или отправьте «-», чтобы сохранить без уточнения."
+    )
+
+
+@router.message(StateFilter(Form.wish_comment), F.text)
+async def receive_wish_comment(message: Message, service: DuoPlanService,
+                               state: FSMContext) -> None:
+    pair = await _guarded_write_pair(message, service, state)
+    if pair is None:
+        return
+    raw = (message.text or "").strip()
+    comment = "" if raw.lower() in {"-", "—", "пропустить", "нет"} else raw
+    data = await state.get_data()
     await _submit_item(
         message, state,
-        lambda: service.add_wish(pair["id"], message.from_user.id, message.text),
+        lambda: service.add_wish(
+            pair["id"], _sender(message).id, data.get("wish_body", ""), comment=comment
+        ),
         "Желание добавлено.", "wishes",
     )
 

@@ -21,8 +21,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from duoplan.handlers import receive_code
-from duoplan.handlers import wishes_view
+from duoplan.handlers import receive_code, wishes_view
 from duoplan.services import sort_date_rows
 
 TZ = ZoneInfo("Europe/Moscow")
@@ -208,8 +207,7 @@ def test_malformed_day_does_not_break_sorting():
 
 def test_validation_message_grammar():
     """Опечатка «не длиннее» — в тексте, который видит пользователь."""
-    from duoplan.services import ValidationError
-    from duoplan.services import _clean_text
+    from duoplan.services import ValidationError, _clean_text
 
     with pytest.raises(ValidationError) as excinfo:
         _clean_text("Слишком длинный заголовок", 5, "План")
@@ -362,9 +360,7 @@ async def test_join_rate_limit_after_five_failures(db):
     блокируют вход (репорт 2026-11-10 — раньше отказы были бесплатными)."""
     import pytest as _pytest
 
-    from duoplan.services import JOIN_ATTEMPT_LIMIT
-    from duoplan.services import DuoPlanService
-    from duoplan.services import ValidationError
+    from duoplan.services import JOIN_ATTEMPT_LIMIT, DuoPlanService, ValidationError
 
     service = DuoPlanService(db)
     await service.ensure_user(50, "try", "Пытливый")
@@ -380,9 +376,7 @@ async def test_join_rate_limit_counts_exact_rejections(db):
     «живой» код отличим от «мёртвого» бесплатно (parity worker PAIR_FULL)."""
     import pytest as _pytest
 
-    from duoplan.services import JOIN_ATTEMPT_LIMIT
-    from duoplan.services import DuoPlanService
-    from duoplan.services import ValidationError
+    from duoplan.services import JOIN_ATTEMPT_LIMIT, DuoPlanService, ValidationError
 
     service = DuoPlanService(db)
     await service.ensure_user(60, "owner", "Владелец")
@@ -396,3 +390,33 @@ async def test_join_rate_limit_counts_exact_rejections(db):
             await service.join_pair(62, "Третий", code)
     with _pytest.raises(ValidationError, match="15 минут"):
         await service.join_pair(62, "Третий", "00000000")
+
+
+@pytest.mark.asyncio
+async def test_join_rate_limit_is_atomic_under_concurrency(db):
+    """Аудит 2026-11-11 (P2): параллельные запросы не обходят лимит.
+
+    Раньше SELECT счётчика и инкремент были разделены: N одновременных
+    запросов читали одно старое значение и все доходили до проверки кода.
+    """
+    import asyncio
+
+    from duoplan.services import JOIN_ATTEMPT_LIMIT, DuoPlanService, ValidationError
+
+    service = DuoPlanService(db)
+    await service.ensure_user(70, "racer", "Гонщик")
+    total = JOIN_ATTEMPT_LIMIT * 2 + 2
+
+    async def attempt():
+        try:
+            return await service.join_pair(70, "Гонщик", "00000000")
+        except ValidationError as exc:
+            return "limited" if "15 минут" in str(exc) else "error"
+
+    results = await asyncio.gather(*[attempt() for _ in range(total)])
+    assert results.count(False) == JOIN_ATTEMPT_LIMIT, results
+    assert results.count("limited") == total - JOIN_ATTEMPT_LIMIT, results
+    row = await service.db.one(
+        "SELECT count FROM rate_limits WHERE bucket_key LIKE ?", ("jf:70:%",)
+    )
+    assert row is not None and row["count"] == total, "каждая попытка получила свой слот"

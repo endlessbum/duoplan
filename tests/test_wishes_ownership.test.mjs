@@ -116,6 +116,25 @@ test("автор обновляет текст и ссылку одним UPDATE
   equal(updates[0].args.includes("https://example.com/gift"), true);
 });
 
+test("автор обновляет уточнение тем же UPDATE, что и остальные поля", async () => {
+  const { route, env, pair, user, calls } = makeHarness({ ownerId: 2 });
+  equal(
+    await route(env, pair, user, "PATCH", "/api/wishes/5", { body: "Плед", comment: "Серый, 150×200" }),
+    true
+  );
+  const updates = calls.filter((c) => c.sql.startsWith("UPDATE wishes SET"));
+  equal(updates.length, 1, "уточнение не должно писаться отдельным UPDATE");
+  equal(updates[0].sql.includes("comment=?"), true);
+  equal(updates[0].args.includes("Серый, 150×200"), true);
+});
+
+test("пустое уточнение снимается в NULL", async () => {
+  const { route, env, pair, user, calls } = makeHarness({ ownerId: 2 });
+  equal(await route(env, pair, user, "PATCH", "/api/wishes/5", { comment: "   " }), true);
+  const update = calls.find((c) => c.sql.startsWith("UPDATE wishes SET"));
+  equal(update.args.includes(null), true);
+});
+
 test("автор может удалить своё желание", async () => {
   const { route, env, pair, user, calls } = makeHarness({ ownerId: 2 });
   equal(await route(env, pair, user, "DELETE", "/api/wishes/5", {}), true);

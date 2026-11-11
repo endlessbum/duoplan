@@ -60,9 +60,11 @@ test("PATCH savings: цель не ниже собранной суммы", () =
 });
 
 test("wishes.url нормализуется к NULL при POST и PATCH", () => {
-  const post = worker.indexOf('INSERT INTO wishes(pair_id,owner_id,body,url,created_at)');
+  const post = worker.indexOf('INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at)');
   ok(post !== -1, "POST wishes не найден");
   match(worker, /const wishLink = wishUrl\(body\.url\) \|\| null/);
+  // Уточнение к желанию пишется тем же INSERT, пустое значение — NULL.
+  match(worker, /const wishComment = clean\(body\.comment\) \|\| null/);
   // В PATCH ветке wishes — тоже || null (places уже так делал).
   const patchStart = worker.indexOf("async function itemRoute(");
   const patchBody = worker.slice(patchStart, worker.indexOf("async function api(", patchStart));

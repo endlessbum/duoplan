@@ -81,3 +81,17 @@ test("SELECT done-планов несёт monthly и yearly (редактиро�
     ok(columnList(sql).includes("yearly"), `yearly пропал в done-SELECT: ${sql.slice(0, 90).replace(/\s+/g, " ")}…`);
   }
 });
+
+// Уточнение к желанию показывается и в активном списке, и в архиве исполненных,
+// и уходит в экспорт: пропущенная колонка молча стирала бы его из карточки.
+// Guard-SELECT (SELECT owner_id FROM wishes ...) не начинается с w.id.
+const wishListSelects = statementWindows("wishes")
+  .filter((w) => !w.includes("COUNT(*)"))
+  .filter((w) => columnList(w).includes("w.id"));
+
+test("каждый списковый SELECT желаний несёт comment", () => {
+  equal(wishListSelects.length >= 5, true, `найдено только ${wishListSelects.length}`);
+  for (const sql of wishListSelects) {
+    ok(columnList(sql).includes("comment"), `comment пропал: ${sql.slice(0, 90).replace(/\s+/g, " ")}…`);
+  }
+});

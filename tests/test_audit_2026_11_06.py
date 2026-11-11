@@ -18,14 +18,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from duoplan.handlers import FROZEN_TEXT
-from duoplan.handlers import _viewable_pair
-from duoplan.handlers import _write_pair
-from duoplan.handlers import game_done
-from duoplan.handlers import tasks_view
-from duoplan.services import DuoPlanService
-from duoplan.services import ValidationError
-
+from duoplan.handlers import FROZEN_TEXT, _viewable_pair, _write_pair, game_done, tasks_view
+from duoplan.services import DuoPlanService, ValidationError
 
 # --------------------------------------------------------------------- фейки
 

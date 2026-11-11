@@ -1,5 +1,4 @@
-from aiogram.types import InlineKeyboardButton
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from duoplan.services import DAILY_XP
 
@@ -49,7 +48,9 @@ def section_menu(section: str) -> InlineKeyboardMarkup:
     )
 
 
-def pager_row(section: str, page: int, has_prev: bool, has_next: bool) -> list[InlineKeyboardButton]:
+def pager_row(
+    section: str, page: int, has_prev: bool, has_next: bool
+) -> list[InlineKeyboardButton]:
     row: list[InlineKeyboardButton] = []
     if has_prev:
         row.append(button("← Назад", f"list:{section}:{max(0, page - 1)}"))

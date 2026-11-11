@@ -1,10 +1,10 @@
-import pytest
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from duoplan.db.schema import SCHEMA
-from scripts.export_sqlite_to_d1 import TABLES
-from scripts.export_sqlite_to_d1 import dump
+from scripts.export_sqlite_to_d1 import TABLES, dump
 
 
 def _make_db(path: Path) -> None:
@@ -166,8 +166,9 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
         "VALUES(1,1,'Годовщина','2026-12-01','18:00',0,1,10,1)"
     )
     con.execute(
-        "INSERT INTO wishes(id,pair_id,owner_id,body,done,done_at,url,created_at) "
-        "VALUES(1,1,10,'Билеты',1,'2026-12-02','https://example.com/tickets',1)"
+        "INSERT INTO wishes(id,pair_id,owner_id,body,done,done_at,url,comment,created_at) "
+        "VALUES(1,1,10,'Билеты',1,'2026-12-02','https://example.com/tickets',"
+        "'В партере, не дальше 5 ряда',1)"
     )
     con.execute(
         "INSERT INTO daily_completions(pair_id,tg_id,day,completed_at) VALUES(1,10,'2026-12-02',5)"
@@ -181,8 +182,8 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
     assert "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, completed_by, completed_at) VALUES(1, 1, 'Сюрприз', 'open', '2026-12-01', '18:00', 0, 0, 1, 10, 1, NULL, NULL);" in sql
     # Личная дата остаётся личной; kind по умолчанию — обычная дата.
     assert "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at) VALUES(1, 1, 'Годовщина', '2026-12-01', '18:00', 0, 0, 1, 10, 'date', 1);" in sql
-    # Звёздочка в календаре (done_at) и ссылка на желание не теряются.
-    assert "INSERT OR REPLACE INTO wishes(id, pair_id, owner_id, body, done, done_at, url, created_at) VALUES(1, 1, 10, 'Билеты', 1, '2026-12-02', 'https://example.com/tickets', 1);" in sql
+    # Звёздочка в календаре (done_at), ссылка и уточнение к желанию не теряются.
+    assert "INSERT OR REPLACE INTO wishes(id, pair_id, owner_id, body, done, done_at, url, comment, created_at) VALUES(1, 1, 10, 'Билеты', 1, '2026-12-02', 'https://example.com/tickets', 'В партере, не дальше 5 ряда', 1);" in sql
     # Настройки пользователя (время сводок, акцент) переезжают вместе с ним.
     assert "'08:00'" in sql and "'09:00'" in sql and "'#ff00ff'" in sql
     # Ежедневные отметки — отдельная таблица, её тоже нужно переносить.
@@ -197,8 +198,7 @@ def test_export_covers_every_column_of_current_schema():
     при импорте (для is_private — тихая смена приватности). Сверка с Python
     SCHEMA не ловила этот класс регрессии (аудит 2026-11-01).
     """
-    from test_schema_parity import _d1_migrations
-    from test_schema_parity import _worker_schema
+    from test_schema_parity import _d1_migrations, _worker_schema
 
     merged: dict[str, set[str]] = {}
     for source in (_d1_migrations(), _worker_schema()):

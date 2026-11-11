@@ -16,23 +16,26 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Sequence
+from typing import Any
 
 import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
 # чтобы повторный запуск после сбоя не ломал базу.
 MIGRATIONS: dict[int, Sequence[str]] = {
     2: (
-        "CREATE TABLE IF NOT EXISTS fsm_states (key TEXT PRIMARY KEY, state TEXT, "
-        "data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL)",
+        (
+            "CREATE TABLE IF NOT EXISTS fsm_states (key TEXT PRIMARY KEY, state TEXT, "
+            "data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL)"
+        ),
         "CREATE INDEX IF NOT EXISTS idx_users_pair ON users(pair_id)",
         "CREATE INDEX IF NOT EXISTS idx_pairs_user_a ON pairs(user_a)",
         "CREATE INDEX IF NOT EXISTS idx_pairs_user_b ON pairs(user_b)",
@@ -61,12 +64,41 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     6: (
         "ALTER TABLE pairs ADD COLUMN awaiting_return INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE pairs ADD COLUMN last_partner INTEGER NOT NULL DEFAULT 0",
-        "CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY, closed_at INTEGER NOT NULL)",
+        (
+            "CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY, "
+            "closed_at INTEGER NOT NULL)"
+        ),
     ),
     # rate_limits (migrations/0002): неудачные попытки входа по коду.
     7: (
-        "CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, "
-        "count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)",
+        (
+            "CREATE TABLE IF NOT EXISTS rate_limits (bucket_key TEXT PRIMARY KEY, "
+            "count INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0)"
+        ),
+    ),
+    # member_stats (migrations/0030): снимок статистики «Ваша история» за парой —
+    # восстановление при возвращении прежнего партнёра, сброс для новой пары.
+    8: (
+        (
+            "CREATE TABLE IF NOT EXISTS member_stats (pair_id INTEGER NOT NULL "
+            "REFERENCES pairs(id) ON DELETE CASCADE, tg_id INTEGER NOT NULL, "
+            "points INTEGER NOT NULL DEFAULT 0, streak INTEGER NOT NULL DEFAULT 0, "
+            "best_streak INTEGER NOT NULL DEFAULT 0, last_activity TEXT, "
+            "updated_at INTEGER NOT NULL, PRIMARY KEY (pair_id, tg_id))"
+        ),
+        (
+            "INSERT OR IGNORE INTO member_stats(pair_id,tg_id,points,streak,"
+            "best_streak,last_activity,updated_at) "
+            "SELECT p.id, p.last_partner, u.points, u.streak, u.best_streak, "
+            "u.last_activity, CAST(strftime('%s','now') AS INTEGER) "
+            "FROM pairs p JOIN users u ON u.tg_id = p.last_partner "
+            "WHERE p.awaiting_return = 1 AND p.last_partner != 0"
+        ),
+    ),
+    # Уточнение к желанию (migrations/0031): автор поясняет контекст подарка.
+    # Бот и Worker читают одну и ту же колонку (test_schema_parity).
+    9: (
+        "ALTER TABLE wishes ADD COLUMN comment TEXT",
     ),
 }
 
@@ -116,7 +148,9 @@ class Database:
 
         current = await self._read_version()
         if current > SCHEMA_VERSION:
-            raise RuntimeError(f"База создана более новой версией бота: {current} > {SCHEMA_VERSION}")
+            raise RuntimeError(
+                f"База создана более новой версией бота: {current} > {SCHEMA_VERSION}"
+            )
 
         if current == SCHEMA_VERSION:
             await self._store_meta_version(current)
@@ -236,15 +270,21 @@ class Database:
         async with self._lock:
             yield
 
-    async def query(self, sql: str, params: Sequence[object] = ()) -> list[aiosqlite.Row]:
+    async def query(self, sql: str, params: Sequence[object] = ()) -> list[dict[str, Any]]:
+        """Строки как обычные dict: у ``sqlite3.Row`` нет ``.get()``.
+
+        Раньше возвращались ``aiosqlite.Row``, а сервисы обращались к
+        ``row.get("field")`` — на реальной базе это ``AttributeError``
+        (тесты на фейковых dict-строках дефект не ловили).
+        """
         conn = self._require_conn()
         async with self._guard():
             cur = await conn.execute(sql, params)
             rows = await cur.fetchall()
             await cur.close()
-        return list(rows)
+        return [dict(row) for row in rows]
 
-    async def one(self, sql: str, params: Sequence[object] = ()) -> aiosqlite.Row | None:
+    async def one(self, sql: str, params: Sequence[object] = ()) -> dict[str, Any] | None:
         rows = await self.query(sql, params)
         return rows[0] if rows else None
 

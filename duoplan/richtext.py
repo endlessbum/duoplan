@@ -95,7 +95,9 @@ def rich_to_html(raw: object) -> str:
         nonlocal quote
         if quote is None:
             return
-        out.append("<blockquote>" + "\n".join(_rich_inline(line) for line in quote) + "</blockquote>")
+        out.append(
+            "<blockquote>" + "\n".join(_rich_inline(line) for line in quote) + "</blockquote>"
+        )
         quote = None
 
     for line in lines:

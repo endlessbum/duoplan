@@ -292,6 +292,23 @@ test("маршрут: состав «all» общих коллекций — о�
   deepStrictEqual(response.data.counts, { places: 0, memories: 1, quotes: 0, wishes: 0, birthdays: 1 });
 });
 
+test("уточнение к желанию попадает в SQL и в TXT-экспорт", async () => {
+  const env0 = makeApiEnv({
+    pair: { id: 9, timezone: "Europe/Moscow" },
+    body: { sections: { wishes: "all" } },
+    rows: {
+      wishes: [{ id: 40, body: "Плед", url: null, comment: "Серый, 150×200", created_at: 5, author: "Аня" }]
+    }
+  });
+  const response = await env0.api(env0.request, env0.env, new URL("https://duoplan.test/api/data/export"));
+  const query = env0.queries.find((x) => x.sql.includes("FROM wishes"));
+  ok(query.sql.includes("w.comment"), "SELECT желаний должен читать comment");
+  const txt = await env0.uploads[0].form.get("document").text();
+  ok(txt.includes("1. Плед"), "название желания в файле");
+  ok(txt.includes("Уточнение: Серый, 150×200"), "уточнение в файле");
+  equal(response.data.counts.wishes, 1);
+});
+
 test("маршрут без выбранных секций — 400 и без запросов к базе", async () => {
   const env0 = makeApiEnv({ pair: { id: 4, timezone: "Europe/Moscow" }, body: {} });
   await rejects(

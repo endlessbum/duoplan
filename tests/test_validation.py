@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from duoplan.services import DATE_TITLE_MAX
-from duoplan.services import MEMORY_MAX
-from duoplan.services import TASK_TITLE_MAX
-from duoplan.services import WISH_MAX
-from duoplan.services import WISH_URL_MAX
-from duoplan.services import ValidationError
-from duoplan.services import normalize_code
+from duoplan.services import (
+    DATE_TITLE_MAX,
+    MEMORY_MAX,
+    TASK_TITLE_MAX,
+    WISH_COMMENT_MAX,
+    WISH_MAX,
+    WISH_URL_MAX,
+    ValidationError,
+    normalize_code,
+)
 
 
 async def test_task_validation_limits(pair):
@@ -46,6 +49,30 @@ async def test_memory_and_wish_validation(pair):
 
     with pytest.raises(ValidationError):
         await service.add_wish(pair_id, owner_id, "Поехать к морю", "x" * (WISH_URL_MAX + 1))
+
+
+async def test_wish_comment_is_optional_and_limited(pair):
+    """Уточнение к подарку сохраняется, пустое пишется NULL, лимит 500."""
+    service, pair_id, owner_id, _ = pair
+
+    wish_id = await service.add_wish(pair_id, owner_id, "Плед", comment="Серый, 150×200")
+    row = await service.db.one("SELECT comment FROM wishes WHERE id = ?", (wish_id,))
+    assert row["comment"] == "Серый, 150×200"
+
+    empty_id = await service.add_wish(pair_id, owner_id, "Плед", comment="   ")
+    row = await service.db.one("SELECT comment FROM wishes WHERE id = ?", (empty_id,))
+    assert row["comment"] is None
+
+    with pytest.raises(ValidationError, match="Уточнение"):
+        await service.add_wish(
+            pair_id, owner_id, "Плед", comment="x" * (WISH_COMMENT_MAX + 1)
+        )
+    assert await service.add_wish(
+        pair_id, owner_id, "Плед", comment="x" * WISH_COMMENT_MAX
+    ) > 0
+    # Список желаний отдаёт уточнение клиенту без отдельного запроса.
+    wishes = await service.wishes(pair_id)
+    assert any(w["comment"] == "Серый, 150×200" for w in wishes)
 
 
 async def test_date_validation_and_recurs_default(pair):

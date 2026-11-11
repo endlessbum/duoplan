@@ -410,6 +410,114 @@
     }
   }
 
+  // ------------------------------------------------------------------
+  // Прогрев аватаров к моменту показа пилюли
+  // ------------------------------------------------------------------
+  // Кнопка пары появляется одновременно с главным экраном, а background-image
+  // начинает грузиться только у ВИДИМОГО элемента: пользователь успевал
+  // увидеть цветную подложку, и только потом поверх «доезжало» фото — это и
+  // было мерцание при каждом открытии. Поэтому фото качаем, пока на экране
+  // ещё «Открываем ваше пространство…», и ждём decode(): к моменту показа
+  // картинка уже в памяти WebView и рисуется первым же кадром. Буквы и
+  // акцентные цвета красятся там же — до unhide пилюли, поэтому и буквенный
+  // вариант не перекрашивается на глазах.
+  const AVATAR_PRELOAD_TIMEOUT_MS = 1500;
+  // url → Promise<boolean>: одна и та же ссылка не качается повторно
+  // (минутный refresh, смена темы, повторные render()).
+  const avatarPreloads = new Map();
+  // Фото меняются редко — старые записи не копим на весь сеанс.
+  const AVATAR_PRELOAD_CACHE_LIMIT = 8;
+
+  // Ссылки, которые реально попадут в слоты при этом state: ровно та же
+  // выборка, что у paintAvatarSlot (флаг показа, https, наличие партнёра).
+  function avatarPhotoUrls(state) {
+    const pair = state?.pair;
+    if (!pair || !state?.user?.gender || state.user.show_avatar === false) return [];
+    const role = pair.role === "b" ? "b" : "a";
+    return [
+      role === "a" ? state.user.photo_url : pair.photo1,
+      pair.user_b ? (role === "b" ? state.user.photo_url : pair.photo2) : null
+    ].filter((url) => typeof url === "string" && /^https:\/\//.test(url));
+  }
+
+  function preloadAvatarPhoto(url) {
+    let task = avatarPreloads.get(url);
+    if (task) return task;
+    if (avatarPreloads.size >= AVATAR_PRELOAD_CACHE_LIMIT) avatarPreloads.clear();
+    task = new Promise((resolve) => {
+      try {
+        const img = new Image();
+        // decode() ждёт не только загрузку, но и декодирование: без него
+        // background-image мог мигнуть пустым кругом на первом кадре.
+        const ready = () => {
+          if (typeof img.decode === "function") img.decode().then(() => resolve(true), () => resolve(true));
+          else resolve(true);
+        };
+        img.onload = ready;
+        img.onerror = () => resolve(false);
+        img.src = url;
+      } catch {
+        // WebView без Image: прогревать нечем — рисуем как раньше.
+        resolve(false);
+      }
+    }).then((ok) => {
+      // Неудачу не кэшируем — следующее открытие попробует снова.
+      if (!ok) avatarPreloads.delete(url);
+      return ok;
+    });
+    avatarPreloads.set(url, task);
+    return task;
+  }
+
+  // Ждём картинки не дольше timeout: медленный CDN не должен держать экран
+  // загрузки — тогда фото доедет уже в интерфейсе, как раньше.
+  function waitAtMost(promise, ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
+      promise.then(
+        () => { clearTimeout(timer); resolve(true); },
+        () => { clearTimeout(timer); resolve(false); }
+      );
+    });
+  }
+
+  // Слоты красятся в одном месте: и прогрев до первого render(), и
+  // syncTopControls — иначе фото/буква/акценты рисовались бы по-разному.
+  function paintPairAvatars() {
+    const pair = appState?.pair;
+    if (!pair || !appState?.user?.gender) return;
+    const role = pair.role === "b" ? "b" : "a";
+    applyAvatarColors();
+    // Моё фото — user.photo_url (если я владелец — слот A, иначе слот B),
+    // фото партнёра — соответствующий photo1/photo2 из state.
+    paintAvatarSlot(avatarA, pair.name1, "А", role === "a" ? appState.user.photo_url : pair.photo1);
+    paintAvatarSlot(avatarB, pair.name2, "Б", pair.user_b ? (role === "b" ? appState.user.photo_url : pair.photo2) : null);
+    if (!pair.user_b) avatarB.textContent = "+";
+  }
+
+  // Полная подготовка пилюли: буквы и акценты в DOM + фото в памяти WebView.
+  // Вызывается до первого render() (кнопка ещё скрыта) и перед перерисовкой,
+  // которая может принести новое фото.
+  async function preloadPairAvatars(timeout = AVATAR_PRELOAD_TIMEOUT_MS) {
+    // Пока пилюля скрыта (старт приложения), буквы и акценты красим сразу:
+    // к моменту показа в слотах уже финальный вид. Если пилюля на экране
+    // (минутный refresh), промежуточное состояние не показываем — ждём фото
+    // и красим один раз, иначе на глазах менялись бы буква, цвет и фото.
+    const pillHidden = !pairButton || pairButton.hidden;
+    if (pillHidden) paintPairAvatars();
+    const urls = [...new Set(avatarPhotoUrls(appState))];
+    if (!urls.length) return;
+    try {
+      await waitAtMost(Promise.all(urls.map(preloadAvatarPhoto)), timeout);
+    } catch {
+      // Прогрев — оптимизация, а не условие запуска: любой сбой просто
+      // оставляет прежнее поведение (фото доедет уже в интерфейсе).
+      return;
+    }
+    // Фото в кэше — перекрашиваем слоты, чтобы background-image встал сразу.
+    paintPairAvatars();
+  }
+
   // Фон WebView в Telegram — это то, что видно за краями документа при
   // отскоке прокрутки (и в полноэкранном режиме под шапкой). Ключ "bg_color"
   // отдаёт цвет темы Telegram: в тёмной теме это чёрный, в светлой — белый,
@@ -663,32 +771,48 @@
     };
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS) : null;
-    let response;
+    const timeoutError = () => {
+      const error = new Error("Сервер не ответил. Попробуйте ещё раз.");
+      error.status = 0;
+      return error;
+    };
     try {
-      response = await fetch(path, {
-        method: options.method || "GET",
-        headers,
-        body: options.body ? JSON.stringify(options.body) : undefined,
-        signal: controller ? controller.signal : undefined
-      });
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        const timeout = new Error("Сервер не ответил. Попробуйте ещё раз.");
-        timeout.status = 0;
-        throw timeout;
+      let response;
+      try {
+        response = await fetch(path, {
+          method: options.method || "GET",
+          headers,
+          body: options.body ? JSON.stringify(options.body) : undefined,
+          signal: controller ? controller.signal : undefined
+        });
+      } catch (error) {
+        // Таймаут на этапе ожидания заголовков.
+        if (error?.name === "AbortError") throw timeoutError();
+        throw error;
       }
-      throw error;
+      let payload;
+      try {
+        // fetch резолвится на заголовках, а тело может зависнуть: AbortController
+        // и таймер обязаны жить до конца чтения (аудит 2026-11-11, P2), иначе
+        // интерфейс остаётся в ожидании после заявленных 20 секунд.
+        payload = await response.json();
+      } catch (error) {
+        if (error?.name === "AbortError") throw timeoutError();
+        // Не-JSON или пустое тело — как раньше, считаем пустым объектом.
+        payload = {};
+      }
+      if (!response.ok) {
+        const error = new Error(payload.error || payload.message || `Ошибка ${response.status}`);
+        error.status = response.status;
+        error.code = payload.code;
+        throw error;
+      }
+      return payload;
     } finally {
+      // Общий finally: reject по таймауту снимает таймер и даёт вызывающим
+      // (loadArchivePage и др.) сбросить cache.loading/button.disabled.
       if (timer) clearTimeout(timer);
     }
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(payload.error || payload.message || `Ошибка ${response.status}`);
-      error.status = response.status;
-      error.code = payload.code;
-      throw error;
-    }
-    return payload;
   }
 
   // ------------------------------------------------------------------
@@ -763,6 +887,9 @@
       return;
     }
 
+    // Слоты красим ДО показа кнопки: пилюля появляется уже с фото, буквами
+    // и акцентами — к этому моменту они прогреты на экране загрузки.
+    paintPairAvatars();
     pairButton.hidden = false;
     // Панель могла быть скрыта в момент инициализации (нет пары) — размеры
     // появились только сейчас, поэтому пересчитываем геометрию капли.
@@ -771,12 +898,6 @@
     const wasHidden = bottomNav.hidden;
     bottomNav.hidden = false;
     if (wasHidden) liquidNav?.refresh();
-    const role = pair.role === "b" ? "b" : "a";
-    // Моё фото — user.photo_url (если я владелец — слот A, иначе слот B),
-    // фото партнёра — соответствующий photo1/photo2 из state.
-    paintAvatarSlot(avatarA, pair.name1, "А", role === "a" ? appState.user.photo_url : pair.photo1);
-    paintAvatarSlot(avatarB, pair.name2, "Б", pair.user_b ? (role === "b" ? appState.user.photo_url : pair.photo2) : null);
-    if (!pair.user_b) avatarB.textContent = "+";
   }
 
   function switchTab(tab, pushScroll = true) {
@@ -1239,7 +1360,7 @@
       `;
     }
     const ritualBlock = pair.user_b && daily ? `
-      <section class="card">
+      <section class="card${daily.done ? " is-done" : ""}">
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
         <p>${daily.done ? `Вы отметили ритуал +10 XP${daily.partnerDone ? " · партнёр тоже отметил" : ""}` : (daily.partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP")}</p>
@@ -1428,6 +1549,7 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.body)}</h3>
+            ${item.comment ? `<div class="wish-comment">${renderRichText(item.comment)}</div>` : ""}
           </div>
           ${itemActions(actions)}
         </div>
@@ -1436,11 +1558,12 @@
     `;
   }
 
-  // Текст для «Поделиться»: название желания, строкой ниже ссылка (если есть).
+  // Текст для «Поделиться»: название, уточнение и ссылка — по строке каждое.
   function wishShareText(wish) {
     const body = String(wish?.body || "").trim();
+    const comment = String(wish?.comment || "").trim();
     const url = String(wish?.url || "").trim();
-    return url ? `${body}\n${url}` : body;
+    return [body, comment, url].filter(Boolean).join("\n");
   }
 
   function findItem(type, id) {
@@ -1547,6 +1670,7 @@
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
+            ${item.comment ? `<div class="wish-comment">${renderRichText(item.comment)}</div>` : ""}
             ${completionMeta(created, completed)}
           </div>
           ${itemActions(actions)}
@@ -4197,8 +4321,9 @@
         openDialog({
           title: "Новое желание",
           fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required placeholder="Плёночный фотоаппарат"></label>
+           <label class="field"><span>Уточнение (необязательно)</span><textarea name="comment" rows="3" maxlength="500" placeholder="Размер, цвет, где купить или чем можно заменить"></textarea></label>
            <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>`,
-          onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), url: fd.get("url") } })
+          onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), comment: fd.get("comment"), url: fd.get("url") } })
         });
       } else if (action === "add-quote") {
         openDialog({
@@ -4686,9 +4811,11 @@
           openDialog({
             title: "Редактировать желание",
             fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" maxlength="300" required value="${esc(item.body || "")}"></label>
+           <label class="field"><span>Уточнение (необязательно)</span><textarea name="comment" rows="3" maxlength="500" placeholder="Размер, цвет, где купить или чем можно заменить">${esc(item.comment || "")}</textarea></label>
            <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com" value="${esc(item.url || "")}"></label>`,
             onSubmit: async (fd) => {
               const body = { body: fd.get("body") };
+              if (fd.get("comment") !== undefined) body.comment = fd.get("comment");
               if (fd.get("url") !== undefined) body.url = fd.get("url");
               const state = await request(`/api/wishes/${id}`, { method: "PATCH", body });
               patchArchiveItem("wishes", id, body);
@@ -4860,6 +4987,9 @@
           }
         });
         showToast("Настройки сохранены");
+        // Переключатель «Отображение аватара» мог включить фото: прогреваем
+        // его до перерисовки, чтобы аватар появился сразу, а не поверх буквы.
+        await preloadPairAvatars();
         render();
       } else if (action === "set-theme") {
         const value = btn.dataset.theme === "dark" || btn.dataset.theme === "light" ? btn.dataset.theme : "system";
@@ -5041,6 +5171,10 @@
       appState = next;
       if (gainedPartner) showToast("Партнёр в пространстве!");
       if (unchanged) return;
+      // Новое фото (своё или партнёра) прогреваем до перерисовки: иначе оно
+      // «доедет» поверх подложки уже в открытом интерфейсе. Для тех же ссылок
+      // вызов мгновенный — картинки уже в кэше.
+      await preloadPairAvatars();
       // Изменение мог сделать и партнёр: его удаления, правки и «сделать
       // личной» не проходят через локальные кэш-патчи. Сразу показываем новое
       // состояние, параллельно перезагружаем страницы архива и доснимаем
@@ -5091,6 +5225,10 @@
 
     try {
       appState = await request("/api/state");
+      // Пока на экране «Открываем ваше пространство…», прогреваем аватары:
+      // фото — в память WebView, буквы и акценты — в слоты пилюли. Пилюля
+      // показывается уже готовой, без мерцания подложки под фото.
+      await preloadPairAvatars();
       render();
       updateDroplet("home", false);
       // Успешная загрузка — сбрасываем состояние ошибки

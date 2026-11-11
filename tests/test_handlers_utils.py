@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from duoplan.handlers import PAGE_TEXT_LIMIT
-from duoplan.handlers import _truncate_utf16
-from duoplan.handlers import _utf16_len
-from duoplan.handlers import parse_date_input
-from duoplan.handlers import parse_tail
-from duoplan.handlers import render_list_items
+from duoplan.handlers import (
+    PAGE_TEXT_LIMIT,
+    _truncate_utf16,
+    _utf16_len,
+    parse_date_input,
+    parse_tail,
+    render_list_items,
+)
 
 
 def test_parse_tail_handles_current_and_legacy_callbacks():
@@ -96,3 +98,15 @@ def test_parse_yes_no_recognizes_answers():
     assert parse_yes_no("может быть") is None
     assert parse_yes_no("") is None
     assert parse_yes_no(None) is None
+
+
+def test_wish_comment_step_is_registered():
+    """Второй шаг ввода желания (уточнение) покрыт общим FSM-фильтром."""
+    from aiogram.fsm.state import State
+
+    from duoplan.handlers import ALL_FORMS, Form, receive_wish, receive_wish_comment
+
+    assert isinstance(Form.wish_comment, State)
+    assert callable(receive_wish) and callable(receive_wish_comment)
+    # Иначе /cancel и защита от не-текстовых сообщений не видели бы новый шаг.
+    assert Form.wish_comment in (ALL_FORMS.states or [])

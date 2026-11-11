@@ -1,7 +1,5 @@
 """Слой хранения: SQLite-подключение и схема."""
 
-from duoplan.db.base import Database
-from duoplan.db.base import SCHEMA_VERSION
-from duoplan.db.base import connect_database
+from duoplan.db.base import SCHEMA_VERSION, Database, connect_database
 
-__all__ = ["Database", "SCHEMA_VERSION", "connect_database"]
+__all__ = ["SCHEMA_VERSION", "Database", "connect_database"]

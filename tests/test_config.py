@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from duoplan.config import DEFAULT_TZ
-from duoplan.config import load_settings
-from duoplan.config import parse_env_file
-from duoplan.config import resolve_timezone
+from duoplan.config import DEFAULT_TZ, load_settings, parse_env_file, resolve_timezone
 
 
 def test_parse_env_file_supports_quoted_values_with_comments():

@@ -4,17 +4,15 @@ import asyncio
 import logging
 import traceback
 
-from aiogram import Bot
-from aiogram import Dispatcher
-from aiogram.types import BotCommand
-from aiogram.types import ErrorEvent
+from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand, ErrorEvent
 
 from duoplan.config import load_settings
 from duoplan.db.base import connect_database
 from duoplan.fsm import SQLiteStorage
 from duoplan.handlers import router
-from duoplan.middlewares import EnsureUserMiddleware
-from duoplan.middlewares import PrivateBotMiddleware
+from duoplan.middlewares import EnsureUserMiddleware, PrivateBotMiddleware
 from duoplan.services import DuoPlanService
 
 log = logging.getLogger(__name__)
@@ -57,12 +55,18 @@ async def main() -> int:
             chat_id = settings.admin_chat_id
             if chat_id is not None:
                 try:
-                    tb = "".join(traceback.format_exception(type(event.exception), event.exception, event.exception.__traceback__))
+                    tb = "".join(
+                        traceback.format_exception(
+                            type(event.exception), event.exception, event.exception.__traceback__
+                        )
+                    )
                     text = "⚠️ Ошибка обработки обновления:\n" + tb
                     if len(text) > 4000:
                         text = text[:4000] + "…"
                     await bot.send_message(chat_id, text)
-                except Exception:
+                except TelegramAPIError:
+                    # Ошибка отправки отчёта не должна порождать новый цикл
+                    # обработки ошибок — только запись в лог.
                     log.exception("Не удалось отправить ошибку в админ-чат")
             return True
 

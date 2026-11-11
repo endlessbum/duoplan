@@ -408,6 +408,9 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       "let goalsSwitch = null;",
       "let movieSwitch = null;",
       "let plansSwitch = null;",
+      // Прогрев аватаров к refreshState отношения не имеет — заглушка,
+      // иначе вызов уйдёт в ReferenceError и тест увидит «сетевую ошибку».
+      "async function preloadPairAvatars() {}",
       extractBraced("function deepEqual"),
       extractBraced("async function refreshState"),
       "return { refreshState, setAppState: (v) => { appState = v; } };"

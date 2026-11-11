@@ -1,8 +1,11 @@
-aiogram>=3.31,<4
-aiosqlite>=0.20,<1
-tzdata>=2024.1
+# Версии зафиксированы по проверенному окружению (.venv, Python 3.14,
+# 2026-11-11). Транзитивные зависимости полным lock-файлом не закреплены —
+# для битовой воспроизводимости добавьте pip-compile/uv lock в CI.
+aiogram==3.31.0
+aiosqlite==0.22.1
+tzdata==2026.5
 
 # dev
-pytest>=8
-pytest-asyncio>=0.24
-pillow>=10
+pytest==9.2.0
+pytest-asyncio==1.4.1
+pillow==13.0.0

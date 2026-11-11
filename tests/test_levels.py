@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from duoplan.game.levels import level_for
-from duoplan.game.levels import title_for
-from duoplan.game.levels import xp_needed
+from duoplan.game.levels import level_for, title_for, xp_needed
 
 
 def test_xp_math_is_unchanged():

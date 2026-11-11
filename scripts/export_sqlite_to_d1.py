@@ -34,12 +34,14 @@ TABLES = {
         "show_avatar, partner_custom_name, custom_name, created_at, updated_at"
     ),
     "tasks": (
-        "id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, "
-        "completed_by, completed_at"
+        "id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, "
+        "created_at, completed_by, completed_at"
     ),
-    "dates": "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at",
+    "dates": (
+        "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at"
+    ),
     "memories": "id, pair_id, author_id, title, body, day, created_at",
-    "wishes": "id, pair_id, owner_id, body, done, done_at, url, created_at",
+    "wishes": "id, pair_id, owner_id, body, done, done_at, url, comment, created_at",
     # Контентные коллекции после 0016: раньше молча не экспортировались, и
     # перенос локальной базы в D1 терял цитаты, места, поездки, цели, фильмы
     # и копилки без единого предупреждения. Порядок важен: родители раньше
@@ -66,6 +68,9 @@ TABLES = {
     "daily_completions": "pair_id, tg_id, day, completed_at",
     # Коды закрытых пространств: без них вход по старому коду даст 404 вместо 410.
     "closed_codes": "code, closed_at",
+    # Снимки статистики «Ваша история» по парам (migrations/0030): без них
+    # вернувшийся партнёр потерял бы свою историю после переноса в D1.
+    "member_stats": "pair_id, tg_id, points, streak, best_streak, last_activity, updated_at",
     # Журнал уведомлений: без него после переноса дедупликация пуста и уже
     # отправленные за сегодня сводки/напоминания уйдут повторно.
     # rate_limits/join_attempts/fsm_states/meta осознанно не переносим:
@@ -198,7 +203,8 @@ def dump(source: Path, skipped: list[str] | None = None) -> str:
                 if guest:
                     condition += f" AND {guest} != 0"
                 rows = db.execute(
-                    f"SELECT {owner} AS tg_id, id AS pair_id, created_at FROM pairs WHERE {condition}"
+                    f"SELECT {owner} AS tg_id, id AS pair_id, created_at FROM pairs "
+                    f"WHERE {condition}"
                 ).fetchall()
                 for row in rows:
                     # joined_at для роли 'b' — время создания пары: точный

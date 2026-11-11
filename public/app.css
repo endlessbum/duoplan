@@ -607,14 +607,26 @@ html.dialog-locked {
 
 .hero-card {
   /* Фон общий с карточками; акцентная окантовка — как у карточек рандома
-     (.place-hero/.movie-hero), цвет следует за акцентом из настроек. */
-  border-color: var(--berry-soft);
+     (.place-hero/.movie-hero), цвет следует за акцентом из настроек.
+     Усилена видимость контура (было --berry-soft). */
+  border-color: var(--berry);
 }
 
 /* Парная карточка истории тапабельна: открывает окно с началом истории
    и рекордом серии. */
 .hero-card[role="button"] {
   cursor: pointer;
+}
+
+/* Карточка ритуала дня после отметки: приглушённый вид показывает выполнение. */
+.card.is-done {
+  opacity: 0.72;
+  background: var(--surface-2);
+}
+
+.card.is-done h3,
+.card.is-done p {
+  color: var(--muted);
 }
 
 .eyebrow {
@@ -1133,6 +1145,20 @@ select.settings-select {
   gap: 6px;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* Уточнение к желанию: спокойная подпись под названием, многострочная.
+   rich-quote внутри наследует общий стиль цитат из .rich-quote. */
+.wish-comment {
+  margin: 2px 0 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wish-comment .rich-quote {
+  margin-top: 4px;
 }
 
 /* Дата колонкой, под ней таймер и «В календаре» в одной строке. */
@@ -1672,7 +1698,7 @@ input[type="checkbox"]:active {
    и единственная на экране получает акцентную окантовку. */
 .place-hero,
 .movie-hero {
-  border-color: var(--berry-soft);
+  border-color: var(--berry);
 }
 
 /* «Рандом» под «Добавить место»: тот же нижний отступ, что у add-button,

@@ -10,13 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
-from dataclasses import field
-from datetime import timezone
-from datetime import tzinfo
+from dataclasses import dataclass, field
+from datetime import UTC, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo
-from zoneinfo import ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
@@ -64,7 +61,7 @@ def resolve_timezone(name: str) -> tuple[tzinfo, str]:
         except (ZoneInfoNotFoundError, ValueError):
             log.warning("Неизвестный часовой пояс %r, пробую %r", candidate, DEFAULT_TZ)
     log.warning("Часовой пояс недоступен, использую UTC")
-    return timezone.utc, "UTC"
+    return UTC, "UTC"
 
 
 def _parse_ttl(raw: str) -> int:
@@ -94,7 +91,7 @@ class Settings:
     bot_name: str
     bot_username: str  # Telegram username без @, для ссылок в Mini App
     tz_name: str
-    tz: tzinfo = field(default=timezone.utc)
+    tz: tzinfo = field(default=UTC)
     # Добавлено в конец, чтобы не сдвигать позиционные аргументы старого API.
     fsm_ttl: int = DEFAULT_FSM_TTL
     # Telegram-ID владельца (или владельцев, через запятую) — гейт приватного

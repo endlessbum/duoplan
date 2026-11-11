@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from duoplan.services import DAILY_ACTIONS
-from duoplan.services import DuoPlanService
+from duoplan.services import DAILY_ACTIONS, DuoPlanService
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = json.loads((ROOT / "tests" / "fixtures" / "daily_actions.json").read_text(encoding="utf-8"))

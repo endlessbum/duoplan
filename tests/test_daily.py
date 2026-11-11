@@ -4,8 +4,7 @@ import asyncio
 from datetime import date
 
 from duoplan.db.base import connect_database
-from duoplan.services import DAILY_XP
-from duoplan.services import DuoPlanService
+from duoplan.services import DAILY_XP, DuoPlanService
 
 
 async def test_concurrent_daily_charges_xp_once(tmp_path, monkeypatch):

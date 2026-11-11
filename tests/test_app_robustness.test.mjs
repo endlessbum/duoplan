@@ -127,6 +127,57 @@ test("зависший запрос обрывается по таймауту �
   });
 });
 
+test("зависшее тело ответа обрывается по таймауту (аудит 2026-11-11, P2)", async () => {
+  const controller = fakeController();
+  let fire = null;
+  let bodyStarted;
+  const bodyStartedPromise = new Promise((resolve) => { bodyStarted = resolve; });
+  const onTimeout = (fn) => { fire = fn; };
+  const request = buildRequest({
+    controller,
+    onTimeout,
+    // Заголовки пришли, тело не передаётся вовсе.
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: () => {
+        bodyStarted();
+        return new Promise((resolve, reject) => {
+          controller.signal.addEventListener("abort", () => {
+            const error = new Error("aborted body");
+            error.name = "AbortError";
+            reject(error);
+          });
+        });
+      }
+    })
+  });
+  const pending = request("/api/state");
+  await bodyStartedPromise;
+  equal(onTimeout.cleared, undefined, "таймер не должен сниматься после заголовков");
+  fire();
+  await rejects(pending, (error) => {
+    equal(error.status, 0);
+    match(error.message, /Сервер не ответил/);
+    return true;
+  });
+  equal(onTimeout.cleared, true, "после таймаута таймер снят — вызывающий сбросит загрузку");
+});
+
+test("не-JSON тело по-прежнему считается пустым объектом", async () => {
+  const controller = fakeController();
+  const request = buildRequest({
+    controller,
+    onTimeout: () => {},
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError("bad json"); }
+    })
+  });
+  deepStrictEqual(await request("/api/state"), {});
+});
+
 test("обычный ответ возвращается, таймер снимается", async () => {
   const controller = fakeController();
   let cleared = null;

@@ -488,15 +488,21 @@ test("save-settings отправляет show_avatar и partner_name", () => {
 });
 
 test("в слотах пилюли пары рисуется paintAvatarSlot с фото из state", () => {
-  const start = appSource.indexOf("function syncTopControls");
-  ok(start !== -1, "syncTopControls не найдена");
-  // Следующее объявление функции закрывает диапазон — внутри самой функции
-  // вложенных function-деклараций нет.
+  // Слоты красит paintPairAvatars — одна точка и для прогрева на экране
+  // загрузки, и для syncTopControls (см. tests/test_avatar_preload.test.mjs).
+  const start = appSource.indexOf("function paintPairAvatars");
+  ok(start !== -1, "paintPairAvatars не найдена");
   const end = appSource.indexOf("function ", start + 30);
-  ok(end > start, "не найден конец syncTopControls");
+  ok(end > start, "не найден конец paintPairAvatars");
   const fn = appSource.slice(start, end);
   ok(fn.includes("paintAvatarSlot(avatarA"), "слот A не через paintAvatarSlot");
   ok(fn.includes("paintAvatarSlot(avatarB"), "слот B не через paintAvatarSlot");
   ok(fn.includes("pair.photo1") && fn.includes("pair.photo2"), "фото партнёров не передаются в слоты");
   ok(fn.includes("appState.user.photo_url"), "своё фото не передаётся в слоты");
+  // Пилюля показывает слоты через неё же — иначе прогрев красил бы не то,
+  // что видит пользователь.
+  ok(
+    extractBraced(appSource, "function syncTopControls").includes("paintPairAvatars()"),
+    "syncTopControls не использует paintPairAvatars"
+  );
 });

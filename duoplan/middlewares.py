@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject
-from aiogram.types import User
+from aiogram import BaseMiddleware, Bot
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import TelegramObject, User
 
 from duoplan.config import Settings
 from duoplan.services import DuoPlanService
@@ -45,13 +46,12 @@ class PrivateBotMiddleware(BaseMiddleware):
     НЕ регистрируется (``EnsureUserMiddleware`` после него не доходит), поэтому
     посторонний не оставляет записей в базе.
 
-    Известное ослабление (осознанное): между проверкой кода здесь и
-    ``join_pair`` в обработчике пара может заполниться (гонка) — тогда
-    ``EnsureUserMiddleware`` уже создал строку в ``users``, и пользователь
-    навсегда проходит гейт как «известный», не будучи в паре. Одноразовость
-    кода не enforced; при 32-битном пространстве кодов практический риск
-    низкий. Смена этого поведения требует отката регистрации при несостоявшемся
-    входе — намеренно не делается, чтобы не удалять строки из-под внешних ключей.
+    Аудит 2026-11-11 (P2): между проверкой кода здесь и ``join_pair`` в
+    обработчике пара могла заполниться (гонка). Тогда ``EnsureUserMiddleware``
+    уже создавал строку в ``users``, и пользователь навсегда проходил гейт как
+    «известный», не будучи в паре. Теперь после обработчика строка удаляется,
+    если вход так и не состоялся. Политика «зарегистрирован = доступ»
+    сохраняется: вышедшие из пары и владельцы доступа не теряют.
     """
 
     async def __call__(
@@ -91,17 +91,41 @@ class PrivateBotMiddleware(BaseMiddleware):
                 payload = match.group(1).strip()
 
         if not payload or await service.open_pair_for_code(payload, tg_id=user.id) is None:
-            bot: object = data.get("bot")
+            bot: Bot | None = data.get("bot")
             chat = getattr(event, "chat", None)
             chat_id = getattr(chat, "id", None)
             if bot is not None and isinstance(chat_id, int):
                 try:
                     await bot.send_message(chat_id, PRIVATE_BOT_DENIED_TEXT)
-                except Exception:
-                    log.info("PrivateBotMiddleware: не удалось отправить отказ пользователю %s", user.id)
+                except TelegramAPIError as exc:
+                    # Отказ — лучшая попытка: пользователь мог заблокировать бота.
+                    log.info(
+                        "PrivateBotMiddleware: не удалось отправить отказ пользователю %s: %s",
+                        user.id,
+                        exc,
+                    )
             return None
 
-        return await handler(event, data)
+        # Допустили по валидному коду. EnsureUserMiddleware создаст строку в
+        # users, но если join_pair проиграл гонку, она не должна остаться:
+        # иначе следующий апдейт пройдёт гейт по ветке «уже известный».
+        try:
+            return await handler(event, data)
+        finally:
+            await self._drop_unconfirmed(service, user.id)
+
+    @staticmethod
+    async def _drop_unconfirmed(service: DuoPlanService, tg_id: int) -> None:
+        """Убрать users-строку, созданную при несостоявшемся входе по коду.
+
+        Удаляем только если пользователь так и не стал участником пары —
+        успешно вошедшие, вышедшие из пары и владельцы не затрагиваются.
+        """
+        await service.db.execute_row(
+            "DELETE FROM users WHERE tg_id = ? AND pair_id IS NULL "
+            "AND NOT EXISTS(SELECT 1 FROM pair_members WHERE tg_id = ?)",
+            (tg_id, tg_id),
+        )
 
 
 class EnsureUserMiddleware(BaseMiddleware):

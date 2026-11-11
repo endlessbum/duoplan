@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.11.50";
+const APP_VERSION = "2026.11.11.54";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.11.50";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.11.50";
+const DB_SCHEMA_VERSION = "2026.11.11.54";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -55,7 +55,7 @@ const ARCHIVE_QUERIES = {
     sql: "SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
   },
   done_wishes: {
-    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
   },
   // Активные наборы: продолжение списков /api/state после 200-й записи.
@@ -79,7 +79,7 @@ const ARCHIVE_QUERIES = {
   },
   wishes: {
     active: true,
-    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
   },
   // Общие коллекции пары без приватности: продолжение списков /api/state
@@ -784,23 +784,34 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
 // найден»): опечатки пользователя почти не задевает, перебор упирается в
 // 5 неудач за 15 минут на аккаунт. Таблица rate_limits общая с rateLimit —
 // устаревшие окна чистятся тем же механизмом по expires_at.
+//
+// Аудит 2026-11-11 (P2): отдельный SELECT счётчика и последующий инкремент
+// позволяли параллельным запросам прочитать одно и то же старое значение и
+// обойти лимит. Теперь попытка резервируется ОДНОЙ атомарной операцией с
+// RETURNING (как rateLimit выше) ДО чтения кода: N одновременных запросов
+// получают слоты 1..N, и только первые JOIN_ATTEMPT_LIMIT доходят до пар.
+// Успешный вход и гонка захвата слот возвращают через releaseJoinAttempt.
 const JOIN_ATTEMPT_LIMIT = 5;
 const JOIN_ATTEMPT_WINDOW = 15 * 60;
 
-async function checkJoinAttempts(env, userId) {
+async function claimJoinAttempt(env, userId) {
   const bucket = Math.floor(now() / JOIN_ATTEMPT_WINDOW);
-  const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?")
-    .bind(`jf:${userId}:${bucket}`).first();
-  if ((row?.count || 0) >= JOIN_ATTEMPT_LIMIT) {
+  const key = `jf:${userId}:${bucket}`;
+  const row = await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
+    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at
+    RETURNING count`).bind(key, (bucket + 1) * JOIN_ATTEMPT_WINDOW).first();
+  if ((row?.count || 0) > JOIN_ATTEMPT_LIMIT) {
     throw new HttpError(429, "Слишком много неудачных попыток входа по коду. Попробуйте снова через 15 минут.", "JOIN_RATE_LIMITED");
   }
+  return key;
 }
 
-async function recordJoinFailure(env, userId) {
-  const bucket = Math.floor(now() / JOIN_ATTEMPT_WINDOW);
-  await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
-    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at`)
-    .bind(`jf:${userId}:${bucket}`, (bucket + 1) * JOIN_ATTEMPT_WINDOW).run();
+async function releaseJoinAttempt(env, key) {
+  // Успех/гонка — не неудачная попытка: освобождаем зарезервированный слот.
+  // DELETE убирает пустую строку, чтобы счётчик окна не рос от успешных входов.
+  await env.DB.prepare("UPDATE rate_limits SET count=count-1 WHERE bucket_key=? AND count>0")
+    .bind(key).run();
+  await env.DB.prepare("DELETE FROM rate_limits WHERE bucket_key=? AND count<=0").bind(key).run();
 }
 
 async function ensureUser(env, tgUser, requestedTimeZone) {
@@ -826,6 +837,16 @@ async function ensureUser(env, tgUser, requestedTimeZone) {
   return fresh;
 }
 
+async function dropUnconfirmedUser(env, userId) {
+  // Аудит 2026-11-11 (P2): незнакомца пустили по валидному коду, ensureUser
+  // создал строку, но вход проиграл гонку. Оставлять её нельзя: /api/* сочтёт
+  // пользователя knownUser и откроет приватного бота без членства в паре.
+  // Удаляем только запись без пары и без pair_members — успешно вошедшие,
+  // вышедшие из пары и владельцы не затрагиваются.
+  await env.DB.prepare(`DELETE FROM users WHERE tg_id=? AND pair_id IS NULL
+    AND NOT EXISTS(SELECT 1 FROM pair_members WHERE tg_id=?)`).bind(userId, userId).run();
+}
+
 async function membership(env, userId) {
   return env.DB.prepare(`SELECT p.*,pm.role,pm.tg_id,
     (SELECT display_name FROM users WHERE tg_id=p.user_a) AS owner_name,
@@ -848,7 +869,10 @@ async function createPair(env, user) {
           VALUES(?,?,?,?,?,?,?)`).bind(code, user.display_name, user.tg_id, localDay(timezone), timezone, timestamp, timestamp),
         env.DB.prepare(`INSERT INTO pair_members(tg_id,pair_id,role,joined_at)
           SELECT ?,id,'a',? FROM pairs WHERE code=?`).bind(user.tg_id, timestamp, code),
-        env.DB.prepare(`UPDATE users SET pair_id=(SELECT id FROM pairs WHERE code=?),role='a',updated_at=? WHERE tg_id=?`)
+        // Новая пара — чистая совместная история: личные XP/серии обнуляем
+        // атомарно вместе с созданием (member_stats старой пары уже снят
+        // при выходе и ждёт возможного возвращения).
+        env.DB.prepare(`UPDATE users SET pair_id=(SELECT id FROM pairs WHERE code=?),role='a',points=0,streak=0,best_streak=0,last_activity=NULL,updated_at=? WHERE tg_id=?`)
           .bind(code, timestamp, user.tg_id)
       ]);
       return membership(env, user.tg_id);
@@ -865,15 +889,16 @@ async function joinPair(env, user, rawCode, requestUrl = null, ctx = null) {
   const code = clean(rawCode).toUpperCase().slice(0, 16);
   if (!/^[A-F0-9]{8}$/.test(code)) throw new HttpError(400, "Код должен состоять из 8 символов", "INVALID_CODE");
   if (await membership(env, user.tg_id)) throw new HttpError(409, "Вы уже состоите в пространстве", "ALREADY_PAIRED");
-  await checkJoinAttempts(env, user.tg_id);
+  // Слот резервируется до чтения кода; неудачи оставляют его занятым,
+  // успех и гонка захвата возвращают через releaseJoinAttempt.
+  const attemptKey = await claimJoinAttempt(env, user.tg_id);
   const pair = await env.DB.prepare("SELECT * FROM pairs WHERE code=?").bind(code).first();
   if (!pair) {
     // Кода нет среди живых пар: возможно, пространство закрылось (последний
     // участник вышел) — тогда отвечаем об этом, а не «код не найден».
-    // Неудача пишется в обоих случаях: различие 410/404 не должно помогать
-    // перебору кодов.
+    // Слот уже зарезервирован в claimJoinAttempt: различие 410/404 не
+    // помогает перебору, обе ветки одинаково расходуют лимит.
     const closed = await env.DB.prepare("SELECT code FROM closed_codes WHERE code=?").bind(code).first();
-    await recordJoinFailure(env, user.tg_id);
     if (closed) {
       throw new HttpError(410, "Это пространство закрыто: последний участник вышел. Создайте новое или попросите новый код.", "PAIR_CLOSED");
     }
@@ -883,11 +908,9 @@ async function joinPair(env, user, rawCode, requestUrl = null, ctx = null) {
   // 400/409 отличимы от 404 «не найден» и подтверждали существование живого
   // кода бесплатно, ослабляя лимит 5 неудач за 15 минут (репорт 2026-11-10).
   if (pair.user_a === user.tg_id) {
-    await recordJoinFailure(env, user.tg_id);
     throw new HttpError(400, "Это ваш собственный код", "OWN_CODE");
   }
   if (pair.user_b) {
-    await recordJoinFailure(env, user.tg_id);
     throw new HttpError(409, "Пространство уже соединено", "PAIR_FULL");
   }
   const timestamp = now();
@@ -898,35 +921,59 @@ async function joinPair(env, user, rawCode, requestUrl = null, ctx = null) {
   // пространство другому аккаунту, даже если код «уехал» в пересланных
   // сообщениях. Свежие пары (awaiting_return=0) открыты любому по коду.
   if (wasAwaitingReturn && Number(pair.last_partner) !== Number(user.tg_id)) {
-    // Неудача пишется и здесь: иначе зарезервированный код можно было бы
+    // Слот зарезервирован: иначе зарезервированный код можно было бы
     // перебирать безлимитно (в пределах общего лимита на пользователя).
-    await recordJoinFailure(env, user.tg_id);
     throw new HttpError(403, "Это пространство ждёт возвращения прежнего партнёра — войти по старому коду может только он. Попросите владельца создать новое пространство.", "PAIR_RESERVED");
+  }
+  // Статистика «Ваша история» привязана к паре, а не к аккаунту: при входе в
+  // новую пару личные показатели обнуляем, а при возвращении прежнего партнёра
+  // по резерваному коду восстанавливаем снимок member_stats, сделанный при
+  // его выходе. Снимка может не быть у пар, ждавших возвращения до появления
+  // таблицы, — тогда оставляем текущие значения (историческое поведение).
+  const statSnapshot = wasAwaitingReturn
+    ? await env.DB.prepare("SELECT points,streak,best_streak,last_activity FROM member_stats WHERE pair_id=? AND tg_id=?")
+      .bind(pair.id, user.tg_id).first()
+    : null;
+  // Операторы членства условны на успех UPDATE pairs: D1 batch не
+  // откатывается при changes=0, и без EXISTS-проверки конкурентный вход
+  // оставил бы pair_members/users.pair_id у пары с user_b=0 — «фантомное»
+  // членство, которое ensureSchema-repair уже не починит.
+  const operations = [
+    env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,awaiting_return=0,last_partner=0,updated_at=? WHERE id=? AND user_b=0")
+      .bind(user.tg_id, user.display_name, timestamp, pair.id),
+    env.DB.prepare(`INSERT INTO pair_members(tg_id,pair_id,role,joined_at)
+      SELECT ?,?,'b',? WHERE EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
+      .bind(user.tg_id, pair.id, timestamp, pair.id, user.tg_id),
+    env.DB.prepare(`UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?
+      AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
+      .bind(pair.id, timestamp, user.tg_id, pair.id, user.tg_id)
+  ];
+  // Четвёртый оператор — статистика: условен на тот же EXISTS, что и членство,
+  // поэтому при гонке входа не сработает (changes парного оператора = 0 → 409).
+  if (statSnapshot) {
+    operations.push(env.DB.prepare(`UPDATE users SET points=?,streak=?,best_streak=?,last_activity=?,updated_at=?
+      WHERE tg_id=? AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
+      .bind(statSnapshot.points, statSnapshot.streak, statSnapshot.best_streak,
+        statSnapshot.last_activity, timestamp, user.tg_id, pair.id, user.tg_id));
+  } else if (!wasAwaitingReturn) {
+    operations.push(env.DB.prepare(`UPDATE users SET points=0,streak=0,best_streak=0,last_activity=NULL,updated_at=?
+      WHERE tg_id=? AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
+      .bind(timestamp, user.tg_id, pair.id, user.tg_id));
   }
   let results;
   try {
-    // Два следующих оператора условны на успех UPDATE pairs: D1 batch не
-    // откатывается при changes=0, и без EXISTS-проверки конкурентный вход
-    // оставил бы pair_members/users.pair_id у пары с user_b=0 — «фантомное»
-    // членство, которое ensureSchema-repair уже не починит.
-    results = await env.DB.batch([
-      env.DB.prepare("UPDATE pairs SET user_b=?,name2=?,awaiting_return=0,last_partner=0,updated_at=? WHERE id=? AND user_b=0")
-        .bind(user.tg_id, user.display_name, timestamp, pair.id),
-      env.DB.prepare(`INSERT INTO pair_members(tg_id,pair_id,role,joined_at)
-        SELECT ?,?,'b',? WHERE EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
-        .bind(user.tg_id, pair.id, timestamp, pair.id, user.tg_id),
-      env.DB.prepare(`UPDATE users SET pair_id=?,role='b',updated_at=? WHERE tg_id=?
-        AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_b=?)`)
-        .bind(pair.id, timestamp, user.tg_id, pair.id, user.tg_id)
-    ]);
+    results = await env.DB.batch(operations);
   } catch (error) {
     const message = String(error?.message || error).toLowerCase();
     if (message.includes("unique") || message.includes("constraint") || message.includes("foreign key")) {
+      // Гонка захвата — не перебор: слот возвращаем (parity с ботом).
+      await releaseJoinAttempt(env, attemptKey);
       throw new HttpError(409, "Не удалось войти: пространство уже занято", "JOIN_CONFLICT");
     }
     throw error;
   }
   if (!results?.[0]?.meta?.changes) {
+    await releaseJoinAttempt(env, attemptKey);
     throw new HttpError(409, "Не удалось войти: пространство уже занято", "JOIN_CONFLICT");
   }
   if (wasAwaitingReturn && positiveId(pair.user_a)) {
@@ -941,6 +988,8 @@ async function joinPair(env, user, rawCode, requestUrl = null, ctx = null) {
     if (ctx?.waitUntil) ctx.waitUntil(notify);
     else await notify;
   }
+  // Успешный вход не расходует лимит неудачных попыток.
+  await releaseJoinAttempt(env, attemptKey);
   return membership(env, user.tg_id);
 }
 
@@ -965,6 +1014,19 @@ async function leavePair(env, member, requestUrl, ctx = null) {
     const guard = (sql, ...params) => env.DB.prepare(`${sql} AND EXISTS(SELECT 1 FROM pairs WHERE id=? AND user_a=? AND user_b=?)`)
       .bind(...params, ...guardBinds);
     const operations = [];
+    if (partnerId) {
+      // Снимок статистики уходящего за парой (member_stats): users.* описывает
+      // ТЕКУЩУЮ пару, поэтому перед выходом сохраняем её — возвращение по
+      // зарезервированному коду восстановит историю, а вход в новую пару
+      // начнёт её с нуля. Гвард EXISTS — как у остальных операторов: при
+      // устаревшем снимке member вставка не сработает и попытка повторится.
+      operations.push(guard(
+        `INSERT OR REPLACE INTO member_stats(pair_id,tg_id,points,streak,best_streak,last_activity,updated_at)
+         SELECT p.id,u.tg_id,u.points,u.streak,u.best_streak,u.last_activity,?
+         FROM pairs p JOIN users u ON u.tg_id=?
+         WHERE p.id=?`,
+        timestamp, member.tg_id, member.id));
+    }
     // Отвязка ушедшего — первой: после DELETE/UPDATE pairs EXISTS-гвард был бы
     // всегда ложен. Партнёрские записи — тоже до парного оператора.
     operations.push(guard("UPDATE users SET pair_id=NULL,role='a',partner_custom_name=NULL,updated_at=? WHERE tg_id=?", timestamp, member.tg_id));
@@ -983,6 +1045,7 @@ async function leavePair(env, member, requestUrl, ctx = null) {
         guard("DELETE FROM daily_rolls WHERE pair_id=?", member.id),
         guard("DELETE FROM daily_completions WHERE pair_id=?", member.id),
         guard("DELETE FROM pair_members WHERE pair_id=?", member.id),
+        guard("DELETE FROM member_stats WHERE pair_id=?", member.id),
         // Все коллекции после 0016 тоже явно (страховка поверх FK CASCADE):
         // quotes, places, trips, goals+goal_items, movies (вместе с
         // unique-индексом не мешает), savings.
@@ -1436,9 +1499,9 @@ async function state(env, userId) {
     env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     env.DB.prepare(`SELECT m.id,m.author_id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
-    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
-    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     // Цитаты и места — общие коллекции пары: приватности у них нет, поэтому
     // фильтровать по created_by нечего. Потолок тот же, что у активных планов:
@@ -1774,7 +1837,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
       dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
       memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 } },
-      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" } },
+      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" }, comment: { type: "string", maxLength: 500 } },
       quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
       places: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } },
       trips: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 } },
@@ -1939,6 +2002,11 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       // в базе смесь '' и NULL для «ссылки нет».
       if (body.url !== undefined) {
         field("url", wishUrl(body.url) || null);
+      }
+      // Уточнение редактируется тем же UPDATE, что и текст: пустая строка
+      // снимает комментарий (NULL), не оставляя смесь '' и NULL в базе.
+      if (body.comment !== undefined) {
+        field("comment", clean(body.comment) || null);
       }
     }
     if (type === "tasks") patchTaskFields();
@@ -2396,11 +2464,17 @@ async function api(request, env, url, ctx = null) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/wishes") {
-    validateSchema(body, { body: { type: "string", required: true, maxLength: 300 }, url: { type: "string" } });
+    validateSchema(body, {
+      body: { type: "string", required: true, maxLength: 300 },
+      url: { type: "string" },
+      // Уточнение к подарку: размер, цвет, где купить, чем заменить.
+      comment: { type: "string", maxLength: 500 }
+    });
     const text = textField(body, "body", 300, "Желание");
     const wishLink = wishUrl(body.url) || null;
-    await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,created_at) VALUES(?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, text, wishLink, now()).run();
+    const wishComment = clean(body.comment) || null;
+    await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, text, wishLink, wishComment, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/quotes") {
@@ -2684,6 +2758,9 @@ async function webhook(request, env, url) {
   const ownerIdList = ownerIds(env);
   const isBotOwner = ownerIdList.includes(message.from.id);
   const knownUser = ownerIdList.length ? await env.DB.prepare("SELECT tg_id FROM users WHERE tg_id=?").bind(message.from.id).first() : null;
+  // Пользователь допущен по приглашению в ЭТОМ апдейте: если вход не состоится,
+  // созданную ensureUser строку нужно убрать (аудит 2026-11-11, P2).
+  const invitedNow = Boolean(ownerIdList.length && !isBotOwner && !knownUser);
   if (ownerIdList.length && !isBotOwner && !knownUser) {
     // Приватный бот: незнакомцам — только /start <код открытой пары>.
     const text = clean(message.text || message.caption || "");
@@ -2713,8 +2790,8 @@ const openPair = /^[A-F0-9]{8}$/i.test(inviteCode)
     const user = await ensureUser(env, message.from, null);
     const text = clean(msgText);
     const code = startPayload(text);
+    let joined = false;
     if (code) {
-      let joined = false;
       let joinFailText = "";
       const existingMembership = await membership(env, user.tg_id);
       if (existingMembership) {
@@ -2755,6 +2832,9 @@ const openPair = /^[A-F0-9]{8}$/i.test(inviteCode)
     } else {
       await openApp(env, message.chat.id, url, "Совместные планы, воспоминания и желания — в одном месте.");
     }
+    // Вход по приглашению не состоялся (гонка, занятая пара, резерв кода) —
+    // не оставляем «известного» пользователя без членства в паре.
+    if (invitedNow && !joined) await dropUnconfirmedUser(env, user.tg_id);
   } catch (error) {
     console.error("webhook delivery failed", error);
     // Снимаем отметку об обработке, чтобы Telegram мог повторить доставку.
@@ -3136,7 +3216,7 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=?${scope === "mine" ? " AND m.author_id=?" : ""} ORDER BY m.created_at ASC, m.id ASC`,
   quotes: (scope) => `SELECT q.id,q.body,q.source,q.created_at,u.display_name AS author FROM quotes q
     LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=?${scope === "mine" ? " AND q.author_id=?" : ""} ORDER BY q.created_at ASC, q.id ASC`,
-  wishes: (scope) => `SELECT w.id,w.body,w.url,w.created_at,u.display_name AS author FROM wishes w
+  wishes: (scope) => `SELECT w.id,w.body,w.url,w.comment,w.created_at,u.display_name AS author FROM wishes w
     LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0${scope === "mine" ? " AND w.owner_id=?" : ""} ORDER BY w.created_at ASC, w.id ASC`
 };
 
@@ -3257,6 +3337,7 @@ const EXPORT_ROW_MAPPERS = {
     id: row.id,
     body: row.body ?? "",
     url: row.url || null,
+    comment: clean(row.comment) || null,
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   })
@@ -3356,6 +3437,7 @@ const EXPORT_TXT_ROWS = {
   wishes: (row) => ({
     head: row.body,
     fields: [
+      ["Уточнение", row.comment],
       ["Ссылка", row.url],
       ["Добавил", row.author],
       ["Создан", exportTxtTime(row.created_at)]
@@ -3680,10 +3762,12 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY,closed_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,weekly_digest_enabled INTEGER NOT NULL DEFAULT 0,weekly_digest_time TEXT,weekly_digest_day TEXT NOT NULL DEFAULT 'sun',accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
+    // Снимки статистики «Ваша история» по парам (migrations/0030).
+    `CREATE TABLE IF NOT EXISTS member_stats (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,best_streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY (pair_id,tg_id))`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT)`,
+    `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT,comment TEXT)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
@@ -3749,6 +3833,7 @@ async function ensureSchema(env) {
     ["dates", "created_by", "INTEGER NOT NULL DEFAULT 0"],
     ["wishes", "done_at", "INTEGER"],
     ["wishes", "url", "TEXT"],
+    ["wishes", "comment", "TEXT"],
     ["memories", "title", "TEXT"],
     ["tasks", "monthly", "INTEGER NOT NULL DEFAULT 0"],
     ["tasks", "yearly", "INTEGER NOT NULL DEFAULT 0"],
@@ -3776,7 +3861,13 @@ async function ensureSchema(env) {
     env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
       SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_a)`),
     env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
-      SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`)
+      SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`),
+    // Бэкфилл member_stats для пар, ожидающих возвращения партнёра (parity
+    // с migrations/0030): users.* ушедшего ещё хранит статистику этой пары.
+    env.DB.prepare(`INSERT OR IGNORE INTO member_stats(pair_id,tg_id,points,streak,best_streak,last_activity,updated_at)
+      SELECT p.id,p.last_partner,u.points,u.streak,u.best_streak,u.last_activity,?
+      FROM pairs p JOIN users u ON u.tg_id=p.last_partner
+      WHERE p.awaiting_return=1 AND p.last_partner!=0`).bind(now())
   ]);
   await env.DB.prepare(
     "INSERT INTO app_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"

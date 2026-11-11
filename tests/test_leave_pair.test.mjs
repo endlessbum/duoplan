@@ -83,9 +83,9 @@ function makeNotifier(order = [], { fail = false } = {}) {
 
 // Полный список child-таблиц: все коллекции пары, а не только до-0016
 // (savings_deposits уходит каскадом за savings).
-const CHILD_TABLES = ["tasks", "dates", "memories", "wishes", "daily_rolls", "quotes", "places", "movies", "savings"];
+const CHILD_TABLES = ["tasks", "dates", "memories", "wishes", "daily_rolls", "quotes", "places", "movies", "savings", "member_stats"];
 
-test("выход последнего держателя удаляет все данные пары", async () => {
+test("выход последнего держателя удаляет все данные пары, включая member_stats", async () => {
   const { db, executed } = makeMockDb();
   const notifier = makeNotifier();
   const leavePair = load(notifier.openApp, escapeHtml);
@@ -101,13 +101,11 @@ test("выход последнего держателя удаляет все �
   deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pair_members WHERE pair_id=?")), true);
   deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs WHERE id=?")), true);
   deepStrictEqual(executed.some((op) => op.sql.startsWith("UPDATE users SET pair_id=NULL")), true);
-  // Партнёра повышение не затрагивает.
-  deepStrictEqual(executed.some((op) => op.sql.includes("user_a=user_b")), false);
-  // Оставшегося нет — уведомлять некого.
-  equal(notifier.calls.length, 0);
+  deepStrictEqual(executed.some((op) => op.sql.includes("INSERT OR REPLACE INTO member_stats")), false, "снимок не пишется: партнёра нет");
+  deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM member_stats WHERE pair_id=?")), true, "member_stats удаляется вместе с парой");
 });
 
-test("выход одного из пары сохраняет данные пары", async () => {
+test("выход одного из пары сохраняет данные пары и снимок статистики", async () => {
   const { db, executed } = makeMockDb();
   const notifier = makeNotifier();
   const leavePair = load(notifier.openApp, escapeHtml);
@@ -121,11 +119,11 @@ test("выход одного из пары сохраняет данные па
     );
   }
   deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs")), false);
-  // Пространство переходит партнёру.
   deepStrictEqual(executed.some((op) => op.sql.includes("user_a=user_b")), true);
+  deepStrictEqual(executed.some((op) => op.sql.includes("INSERT OR REPLACE INTO member_stats")), true, "снимок статистики записан");
 });
 
-test("выход партнёра (role b) сохраняет данные пары", async () => {
+test("выход партнёра (role b) сохраняет данные пары и снимок статистики", async () => {
   const { db, executed } = makeMockDb();
   const notifier = makeNotifier();
   const leavePair = load(notifier.openApp, escapeHtml);
@@ -137,6 +135,7 @@ test("выход партнёра (role b) сохраняет данные па�
   deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pairs")), false);
   deepStrictEqual(executed.some((op) => op.sql.startsWith("UPDATE pairs SET user_b=0")), true);
   deepStrictEqual(executed.some((op) => op.sql.startsWith("DELETE FROM pair_members WHERE tg_id=? AND pair_id=?")), true);
+  deepStrictEqual(executed.some((op) => op.sql.includes("INSERT OR REPLACE INTO member_stats")), true, "снимок статистики записан");
 });
 
 test("владелец уходит — бот уведомляет оставшегося партнёра", async () => {

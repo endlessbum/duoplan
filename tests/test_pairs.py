@@ -5,8 +5,7 @@ import asyncio
 import pytest
 
 from duoplan.db.base import connect_database
-from duoplan.services import DuoPlanService
-from duoplan.services import ValidationError
+from duoplan.services import DuoPlanService, ValidationError
 
 
 async def test_concurrent_join_has_exactly_one_winner(tmp_path):

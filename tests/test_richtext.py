@@ -10,13 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from duoplan.handlers import dates_view
-from duoplan.handlers import memories_view
-from duoplan.handlers import tasks_view
-from duoplan.handlers import wishes_view
-from duoplan.richtext import escape_html
-from duoplan.richtext import rich_to_html
-from duoplan.richtext import rich_to_plain
+from duoplan.handlers import dates_view, memories_view, tasks_view, wishes_view
+from duoplan.richtext import escape_html, rich_to_html, rich_to_plain
 
 # ------------------------------------------------------------ чистые функции
 
