@@ -10,7 +10,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.06.35` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.11.50` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -34,11 +34,11 @@ Telegram Mini App для пар: общие планы, значимые дат�
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 28 миграций схемы D1 |
+| `migrations/` | 29 миграций схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
-| `tests/` | pytest (28 файлов) и `node:test` (55 файлов) + браузерные harness'ы |
+| `tests/` | pytest (28 файлов) и `node:test` (64 файла) + браузерные harness'ы |
 
 **Production:** Cloudflare Worker + D1 + static assets. Worker обслуживает только
 `/api/*`, `/health` и `/telegram/*` (`run_worker_first`), остальное отдаёт
@@ -102,6 +102,7 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0026_goals` | `goals` + `goal_items` — цели с пунктами выполнения |
 | `0027_awaiting_return_and_closed_codes` | `pairs.awaiting_return`, `pairs.last_partner`, `closed_codes` — заморозка контента после выхода партнёра и коды закрытых пространств |
 | `0028_last_partner` | `pairs.last_partner` — резерв кода за ушедшим до его возвращения |
+| `0029_weekly_digest` | `users.weekly_digest_enabled`, `weekly_digest_time`, `weekly_digest_day` — недельная сводка (выключена по умолчанию, день `sun`/`mon`) |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -219,9 +220,10 @@ assets; в `public/_headers` им выставлен
 
 ### Резервные копии D1
 
-Экспорт данных из настроек пары (один JSON-файл «Экспорт» — выбранные
-разделы: планы, кино, значимые даты, дни рождения, места, записи дневника,
-цитаты, желания; для каждой — свой состав выгрузки) не заменяет резервное
+Экспорт данных из настроек пары (один текстовый файл `Экспорт.txt`,
+отправляемый документом `text/plain` — выбранные разделы: планы, кино,
+значимые даты, дни рождения, места, поездки, записи дневника, цитаты,
+желания; для каждой — свой состав выгрузки) не заменяет резервное
 копирование базы: настройки и очки в файлы не попадают.
 Вся база выгружается скриптом:
 
@@ -662,8 +664,9 @@ Telegram WebView, там масштабирование оставлено (до
 - **Экспорт данных.** Кнопка «Экспортировать» на вкладке «Наша пара»
   открывает выбор разделов: планы (все или личные), кино (не просмотренные),
   значимые даты (все или личные), дни рождения (все или личные), места,
-  записи дневника, цитаты и желания (все или только свои). Бот присылает
-  один JSON-файл «Экспорт» с выбранным; личные записи партнёра не попадают
+  записи дневника, цитаты и желания (все или только свои), поездки (все или
+  только свои). Бот присылает один текстовый файл `Экспорт.txt` с выбранным;
+  личные записи партнёра не попадают
   в выгрузку ни в каком составе. Полная копия базы —
   `scripts/backup-d1.sh` (см. «Резервные копии D1»).
 
@@ -681,7 +684,7 @@ cp .env.example .env          # заполните BOT_TOKEN
 `.env`, он в `.gitignore`.
 
 - База по умолчанию — `data/duoplan.db`. Версия схемы хранится в
-  `PRAGMA user_version` (сейчас `5`), миграции идемпотентны и не удаляют данные.
+  `PRAGMA user_version` (сейчас `7`), миграции идемпотентны и не удаляют данные.
   Старые базы, где версия лежала в `meta.schema_version`, читаются и переводятся
   на новую дисциплину.
 - FSM-состояния хранятся в SQLite (`fsm_states`) с TTL (по умолчанию 7 дней,
@@ -706,7 +709,7 @@ cp .env.example .env          # заполните BOT_TOKEN
 | `scripts/backup-d1.sh` | Полный дамп production D1 в `backups/` |
 | `scripts/export_sqlite_to_d1.py` | SQLite-база бота → SQL-файл для `wrangler d1 execute` |
 | `scripts/check-touch-drag.mjs` | Жест капли настоящими касаниями через CDP (Node 22+ и Chrome) |
-| `scripts/package-safe.js` | Сборка `DuoPlan.zip` по allowlist: только код и конфиги, без `.env`, баз и кэшей |
+| `scripts/package-safe.js` | Сборка `DuoPlan.zip` по allowlist: только код и конфиги, без `.env`, баз, кэшей и внутренних аудиторских документов (например, `АУДИТ-*.md` и планы исправлений — они не входят в поставку) |
 
 ## Проверки
 
@@ -721,7 +724,8 @@ wrangler deploy --dry-run
 node scripts/check-touch-drag.mjs
 ```
 
-81 файл тестов: 27 pytest и 54 `node:test`. Python-часть покрывает гонку входа
+92 файла тестов: 28 pytest и 64 `node:test` (последний прогон — 586 тестов).
+Python-часть покрывает гонку входа
 в пару, запрет входа владельцу пустой пары, двойное начисление XP, валидацию,
 часовой пояс и DST, FSM-медиа, миграции, приватный гейт, уровни и паритет
 схемы (`test_schema_parity.py`) и ритуала (`test_daily_parity.py`).
@@ -756,5 +760,5 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.06.35`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.11.50`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.

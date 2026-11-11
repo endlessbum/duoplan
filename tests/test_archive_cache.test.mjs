@@ -39,8 +39,8 @@ const load = new Function(
     "let appState = null;",
     "let archiveCachePairId = null;",
     extractBraced("function emptyArchiveEntry"),
-    "const archiveCache = { tasks: emptyArchiveEntry(), dates: emptyArchiveEntry(), wishes: emptyArchiveEntry(), memories: emptyArchiveEntry(), done_tasks: emptyArchiveEntry(), done_wishes: emptyArchiveEntry() };",
-    "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'] };",
+    "const archiveCache = { tasks: emptyArchiveEntry(), dates: emptyArchiveEntry(), wishes: emptyArchiveEntry(), memories: emptyArchiveEntry(), done_tasks: emptyArchiveEntry(), done_wishes: emptyArchiveEntry(), movies: emptyArchiveEntry(), quotes: emptyArchiveEntry(), places: emptyArchiveEntry(), trips: emptyArchiveEntry(), goals: emptyArchiveEntry(), savings: emptyArchiveEntry() };",
+    "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'], movies: ['movies'], quotes: ['quotes'], places: ['places'], trips: ['trips'], goals: ['goals'], savings: ['savings'] };",
     extractBraced("function resetArchiveCache"),
     extractBraced("function syncArchiveCachePair"),
     extractBraced("function removeFromArchiveCache"),
@@ -225,10 +225,33 @@ test("кнопка «Показать ещё» у активных наборо�
   equal(ctx.archiveMoreHtml("tasks", 200), "");
 });
 
-test("кнопка «Показать ещё» подписана счётчиком remaining", () => {
+test("шесть новых типов архива: кэш, порог 200 и mergedArchive в хелперах", () => {
   const ctx = makeCtx();
   ctx.setAppState({ pair: { id: 1 } });
   ctx.syncArchiveCachePair();
+  for (const type of ["movies", "quotes", "places", "trips", "goals", "savings"]) {
+    deepStrictEqual(ctx.archiveCache[type], { items: [], page: -1, hasMore: null, remaining: null }, `${type}: нет ключа кэша`);
+    equal(ctx.archiveMoreHtml(type, 199), "", `${type}: кнопка раньше порога`);
+    deepStrictEqual(ctx.archiveMoreHtml(type, 200).includes("load-archive"), true, `${type}: нет кнопки на границе`);
+  }
+  // Хелперы списков и findItem читают mergedArchive — иначе карточки 201+
+  // не рендерились бы и диалоги не находили запись.
+  for (const helper of ["function movieList()", "function savingsList()", "function placeList()",
+    "function tripList()", "function goalList()"]) {
+    ok(source.includes(`${helper} {\n    return mergedArchive(`), `${helper} не через mergedArchive`);
+  }
+  ok(source.includes('quotes: mergedArchive("quotes", appState?.quotes || [])'), "findItem: цитаты мимо архива");
+  ok(source.includes('movies: mergedArchive("movies", appState?.movies || [])'), "findItem: фильмы мимо архива");
+  ok(source.includes('goals: mergedArchive("goals", appState?.goals || [])'), "findItem: цели мимо архива");
+  ok(source.includes('savings: mergedArchive("savings", appState?.savings || [])'), "findItem: копилки мимо архива");
+  ok(source.includes('places: mergedArchive("places", appState?.places || [])'), "findItem: места мимо архива");
+  ok(source.includes('trips: mergedArchive("trips", appState?.trips || [])'), "findItem: трипы мимо архива");
+  ok(source.includes('const quotes = mergedArchive("quotes", appState.quotes || []);'), "цитаты рендерятся мимо архива");
+});
+
+test("кнопка «Показать ещё» подписана счётчиком remaining", () => {
+  const ctx = makeCtx();
+  ctx.setAppState({ pair: { id: 1 } });  ctx.syncArchiveCachePair();
   // Остаток неизвестен (страрый ответ сервера) — кнопка без счётчика.
   ctx.archiveCache.memories.page = 0;
   ctx.archiveCache.memories.hasMore = true;
@@ -382,6 +405,9 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       "let liquidNav = null;",
       "let segSwitch = null;",
       "let wishSwitch = null;",
+      "let goalsSwitch = null;",
+      "let movieSwitch = null;",
+      "let plansSwitch = null;",
       extractBraced("function deepEqual"),
       extractBraced("async function refreshState"),
       "return { refreshState, setAppState: (v) => { appState = v; } };"

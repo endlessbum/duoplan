@@ -108,7 +108,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
     "details", "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
     "is_private", "kind", "last_partner", "monthly", "monthly", "partner_custom_name", "photo_url",
     "rating_checked_at", "rating_source", "show_avatar",
-    "time", "time", "timezone", "timezone", "title", "url", "yearly"
+    "time", "time", "timezone", "timezone", "title", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "yearly"
   ]);
 });
 
@@ -122,7 +122,8 @@ test("чистый проход миграции без гонки записы�
   // + rating_source/rating_checked_at/details (movies, items 88/89/92)
   // + awaiting_return/last_partner (pairs, заморозка контента после выхода
   // партнёра и резерв кода за ушедшим)
-  deepStrictEqual(log.alters.length, 31);
+  // + 3 настройки недельной сводки (users)
+  deepStrictEqual(log.alters.length, 34);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

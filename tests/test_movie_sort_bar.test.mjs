@@ -40,6 +40,8 @@ function loadRender({ view, watched, kind }) {
     "moviesView", "watchedMovies", "filterMoviesByKind", "movieSortBar",
     "sortMovies", "movieItem", "renderOpenMovies", "movieKindFilter",
     [
+      "const appState = { movies: [] };",
+      "const archiveMoreHtml = () => \"\";",
       extractBraced("function movieEmptyByKind"),
       extractBraced("function renderMoviesList"),
       "return renderMoviesList;"
@@ -69,6 +71,8 @@ function loadOpenRender({ open, watched, kind }) {
     "currentMoviePick", "movieRandomUsed", "movieEmptyByKind", "movieSortBar",
     "sortMovies", "movieItem",
     [
+      "const appState = { movies: [] };",
+      "const archiveMoreHtml = () => \"\";",
       extractBraced("function renderOpenMovies"),
       "return renderOpenMovies;"
     ].join("\n")

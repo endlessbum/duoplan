@@ -35,16 +35,15 @@ function extractLine(prefix) {
   return source.slice(start, source.indexOf("\n", start));
 }
 
-const load = new Function(
-  [
+const RENDER_DEPS = [
     // pairTimeZone и applyAccent-путь читают appState/документ — минимальные стабы.
-    'const appState = { pair: { timezone: "Europe/Moscow", user_b: 1 }, user: { tg_id: 1 } };',
     'const document = { documentElement: { dataset: { theme: "dark" } }, querySelectorAll: () => [] };',
     extractLine("  const RICH_TOKENS"),
     extractLine("  const REOPEN_ICON"),
     extractLine("  const DONE_ICON"),
     extractLine("  const EDIT_ICON"),
     extractLine("  const DELETE_ICON"),
+    extractLine("  const SHARE_ICON"),
     extractBraced("function esc"),
       extractBraced("function itemActionButton"),
       extractBraced("function itemActions"),
@@ -54,6 +53,9 @@ const load = new Function(
     extractBraced("function richInline"),
     extractBraced("function renderRichText"),
     extractBraced("function pairTimeZone"),
+    extractBraced("function viewerTimeZone"),
+    extractBraced("function validTimeZoneLite"),
+    extractBraced("function viewerTimeHint"),
     extractBraced("function timeZoneOffsetMs"),
     extractBraced("function makeDateInTimeZone"),
     extractBraced("function zonedToday"),
@@ -79,8 +81,14 @@ const load = new Function(
     extractBraced("function completedTaskItem"),
     extractBraced("function completedWishItem"),
     "return { taskItem, dateItem, birthdayItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay };"
-  ].join("\n")
-);
+  ];
+
+const load = () => new Function([
+    'const appState = { pair: { timezone: "Europe/Moscow", user_b: 1 }, user: { tg_id: 1 } };',
+    ...RENDER_DEPS
+  ].join("\n"))();
+// Вариант с разными поясами пары и зрителя — для проверок data-day.
+const loadTZ = (stateLine) => new Function([stateLine, ...RENDER_DEPS].join("\n"))();
 const { taskItem, dateItem, birthdayItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay } = load();
 
 test("у плана с датой карточка-кнопка календаря, у плана без даты — нет", () => {
@@ -122,6 +130,22 @@ test("карточка дня рождения ведёт в календарь 
   const year = Number(day.slice(0, 4));
   ok((year === currentYear || year === currentYear + 1) && day.slice(5) === "05-14",
     `проекция неверна: ${day}`);
+});
+
+// BUG-03: nextOccurrence возвращает абсолютный момент в поясе ПАРЫ; data-day
+// обязан извлекаться в том же поясе. 11.11 01:00 по Токио — это ещё 10.11
+// по Лос-Анджелесу: ключ зрителя сдвигал бы карточку на соседний день.
+test("карточка дня рождения: data-day считается в поясе пары, не зрителя", () => {
+  const { birthdayItem: birthdayItemTZ } = loadTZ(
+    'const appState = { pair: { timezone: "Asia/Tokyo", user_b: 2 }, user: { tg_id: 1, timezone: "America/Los_Angeles" } };'
+  );
+  const html = birthdayItemTZ({ id: 12, title: "Маша", day: "1990-11-11", time: "01:00", is_private: 0 });
+  const day = html.match(/data-day="(\d{4}-\d{2}-\d{2})"/)?.[1];
+  ok(day, "data-day без валидной даты");
+  const currentYear = new Date().getFullYear();
+  const year = Number(day.slice(0, 4));
+  ok((year === currentYear || year === currentYear + 1) && day.slice(5) === "11-11",
+    `дата съехала на соседний день пояса зрителя: ${day}`);
 });
 
 test("карточки рендерятся без ошибок на богатом наборе состояний", () => {
@@ -239,6 +263,7 @@ test("movieItem: пилюля рейтинга по порогам оценки"
       extractBraced("function itemActions"),
       extractBraced("function plural"),
       'const pairTimeZone = () => "UTC";',
+      'const viewerTimeZone = () => "UTC";',
       extractBraced("function formatTimestamp"),
       extractBraced("function scorePill"),
       extractBraced("function ratingPill"),
@@ -297,6 +322,7 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       extractBraced("function itemActions"),
       extractBraced("function plural"),
       'const pairTimeZone = () => "UTC";',
+      'const viewerTimeZone = () => "UTC";',
       extractBraced("function formatTimestamp"),
       extractBraced("function scorePill"),
       extractBraced("function ratingPill"),
@@ -379,13 +405,16 @@ test("renderMovieDetails: описание, актёры, все жанры, р�
   ok(renderMovieDetails(movie, null).includes("Описание пока недоступно"), "нет заглушки");
 });
 
-test("wishItem: у желания партнёра нет кнопок, у своего — полный набор", () => {
+test("wishItem: у партнёра только «Поделиться», у своего — полный набор", () => {
   const own = wishItem({ id: 16, body: "Моё", owner_id: 1, url: "" }, true);
-  for (const action of ["done-item", "edit-item", "delete-item"]) {
+  for (const action of ["share-wish", "done-item", "edit-item", "delete-item"]) {
     ok(own.includes(`data-action="${action}"`), action);
   }
   const alien = wishItem({ id: 17, body: "Чужое", owner_id: 2, url: "" }, true);
-  ok(!alien.includes("icon-btn"), "у чужого желания отрисовались кнопки");
+  ok(alien.includes('data-action="share-wish"'), "у чужого желания нет «Поделиться»");
+  for (const action of ["done-item", "edit-item", "delete-item"]) {
+    ok(!alien.includes(`data-action="${action}"`), `${action} не должен быть у чужого желания`);
+  }
 });
 
 // ------------------------------------------------------------------
@@ -450,4 +479,19 @@ test("чип таймера кодирует repeat в data-countdown — тик
   // Разовые планы — пустой repeat: обратная совместимость формата.
   const plain = countdownChip("2027-01-01", "", null);
   ok(/data-countdown="2027-01-01\|\|"/.test(plain), "разовый чип без repeat");
+});
+
+test("карточка «Ваша история»: тап открывает окно с рекордом серии", () => {
+  // Тапабельна только парная карточка героя; окно — начало истории + рекорд.
+  ok(source.includes('class="card hero-card" role="button" tabindex="0" data-action="open-history"'), "нет тапа на карточке истории");
+  ok(source.includes('action === "open-history"'), "нет обработчика open-history");
+  ok(source.includes("Рекорд серии"), "в окне нет рекорда серии");
+  ok(/<span style="color: var\(--berry\);">\$\{FLAME_ICON\}<\/span> Рекорд серии/.test(source), "огонёк рекорда не в акценте");
+  // «Начало истории» переехало из карточки в окно.
+  const heroStart = source.indexOf('class="card hero-card" role="button"');
+  const heroBody = source.slice(heroStart, source.indexOf("</section>", heroStart));
+  ok(!heroBody.includes("Начало истории"), "«Начало истории» осталось на карточке");
+  ok(source.includes("Начало истории</span><span>"), "нет строки «Начало истории» в окне");
+  // Карточка «Ожидание партнёра» осталась нетапабельной с подсказкой про код.
+  ok(source.includes("Отправьте код партнёру, чтобы открыть ритуалы дня"), "потеряна подсказка ожидания партнёра");
 });

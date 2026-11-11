@@ -36,6 +36,10 @@ function extractBraced(text, declaration) {
 const load = new Function(
   [
     "let appState = { trips: [] };",
+    // tripList() читает mergedArchive — стаб возвращает недавние как есть.
+    "const mergedArchive = (type, recent) => recent || [];",
+    "const archiveMoreHtml = () => \"\";",
+    "const viewerTimeZone = () => 'Europe/Moscow';",
     "const REOPEN_ICON = '';",
     "const DONE_ICON = '';",
     "const EDIT_ICON = '';",
@@ -138,7 +142,7 @@ test("app: сегмент «Посетить/Путешествие» на вк�
   ok(/key === "places" \? \(placesView === "trips" \? renderTripsBody\(\) : renderPlacesBody\(\)\)/.test(appSource), "commitSwitch не перерисовывает тело мест");
   ok(/action: "trip-visited"/.test(appSource), "нет действия trip-visited");
   ok(/action === "trip-visited" \|\| action === "trip-unvisited"/.test(appSource), "нет обработчика отметки поездки");
-  ok(appSource.includes('trips: appState?.trips || []'), "trips нет в findItem");
+  ok(appSource.includes('trips: mergedArchive("trips", appState?.trips || [])'), "trips нет в findItem");
   ok(appSource.includes('trips: "поездку"'), "trips нет в typeNames удаления");
   ok(appSource.includes('type === "trips"'), "нет диалога правки поездки");
   ok(appSource.includes('name="trips"'), "поездки нет в диалоге экспорта");

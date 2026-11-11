@@ -32,12 +32,15 @@ function loadDevVars() {
 }
 let vars = loadDevVars();
 if (!vars.BOT_TOKEN) {
-  writeFileSync(devVarsPath, [
-    "BOT_TOKEN=123456:duoplan-dev-stand",
-    "WEBHOOK_SECRET=dev-webhook-secret",
-    "SETUP_TOKEN=dev-setup-token",
-    ""
-  ].join("\n"));
+  // Дописываем только недостающие ключи: у файла могут быть свои значения
+  // (SETUP_TOKEN и т.п.), перезапись целиком их затирала.
+  const defaults = {
+    BOT_TOKEN: "123456:duoplan-dev-stand",
+    WEBHOOK_SECRET: "dev-webhook-secret",
+    SETUP_TOKEN: "dev-setup-token"
+  };
+  const merged = { ...defaults, ...vars };
+  writeFileSync(devVarsPath, Object.entries(merged).map(([k, v]) => `${k}=${v}`).join("\n") + "\n");
   vars = loadDevVars();
 }
 const TOKEN = vars.BOT_TOKEN;
@@ -124,6 +127,9 @@ const server = http.createServer(async (req, res) => {
       const plainReq = { ...req, headers: { ...req.headers, "accept-encoding": "identity" } };
       const up = await fetchUpstream(plainReq, null);
       let html = "";
+      // setEncoding: chunk может разрезать кириллический символ — toString
+      // по кускам превратил бы её в U+FFFD.
+      up.setEncoding("utf8");
       up.on("data", (d) => (html += d));
       up.on("end", () => {
         html = html.replace(
@@ -168,12 +174,12 @@ console.log(`[stand] BOT_TOKEN из .dev.vars: ${TOKEN.slice(0, 12)}…`);
 
 if (!args.includes("--no-migrate")) {
   console.log("[stand] применяю миграции к локальной D1…");
-  const r = spawnSync("npx --yes wrangler@4 d1 migrations apply duoplan --local", { cwd: root, shell: SHELL, stdio: "inherit" });
+  const r = spawnSync("npx", ["--yes", "wrangler@4", "d1", "migrations", "apply", "duoplan", "--local"], { cwd: root, shell: SHELL, stdio: "inherit" });
   if (r.status !== 0) { console.error("[stand] миграции не применились"); process.exit(1); }
 }
 
 console.log(`[stand] запускаю wrangler dev на :${UP_PORT}…`);
-const wrangler = spawn(`npx --yes wrangler@4 dev --local --port ${UP_PORT} --ip ${UP_HOST}`, {
+const wrangler = spawn("npx", ["--yes", "wrangler@4", "dev", "--local", "--port", String(UP_PORT), "--ip", UP_HOST], {
   cwd: root, shell: SHELL, stdio: "inherit"
 });
 wrangler.on("exit", (code) => { console.error(`[stand] wrangler завершился (${code})`); process.exit(code ?? 1); });

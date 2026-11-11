@@ -37,16 +37,18 @@ const loadWishItem = new Function(
     "const DONE_ICON = " + appSource.match(/const DONE_ICON = ('.*');/)?.[1] + ";",
     "const EDIT_ICON = " + appSource.match(/const EDIT_ICON = ('.*');/)?.[1] + ";",
     "const DELETE_ICON = " + appSource.match(/const DELETE_ICON = ('.*');/)?.[1] + ";",
+    "const SHARE_ICON = " + appSource.match(/const SHARE_ICON = ('.*');/)?.[1] + ";",
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function itemActionButton"),
     extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function richInline"),
     extractBraced(appSource, "function renderRichText"),
     extractBraced(appSource, "function wishItem"),
-    "return { wishItem };"
+    extractBraced(appSource, "function wishShareText"),
+    "return { wishItem, wishShareText };"
   ].join("\n")
 );
-const { wishItem } = loadWishItem({ user: { tg_id: 2 } });
+const { wishItem, wishShareText } = loadWishItem({ user: { tg_id: 2 } });
 
 const PARTNER_WISH = { id: 7, body: "**Плед** и какао", owner_id: 2, display_name: "Аня" };
 const WISH_WITH_URL = { id: 8, body: "**Плед** и какао", owner_id: 2, display_name: "Аня", url: "https://example.com/gifts" };
@@ -57,10 +59,20 @@ test("карточка чужого желания не показывает а�
   equal(html.includes("Аня"), false);
 });
 
-test("карточка чужого желания остаётся без действий, но с разметкой", () => {
+test("карточка чужого желания: «Поделиться» доступна, мутаций нет", () => {
   const html = wishItem(PARTNER_WISH, false);
   equal(html.includes("<b>Плед</b> и какао"), true);
+  equal(html.includes("data-action=\"share-wish\""), true, "у чужого желания нет «Поделиться»");
   equal(html.includes("data-action=\"done-item\""), false);
+  equal(html.includes("data-action=\"edit-item\""), false);
+  equal(html.includes("data-action=\"delete-item\""), false);
+});
+
+test("wishShareText: название и строкой ниже ссылка, если есть", () => {
+  equal(wishShareText(WISH_WITH_URL), "**Плед** и какао\nhttps://example.com/gifts");
+  equal(wishShareText(PARTNER_WISH), "**Плед** и какао");
+  equal(wishShareText({ body: "Только название", url: "  " }), "Только название");
+  equal(wishShareText({}), "");
 });
 
 test("своё желание: действия на месте, автора тоже нет", () => {

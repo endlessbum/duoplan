@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.11.42";
+const APP_VERSION = "2026.11.11.50";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.11.42";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.11.42";
+const DB_SCHEMA_VERSION = "2026.11.11.50";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -81,6 +81,37 @@ const ARCHIVE_QUERIES = {
     active: true,
     sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
+  },
+  // Общие коллекции пары без приватности: продолжение списков /api/state
+  // после 200-й записи, те же колонки и порядок, что в state().
+  movies: {
+    active: true,
+    sql: "SELECT id,imdb_id,title,year,kind,rating,rating_source,rating_checked_at,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+  },
+  quotes: {
+    active: true,
+    sql: `SELECT q.id,q.body,q.source,q.author_id,q.created_at,u.display_name FROM quotes q
+      LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=? ORDER BY q.created_at DESC, q.id DESC LIMIT ? OFFSET ?`
+  },
+  places: {
+    active: true,
+    sql: "SELECT id,title,note,url,visited,visited_at,visited_by,created_by,created_at FROM places WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+  },
+  trips: {
+    active: true,
+    sql: "SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+  },
+  // Личные сущности: фильтр в SQL, как у state() и остальных userScoped-типов.
+  savings: {
+    active: true,
+    userScoped: true,
+    sql: "SELECT id,created_by,kind,title,target,collected,created_at FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+  },
+  goals: {
+    active: true,
+    userScoped: true,
+    // Пункты приклеиваются в archivePage после выборки страницы (как в state()).
+    sql: "SELECT id,title,is_private,created_by,created_at FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
   }
 };
 
@@ -1082,6 +1113,10 @@ function publicUser(user, pairTz = null) {
     digest_enabled: Number(user.digest_enabled ?? 1) === 1,
     dates_digest_time: user.dates_digest_time || null,
     dates_digest_enabled: Number(user.dates_digest_enabled ?? 1) === 1,
+    // Недельная сводка: по умолчанию выключена; день — вс или пн.
+    weekly_digest_time: user.weekly_digest_time || null,
+    weekly_digest_enabled: Number(user.weekly_digest_enabled ?? 0) === 1,
+    weekly_digest_day: user.weekly_digest_day === "mon" ? "mon" : "sun",
     accent_color: user.accent_color || null,
     photo_url: user.photo_url || null,
     show_avatar: Number(user.show_avatar ?? 1) === 1,
@@ -1386,7 +1421,10 @@ async function state(env, userId) {
   const pair = await membership(env, userId);
   if (!pair) return { user: publicUser(user), pair: null };
   const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, goals, goalItems, savings, daily, partnerUser] = await Promise.all([
+  // Порядок имён строго совпадает с порядком запросов ниже: цели и копилки
+  // когда-то поменялись местами, и state.goals отдавал копилки, а
+  // state.savings — пункты целей (замечено 2026-11-11 на сиде архива).
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, daily, partnerUser] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     // monthly/yearly — как в ARCHIVE_QUERIES.done_tasks: редактирование
@@ -1442,24 +1480,10 @@ async function state(env, userId) {
   // имя (custom_name) работает точно так же: меняет имя только у того, кто
   // его задал, и во всех подписях его собственных записей. Партнёру уходит
   // сырое display_name из Telegram.
-  const override = clean(user.partner_custom_name) || null;
-  const ownName = clean(user.custom_name) || null;
-  if (override || ownName) {
-    const viewerId = Number(user.tg_id);
-    const partnerIdNum = partnerId ? Number(partnerId) : null;
-    for (const list of [memories.results || [], quotes.results || []]) {
-      for (const row of list) {
-        if (override && partnerIdNum !== null && Number(row.author_id) === partnerIdNum) row.display_name = override;
-        if (ownName && Number(row.author_id) === viewerId) row.display_name = ownName;
-      }
-    }
-    for (const list of [wishes.results || [], completedWishes.results || []]) {
-      for (const row of list) {
-        if (override && partnerIdNum !== null && Number(row.owner_id) === partnerIdNum) row.display_name = override;
-        if (ownName && Number(row.owner_id) === viewerId) row.display_name = ownName;
-      }
-    }
-  }
+  applyAuthorNameOverrides(memories.results, user, partnerId);
+  applyAuthorNameOverrides(quotes.results, user, partnerId);
+  applyAuthorNameOverrides(wishes.results, user, partnerId);
+  applyAuthorNameOverrides(completedWishes.results, user, partnerId);
   const names = withPartnerOverride(user, pair);
   return {
     user: publicUser(user, pair.timezone),
@@ -1508,6 +1532,25 @@ async function state(env, userId) {
   };
 }
 
+// Подстановка личных имён в подписи авторов (display_name в JOIN users).
+// Зрителю-партнёру записи второго участника подписываются его
+// partner_custom_name, собственные записи автора — его custom_name.
+// Общий код state() и archivePage(): без него догрузка архива «Показать ещё»
+// откатывала имя автора к сырому display_name из Telegram. У memories/quotes
+// автор — author_id, у wishes/done_wishes — owner_id.
+function applyAuthorNameOverrides(rows, user, partnerId) {
+  const override = clean(user?.partner_custom_name) || null;
+  const ownName = clean(user?.custom_name) || null;
+  if (!override && !ownName) return;
+  const viewerId = Number(user?.tg_id);
+  const partnerIdNum = partnerId ? Number(partnerId) : null;
+  for (const row of rows || []) {
+    const authorId = Number(row.author_id ?? row.owner_id);
+    if (override && partnerIdNum !== null && authorId === partnerIdNum) row.display_name = override;
+    if (ownName && authorId === viewerId) row.display_name = ownName;
+  }
+}
+
 // Страница догрузки: архивы продолжают первые STATE_RECENT_LIMIT записей
 // из /api/state, активные наборы — записи после STATE_ACTIVE_LIMIT.
 
@@ -1518,10 +1561,24 @@ const ARCHIVE_COUNT_SQL = {
   memories: "SELECT COUNT(*) AS n FROM memories WHERE pair_id=?",
   done_tasks: "SELECT COUNT(*) AS n FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?)",
   done_wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=1",
-  wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=0"
+  wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=0",
+  movies: "SELECT COUNT(*) AS n FROM movies WHERE pair_id=?",
+  quotes: "SELECT COUNT(*) AS n FROM quotes WHERE pair_id=?",
+  places: "SELECT COUNT(*) AS n FROM places WHERE pair_id=?",
+  trips: "SELECT COUNT(*) AS n FROM trips WHERE pair_id=?",
+  savings: "SELECT COUNT(*) AS n FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?)",
+  goals: "SELECT COUNT(*) AS n FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?)"
 };
 
-async function archivePage(env, pair, type, page, userId = null) {
+// Типы с подписями авторов (JOIN users → display_name): для них archivePage
+// применяет те же личные имена, что state(), иначе догрузка «Показать ещё»
+// меняла имя автора на сырое display_name из Telegram (BUG-05).
+const AUTHOR_NAME_TYPES = new Set(["memories", "quotes", "wishes", "done_wishes"]);
+
+async function archivePage(env, pair, type, page, user = null) {
+  // user — объект пользователя запроса (нужны tg_id и личные имена); в
+  // тестах и старых вызовах сюда передавали голый tg_id.
+  const userId = user && typeof user === "object" ? user.tg_id : user;
   // Object.hasOwn, а не ARCHIVE_QUERIES[type]: имена из прототипа
   // ("constructor", "toString", "__proto__") дают truthy-функцию, проходят
   // проверку и падают на config.sql уже внутри D1 — 500 вместо 400.
@@ -1560,8 +1617,32 @@ async function archivePage(env, pair, type, page, userId = null) {
   const shown = offset + Math.min(results.length, ARCHIVE_PAGE_SIZE);
   const totalRow = await env.DB.prepare(ARCHIVE_COUNT_SQL[type])
     .bind(...(config.userScoped ? [pair.id, userId] : [pair.id])).first();
+  const items = results.slice(0, ARCHIVE_PAGE_SIZE);
+  // Личные имена авторов — как в state(): партнёру его override на записи
+  // второго участника, автору его custom_name на собственные. Партнёр пары —
+  // участник, не совпадающий с просматривающим.
+  if (AUTHOR_NAME_TYPES.has(type) && items.length && user && typeof user === "object") {
+    const partnerId = pair.role === "a" ? pair.user_b : pair.user_a;
+    applyAuthorNameOverrides(items, user, partnerId);
+  }
+  // Кино и цели state() отдаёт с приклеенным (my_rating/pair_rating) и
+  // (items) — страница архива должна давать ровно ту же форму карточки.
+  if (type === "movies" && items.length) {
+    const ratingRows = await env.DB.prepare(`SELECT r.movie_id,r.tg_id,r.rating FROM movie_ratings r
+      JOIN movies m ON m.id=r.movie_id WHERE m.pair_id=?`).bind(pair.id).all();
+    attachMovieRatings(items, ratingRows?.results, userId);
+  }
+  if (type === "goals" && items.length) {
+    const ids = items.map((goal) => Number(goal.id));
+    const itemRows = await env.DB.prepare(`SELECT gi.id,gi.goal_id,gi.title,gi.done,gi.done_at,gi.done_by,gi.created_at FROM goal_items gi
+      WHERE gi.goal_id IN (${ids.map(() => "?").join(",")})
+      ORDER BY gi.created_at ASC, gi.id ASC`).bind(...ids).all();
+    for (const goal of items) {
+      goal.items = (itemRows.results || []).filter((item) => Number(item.goal_id) === Number(goal.id));
+    }
+  }
   return {
-    items: results.slice(0, ARCHIVE_PAGE_SIZE),
+    items,
     hasMore: results.length > ARCHIVE_PAGE_SIZE,
     page,
     remaining: Math.max(0, Number(totalRow?.n || 0) - shown)
@@ -1990,6 +2071,11 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   if (method === "POST" && action) {
     const handler = ACTION_HANDLERS[type];
     if (!handler) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+    // Несуществующая строка — 404, а не 409 из UPDATE: иначе перечислением id
+    // (404 = «существует, но скрыто», 409 = «не существует») вычислялось бы
+    // наличие чужих личных планов и пунктов целей.
+    if (type === "tasks" && !taskRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+    if (type === "goal_items" && !goalRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
     const outcome = await handler();
     if (outcome === true) return true;
     if (!outcome.meta.changes) throw new HttpError(409, "Запись уже в этом состоянии", "NO_CHANGE");
@@ -2097,6 +2183,9 @@ async function api(request, env, url, ctx = null) {
       digest_enabled: { type: "boolean" },
       dates_digest_time: { type: "string" },
       dates_digest_enabled: { type: "boolean" },
+      weekly_digest_time: { type: "string" },
+      weekly_digest_enabled: { type: "boolean" },
+      weekly_digest_day: { type: "string", enum: ["sun", "mon"] },
       show_avatar: { type: "boolean" },
       display_name: { type: "string" },
       partner_name: { type: "string" }
@@ -2139,7 +2228,8 @@ async function api(request, env, url, ctx = null) {
     }
     for (const [timeColumn, enabledColumn, enabledKey] of [
       ["digest_time", "digest_enabled", "digest_enabled"],
-      ["dates_digest_time", "dates_digest_enabled", "dates_digest_enabled"]
+      ["dates_digest_time", "dates_digest_enabled", "dates_digest_enabled"],
+      ["weekly_digest_time", "weekly_digest_enabled", "weekly_digest_enabled"]
     ]) {
       if (body?.[timeColumn] !== undefined) {
         if (body[timeColumn] !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(clean(body[timeColumn]))) {
@@ -2153,6 +2243,12 @@ async function api(request, env, url, ctx = null) {
         updates.push(`${enabledColumn}=?`);
         values.push(body[enabledKey] ? 1 : 0);
       }
+    }
+    if (body?.weekly_digest_day !== undefined) {
+      const day = clean(body.weekly_digest_day);
+      if (day !== "sun" && day !== "mon") throw new HttpError(400, "День сводки — воскресенье или понедельник", "INVALID_SETTING");
+      updates.push("weekly_digest_day=?");
+      values.push(day);
     }
     if (!updates.length) throw new HttpError(400, "Нет настроек для сохранения", "EMPTY_SETTINGS");
     updates.push("updated_at=?");
@@ -2178,7 +2274,7 @@ async function api(request, env, url, ctx = null) {
   if (request.method === "GET" && url.pathname === "/api/archive") {
     const type = String(url.searchParams.get("type") || "");
     const page = Math.min(500, Math.max(0, Math.floor(Number(url.searchParams.get("page")) || 0)));
-    return json(await archivePage(env, pair, type, page, user.tg_id));
+    return json(await archivePage(env, pair, type, page, user));
   }
   // Подсказки IMDb для диалога «Добавить фильм»: как в поисковике —
   // пользователь печатает, воркер возвращает до 8 совпадений (фильмы/сериалы).
@@ -2219,7 +2315,9 @@ async function api(request, env, url, ctx = null) {
     return json(await state(env, user.tg_id));
   }
   // Часовой пояс пары общий: от него считаются календарь, локальный день
-  // ритуала и расписание напоминаний (users.timezone — только личная база).
+  // ритуала, напоминания и сами события. Личные пояса (users.timezone,
+  // синхронизируются с устройства) задают только момент доставки сводок —
+  // клиент рядом с каноничным временем показывает конверсию «для вас».
   if (request.method === "POST" && url.pathname === "/api/pair/timezone") {
     validateSchema(body, { timezone: { type: "string", required: true, maxLength: 64 } });
     if (!validTimeZone(clean(body.timezone))) throw new HttpError(400, "Неизвестный часовой пояс", "INVALID_TIMEZONE");
@@ -2356,6 +2454,9 @@ async function api(request, env, url, ctx = null) {
     const goalResult = await env.DB.prepare("INSERT INTO goals(pair_id,created_by,title,is_private,created_at) VALUES(?,?,?,?,?)")
       .bind(pair.id, user.tg_id, title, body.is_private === true ? 1 : 0, now()).run();
     const goalId = goalResult.meta.last_row_id;
+    // last_row_id=0/undefined (D1-квирк) дал бы пункты с goal_id=0 —
+    // вечные сироты, невидимые ни в одном списке. Падаем до компенсации.
+    if (!positiveId(goalId)) throw new HttpError(500, "Не удалось создать цель", "GOAL_ID_MISSING");
     try {
       await env.DB.batch(items.map((item) =>
         env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
@@ -2711,12 +2812,42 @@ function timeDueWithRollover(minutes, timeValue) {
   return 1440 - scheduled + minutes <= CRON_TICK_MINUTES;
 }
 
+// Календарный день, к которому относится тик для расписаний, привязанных ко
+// дню недели (недельная сводка). На rollover-тике — когда время из хвоста
+// суток наступило уже после полуночи — расписание считается по ПРЕДЫДУЩЕМУ
+// локальному дню участника: иначе «воскресенье 23:50» пропускало бы тик
+// понедельника 00:00, потому что memberCtx.today уже новый день. Обычный тик
+// и rollover срабатывают только в окне CRON_TICK_MINUTES, поэтому обычное
+// утреннее время день не меняет. Переходы месяца/года корректны: день
+// вычитается календарно от YYYY-MM-DD.
+function weeklyDigestDayKey(memberToday, minutes, timeValue) {
+  const scheduled = parseTimeMinutes(timeValue);
+  const rollover = minutes < scheduled && 1440 - scheduled + minutes <= CRON_TICK_MINUTES;
+  if (!rollover) return memberToday;
+  return new Date(Date.parse(`${memberToday}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+}
+
 function localMinutesOfDay(timeZone, stamp) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: timeZone || DEFAULT_TZ, hour: "2-digit", minute: "2-digit", hour12: false
   }).formatToParts(stamp);
   const get = (type) => Number(parts.find((part) => part.type === type)?.value || "0");
   return (get("hour") % 24) * 60 + get("minute");
+}
+
+// Личный контекст времени участника: users.timezone синхронизируется с
+// устройства каждого партнёра (x-timezone на каждом запросе, ensureUser),
+// поэтому уехавший партнёр получает сводки в своё местное утро. Содержимое
+// сводок считается в поясе ПАРЫ (события живут в нём) — личный пояс задаёт
+// только момент доставки и день ключа журнала. Ритуал/серия/напоминания —
+// в поясе пары (репорт 2026-11-03, B-8: личный пояс ломает общий день).
+function memberTimeContext(user, stamp, fallbackTimeZone) {
+  const timeZone = validTimeZone(user?.timezone) || fallbackTimeZone || DEFAULT_TZ;
+  return {
+    timeZone,
+    minutes: localMinutesOfDay(timeZone, stamp),
+    today: localDay(timeZone, stamp)
+  };
 }
 
 // ------------------------------------------------------------------
@@ -2873,6 +3004,80 @@ function datesDigestText(timeZone, tomorrow, dates) {
   }
   if (hidden) lines.push(`…и ещё ${hidden}`);
   return ["Напоминаю: завтра значимые даты:", "", ...lines].join("\n").trim();
+}
+
+// Окно предстоящей недели (пн 00:00 — вс 23:59 в поясе пары, где живут
+// события). today — YYYY-MM-DD из localDay; воскресенье → пн = завтра,
+// понедельник → неделя начинается сегодня.
+function upcomingWeekWindow(today) {
+  const weekday = new Date(`${today}T00:00:00Z`).getUTCDay(); // 0 = вс
+  const daysToMonday = (8 - weekday) % 7;
+  const start = new Date(Date.parse(`${today}T00:00:00Z`) + daysToMonday * 86400000).toISOString().slice(0, 10);
+  const end = new Date(Date.parse(`${start}T00:00:00Z`) + 6 * 86400000).toISOString().slice(0, 10);
+  return { start, end };
+}
+
+const WEEKDAY_SHORT = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+
+// Недельная сводка: все планы, значимые даты и дни рождения предстоящей
+// недели (пн–вс) одним сообщением — чтобы строить планы наперёд.
+function weeklyDigestText(weekStart, weekEnd, dates, tasks) {
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    days.push(new Date(Date.parse(`${weekStart}T00:00:00Z`) + i * 86400000).toISOString().slice(0, 10));
+  }
+  // Задачи: точный день, ежемесячные и ежегодные попадают, когда их день
+  // наступает в окне (тот же предикат, что в digestText). Без даты — не было
+  // бы дня недели, не включаем.
+  const taskOccurs = (task, day) =>
+    String(task.day) === day ||
+    monthlyOccursOnDay(task, day) ||
+    (Number(task.yearly) === 1 && String(task.day).slice(5) === String(day).slice(5));
+  const fmtDay = (day) => {
+    const weekday = WEEKDAY_SHORT[new Date(`${day}T00:00:00Z`).getUTCDay()];
+    return `${weekday} ${day.slice(8)}.${day.slice(5, 7)}`;
+  };
+  const birthday = (d) => d.kind === "birthday";
+  const dateLines = [];
+  const birthdayLines = [];
+  const taskLines = [];
+  for (const day of days) {
+    const label = fmtDay(day);
+    for (const d of dates) {
+      if (!dateOccursOnDay(d, day)) continue;
+      const line = `• ${label}${d.time ? `, ${d.time}` : ""} — ${birthday(d) ? richToHtml(d.title) : maskTitle(d)}`;
+      (birthday(d) ? birthdayLines : dateLines).push(line);
+    }
+    for (const t of tasks) {
+      if (!taskOccurs(t, day)) continue;
+      taskLines.push(`• ${label}${t.time ? `, до ${t.time}` : ""} — ${maskTitle(t)}`);
+    }
+  }
+  if (!dateLines.length && !birthdayLines.length && !taskLines.length) return "";
+  const fmtRange = (day) => `${day.slice(8)}.${day.slice(5, 7)}`;
+  const lines = [`Планы на неделю ${fmtRange(weekStart)} — ${fmtRange(weekEnd)}:`, ""];
+  let shown = 0;
+  let hidden = 0;
+  let used = lines[0].length + 1;
+  const pushParagraph = (title, items) => {
+    if (!items.length) return;
+    lines.push(title);
+    used += title.length + 1;
+    for (const item of items) {
+      if (shown < DIGEST_MAX_ITEMS && used + item.length + 1 <= DIGEST_MAX_CHARS) {
+        lines.push(item);
+        used += item.length + 1;
+        shown++;
+      } else hidden++;
+    }
+    lines.push("");
+    used += 1;
+  };
+  pushParagraph("Дни рождения", birthdayLines);
+  pushParagraph("Значимые даты", dateLines);
+  pushParagraph("Планы", taskLines);
+  if (hidden) lines.push(`…и ещё ${hidden} — полный список в приложении`);
+  return lines.join("\n").trim();
 }
 
 // ------------------------------------------------------------------
@@ -3323,22 +3528,46 @@ async function processPairNotifications(env, pair, stamp, budget) {
     const visibleDates = dates.filter(d => Number(d.is_private) !== 1 || Number(d.created_by) === Number(member));
     // Личные планы — только их автору; заголовок скрыт спойлером в maskTitle.
     const visibleTasks = tasks.filter(t => Number(t.is_private) !== 1 || Number(t.created_by) === Number(member));
-    // Утренняя сводка в персональное время (по умолчанию 09:00).
-    if (Number(user?.digest_enabled ?? 1) === 1 && timeDueWithRollover(minutes, user?.digest_time)) {
+    // Утренняя сводка в ЛИЧНОМ поясе участника (по умолчанию 09:00 по его
+    // часам); содержимое — планы/даты в поясе пары.
+    const memberCtx = memberTimeContext(user, stamp, timeZone);
+    if (Number(user?.digest_enabled ?? 1) === 1 && timeDueWithRollover(memberCtx.minutes, user?.digest_time)) {
       const text = digestText(today, tomorrow, visibleDates, visibleTasks);
       if (text) {
         if (budget.left < 2) break;
         budget.left -= 2;
-        await deliverNotification(env, member, today, "digest", text);
+        // kind с парой: при переходе между парами в течение дня журнал
+        // (tg_id, day, kind) не должен глушить дайджест новой пары; день —
+        // локальный для участника.
+        await deliverNotification(env, member, memberCtx.today, `digest:${pair.id}`, text);
       }
     }
     // Сводка о датах за сутки: завтрашние даты в персональное время.
-    if (Number(user?.dates_digest_enabled ?? 1) === 1 && timeDueWithRollover(minutes, user?.dates_digest_time)) {
+    if (Number(user?.dates_digest_enabled ?? 1) === 1 && timeDueWithRollover(memberCtx.minutes, user?.dates_digest_time)) {
       const text = datesDigestText(timeZone, tomorrow, visibleDates);
       if (text) {
         if (budget.left < 2) break;
         budget.left -= 2;
-        await deliverNotification(env, member, today, "dates_digest", text);
+        await deliverNotification(env, member, memberCtx.today, `dates_digest:${pair.id}`, text);
+      }
+    }
+    // Недельная сводка: в выбранный день (вс или пн — по календарю участника)
+    // и время, содержимое — предстоящая неделя в поясе пары. Выключена по
+    // умолчанию; окно отправки — те же 15 минут тика, дедуп в журнале.
+    if (Number(user?.weekly_digest_enabled ?? 0) === 1) {
+      const wantWeekday = user?.weekly_digest_day === "mon" ? 1 : 0; // 0 = вс
+      // На rollover-тике «день недели» — предыдущий локальный день участника:
+      // сводка за воскресенье 23:50 уходит в 00:00 понедельника.
+      const scheduleDay = weeklyDigestDayKey(memberCtx.today, memberCtx.minutes, user?.weekly_digest_time);
+      const memberWeekday = new Date(`${scheduleDay}T00:00:00Z`).getUTCDay();
+      if (memberWeekday === wantWeekday && timeDueWithRollover(memberCtx.minutes, user?.weekly_digest_time)) {
+        const window = upcomingWeekWindow(today);
+        const text = weeklyDigestText(window.start, window.end, visibleDates, visibleTasks);
+        if (text) {
+          if (budget.left < 2) break;
+          budget.left -= 2;
+          await deliverNotification(env, member, memberCtx.today, `weekly_digest:${pair.id}`, text);
+        }
       }
     }
   }
@@ -3449,7 +3678,7 @@ async function ensureSchema(env) {
     // Коды удалённых пространств (последний участник вышел): вход по такому
     // коду отвечает «пространство закрыто», а не «код не найден».
     `CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY,closed_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,weekly_digest_enabled INTEGER NOT NULL DEFAULT 0,weekly_digest_time TEXT,weekly_digest_day TEXT NOT NULL DEFAULT 'sun',accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
@@ -3501,6 +3730,9 @@ async function ensureSchema(env) {
     ["users", "digest_enabled", "INTEGER NOT NULL DEFAULT 1"],
     ["users", "dates_digest_time", "TEXT"],
     ["users", "dates_digest_enabled", "INTEGER NOT NULL DEFAULT 1"],
+    ["users", "weekly_digest_enabled", "INTEGER NOT NULL DEFAULT 0"],
+    ["users", "weekly_digest_time", "TEXT"],
+    ["users", "weekly_digest_day", "TEXT NOT NULL DEFAULT 'sun'"],
     ["users", "accent_color", "TEXT"],
     ["users", "photo_url", "TEXT"],
     ["users", "show_avatar", "INTEGER NOT NULL DEFAULT 1"],

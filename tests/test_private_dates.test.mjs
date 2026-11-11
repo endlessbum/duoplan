@@ -197,6 +197,8 @@ const loadState = new Function(
     extractBraced("function withPartnerOverride"),
     extractBraced("async function membership"),
     extractBraced("function attachMovieRatings"),
+    extractLine("const AUTHOR_NAME_TYPES"),
+    extractBraced("function applyAuthorNameOverrides"),
     extractBraced("async function state"),
     extractBraced("async function archivePage")
   ].join("\n") +
@@ -628,7 +630,12 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractBraced("function parseTimeMinutes"),
       extractLine("const CRON_TICK_MINUTES"),
       extractBraced("function timeDueWithRollover"),
+      extractBraced("function weeklyDigestDayKey"),
       extractBraced("function localMinutesOfDay"),
+      extractBraced("function memberTimeContext"),
+      "const WEEKDAY_SHORT = " + source.match(/const WEEKDAY_SHORT = (\[.*\]);/)?.[1] + ";",
+      extractBraced("function upcomingWeekWindow("),
+      extractBraced("function weeklyDigestText("),
       extractBraced("function digestText"),
       extractBraced("function datesDigestText"),
       extractBraced("async function deliverNotification"),
@@ -827,4 +834,71 @@ test("публичный план с разметкой уходит в Telegram
     equal(r.text.includes("<tg-spoiler>секретик</tg-spoiler>"), true);
     equal(r.text.includes("**"), false);
   }
+});
+
+test("сводка уехавшего партнёра придёт по его местному утру", async () => {
+  // 00:00 UTC 02.03 = 03:00 Москвы (окно 09:00 не наступило) и
+  // 10:00 Владивостока (окно уже прошло) — сводка только уехавшему.
+  const stamp = Date.UTC(2020, 2, 2, 0, 0, 0);
+  const h = notificationHarness({
+    dates: N_DATES,
+    users: [
+      { tg_id: 111, timezone: "Asia/Vladivostok", digest_time: "09:00", digest_enabled: 1, dates_digest_time: "09:00", dates_digest_enabled: 1 },
+      { tg_id: 222, timezone: "Europe/Moscow", digest_time: "09:00", digest_enabled: 1, dates_digest_time: "09:00", dates_digest_enabled: 1 }
+    ],
+    stamp
+  });
+  await h.run();
+  equal(h.sent.length, 2, `ожидались 2 сводки (дайджест+даты) уехавшему, пришло: ${h.sent.length}`);
+  deepStrictEqual(h.sent.map((s) => s.chatId), [111, 111], `сводки ушли не только уехавшему: ${h.sent.map((s) => s.chatId)}`);
+});
+
+// ------------------------------------------------------------------
+// Недельная сводка: выбранный день недели (вс/пн) и время участника,
+// содержимое — предстоящая неделя в поясе пары.
+
+const WEEKLY_DATES = [{ id: 1, title: "Дата недели", day: "2020-07-15", recurs: 1, is_private: 0, created_by: 111, kind: "date" }];
+const WEEKLY_TASKS = [{ id: 1, title: "План недели", day: "2026-07-14", time: "18:00", status: "open", is_private: 0, created_by: 111, monthly: 0, yearly: 0 }];
+const WEEKLY_USER = (day) => ({
+  tg_id: 111, timezone: "Europe/Moscow", digest_enabled: 0, dates_digest_enabled: 0,
+  weekly_digest_enabled: 1, weekly_digest_day: day, weekly_digest_time: "09:00"
+});
+// Воскресенье 09:00 Москвы 12.07.2026.
+const WEEKLY_STAMP = Date.UTC(2026, 6, 12, 6, 0);
+
+test("недельная сводка: в выбранное воскресенье приходит окно пн–вс", async () => {
+  const h = notificationHarness({ dates: WEEKLY_DATES, tasks: WEEKLY_TASKS, users: [WEEKLY_USER("sun")], stamp: WEEKLY_STAMP });
+  await h.run();
+  const weekly = h.sent.filter((s) => s.text.includes("Планы на неделю"));
+  equal(weekly.length, 1, "недельная сводка не пришла в воскресенье");
+  equal(weekly[0].text.includes("Планы на неделю 13.07 — 19.07"), true, "окно недели неверное");
+  equal(weekly[0].text.includes("Дата недели"), true, "дата недели не попала в сводку");
+  equal(weekly[0].text.includes("План недели"), true, "план недели не попал в сводку");
+  deepStrictEqual(h.sent.map((s) => s.chatId), [111], "ушло не тому участнику");
+});
+
+test("недельная сводка: день «понедельник» в воскресенье не срабатывает", async () => {
+  const h = notificationHarness({ dates: WEEKLY_DATES, tasks: WEEKLY_TASKS, users: [WEEKLY_USER("mon")], stamp: WEEKLY_STAMP });
+  await h.run();
+  equal(h.sent.filter((s) => s.text.includes("Планы на неделю")).length, 0, "сводка пришла не в выбранный день");
+});
+
+test("недельная сводка: выключенная не отправляется", async () => {
+  const h = notificationHarness({
+    dates: WEEKLY_DATES, tasks: WEEKLY_TASKS,
+    users: [{ tg_id: 111, timezone: "Europe/Moscow", digest_enabled: 0, dates_digest_enabled: 0, weekly_digest_enabled: 0, weekly_digest_day: "sun", weekly_digest_time: "09:00" }],
+    stamp: WEEKLY_STAMP
+  });
+  await h.run();
+  equal(h.sent.filter((s) => s.text.includes("Планы на неделю")).length, 0, "выключенная сводка отправилась");
+});
+
+test("недельная сводка: в понедельник — окно текущей недели (пн сегодня)", async () => {
+  // Понедельник 13.07.2026, 09:00 Москвы: окно 13.07–19.07 начинается сегодня.
+  const stamp = Date.UTC(2026, 6, 13, 6, 0);
+  const h = notificationHarness({ dates: WEEKLY_DATES, tasks: WEEKLY_TASKS, users: [WEEKLY_USER("mon")], stamp });
+  await h.run();
+  const weekly = h.sent.filter((s) => s.text.includes("Планы на неделю"));
+  equal(weekly.length, 1, "сводка в понедельник не пришла");
+  equal(weekly[0].text.includes("Планы на неделю 13.07 — 19.07"), true, "окно не начинается с текущего понедельника");
 });

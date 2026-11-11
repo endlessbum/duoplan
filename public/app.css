@@ -606,7 +606,15 @@ html.dialog-locked {
 }
 
 .hero-card {
-  background: linear-gradient(145deg, var(--surface) 0%, var(--surface-2) 100%);
+  /* Фон общий с карточками; акцентная окантовка — как у карточек рандома
+     (.place-hero/.movie-hero), цвет следует за акцентом из настроек. */
+  border-color: var(--berry-soft);
+}
+
+/* Парная карточка истории тапабельна: открывает окно с началом истории
+   и рекордом серии. */
+.hero-card[role="button"] {
+  cursor: pointer;
 }
 
 .eyebrow {
@@ -647,6 +655,29 @@ html.dialog-locked {
   white-space: nowrap;
   font-size: 11.5px;
   font-weight: 500;
+  position: relative;
+}
+
+/* Летящий «+10» над пилюлей XP: появляется после смены карточки ритуала,
+   живёт секунду и исчезает — числа обновляются только после него. */
+.xp-gain {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  color: var(--berry);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: xp-gain 1s ease both;
+}
+
+@keyframes xp-gain {
+  0% { opacity: 0; transform: translate(-50%, 8px); }
+  20% { opacity: 1; transform: translate(-50%, 0); }
+  70% { opacity: 1; transform: translate(-50%, -6px); }
+  100% { opacity: 0; transform: translate(-50%, -16px); }
 }
 
 .stat-pill {
@@ -921,6 +952,12 @@ html.dialog-locked {
   box-shadow: 0 0 0 1px var(--surface);
 }
 
+/* На выбранной ячейке фон ягодный: кольцо цвета поверхности выглядело бы
+   чужеродным ореолом — перекрашиваем в фон ячейки. */
+.cal-day.is-selected .cal-dot-pair .cal-dot + .cal-dot {
+  box-shadow: 0 0 0 1px var(--berry-soft);
+}
+
 /* Звезда — вручённое желание. Жёлтая, крупнее точки. */
 .cal-star {
   font-size: 10px;
@@ -1119,6 +1156,7 @@ select.settings-select {
 .item-when-line {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
   max-width: 100%;

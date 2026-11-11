@@ -39,6 +39,8 @@ function loadDeck() {
       "let appState = null;",
       "let placeDeck = [];",
       "let placePickId = null;",
+      // placeList() читает mergedArchive — стаб возвращает недавние как есть.
+      "const mergedArchive = (type, recent) => recent || [];",
       extractBraced(source, "function placeList()"),
       extractBraced(source, "function unvisitedPlaces()"),
       extractBraced(source, "function visitedPlaces()"),

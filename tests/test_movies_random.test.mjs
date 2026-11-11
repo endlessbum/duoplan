@@ -35,6 +35,8 @@ function loadDeck() {
       "let appState = null;",
       "let movieDeck = [];",
       "let moviePickId = null;",
+      // movieList() читает mergedArchive — стаб возвращает недавние как есть.
+      "const mergedArchive = (type, recent) => recent || [];",
       extractBraced(source, "function movieList()"),
       extractBraced(source, "function openMovies()"),
       extractBraced(source, "function watchedMovies()"),

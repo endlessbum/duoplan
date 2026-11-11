@@ -36,6 +36,9 @@ function extractBraced(text, declaration) {
 const load = new Function(
   [
     "let appState = { goals: [] };",
+    // goalList() читает mergedArchive — стаб возвращает недавние как есть.
+    "const mergedArchive = (type, recent) => recent || [];",
+    "const archiveMoreHtml = () => \"\";",
     "let goalsView = 'open';",
     "const REOPEN_ICON = '';",
     "const DONE_ICON = '';",
@@ -149,7 +152,15 @@ test("app: диалог цели и действия", () => {
   ok(appSource.includes('is_private: fd.get("is_private") === "on"'), "личная цель не передаётся");
   ok(/action === "goal-item-done" \|\| action === "goal-item-reopen"/.test(appSource), "нет обработчика отметки пункта");
   ok(appSource.includes("/api/goal_items/"), "нет запроса отметки пункта");
-  ok(appSource.includes('goals: appState?.goals || []'), "goals нет в findItem");
+  ok(appSource.includes('goals: mergedArchive("goals", appState?.goals || [])'), "goals нет в findItem");
+  // Регрессия 2026-11-11: в Promise.all state() порядок запросов разъехался
+  // с деструктуризацией — goals получал строки копилок, savings — пункты
+  // целей (заметено на сиде архива). Порядок: savings → goals → goalItems.
+  ok(/movieRatings, savings, goals, goalItems, daily, partnerUser\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
+  const stateStart = workerSource.indexOf("movieRatings, savings, goals, goalItems");
+  const savingsQ = workerSource.indexOf("FROM savings WHERE pair_id=? AND (kind='shared'", stateStart);
+  const goalsQ = workerSource.indexOf("FROM goals WHERE pair_id=? AND (is_private=0", stateStart);
+  ok(savingsQ > -1 && goalsQ > savingsQ, "в Promise.all state() savings/goals поменялись местами");
   ok(appSource.includes('goals: "цель"'), "goals нет в typeNames удаления");
   ok(appSource.includes('"add-goal"'), "нет действия создания цели");
 });

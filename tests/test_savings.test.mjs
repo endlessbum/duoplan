@@ -32,6 +32,9 @@ function extractBraced(text, declaration) {
 const load = new Function(
   [
     "let appState = { savings: [] };",
+    // savingsList() читает mergedArchive — стаб возвращает недавние как есть.
+    "const mergedArchive = (type, recent) => recent || [];",
+    "const archiveMoreHtml = () => \"\";",
     "const REOPEN_ICON = '';",
     "const DONE_ICON = '';",
     "const EDIT_ICON = '';",

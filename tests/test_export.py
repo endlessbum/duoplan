@@ -101,10 +101,11 @@ def test_export_substitutes_defaults_for_plain_schema(tmp_path):
     assert (
         "INSERT OR REPLACE INTO users(tg_id, username, display_name, role, gender, pair_id, "
         "points, streak, last_activity, best_streak, timezone, digest_time, digest_enabled, "
-        "dates_digest_time, dates_digest_enabled, accent_color, photo_url, show_avatar, "
+        "dates_digest_time, dates_digest_enabled, weekly_digest_enabled, weekly_digest_time, "
+        "weekly_digest_day, accent_color, photo_url, show_avatar, "
         "partner_custom_name, custom_name, created_at, updated_at) "
         "VALUES(10, NULL, 'Owner', 'a', NULL, NULL, 0, 0, NULL, 0, 'Europe/Moscow', NULL, 1, "
-        "NULL, 1, NULL, NULL, 1, NULL, NULL, 1, 1);"
+        "NULL, 1, 0, NULL, 'sun', NULL, NULL, 1, NULL, NULL, 1, 1);"
     ) in sql
     # Nullable колонки без источника остаются NULL, а NOT NULL с DEFAULT —
     # получают дефолт (is_private не должен молча раскрыть личную запись).

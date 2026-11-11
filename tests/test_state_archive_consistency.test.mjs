@@ -72,6 +72,8 @@ const load = new Function(
     extractBraced("function withPartnerOverride"),
     extractBraced("async function membership"),
     extractBraced("function attachMovieRatings"),
+    extractLine("const AUTHOR_NAME_TYPES"),
+    extractBraced("function applyAuthorNameOverrides"),
     extractBraced("async function state"),
     extractBraced("async function archivePage")
   ].join("\n") +

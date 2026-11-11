@@ -34,6 +34,8 @@ const calendar = new Function(
   "STAR_ICON",
   [
     extractBraced("function pairTimeZone"),
+    extractBraced("function viewerTimeZone"),
+    extractBraced("function validTimeZoneLite"),
     extractBraced("function calendarPad"),
     extractBraced("function calendarDayKey"),
     extractBraced("function calendarDaysInMonth"),
@@ -292,6 +294,31 @@ test("звезда желаний первая, пустой день точек
   deepStrictEqual(calendarCellDots(null), []);
   deepStrictEqual(calendarCellDots({ tasks: [], dates: [], birthdays: [], wishes: [] }), []);
   deepStrictEqual(calendarCellDots({ wishes: [] }), []);
+});
+
+test("завершённый план остаётся событием своего дня", () => {
+  const rows = calendarEventRows({
+    tasks: [
+      { title: "Было", time: null, is_private: 0, status: "done" },
+      { title: "Будет", time: null, is_private: 0, status: "open" }
+    ],
+    dates: [], birthdays: [], wishes: []
+  });
+  equal(rows.find((row) => row.title === "Было").done, true, "завершённый план не помечен");
+  equal(rows.find((row) => row.title === "Будет").done, false, "предстоящий план помечен выполненным");
+  // Точка у завершённого та же зелёная: статус в маркер не вмешивается.
+  equal(calendarCellDots({ tasks: [{ is_private: 0, status: "done" }] })[0], `<i class="cal-dot is-task"></i>`);
+});
+
+test("календарь подмешивает завершённые планы и догружает их архив", () => {
+  const calFn = source.slice(source.indexOf("function renderPairCalendar"), source.indexOf("function calendarArchivePending"));
+  equal(calFn.includes('mergedArchive("done_tasks"'), true, "нет подмеса done_tasks в календарь");
+  equal(calFn.includes("openTasks.concat(doneTasks)"), true, "завершённые не склеены с предстоящими");
+  equal(source.includes('for (const type of ["tasks", "dates", "done_tasks", "done_wishes"])'), true, "ensureCalendarArchive не догружает done_tasks");
+  // Порог ожидания: done_tasks сравнивается с completedTasks и лимитом 10,
+  // а не с completedWishes/200 — иначе архив завершённых никогда не догрузится.
+  equal(source.includes('type === "done_tasks" ? (appState?.completedTasks || [])'), true, "calendarArchivePending не знает done_tasks");
+  equal(source.includes('type === "done_wishes" || type === "done_tasks" ? STATE_RECENT_LIMIT : STATE_ACTIVE_LIMIT'), true, "порог догрузки done_tasks неверный");
 });
 
 test("маркеры: звезда жёлтая, личное — серое, и не от акцента", () => {

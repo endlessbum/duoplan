@@ -46,7 +46,7 @@ const load = new Function(
 ${extractBraced("function cachedFormatter")}
 ${extractBraced("function timeZoneOffsetMs")}\n${extractBraced("function makeDateInTimeZone")}\n${extractBraced("function monthlyOccursOnDay"),
     extractBraced("function nextMonthlyOccurrenceMs"),
-    extractBraced("function nextDateOccurrence")}\n${extractBraced("function isPastDate")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("function sortByTaskDeadline")}\n${extractBraced("class HttpError")}\n${extractBraced("const ARCHIVE_COUNT_SQL")}\n${extractBraced("async function archivePage")}\n` +
+    extractBraced("function nextDateOccurrence")}\n${extractBraced("function isPastDate")}\n${extractBraced("function sortDateRows")}\n${extractBraced("function taskTargetMs")}\n${extractBraced("function sortByTaskDeadline")}\n${extractBraced("class HttpError")}\n${extractBraced("function attachMovieRatings")}\n${extractLine("const clean = value")}\n${extractLine("const AUTHOR_NAME_TYPES")}\n${extractBraced("function applyAuthorNameOverrides")}\n${extractBraced("const ARCHIVE_COUNT_SQL")}\n${extractBraced("async function archivePage")}\n` +
   "return { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE };");
 const { archivePage, taskTargetMs, sortDateRows, sortByTaskDeadline, STATE_RECENT_LIMIT, STATE_ACTIVE_LIMIT, ARCHIVE_PAGE_SIZE } = load();
 
@@ -219,4 +219,130 @@ test("archivePage отдаёт remaining — счётчик кнопки «По�
   const page = await archivePage({ DB: makeActiveDb(rows) }, { id: 1, timezone: "UTC" }, "tasks", 0);
   equal(page.remaining, 5); // 225 - 220 (200 база + 20 страница)
   equal(page.hasMore, true);
+});
+
+// ------------------------------------------------------------------
+// Новые типы архива: кино, цитаты, места, трипы, цели, копилки.
+// state() отдаёт первые 200 — страницы архива продолжают список от 200-й.
+
+test("шесть новых типов грузятся страницами после 200 (как активные)", async () => {
+  for (const type of ["movies", "quotes", "places", "trips", "savings", "goals"]) {
+    const { db } = makeMockDb(STATE_ACTIVE_LIMIT + 5);
+    const page = await archivePage({ DB: db }, { id: 1, timezone: "UTC" }, type, 0);
+    deepStrictEqual(page.items.map((r) => r.id), [201, 202, 203, 204, 205], `${type}: неверный офсет`);
+    equal(page.hasMore, false, `${type}: лишняя страница`);
+    equal(page.remaining, 0, `${type}: неверный remaining`);
+  }
+});
+
+test("цели из архива приходят с приклеенными пунктами", async () => {
+  const goalRows = Array.from({ length: 3 }, (_, i) => ({
+    id: 201 + i, title: `Цель ${i + 1}`, is_private: 0, created_by: 1, created_at: 1700000000 + i
+  }));
+  const itemRows = [
+    { id: 1, goal_id: 201, title: "Шаг 1", done: 0, created_at: 1 },
+    { id: 2, goal_id: 201, title: "Шаг 2", done: 1, created_at: 2 },
+    { id: 3, goal_id: 203, title: "Шаг A", done: 0, created_at: 3 }
+  ];
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...params) {
+          const placeholders = (sql.match(/\?/g) || []).length;
+          if (placeholders !== params.length) throw new Error(`bind ${params.length} != ${placeholders}`);
+          return {
+            async all() {
+              if (sql.includes("FROM goals")) return { results: goalRows };
+              if (sql.includes("FROM goal_items")) return { results: itemRows };
+              return { results: [] };
+            },
+            async first() { return { n: 203 }; }
+          };
+        }
+      };
+    }
+  };
+  const page = await archivePage({ DB: db }, { id: 1, timezone: "UTC" }, "goals", 0);
+  deepStrictEqual(page.items.map((g) => g.id), [201, 202, 203]);
+  deepStrictEqual(page.items[0].items.map((i) => i.title), ["Шаг 1", "Шаг 2"], "пункты цели 201 не приклеились");
+  deepStrictEqual(page.items[1].items, [], "цель 202 получила чужие пункты");
+  deepStrictEqual(page.items[2].items.map((i) => i.title), ["Шаг A"], "пункты цели 203 не приклеились");
+});
+
+test("фильмы из архива приходят с полями RAofP", async () => {
+  const { db } = makeMockDb(STATE_ACTIVE_LIMIT + 2);
+  const page = await archivePage({ DB: db }, { id: 1, timezone: "UTC" }, "movies", 0);
+  // В моке голосов нет: поля приклеены пустыми — форма карточки как у state().
+  ok("my_rating" in page.items[0], "нет my_rating");
+  ok("pair_rating" in page.items[0], "нет pair_rating");
+  equal(page.items[0].my_rating, null);
+  equal(page.items[0].pair_rating, null);
+});
+
+// ------------------------------------------------------------------
+// BUG-05: догрузка архива обязана сохранять личные имена авторов — те же
+// подстановки, что state() делает для первых записей. Без helper'а
+// «Показать ещё» откатывал display_name к сырому имени из Telegram.
+
+const AUTHOR_FIELD = { memories: "author_id", quotes: "author_id", wishes: "owner_id", done_wishes: "owner_id" };
+const rowsFor = (type) => [
+  { id: 1, [AUTHOR_FIELD[type]]: 1, display_name: "АняТГ" },
+  { id: 2, [AUTHOR_FIELD[type]]: 2, display_name: "БоряТГ" },
+  // Автор вне пары: личные имена не применяются, сырой display_name остаётся.
+  { id: 3, [AUTHOR_FIELD[type]]: 99, display_name: "ЧужойТГ" }
+];
+const dbReturning = (rows) => ({
+  DB: {
+    prepare() {
+      return {
+        bind() {
+          return {
+            async all() { return { results: rows }; },
+            async first() { return { n: rows.length }; }
+          };
+        }
+      };
+    }
+  }
+});
+
+test("архив применяет личные имена авторов как state(): оба участника, все типы", async () => {
+  for (const type of ["memories", "quotes", "wishes", "done_wishes"]) {
+    const pair = { id: 1, role: "a", user_a: 1, user_b: 2 };
+    // Зритель — user_a: свой custom_name на свои записи, partner_custom_name
+    // на записи партнёра (user_b).
+    const userA = { tg_id: 1, partner_custom_name: "БоряЛичное", custom_name: "АняЛичная" };
+    const pageA = await archivePage(dbReturning(rowsFor(type)), pair, type, 0, userA);
+    equal(pageA.items[0].display_name, "АняЛичная", `${type}: своё имя не подставлено`);
+    equal(pageA.items[1].display_name, "БоряЛичное", `${type}: имя партнёра не подставлено`);
+    equal(pageA.items[2].display_name, "ЧужойТГ", `${type}: имя постороннего затёрто`);
+
+    // Зритель — user_b: зеркально.
+    const pairB = { id: 1, role: "b", user_a: 1, user_b: 2 };
+    const userB = { tg_id: 2, partner_custom_name: "АняЛичноеB", custom_name: "БоряЛичноеB" };
+    const pageB = await archivePage(dbReturning(rowsFor(type)), pairB, type, 0, userB);
+    equal(pageB.items[0].display_name, "АняЛичноеB", `${type}: имя партнёра (user_b-view) не подставлено`);
+    equal(pageB.items[1].display_name, "БоряЛичноеB", `${type}: своё имя (user_b-view) не подставлено`);
+    equal(pageB.items[2].display_name, "ЧужойТГ", `${type}: чужое имя затёрто (user_b-view)`);
+  }
+});
+
+test("архив без личных имён оставляет сырой display_name", async () => {
+  for (const type of ["memories", "quotes", "wishes", "done_wishes"]) {
+    const pair = { id: 1, role: "a", user_a: 1, user_b: 2 };
+    const page = await archivePage(dbReturning(rowsFor(type)), pair, type, 0, { tg_id: 1 });
+    deepStrictEqual(page.items.map((r) => r.display_name), ["АняТГ", "БоряТГ", "ЧужойТГ"], type);
+  }
+});
+
+test("архив со старым вызовом (голый tg_id) не падает и не подменяет имена", async () => {
+  const page = await archivePage(dbReturning(rowsFor("memories")), { id: 1 }, "memories", 0, 1);
+  deepStrictEqual(page.items.map((r) => r.display_name), ["АняТГ", "БоряТГ", "ЧужойТГ"]);
+});
+
+test("приватность savings/goals в архиве фильтруется в SQL", () => {
+  ok(/savings: \{\s*\n\s*active: true,\s*\n\s*userScoped: true/.test(source), "savings без userScoped");
+  ok(/goals: \{\s*\n\s*active: true,\s*\n\s*userScoped: true/.test(source), "goals без userScoped");
+  ok(source.includes("SELECT COUNT(*) AS n FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?)"), "COUNT savings без фильтра видимости");
+  ok(source.includes("SELECT COUNT(*) AS n FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?)"), "COUNT goals без фильтра видимости");
 });
