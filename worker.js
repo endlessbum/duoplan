@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.13.8";
+const APP_VERSION = "2026.11.13.22";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.13.8";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.13.8";
+const DB_SCHEMA_VERSION = "2026.11.13.22";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -2269,7 +2269,7 @@ async function api(request, env, url, ctx = null) {
       }
       const [periodsRes, logsRes, medsRes, medLogsRes, measRes] = await Promise.all([
         env.DB.prepare("SELECT start_date,end_date,end_unknown FROM cycle_periods WHERE tg_id=? AND start_date<=? AND (end_date IS NULL OR end_date>=?) ORDER BY start_date ASC, id ASC").bind(user.tg_id, to, from).all(),
-        env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? AND date>=? AND date<=? ORDER BY date ASC, id ASC").bind(user.tg_id, from, to).all(),
+        env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? AND date>=? AND date<=? ORDER BY date ASC, id ASC").bind(user.tg_id, from, to).all(),
         env.DB.prepare("SELECT id,name,category,dosage,form,schedule,start_date,end_date,status,note FROM cycle_meds WHERE tg_id=? ORDER BY start_date ASC, id ASC").bind(user.tg_id).all(),
         env.DB.prepare("SELECT med_id,date,time,status,dose_taken,note FROM cycle_med_logs WHERE tg_id=? AND date>=? AND date<=? ORDER BY date ASC, id ASC").bind(user.tg_id, from, to).all(),
         env.DB.prepare("SELECT id,date,time,kind,value,unit,result,note FROM cycle_measurements WHERE tg_id=? AND date>=? AND date<=? ORDER BY date ASC, id ASC").bind(user.tg_id, from, to).all()
@@ -2369,6 +2369,15 @@ async function api(request, env, url, ctx = null) {
       const note = body.note ? String(body.note).slice(0, 2000) : null;
       const sex = body.sex ? String(body.sex) : null;
       if (sex && !CYCLE_SEX.includes(sex)) throw new HttpError(400, "Неизвестное значение", "INVALID_SEX");
+      // Несколько актов за день: тип защиты один на запись, количество —
+      // отдельным счётчиком. sex_count без активного sex не храним.
+      let sexCount = 0;
+      if (sex === "protected" || sex === "unprotected") {
+        sexCount = body.sex_count === undefined || body.sex_count === null ? 1 : Number(body.sex_count);
+        if (!Number.isInteger(sexCount) || sexCount < 1 || sexCount > 20) {
+          throw new HttpError(400, "Количество отметок — от 1 до 20", "INVALID_SEX_COUNT");
+        }
+      }
       // Добивка дневника: протекание, боль 0–10 с локализацией, влияние на жизнь.
       const leakage = body.leakage ? String(body.leakage) : null;
       if (leakage && !CYCLE_LEAKAGE.includes(leakage)) throw new HttpError(400, "Неизвестное значение", "INVALID_LEAKAGE");
@@ -2426,9 +2435,9 @@ async function api(request, env, url, ctx = null) {
           throw new HttpError(400, "Проверьте вес", "INVALID_WEIGHT");
         }
       }
-      await env.DB.prepare(`INSERT INTO cycle_logs(tg_id,date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(tg_id,date) DO UPDATE SET flow=excluded.flow, clots=excluded.clots, energy=excluded.energy, mood=excluded.mood, symptoms=excluded.symptoms, symptoms_clear=excluded.symptoms_clear, note=excluded.note, sex=excluded.sex, leakage=excluded.leakage, pain_score=excluded.pain_score, pain_locations=excluded.pain_locations, life_impact=excluded.life_impact, mucus=excluded.mucus, sleep_hours=excluded.sleep_hours, sleep_quality=excluded.sleep_quality, stress=excluded.stress, sick=excluded.sick, travel=excluded.travel, weight_kg=excluded.weight_kg, updated_at=excluded.updated_at`)
-        .bind(user.tg_id, date, flow, clots, energy, mood, JSON.stringify(symptoms), symptomsClear, note, sex, leakage, painScore, JSON.stringify(painLocations), lifeImpact, mucus ? JSON.stringify(mucus) : null, sleepHours, sleepQuality, stress, sick, travel, weightKg, stamp, stamp).run();
+      await env.DB.prepare(`INSERT INTO cycle_logs(tg_id,date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(tg_id,date) DO UPDATE SET flow=excluded.flow, clots=excluded.clots, energy=excluded.energy, mood=excluded.mood, symptoms=excluded.symptoms, symptoms_clear=excluded.symptoms_clear, note=excluded.note, sex=excluded.sex, sex_count=excluded.sex_count, leakage=excluded.leakage, pain_score=excluded.pain_score, pain_locations=excluded.pain_locations, life_impact=excluded.life_impact, mucus=excluded.mucus, sleep_hours=excluded.sleep_hours, sleep_quality=excluded.sleep_quality, stress=excluded.stress, sick=excluded.sick, travel=excluded.travel, weight_kg=excluded.weight_kg, updated_at=excluded.updated_at`)
+        .bind(user.tg_id, date, flow, clots, energy, mood, JSON.stringify(symptoms), symptomsClear, note, sex, sexCount, leakage, painScore, JSON.stringify(painLocations), lifeImpact, mucus ? JSON.stringify(mucus) : null, sleepHours, sleepQuality, stress, sick, travel, weightKg, stamp, stamp).run();
       return json(await cycleState(env, user.tg_id, timezone));
     }
     // Измерения цикла (этап 6/P2): базальная температура и тесты на ЛГ.
@@ -2538,7 +2547,7 @@ async function api(request, env, url, ctx = null) {
       await rateLimit(env, `cycle-export:${user.tg_id}`, 5, 3600);
       const [periodsRes, logsRes, profileRow, medsRes, medLogsRes, measRes] = await Promise.all([
         env.DB.prepare("SELECT start_date,end_date,end_unknown FROM cycle_periods WHERE tg_id=? ORDER BY start_date ASC, id ASC").bind(user.tg_id).all(),
-        env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all(),
+        env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all(),
         env.DB.prepare("SELECT avg_cycle_length,avg_period_length,cycle_length_known,share_enabled,share_level FROM cycle_profiles WHERE tg_id=?").bind(user.tg_id).first(),
         env.DB.prepare("SELECT id,name,category,dosage,form,schedule,start_date,end_date,status,note FROM cycle_meds WHERE tg_id=? ORDER BY start_date ASC, id ASC").bind(user.tg_id).all(),
         env.DB.prepare("SELECT med_id,date,time,status,dose_taken,note FROM cycle_med_logs WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all(),
@@ -3750,23 +3759,23 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0${scope === "mine" ? " AND w.owner_id=?" : ""} ORDER BY w.created_at ASC, w.id ASC`,
   // Фло: периоды и дневник одной лентой (kind различает строки). Данные
   // принадлежат tg_id владельца — пару в запросе нет, бинды [userId, userId].
-  cycle: () => `SELECT 'period' AS kind, p.start_date AS day, p.end_date, NULL AS flow, NULL AS clots, NULL AS energy, NULL AS mood, NULL AS symptoms, NULL AS symptoms_clear, NULL AS note, NULL AS sex, NULL AS leakage, NULL AS pain_score, NULL AS pain_locations, NULL AS life_impact, NULL AS mucus, NULL AS sleep_hours, NULL AS sleep_quality, NULL AS stress, NULL AS sick, NULL AS travel, NULL AS weight_kg,
+  cycle: () => `SELECT 'period' AS kind, p.start_date AS day, p.end_date, NULL AS flow, NULL AS clots, NULL AS energy, NULL AS mood, NULL AS symptoms, NULL AS symptoms_clear, NULL AS note, NULL AS sex, NULL AS sex_count, NULL AS leakage, NULL AS pain_score, NULL AS pain_locations, NULL AS life_impact, NULL AS mucus, NULL AS sleep_hours, NULL AS sleep_quality, NULL AS stress, NULL AS sick, NULL AS travel, NULL AS weight_kg,
       CASE WHEN p.end_unknown=1 THEN 'end_unknown' ELSE NULL END AS extra, p.created_at
     FROM cycle_periods p WHERE p.tg_id=?
     UNION ALL
-    SELECT 'log', l.date, NULL, l.flow, l.clots, l.energy, l.mood, l.symptoms, l.symptoms_clear, l.note, l.sex, l.leakage, l.pain_score, l.pain_locations, l.life_impact, l.mucus, l.sleep_hours, l.sleep_quality, l.stress, l.sick, l.travel, l.weight_kg, NULL, l.created_at
+    SELECT 'log', l.date, NULL, l.flow, l.clots, l.energy, l.mood, l.symptoms, l.symptoms_clear, l.note, l.sex, l.sex_count, l.leakage, l.pain_score, l.pain_locations, l.life_impact, l.mucus, l.sleep_hours, l.sleep_quality, l.stress, l.sick, l.travel, l.weight_kg, NULL, l.created_at
     FROM cycle_logs l WHERE l.tg_id=?
     UNION ALL
-    SELECT 'measurement', m.date, NULL, NULL, NULL, NULL, NULL, NULL, NULL, m.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    SELECT 'measurement', m.date, NULL, NULL, NULL, NULL, NULL, NULL, NULL, m.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       m.kind || '|' || COALESCE(CAST(m.value AS TEXT), '') || '|' || COALESCE(m.unit, '') || '|' || COALESCE(m.result, '') || '|' || COALESCE(m.time, ''), m.created_at
     FROM cycle_measurements m WHERE m.tg_id=?
     UNION ALL
     SELECT 'med', md.start_date, md.end_date, NULL, NULL, NULL, NULL, NULL, NULL,
-      md.name || CASE WHEN md.dosage IS NOT NULL THEN ' (' || md.dosage || ')' ELSE '' END, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      md.name || CASE WHEN md.dosage IS NOT NULL THEN ' (' || md.dosage || ')' ELSE '' END, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       COALESCE(md.category, '') || '|' || COALESCE(md.form, '') || '|' || COALESCE(md.schedule, '') || '|' || md.status, md.created_at
     FROM cycle_meds md WHERE md.tg_id=?
     UNION ALL
-    SELECT 'med_log', ml.date, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ml.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    SELECT 'med_log', ml.date, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ml.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       COALESCE(mm.name, '') || '|' || COALESCE(ml.time, '') || '|' || ml.status || '|' || COALESCE(ml.dose_taken, ''), ml.created_at
     FROM cycle_med_logs ml LEFT JOIN cycle_meds mm ON mm.id=ml.med_id WHERE ml.tg_id=?
     ORDER BY day ASC`
@@ -3906,6 +3915,7 @@ const EXPORT_ROW_MAPPERS = {
         symptoms: (() => { try { return JSON.parse(row.symptoms || "[]"); } catch { return []; } })(),
         note: clean(row.note) || "",
         sex: row.sex || null,
+        sex_count: row.sex_count || 0,
         created_at: row.created_at
       }
 };
@@ -4077,7 +4087,7 @@ const EXPORT_TXT_ROWS = {
           ["Болезнь/температура", row.sick ? "отмечено" : null],
           ["Поездка/смена часового пояса", row.travel ? "отмечено" : null],
           ["Вес", row.weight_kg !== null && row.weight_kg !== undefined ? `${row.weight_kg} кг` : null],
-          ["Секс", row.sex ? CYCLE_SEX_LABELS[row.sex] || row.sex : null],
+          ["Секс", row.sex ? `${CYCLE_SEX_LABELS[row.sex] || row.sex}${(row.sex_count || 0) > 1 ? ` ×${row.sex_count}` : ""}` : null],
           ["Заметка", row.note],
           ["Записан", exportTxtTime(row.created_at)]
         ]
@@ -4770,7 +4780,7 @@ function cycleExportPayload({ profile, share, periods, logs, meds, med_logs, mea
       share_level: share.level
     },
     periods: periods.map(p => ({ start_date: p.start_date, end_date: p.end_date || null, end_unknown: !!p.end_unknown })),
-    logs: logs.map(l => ({ date: l.date, flow: l.flow || null, clots: !!l.clots, energy: l.energy || null, mood: l.mood || null, symptoms: l.symptoms || [], symptoms_clear: !!l.symptoms_clear, note: l.note || "", sex: l.sex || null, leakage: l.leakage || null, pain_score: l.pain_score ?? null, pain_locations: l.pain_locations || [], life_impact: l.life_impact || null, mucus: l.mucus || null, sleep_hours: l.sleep_hours ?? null, sleep_quality: l.sleep_quality || null, stress: l.stress || null, sick: !!l.sick, travel: !!l.travel, weight_kg: l.weight_kg ?? null })),
+    logs: logs.map(l => ({ date: l.date, flow: l.flow || null, clots: !!l.clots, energy: l.energy || null, mood: l.mood || null, symptoms: l.symptoms || [], symptoms_clear: !!l.symptoms_clear, note: l.note || "", sex: l.sex || null, sex_count: l.sex_count || 0, leakage: l.leakage || null, pain_score: l.pain_score ?? null, pain_locations: l.pain_locations || [], life_impact: l.life_impact || null, mucus: l.mucus || null, sleep_hours: l.sleep_hours ?? null, sleep_quality: l.sleep_quality || null, stress: l.stress || null, sick: !!l.sick, travel: !!l.travel, weight_kg: l.weight_kg ?? null })),
     meds: (meds || []).map(m => ({ id: m.id, name: m.name, category: m.category || null, dosage: m.dosage || null, form: m.form || null, schedule: m.schedule || null, start_date: m.start_date, end_date: m.end_date || null, status: m.status, note: m.note || "" })),
     med_logs: (med_logs || []).map(l => ({ med_id: l.med_id, date: l.date, time: l.time || null, status: l.status, dose_taken: l.dose_taken || null, note: l.note || "" })),
     measurements: (measurements || []).map(m => ({ id: m.id, date: m.date, time: m.time || null, kind: m.kind, value: m.value ?? null, unit: m.unit || null, result: m.result || null, note: m.note || "" }))
@@ -5046,6 +5056,9 @@ function cycleLogFromRow(l) {
     symptoms_clear: !!l.symptoms_clear,
     note: l.note || "",
     sex: l.sex || null,
+    sex_count: l.sex === "protected" || l.sex === "unprotected"
+      ? (Number.isInteger(Number(l.sex_count)) && Number(l.sex_count) > 0 ? Math.min(Number(l.sex_count), 20) : 1)
+      : 0,
     leakage: l.leakage || null,
     pain_score: l.pain_score === null || l.pain_score === undefined ? null : Number(l.pain_score),
     pain_locations: (JSON.parse(l.pain_locations || "[]")).filter(code => CYCLE_PAIN_LOCATIONS.includes(code)),
@@ -5064,7 +5077,7 @@ async function cycleState(env, tgId, tz) {
   const [periodsRes, profile, logsRes, medsRes, medLogsRes, measRes] = await Promise.all([
     env.DB.prepare("SELECT id,start_date,end_date,end_unknown FROM cycle_periods WHERE tg_id=? ORDER BY start_date DESC, id DESC LIMIT 36").bind(tgId).all(),
     env.DB.prepare("SELECT avg_cycle_length,avg_period_length,cycle_length_known,share_enabled,share_level,onboarded,notify_enabled,notify_period,notify_ovulation,notify_fertile,notify_delay,notify_period_days,notify_delay_days,notify_diary,share_notify FROM cycle_profiles WHERE tg_id=?").bind(tgId).first(),
-    env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 400").bind(tgId).all(),
+    env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 400").bind(tgId).all(),
     env.DB.prepare("SELECT id,name,category,dosage,form,schedule,start_date,end_date,status,note FROM cycle_meds WHERE tg_id=? ORDER BY status='completed', start_date DESC, id DESC").bind(tgId).all(),
     env.DB.prepare("SELECT med_id,date,time,status,dose_taken,note FROM cycle_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 600").bind(tgId).all(),
     env.DB.prepare("SELECT id,date,time,kind,value,unit,result,note FROM cycle_measurements WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 800").bind(tgId).all()
@@ -5098,7 +5111,7 @@ async function cycleState(env, tgId, tz) {
       diary: Number(profile?.notify_diary ?? 0) === 1
     },
     forecast: cycleForecast(periods, profile || { avg_cycle_length: 28, avg_period_length: 5 }, today, measurements),
-    disclaimer: "Прогноз приблизительный и не заменяет консультацию врача."
+    disclaimer: "Прогноз приблизительный и не заменяет консультацию врача"
   };
 }
 
@@ -5161,7 +5174,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS cycle_profiles (tg_id INTEGER PRIMARY KEY,avg_cycle_length INTEGER NOT NULL DEFAULT 28,avg_period_length INTEGER NOT NULL DEFAULT 5,cycle_length_known INTEGER NOT NULL DEFAULT 0,share_enabled INTEGER NOT NULL DEFAULT 0,share_level TEXT NOT NULL DEFAULT 'phases',onboarded INTEGER NOT NULL DEFAULT 0,notify_enabled INTEGER NOT NULL DEFAULT 0,notify_period INTEGER NOT NULL DEFAULT 1,notify_ovulation INTEGER NOT NULL DEFAULT 1,notify_fertile INTEGER NOT NULL DEFAULT 1,notify_delay INTEGER NOT NULL DEFAULT 1,notify_period_days INTEGER NOT NULL DEFAULT 2,notify_delay_days INTEGER NOT NULL DEFAULT 3,notify_diary INTEGER NOT NULL DEFAULT 0,share_notify INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS cycle_periods (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,start_date TEXT NOT NULL,end_date TEXT,end_unknown INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(tg_id,start_date))`,
     `CREATE INDEX IF NOT EXISTS idx_cycle_periods_tg_start ON cycle_periods(tg_id,start_date)`,
-    `CREATE TABLE IF NOT EXISTS cycle_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,date TEXT NOT NULL,flow TEXT,clots INTEGER NOT NULL DEFAULT 0,energy TEXT,mood TEXT,symptoms TEXT,symptoms_clear INTEGER NOT NULL DEFAULT 0,note TEXT,sex TEXT,leakage TEXT,pain_score INTEGER,pain_locations TEXT,life_impact TEXT,mucus TEXT,sleep_hours REAL,sleep_quality TEXT,stress TEXT,sick INTEGER NOT NULL DEFAULT 0,travel INTEGER NOT NULL DEFAULT 0,weight_kg REAL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(tg_id,date))`,
+    `CREATE TABLE IF NOT EXISTS cycle_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,date TEXT NOT NULL,flow TEXT,clots INTEGER NOT NULL DEFAULT 0,energy TEXT,mood TEXT,symptoms TEXT,symptoms_clear INTEGER NOT NULL DEFAULT 0,note TEXT,sex TEXT,sex_count INTEGER NOT NULL DEFAULT 1,leakage TEXT,pain_score INTEGER,pain_locations TEXT,life_impact TEXT,mucus TEXT,sleep_hours REAL,sleep_quality TEXT,stress TEXT,sick INTEGER NOT NULL DEFAULT 0,travel INTEGER NOT NULL DEFAULT 0,weight_kg REAL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(tg_id,date))`,
     `CREATE INDEX IF NOT EXISTS idx_cycle_logs_tg_date ON cycle_logs(tg_id,date)`,
     // Этап 6/P2: серия измерений (BBT/ЛГ — несколько в день), справочник
     // препаратов и факт приёма. Паритет с migrations/0038_p2_measurements.sql.
@@ -5228,6 +5241,7 @@ async function ensureSchema(env) {
     ["cycle_logs", "clots", "INTEGER NOT NULL DEFAULT 0"],
     ["cycle_logs", "energy", "TEXT"],
     ["cycle_logs", "symptoms_clear", "INTEGER NOT NULL DEFAULT 0"],
+    ["cycle_logs", "sex_count", "INTEGER NOT NULL DEFAULT 1"],
     ["cycle_logs", "leakage", "TEXT"],
     ["cycle_logs", "pain_score", "INTEGER"],
     ["cycle_logs", "pain_locations", "TEXT"],

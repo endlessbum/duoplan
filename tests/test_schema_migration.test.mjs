@@ -114,7 +114,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
     "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "mucus",
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url",
-    "rating_checked_at", "rating_source", "show_avatar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "rating_checked_at", "rating_source", "sex_count", "show_avatar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -137,7 +137,8 @@ test("чистый проход миграции без гонки записы�
   //   (cycle_logs, этап 6/P2: слизь и факторы дня)
   // + notify_diary (cycle_profiles, P3: напоминание о дневнике)
   // + end_unknown (cycle_periods, история прошлых циклов: «конец не помним»)
-  deepStrictEqual(log.alters.length, 52);
+  // + sex_count (cycle_logs, несколько актов за день — migrations/0041)
+  deepStrictEqual(log.alters.length, 53);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

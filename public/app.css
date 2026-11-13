@@ -926,7 +926,10 @@ html.dialog-locked {
 }
 
 .cal-day.is-selected {
-  background: var(--berry-soft);
+  /* Акцент — фоновый слой (background-color): цветовые состояния Фло
+     (градиенты background-image и полосы ::before) ложатся поверх,
+     не сбрасывая заливку выбора. */
+  background-color: var(--berry-soft);
   color: var(--berry);
   font-weight: 600;
 }
@@ -2191,14 +2194,15 @@ input[type="checkbox"]:active {
    цикла, состояния дней и чипы-переключатели.
 ------------------------------------------------------------------- */
 :root {
-  /* Месячные красятся акцентом пользователя: --flo-period ссылается на
-     --berry, который applyAccent переопределяет под выбранную палитру.
+  /* Месячные — красный: семантический цвет, не зависящий от акцента.
      Фертильное окно — фиксированный бирюзовый в обеих темах, как
      семантические цвета календаря (--cal-*). */
+  --flo-period: #d64545;
   --flo-fertile: #2e9c8d;
 }
 
 :root[data-theme="dark"] {
+  --flo-period: #f2766f;
   --flo-fertile: #55c3b2;
 }
 
@@ -2305,7 +2309,7 @@ input[type="checkbox"]:active {
 
 /* Статистика за год: столбики циклов и симптомы по фазам. */
 .flo-chart { width: 100%; height: auto; margin-top: 8px; }
-.flo-bar { fill: var(--flo-period, var(--berry)); opacity: 0.85; }
+.flo-bar { fill: var(--berry); opacity: 0.85; }
 .flo-avg { stroke: var(--muted); stroke-dasharray: 4 4; }
 .flo-phase { margin-top: 10px; }
 .flo-bar-row {
@@ -2325,48 +2329,82 @@ input[type="checkbox"]:active {
 .flo-meter i {
   display: block;
   height: 100%;
-  background: var(--flo-period, var(--berry));
+  background: var(--berry);
   border-radius: 4px;
 }
 .flo-legend { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
 
 /* Состояния дней в календаре Фло: сетка общая с «Нашей парой» (.cal-day),
-   краска цикла — своя. Порядок важен: месячные (непрозрачная заливка)
-   перекрывают прочие фоны, а кольца «сегодня»/«выбран» возвращаются
-   поверх заливки контуром. */
-.cal-day.is-period {
-  background: var(--flo-period, var(--berry));
-  color: #fff;
-  font-weight: 600;
+   краска цикла — своя. Порядок важен: месячные рисуются полосой сверху
+   (::before), поэтому полупрозрачные фоны прогноза/фертильности и точки
+   событий под числом остаются видны. Кольца «сегодня»/«выбран» — поверх. */
+.cal-day.is-period::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 26%;
+  background: var(--flo-period);
+  border-radius: 12px 12px 0 0;
 }
 
+/* Прогноз и фертильность — та же полоса сверху на четверть дня,
+   градиентом: обе могут стоять на одной ячейке, позднее правило
+   (фертильность) перекрывает прогноз, как раньше с фоном. */
+/* Цвет band's верхней части смешан с --surface, а не transparent:
+   полоса остаётся чистым цветом и поверх акцентной подложки выбранного
+   дня (berry-soft), без скрещивания оттенков. */
 .cal-day.is-predicted {
-  background: color-mix(in srgb, var(--flo-period, var(--berry)) 22%, transparent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--flo-period) 22%, var(--surface)) 0 26%,
+    transparent 26%
+  );
 }
 
-.cal-day.is-fertile {
-  background: color-mix(in srgb, var(--flo-fertile, #2e9c8d) 24%, transparent);
+.cal-day.is-fertile:not(.is-ovulation) {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--flo-fertile) 24%, var(--surface)) 0 26%,
+    transparent 26%
+  );
 }
 
-.cal-day.is-ovulation {
-  box-shadow: inset 0 0 0 2px var(--flo-ovulation, var(--flo-fertile, #2e9c8d));
+/* Овуляция — та же полоса сверху на четверть, что у месячных/прогноза,
+   но разделённая пополам по вертикали: слева фертильный цвет, справа
+   цвет овуляции. Рисуется ::before, как у is-period, чтобы срез по
+   горизонтали внутри полосы не съезжал по осям градиента. */
+.cal-day.is-ovulation::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 26%;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--flo-fertile) 24%, var(--surface)) 0 50%,
+    var(--flo-ovulation, var(--flo-fertile)) 50%
+  );
+  border-radius: 12px 12px 0 0;
 }
 
 .cal-day.is-delay { opacity: 0.5; }
 
-.cal-day.is-period.is-today,
-.cal-day.is-period.is-selected {
+.cal-day.is-period.is-today {
   box-shadow: inset 0 0 0 1.5px var(--ink);
 }
 
-/* Точки цикла в легендах обеих календарей. «Месячные» — не круглая точка,
-   а капля (острый кончик вверх) серого цвета --cal-private, чтобы она не
-   спорила с цветовыми точками планов и дат. */
-.cal-dot.is-cycle,
-.cal-dot.is-period {
+/* Точки цикла в легендах обеих календарей. «Месячные» — красный квадратик
+   с мягкими углами: день в календаре красится полосой сверху, а не целиком,
+   поэтому круглая точка читалась бы как «просто цвет». */
+.cal-dot.is-cycle {
   background: var(--cal-private);
   border-radius: 0 50% 50% 50%;
   transform: rotate(45deg);
+}
+.cal-dot.is-period {
+  background: var(--flo-period);
+  border-radius: 2px;
 }
 .cal-dot.is-predicted {
   background: color-mix(in srgb, var(--flo-period, var(--berry)) 22%, transparent);
@@ -2377,6 +2415,27 @@ input[type="checkbox"]:active {
 .cal-dot.is-ovulation { background: var(--flo-ovulation, var(--flo-fertile, #2e9c8d)); }
 /* Запись дня (флоу/настроение/симптомы) — нейтральная точка. */
 .cal-dot.is-log { background: var(--muted); }
+
+/* Секс в календаре Фло — красные сердечки по числу отметок вместо точки. */
+.cal-heart {
+  width: 11px;
+  height: 11px;
+  fill: var(--flo-period);
+  flex: none;
+  vertical-align: -1px;
+}
+.cal-sex-more {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--flo-period);
+  align-self: center;
+}
+.flo-sex-count {
+  align-self: center;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 0 6px;
+}
 
 /* --- Фло, этап 6/P2: препараты, измерения, отчёт --- */
 .flo-med-row {
@@ -2409,20 +2468,47 @@ input[type="checkbox"]:active {
   font-weight: 600;
 }
 .flo-report-doc small { color: var(--muted); }
+/* Таблицы отчёта живут в диалоге ~480px: широкие (дневник на 10 колонок)
+   прокручиваются горизонтально внутри обёртки, узкие занимают ширину. */
+.flo-report-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.flo-report-table--wide { min-width: 720px; }
 @media print {
   .no-print { display: none !important; }
   body * { visibility: hidden; }
-  #flo-report, #flo-report * { visibility: visible; }
-  #flo-report {
-    position: absolute;
-    left: 0;
-    top: 0;
+  .flo-report-doc, .flo-report-doc * { visibility: visible; }
+  /* Отчёт теперь в общем диалоге: при печати разворачиваем его на весь
+     лист, прячем шапку/кнопки диалога и снимаем ограничение ширины таблиц. */
+  #item-dialog {
+    position: fixed;
+    inset: 0;
     width: 100%;
+    max-width: 100%;
+    max-height: none;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
     background: #fff;
     color: #111;
-    padding: 16px;
+    overflow: visible;
   }
-  .flo-report-table { font-size: 10pt; }
+  #item-dialog::backdrop { display: none; }
+  #item-dialog .sheet-form { padding: 0; }
+  #item-dialog .sheet-head,
+  #item-dialog .sheet-actions { display: none !important; }
+  #flo-report { width: 100%; }
+  .flo-report-doc {
+    padding: 16px;
+    max-height: none;
+    overflow: visible;
+  }
+  .flo-report-table-wrap { overflow: visible; }
+  .flo-report-table--wide { min-width: 0; }
+  .flo-report-table { font-size: 10pt; width: 100%; }
   .flo-report-table th, .flo-report-table td { border-color: #999; }
   .flo-report-doc h2, .flo-report-doc h3 { color: #111; }
   .flo-report-doc .flo-disclaimer { color: #333; }
@@ -2434,6 +2520,12 @@ input[type="checkbox"]:active {
 .flo-fold {
   border-top: 1px solid var(--line, rgba(127,127,127,.15));
   padding: 6px 0;
+}
+/* Разделитель над «Как считается прогноз?» не нужен: блок идёт сразу
+   после кнопки действия в карточке «сегодня». */
+.flo-fold.flo-forecast {
+  border-top: 0;
+  padding-top: 0;
 }
 .flo-fold-title {
   cursor: pointer;

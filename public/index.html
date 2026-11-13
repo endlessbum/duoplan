@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f7f3ed">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <meta name="description" content="DuoPlan — приложение для пар: общие планы, значимые даты, общий дневник и вишлисты.">
+  <meta name="description" content="DuoPlan — приложение для пар: общие планы, цели, кино, значимые даты, места и путешествия, дневник, вишлисты и копилка.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="ru_RU">
   <meta property="og:title" content="DuoPlan — ваше общее пространство">
@@ -77,18 +77,26 @@
 
     .preview { position: relative; max-width: 420px; margin-left: auto; padding: 20px; border: 1px solid rgba(255,255,255,.8); border-radius: 30px; background: rgba(255,253,249,.78); box-shadow: var(--shadow); backdrop-filter: blur(12px); transform: rotate(2deg); }
     .preview-top { display: flex; align-items: center; gap: 12px; padding: 6px 4px 20px; }
-    .avatar { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--sage-soft); color: var(--sage); font-family: Georgia, serif; font-size: 20px; }
+    .preview-pair { position: relative; display: inline-flex; margin-right: 12px; }
+    .preview-avatar { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: var(--sage-soft); color: var(--sage); font-family: Georgia, serif; font-size: 17px; border: 2px solid var(--surface); }
+    .preview-avatar.is-second { margin-left: -12px; background: var(--berry-soft); color: var(--berry-dark); }
     .preview-title { font-weight: 750; line-height: 1.3; }
     .preview-subtitle { color: var(--muted); font-size: 12px; }
+    .preview-stats { display: flex; gap: 8px; margin-top: 14px; }
+    .preview-chip { padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 650; }
     .preview-card { margin-top: 10px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
     .preview-label { margin-bottom: 6px; color: var(--berry); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
     .preview-card h3 { margin-bottom: 5px; font-size: 16px; }
     .preview-card p { margin-bottom: 0; color: var(--muted); font-size: 13px; }
+    .preview-done { display: inline-block; margin-top: 10px; color: var(--sage); font-size: 11px; font-weight: 750; }
     .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .mini { padding: 15px; }
     .mini-icon { display: block; margin-bottom: 10px; color: var(--sage); }
     .mini-icon svg { width: 22px; height: 22px; }
-    .floating-note { position: absolute; right: -32px; bottom: 48px; padding: 12px 16px; border-radius: 14px; background: var(--ink); color: white; font-size: 12px; box-shadow: 0 12px 30px rgba(41,37,36,.18); transform: rotate(-4deg); }
+    .preview-nav { display: flex; justify-content: space-around; margin: 14px -20px -20px; padding: 10px 6px 8px; border-top: 1px solid var(--line); border-radius: 0 0 29px 29px; background: rgba(255,253,249,.72); }
+    .preview-nav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 44px; color: var(--muted); font-size: 9px; font-weight: 650; }
+    .preview-nav-item svg { width: 19px; height: 19px; }
+    .preview-nav-item.is-active { color: var(--berry); }
 
     .features { padding: 92px 0; background: var(--surface); }
     .section-head { max-width: 620px; margin-bottom: 46px; }
@@ -137,7 +145,7 @@
       .feature-grid { grid-template-columns: 1fr; }
       .features, .steps { padding: 68px 0; }
       .preview { padding: 14px; border-radius: 24px; }
-      .floating-note { right: -4px; bottom: 34px; }
+      .preview-nav { margin: 14px -14px -14px; border-radius: 0 0 23px 23px; }
       .cta-box { padding: 48px 22px; border-radius: 24px; }
       .footer-inner { flex-direction: column; gap: 6px; }
     }
@@ -166,8 +174,8 @@
       <div class="container hero-grid">
         <div>
           <p class="eyebrow">Пространство для двоих</p>
-          <h1>Всё наше.<br>В одном <em>месте.</em></h1>
-          <p class="hero-copy">Общие планы, тёплые воспоминания и маленькие ритуалы, которые помогают быть ближе — прямо в Telegram.</p>
+          <h1>Всё наше<br>В одном <em>месте</em></h1>
+          <p class="hero-copy">Общие планы, тёплые воспоминания и маленькие ритуалы, которые помогают быть ближе — прямо в Telegram</p>
           <div class="actions">
             <a class="button" href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">
               Открыть DuoPlan
@@ -179,25 +187,54 @@
 
         <div class="preview" aria-label="Пример пространства DuoPlan">
           <div class="preview-top">
-            <div class="avatar">Д</div>
+            <span class="preview-pair" aria-hidden="true">
+              <span class="preview-avatar">А</span>
+              <span class="preview-avatar is-second">Б</span>
+            </span>
             <div><div class="preview-title">Наше пространство</div><div class="preview-subtitle">Два человека · одна история</div></div>
+          </div>
+          <div class="preview-stats">
+            <span class="preview-chip">Серия · 6 дней</span>
+            <span class="preview-chip">Очки · 240</span>
           </div>
           <div class="preview-card">
             <div class="preview-label">Ритуал дня</div>
             <h3>Прогулка без телефонов</h3>
-            <p>Полчаса только для вас двоих. Обсудите что-нибудь хорошее.</p>
+            <p>Полчаса только для вас двоих. Обсудите что-нибудь хорошее</p>
+            <span class="preview-done">Выполнено +10 XP</span>
           </div>
           <div class="preview-grid">
             <div class="preview-card mini">
-              <span class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4m8-4v4M3 10h18"/></svg></span>
+              <span class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg></span>
               <h3>Наши планы</h3><p>Идеи и дела</p>
             </div>
             <div class="preview-card mini">
-              <span class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 21s8-4.5 8-11a4.5 4.5 0 0 0-8-2.8A4.5 4.5 0 0 0 4 10c0 6.5 8 11 8 11Z"/></svg></span>
+              <span class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></span>
               <h3>Общий дневник</h3><p>Важные моменты</p>
             </div>
           </div>
-          <div class="floating-note">Мы это сделали · +10 XP</div>
+          <div class="preview-nav" role="img" aria-label="Нижняя навигация приложения">
+            <span class="preview-nav-item is-active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/></svg>
+              <span>Главная</span>
+            </span>
+            <span class="preview-nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg>
+              <span>Планы</span>
+            </span>
+            <span class="preview-nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/><path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/></svg>
+              <span>Даты</span>
+            </span>
+            <span class="preview-nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/><circle cx="12" cy="10.4" r="2.4"/></svg>
+              <span>Места</span>
+            </span>
+            <span class="preview-nav-item">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/><path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/></svg>
+              <span>Дневник</span>
+            </span>
+          </div>
         </div>
       </div>
     </section>
@@ -207,32 +244,56 @@
         <div class="section-head">
           <p class="eyebrow">Ближе друг к другу</p>
           <h2>Для больших планов<br>и маленьких радостей</h2>
-          <p>Не ещё одна социальная сеть, а личное пространство, которое принадлежит только вам.</p>
+          <p>Не ещё одна социальная сеть, а личное пространство, которое принадлежит только вам</p>
         </div>
         <div class="feature-grid">
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m5 12 4 4L19 6"/><path d="M21 12a9 9 0 1 1-5.3-8.2"/></svg></div>
-            <h3>Общие планы</h3><p>Собирайте идеи свиданий, поездок и дел, а затем воплощайте их вместе.</p>
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg></div>
+            <h3>Общие планы</h3><p>Собирайте идеи свиданий, поездок и дел, а затем воплощайте их вместе</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4m8-4v4M3 10h18m-13 5h2"/></svg></div>
-            <h3>Значимые даты</h3><p>Храните важные события вашей истории и не позволяйте им затеряться.</p>
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/><path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/></svg></div>
+            <h3>Значимые даты</h3><p>Храните важные события вашей истории и не позволяйте им затеряться</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></div>
-            <h3>Общий дневник</h3><p>Сохраняйте воспоминания, мысли и моменты, к которым хочется возвращаться.</p>
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/><path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/></svg></div>
+            <h3>Общий дневник</h3><p>Сохраняйте воспоминания, мысли и моменты, к которым хочется возвращаться</p>
           </article>
           <article class="feature">
             <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z"/></svg></div>
-            <h3>Вишлист</h3><p>Делитесь желаниями и подсказками для подарков без лишних догадок.</p>
+            <h3>Вишлист</h3><p>Делитесь желаниями и подсказками для подарков без лишних догадок</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 21s8-4.5 8-11a4.5 4.5 0 0 0-8-2.8A4.5 4.5 0 0 0 4 10c0 6.5 8 11 8 11Z"/></svg></div>
-            <h3>Ритуал дня</h3><p>Получайте одно простое совместное действие и отмечайте маленькие победы.</p>
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/></svg></div>
+            <h3>Ритуал дня</h3><p>Получайте одно простое совместное действие и отмечайте маленькие победы</p>
           </article>
           <article class="feature">
             <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="9" cy="8" r="4"/><circle cx="17" cy="10" r="3"/><path d="M2 21v-2a6 6 0 0 1 12 0v2m2-6a5 5 0 0 1 6 4.9V21"/></svg></div>
-            <h3>Только для вас</h3><p>Создайте пространство и пригласите партнёра по личному коду или ссылке.</p>
+            <h3>Только для вас</h3><p>Создайте пространство и пригласите партнёра по личному коду или ссылке</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/><circle cx="12" cy="10.4" r="2.4"/></svg></div>
+            <h3>Места</h3><p>Собирайте список «куда сходить» с картами и отметками посещений — и вытягивайте случайное место на вечер</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3Z"/><path d="m6.2 5.3 3.1 3.9"/><path d="m12.4 3.4 3.1 4"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></div>
+            <h3>Кино на вечер</h3><p>Общий список фильмов и сериалов с рейтингами IMDb и TMDB — выбирайте вместе и ставьте оценки</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="9" width="15" height="11.5" rx="2.5"/><path d="M9 9V6.8a3 3 0 0 1 6 0V9"/><path d="M9.6 9v11.5M14.4 9v11.5"/></svg></div>
+            <h3>Путешествия</h3><p>Отмечайте города и страны, куда мечтаете съездить вдвоём, — и вспоминайте уже пройденные</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg></div>
+            <h3>Цели</h3><p>Общие и личные цели со списком шагов — прогресс виден обоим, приватные остаются вашими</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 7V4H5a2 2 0 0 0 0 4h15v12a1 1 0 0 0 1 1h1v-4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></div>
+            <h3>Копилка</h3><p>Копите на общую мечту или личную цель: сумма, прогресс и история каждого пополнения</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5s6.8 7.2 6.8 11.3a6.8 6.8 0 0 1-13.6 0C5.2 10.7 12 3.5 12 3.5Z"/></svg></div>
+            <h3>Фло</h3><p>Личный календарь для неё: месячные, прогноз, дневник самочувствия и напоминания — только для владелицы. Партнёру можно предоставить доступ только к определённым событиям</p>
           </article>
         </div>
       </div>
@@ -243,12 +304,12 @@
         <div class="section-head">
           <p class="eyebrow">Легко начать</p>
           <h2>Ваше пространство за пару минут</h2>
-          <p>Не нужно устанавливать приложение или придумывать новый пароль.</p>
+          <p>Не нужно устанавливать приложение или придумывать новый пароль</p>
         </div>
         <div>
-          <div class="step"><span class="step-number">1</span><div><h3>Откройте бота</h3><p>Перейдите к @duoplanbot в Telegram и нажмите «Запустить».</p></div></div>
-          <div class="step"><span class="step-number">2</span><div><h3>Создайте пространство</h3><p>Отправьте партнёру приглашение или войдите по полученному коду.</p></div></div>
-          <div class="step"><span class="step-number">3</span><div><h3>Наполняйте его вместе</h3><p>Добавьте первый план, тёплую запись или желание — остальное придёт само.</p></div></div>
+          <div class="step"><span class="step-number">1</span><div><h3>Откройте бота</h3><p>Перейдите к @duoplanbot в Telegram и нажмите «Запустить»</p></div></div>
+          <div class="step"><span class="step-number">2</span><div><h3>Создайте пространство</h3><p>Отправьте партнёру приглашение или войдите по полученному коду</p></div></div>
+          <div class="step"><span class="step-number">3</span><div><h3>Наполняйте его вместе</h3><p>Добавьте первый план, тёплую запись или желание — остальное придёт само</p></div></div>
         </div>
       </div>
     </section>
@@ -256,7 +317,7 @@
     <section class="cta">
       <div class="container cta-box">
         <h2>Начните вашу общую историю</h2>
-        <p>DuoPlan уже ждёт в Telegram. Первое совместное пространство — всего в одном сообщении.</p>
+        <p>DuoPlan уже ждёт в Telegram. Первое совместное пространство — всего в одном сообщении</p>
         <a class="button" href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">Перейти к @duoplanbot</a>
       </div>
     </section>

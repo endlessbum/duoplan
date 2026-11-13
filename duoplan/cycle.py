@@ -383,7 +383,7 @@ def cycle_text(forecast: dict[str, Any] | None, open_start: date | None) -> str:
         lines.append(f"Овуляция примерно через {forecast['ovulation_in']} дн.")
     if forecast["irregular"]:
         lines.append("Цикл нерегулярный, прогнозы приблизительные.")
-    lines.append("<i>Прогноз приблизительный и не заменяет консультацию врача.</i>")
+    lines.append("<i>Прогноз приблизительный и не заменяет консультацию врача</i>")
     return "\n".join(lines)
 
 

@@ -49,6 +49,8 @@
   // минутный refresh и возврат на вкладку не сбрасывали выбранный вид.
   let pairView = "profile";
   let floState = null;
+  // Под-вкладки внутри «Фло»: Сегодня / Цикл / Статистика / Здоровье / Настройки.
+  let floView = "today";
   let floMonth = null;
   let floSelectedDate = null;
   let floBusy = false;
@@ -69,7 +71,6 @@
   let floEditing = null;
   // P2: отчёт (печать/CSV/JSON), препараты и черновики форм.
   let floReport = null; // { months, loading, failed, data }
-  let floReportOpen = false;
   let floStatsMonths = 12;
   let floMedForm = null; // { id?, ...поля } — открытая форма препарата
   let floMedDeleteArmed = null;
@@ -2401,12 +2402,65 @@
     return classes;
   }
 
+  const FLO_HEART_ICON = '<svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
+
+  // Количество сердечек в календаре: до 5 штук, дальше «+N», чтобы
+  // ячейка не расползалась (flex-wrap уже разрешает перенос).
+  function floSexHearts(count) {
+    const n = Math.max(0, Math.min(Number(count) || 0, 20));
+    const shown = Math.min(n, 5);
+    const hearts = FLO_HEART_ICON.repeat(shown);
+    return hearts + (n > 5 ? `<span class="cal-sex-more">+${n - 5}</span>` : "");
+  }
+
   function floDayDots(date) {
     const log = floDayLog(date);
+    // Секс — отдельный маркер: красные сердечки по числу отметок.
+    const sexCount = (log.sex === "protected" || log.sex === "unprotected") ? (log.sex_count || 1) : 0;
     // Любая запись дня даёт индикатор: флоу, сгустки, настроение, энергия,
-    // симптомы (включая «симптомов не было»), заметка или секс.
-    if (log.flow || log.clots || log.mood || log.energy || log.symptoms?.length || log.symptoms_clear || log.note || log.sex || log.leakage || log.pain_score !== null && log.pain_score !== undefined || log.life_impact || log.pain_locations?.length) return `<i class="cal-dot is-log"></i>`;
-    return "";
+    // симптомы (включая «симптомов не было»), заметка, протечки, боль.
+    const hasLog = log.flow || log.clots || log.mood || log.energy || log.symptoms?.length || log.symptoms_clear || log.note || log.leakage || log.pain_score !== null && log.pain_score !== undefined || log.life_impact || log.pain_locations?.length;
+    return `${hasLog ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}`;
+  }
+
+  // Сводка записей выбранного дня под календарём — как cal-events в общем
+  // календаре: маркер + короткие факты, без развёрнутого дневника.
+  function floDayEventRows(date) {
+    const rows = [];
+    const log = floDayLog(date);
+    const label = (list, code) => list.find(([c]) => c === code)?.[1] || code || "";
+    if (floInPeriod(date)) rows.push({ icon: "period", title: "Месячные", meta: "день цикла" });
+    const facts = [];
+    if (log.flow) facts.push(`Кровотечение: ${label(FLO_FLOWS, log.flow)}`);
+    if (log.clots) facts.push("сгустки");
+    if (log.leakage) facts.push(`Протекание: ${label(FLO_LEAKAGE, log.leakage)}`);
+    if (log.pain_score !== null && log.pain_score !== undefined) facts.push(`Боль ${log.pain_score}/10`);
+    if (log.mood) facts.push(`Настроение: ${label(FLO_MOODS, log.mood)}`);
+    if (log.energy) facts.push(`Энергия: ${label(FLO_ENERGY, log.energy)}`);
+    if (log.symptoms?.length) facts.push(`Симптомы: ${log.symptoms.map(c => label(FLO_SYMPTOMS, c)).join(", ")}`);
+    else if (log.symptoms_clear) facts.push("Симптомов не было");
+    const mucusParts = log.mucus ? [log.mucus.amount && label(FLO_MUCUS_AMOUNTS, log.mucus.amount), log.mucus.consistency && label(FLO_MUCUS_CONSISTENCY, log.mucus.consistency), log.mucus.color && label(FLO_MUCUS_COLORS, log.mucus.color)].filter(Boolean) : [];
+    if (mucusParts.length) facts.push(`Слизь: ${mucusParts.join(", ")}`);
+    if (log.sleep_hours !== null && log.sleep_hours !== undefined) facts.push(`Сон ${log.sleep_hours} ч`);
+    const factors = [log.stress ? `стресс: ${label(FLO_STRESS, log.stress)}` : "", log.sick ? "болезнь" : "", log.travel ? "поездка" : "", log.weight_kg ? `${log.weight_kg} кг` : ""].filter(Boolean);
+    if (factors.length) facts.push(factors.join(", "));
+    if (facts.length) rows.push({ icon: "log", title: "Дневник", meta: facts.join(" · ") });
+    const sexCount = (log.sex === "protected" || log.sex === "unprotected") ? (log.sex_count || 1) : 0;
+    if (sexCount) {
+      rows.push({ icon: "heart", title: "Секс", meta: `${log.sex === "protected" ? "с защитой" : "без защиты"}${sexCount > 1 ? ` ×${sexCount}` : ""}` });
+    }
+    if (log.note) rows.push({ icon: "log", title: "Заметка", meta: log.note.length > 80 ? `${log.note.slice(0, 80)}…` : log.note });
+    for (const m of floMeasurements(date)) {
+      const txt = m.kind === "bbt"
+        ? `БТ ${m.value}°${m.unit === "F" ? "F" : "C"}${m.time ? ` ${m.time}` : ""}`
+        : `ЛГ: ${label(FLO_LH_RESULTS, m.result) || m.result || "—"}`;
+      rows.push({ icon: "log", title: "Измерение", meta: txt });
+    }
+    const medName = id => floMeds().find(m => m.id === id)?.name || "";
+    for (const ml of (floState?.med_logs || []).filter(l => l.date === date)) {
+      rows.push({ icon: "log", title: "Препарат", meta: `${medName(ml.med_id) || `#${ml.med_id}`}: ${ml.status === "taken" ? "принят" : "пропущен"}${ml.time ? ` ${ml.time}` : ""}` });
+    }
+    return rows;
   }
 
   function renderFloCalendar() {
@@ -2440,7 +2494,23 @@
           <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно</span>
           <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция</span>
           <span><i class="cal-dot is-log" aria-hidden="true"></i>Запись</span>
+          <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
         </div>
+        ${(() => {
+          if (!floSelectedDate) return "";
+          const rows = floDayEventRows(floSelectedDate);
+          return `<div class="cal-events">
+            <p class="cal-events-date">${esc(calendarLongDate(floSelectedDate))}</p>
+            ${rows.length ? rows.map(row => `
+              <div class="cal-event">
+                ${row.icon === "heart" ? FLO_HEART_ICON : `<i class="cal-dot ${row.icon === "period" ? "is-period" : "is-log"}" aria-hidden="true"></i>`}
+                <div class="cal-event-body">
+                  <span class="cal-event-title">${esc(row.title)}</span>
+                  <span class="cal-event-meta">${esc(row.meta)}</span>
+                </div>
+              </div>`).join("") : `<p class="cal-empty">Записей нет.</p>`}
+          </div>`;
+        })()}
       </section>`;
   }
 
@@ -2477,7 +2547,7 @@
   const FLO_LH_RESULTS = [["negative", "отрицательный"], ["positive", "положительный"], ["unclear", "неясно"]];
 
   function floDayLog(date) {
-    return floAllLogs().find(l => l.date === date) || { flow: null, mood: null, symptoms: [], note: "", sex: null, clots: false, energy: null, symptoms_clear: false, leakage: null, pain_score: null, pain_locations: [], life_impact: null, mucus: null, sleep_hours: null, sleep_quality: null, stress: null, sick: false, travel: false, weight_kg: null };
+    return floAllLogs().find(l => l.date === date) || { flow: null, mood: null, symptoms: [], note: "", sex: null, sex_count: 0, clots: false, energy: null, symptoms_clear: false, leakage: null, pain_score: null, pain_locations: [], life_impact: null, mucus: null, sleep_hours: null, sleep_quality: null, stress: null, sick: false, travel: false, weight_kg: null };
   }
 
   async function floPostLog(date, patch) {
@@ -2485,6 +2555,7 @@
     const body = {
       date,
       flow: current.flow, mood: current.mood, symptoms: current.symptoms, note: current.note, sex: current.sex || null,
+      sex_count: current.sex_count || 0,
       clots: !!current.clots, energy: current.energy || null, symptoms_clear: !!current.symptoms_clear,
       leakage: current.leakage || null, pain_score: current.pain_score ?? null,
       pain_locations: current.pain_locations || [], life_impact: current.life_impact || null,
@@ -2539,7 +2610,7 @@
     const dis = future ? " disabled" : "";
     const lhOn = floLhDraft.date === d ? floLhDraft.result : null;
     return `
-      ${list || `<p class="flo-disclaimer">За этот день измерений нет.</p>`}
+      ${list || `<p class="flo-disclaimer">За этот день измерений нет</p>`}
       <div class="flo-actions" style="margin-top:6px">
         <input id="flo-bbt" class="flo-input" type="number" inputmode="decimal" min="34" max="42" step="0.05" placeholder="БТ, °C" style="width:110px">
         <input id="flo-bbt-time" class="flo-input" type="time" aria-label="Время">
@@ -2558,7 +2629,7 @@
   function renderFloDayMeds(d, future) {
     const meds = floMeds();
     if (!meds.length) {
-      return `<p class="flo-disclaimer">Список пуст — добавьте препараты в настройках Фло («Мои препараты»). Дозы и схемы здесь не назначаются, только фиксируется факт.</p>`;
+      return `<p class="flo-disclaimer">Список пуст — добавьте препараты в настройках Фло («Мои препараты»). Дозы и схемы здесь не назначаются, только фиксируется факт</p>`;
     }
     const rows = meds.map(m => {
       const log = floMedLogFor(m.id, d);
@@ -2630,7 +2701,7 @@
           <button type="button" class="flo-chip${log.clots ? " is-on" : ""}" data-action="flo-set-clots" data-date="${d}" data-value="${!log.clots}" aria-pressed="${log.clots}">Сгустки были</button>
           ${FLO_LEAKAGE.map(([code, label]) => chip("flo-set-leakage", label, log.leakage === code, "data-leakage", code)).join("")}
         </div>
-        <p class="settings-hint">Если сгустки крупные или их много — покажите это врачу.</p>
+        <p class="settings-hint">Если сгустки крупные или их много — покажите это врачу</p>
         <p class="eyebrow flo-group">Боль, 0–10</p>
         <div class="flo-chips flo-pain-scale">${Array.from({ length: 11 }, (_, n) => chip("flo-set-pain", String(n), log.pain_score === n, "data-pain", n)).join("")}</div>
         <div class="flo-chips" style="margin-top:6px">
@@ -2645,12 +2716,12 @@
           ${FLO_SYMPTOMS.map(([code, label]) => chip("flo-toggle-symptom", label, log.symptoms.includes(code), "data-code", code)).join("")}
           <button type="button" class="flo-chip${log.symptoms_clear ? " is-on" : ""}" data-action="flo-toggle-clear" data-date="${d}" aria-pressed="${log.symptoms_clear}">Симптомов не было</button>
         </div>
-        <p class="settings-hint">«Симптомов не было» — явная отметка: день записан, но ничего не беспокоило.</p>
+        <p class="settings-hint">«Симптомов не было» — явная отметка: день записан, но ничего не беспокоило</p>
         <details class="flo-fold"><summary class="flo-fold-title">Влияние на жизнь</summary>
         <div class="flo-chips">${FLO_LIFE_IMPACT.map(([code, label]) => chip("flo-set-impact", label, log.life_impact === code, "data-impact", code)).join("")}</div>
         </details>
         <details class="flo-fold"><summary class="flo-fold-title">Слизь и выделения</summary>
-        <p class="flo-sub">Цвет и консистенция — приблизительное наблюдение, не диагноз.</p>
+        <p class="flo-sub">Цвет и консистенция — приблизительное наблюдение, не диагноз</p>
         ${([["amount", FLO_MUCUS_AMOUNTS], ["consistency", FLO_MUCUS_CONSISTENCY], ["color", FLO_MUCUS_COLORS]]).map(([field, opts]) =>
           `<div class="flo-chips"${field === "amount" ? "" : ` style="margin-top:6px"`}>${opts.map(([code, label]) =>
             `<button type="button" class="flo-chip${log.mucus?.[field] === code ? " is-on" : ""}" data-action="flo-set-mucus" data-date="${d}" data-field="${field}" data-value="${esc(code)}" aria-pressed="${log.mucus?.[field] === code}">${esc(label)}</button>`).join("")}</div>`).join("")}
@@ -2680,8 +2751,13 @@
         ${renderFloDayMeds(d, future)}
         </details>
         <details class="flo-fold"><summary class="flo-fold-title">Секс (только вам)</summary>
-        <p class="settings-hint">Видно только вам — партнёру не передаётся.</p>
+        <p class="settings-hint">Видно только вам — партнёру не передаётся. Повторите отметку для нескольких раз за день</p>
         <div class="flo-chips">${[["protected", "с защитой"], ["unprotected", "без защиты"], ["none", "без секса"]].map(([code, label]) => chip("flo-set-sex", label, log.sex === code, "data-sex", code)).join("")}</div>
+        ${(log.sex === "protected" || log.sex === "unprotected") ? `<div class="flo-chips" style="margin-top:6px">
+          <button type="button" class="flo-chip" data-action="flo-sex-dec" data-date="${d}" aria-label="Убрать одну отметку">−</button>
+          <span class="flo-sex-count">Отметок: ${log.sex_count || 1}</span>
+          <button type="button" class="flo-chip" data-action="flo-sex-inc" data-date="${d}" aria-label="Добавить отметку">+</button>
+        </div>` : ""}
         </details>
         <details class="flo-fold"><summary class="flo-fold-title">Заметка</summary>
         <label class="field"><span>Заметка</span><textarea id="flo-note" rows="2" maxlength="2000">${esc(log.note || "")}</textarea></label>
@@ -3061,6 +3137,7 @@
     const from = fromDate.toISOString().slice(0, 10);
     floReport = { months, loading: true, data: floReport?.data || null, failed: false };
     render();
+    syncFloReportDialog();
     try {
       const data = await request(`/api/cycle/history?from=${from}&to=${today}`);
       floReport = { months, loading: false, failed: false, data };
@@ -3068,6 +3145,27 @@
       floReport = { months, loading: false, failed: true, data: null };
     }
     render();
+    syncFloReportDialog();
+  }
+
+  // Отчёт живёт в общем диалоге (#item-dialog): пока он открыт, догрузка
+  // данных и смена периода обновляют его содержимое, а не страницу.
+  function syncFloReportDialog() {
+    if (dialog?.open && dialogContext?.floReport) {
+      dialogFields.innerHTML = renderFloReportDialog();
+    }
+  }
+
+  function openFloReportDialog() {
+    openDialog({
+      title: "Медицинский отчёт",
+      submitLabel: null,
+      cancelLabel: "Закрыть",
+      readOnly: true,
+      floReport: true,
+      fields: renderFloReportDialog()
+    });
+    if (!floReport?.data && !floReport?.loading) loadFloReport();
   }
 
   function floReportDownload(data, kind) {
@@ -3115,7 +3213,7 @@
         (l.symptoms || []).join(","), l.symptoms_clear ? 1 : 0, l.leakage, l.pain_score ?? "",
         (l.pain_locations || []).join(","), l.life_impact, mucus,
         l.sleep_hours ?? "", l.sleep_quality, l.stress, l.sick ? 1 : 0, l.travel ? 1 : 0,
-        l.weight_kg ?? "", l.sex, l.note]);
+        l.weight_kg ?? "", l.sex ? `${l.sex}${(l.sex_count || 0) > 1 ? ` ×${l.sex_count}` : ""}` : "", l.note]);
     }
     for (const ml of data.med_logs || []) {
       push([ml.date, "med_log", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
@@ -3151,21 +3249,20 @@
     return { from: floMonthsAgo(to, months), to, months };
   }
 
-  function renderFloReport() {
+  // Содержимое диалога отчёта: переключатель периода, статус загрузки
+  // и печатаемое тело. id="flo-report" нужен печатным стилям.
+  function renderFloReportDialog() {
     const r = floReport;
     const monthsChips = FLO_REPORT_MONTHS.map(m =>
       `<button type="button" class="flo-chip${(r?.months || 6) === m ? " is-on" : ""}" data-action="flo-report-months" data-months="${m}">${m} мес.</button>`).join("");
-    const head = `
-      <section class="card" id="flo-report">
-        <p class="eyebrow no-print">Отчёт</p>
-        <h3 class="no-print">Медицинский отчёт</h3>
+    return `
+      <div id="flo-report">
         <div class="flo-chips no-print">${monthsChips}</div>
         ${!r || r.loading ? `<p class="flo-disclaimer">Загружаем данные…</p>` : ""}
         ${r?.failed ? `<p class="flo-disclaimer">Не удалось загрузить данные.</p>
-          <button type="button" class="secondary full card-action" data-action="flo-report-retry">Повторить</button>` : ""}
+          <button type="button" class="secondary full card-action no-print" data-action="flo-report-retry">Повторить</button>` : ""}
         ${r?.data ? floReportBody(r.data) : ""}
-      </section>`;
-    return head;
+      </div>`;
   }
 
   // Тело отчёта — печатаемая разметка. Пустые значения — «—», отсутствие
@@ -3233,13 +3330,13 @@
         <p>Период: ${esc(fmtDate(from))} — ${esc(fmtDate(to))} · Сформирован: ${esc(generated)}</p>
         <p class="flo-disclaimer">Отчёт содержит только фактически записанные наблюдения; пропуски не приравниваются к отсутствию симптомов. Прогнозы и фазы в отчёт не входят. Приложение не ставит диагнозы — этот документ не заменяет консультацию врача.</p>
         <h3>Месячные в периоде</h3>
-        ${periodRows ? `<table class="flo-report-table"><thead><tr><th>Начало</th><th>Конец</th><th>Длительность</th></tr></thead><tbody>${periodRows}</tbody></table>` : `<p>Записей о месячных в периоде нет.</p>`}
+        ${periodRows ? `<div class="flo-report-table-wrap"><table class="flo-report-table"><thead><tr><th>Начало</th><th>Конец</th><th>Длительность</th></tr></thead><tbody>${periodRows}</tbody></table></div>` : `<p>Записей о месячных в периоде нет.</p>`}
         <h3>Дневник (${sorted.length} дн. с записями)</h3>
-        ${dayRows ? `<table class="flo-report-table"><thead><tr><th>Дата</th><th>Кровотечение</th><th>Боль</th><th>Настроение</th><th>Симптомы</th><th>Слизь</th><th>Сон / факторы</th><th>Препараты</th><th>Измерения</th><th>Заметка</th></tr></thead><tbody>${dayRows}</tbody></table>` : `<p>Записей дневника в периоде нет.</p>`}
+        ${dayRows ? `<div class="flo-report-table-wrap"><table class="flo-report-table flo-report-table--wide"><thead><tr><th>Дата</th><th>Кровотечение</th><th>Боль</th><th>Настроение</th><th>Симптомы</th><th>Слизь</th><th>Сон / факторы</th><th>Препараты</th><th>Измерения</th><th>Заметка</th></tr></thead><tbody>${dayRows}</tbody></table></div>` : `<p>Записей дневника в периоде нет.</p>`}
         <h3>Препараты</h3>
-        ${medRows ? `<table class="flo-report-table"><thead><tr><th>Название</th><th>Схема</th><th>Период</th><th>Статус</th><th>Приём</th></tr></thead><tbody>${medRows}</tbody></table>` : `<p>Препараты не записаны.</p>`}
+        ${medRows ? `<div class="flo-report-table-wrap"><table class="flo-report-table"><thead><tr><th>Название</th><th>Схема</th><th>Период</th><th>Статус</th><th>Приём</th></tr></thead><tbody>${medRows}</tbody></table></div>` : `<p>Препараты не записаны.</p>`}
         <h3>Измерения</h3>
-        ${measRows ? `<table class="flo-report-table"><thead><tr><th>Дата</th><th>Тип</th><th>Значение</th><th>Время</th><th>Заметка</th></tr></thead><tbody>${measRows}</tbody></table>` : `<p>Измерений нет.</p>`}
+        ${measRows ? `<div class="flo-report-table-wrap"><table class="flo-report-table"><thead><tr><th>Дата</th><th>Тип</th><th>Значение</th><th>Время</th><th>Заметка</th></tr></thead><tbody>${measRows}</tbody></table></div>` : `<p>Измерений нет.</p>`}
       </div>`;
   }
 
@@ -3258,7 +3355,7 @@
       .map(d => ({ x: X(idx.get(d.date)), y: H - pad - (d.pain_score / 10) * (H - 2 * pad), label: `${d.date}: боль ${d.pain_score}/10` }));
     const painSvg = painPts.length
       ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Боль по дням">${painPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" class="flo-dot"><title>${esc(p.label)}</title></circle>`).join("")}</svg>
-        <p class="flo-legend">Боль 0–10: каждая точка — день с отметкой (${painPts.length}). Пропуски не считаются нулём.</p>`
+        <p class="flo-legend">Боль 0–10: каждая точка — день с отметкой (${painPts.length}). Пропуски не считаются нулём</p>`
       : `<p class="flo-disclaimer">Боль не отмечали за период.</p>`;
     const flowBars = daily.filter(d => d.flow)
       .map(d => {
@@ -3269,14 +3366,14 @@
       }).join("");
     const flowSvg = flowBars
       ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Кровотечение по дням">${flowBars}</svg>
-        <p class="flo-legend">Высота столбца — интенсивность: ${esc(FLO_FLOWS.map(([, l]) => l).join(" / "))}.</p>`
+        <p class="flo-legend">Высота столбца — интенсивность: ${esc(FLO_FLOWS.map(([, l]) => l).join(" / "))}</p>`
       : `<p class="flo-disclaimer">Кровотечение не отмечали за период.</p>`;
     // БТ (приводим °F к °C) + маркеры ЛГ-тестов в верхней полосе.
     const bbtPts = meas.filter(m => m.kind === "bbt" && m.value !== null && m.value !== undefined)
       .map(m => ({ x: X(idx.get(m.date)), v: m.unit === "F" ? (m.value - 32) * 5 / 9 : m.value, m }));
     const lhPts = meas.filter(m => m.kind === "lh" && m.result)
       .map(m => ({ x: X(idx.get(m.date)), result: m.result, m }));
-    let measSvg = `<p class="flo-disclaimer">Измерений (БТ, ЛГ) за период нет.</p>`;
+    let measSvg = `<p class="flo-disclaimer">Измерений (БТ, ЛГ) за период нет</p>`;
     if (bbtPts.length || lhPts.length) {
       const vals = bbtPts.map(p => p.v);
       const lo = Math.min(...(vals.length ? vals : [36.2]), 36.2);
@@ -3313,7 +3410,7 @@
     if (!s.cycles.length && !s.logged_days) {
       return `<section class="card"><p class="eyebrow">Статистика</p><p>Пока мало данных: нужны два старта месячных и несколько записей дня.</p></section>`;
     }
-    let chart = `<p class="flo-disclaimer">Нужно минимум два старта месячных за год.</p>`;
+    let chart = `<p class="flo-disclaimer">Нужно минимум два старта месячных за год</p>`;
     if (s.cycles.length) {
       const W = 320, H = 130, pad = 18;
       const slot = (W - pad * 2) / s.cycles.length;
@@ -3342,7 +3439,7 @@
     if (s.median_cycle_length !== null && s.median_cycle_length !== undefined) statBits.push(`медиана ${s.median_cycle_length} дн.`);
     if (s.min_cycle_length !== null && s.max_cycle_length !== null) statBits.push(`от ${s.min_cycle_length} до ${s.max_cycle_length} дн.`);
     if (s.spread) statBits.push(`разброс ${s.spread} дн.`);
-    if (s.period_lengths) statBits.push(`месячные в среднем ${s.period_lengths.avg} дн. (от ${s.period_lengths.min} до ${s.period_lengths.max})`);
+    if (s.period_lengths) statBits.push(`Месячные в среднем ${s.period_lengths.avg} дн. (от ${s.period_lengths.min} до ${s.period_lengths.max})`);
     if (s.logged_days) statBits.push(`дней с записями: ${s.logged_days}`);
     const statLine = statBits.length ? `<p class="flo-line">${statBits.map(esc).join(" · ")}</p>` : "";
     const unusual = (s.unusual_intervals || []).length
@@ -3396,7 +3493,7 @@
           }).join("")}
         </div>
         <p class="flo-disclaimer">Паттерн — не диагноз: это повторяемость отметок в ваших записях.</p>` : ""}
-        <p class="flo-disclaimer">Фазы и овуляция — расчётные по датам месячных, не подтверждённые. Это не диагноз.</p>
+        <p class="flo-disclaimer">Фазы и овуляция — расчётные по датам месячных, не подтверждённые. Это не диагноз</p>
       </section>`;
   }
 
@@ -3430,19 +3527,19 @@
     const bits = [];
     if (f.based_on === "history") bits.push(`Даты посчитаны по вашим записям: использовано циклов — ${f.usable_cycles ?? "—"}.`);
     else if (f.based_on === "profile") bits.push("Личной истории циклов пока мало — даты считаются по указанной вами длине цикла.");
-    else bits.push("Истории пока нет — используется стандартная длина цикла 28 дней.");
-    if (f.quality === "insufficient") bits.push("Данных недостаточно: все даты очень примерные.");
+    else bits.push("Истории пока нет — используется стандартная длина цикла 28 дней");
+    if (f.quality === "insufficient") bits.push("Данных недостаточно: все даты очень примерные");
     else if (f.quality === "few") bits.push("Истории немного: даты могут заметно отличаться от факта.");
     if (f.next_period_early && f.next_period_late) {
-      bits.push(`Разброс ожидания месячных: ${esc(f.next_period_early)} — ${esc(f.next_period_late)}. Это календарная оценка, а не гарантия.`);
+      bits.push(`Разброс ожидания месячных: ${esc(f.next_period_early)} — ${esc(f.next_period_late)}. Это календарная оценка, а не гарантия`);
     }
     if (f.ovulation_source === "lh") bits.push("Дата овуляции уточнена по положительному тесту ЛГ — это оценка, а не подтверждение.");
     else if (f.ovulation_source === "bbt") bits.push("Дата овуляции уточнена по подъёму базальной температуры — это оценка, а не подтверждение.");
-    else if (f.ovulation_estimated) bits.push("Овуляция — расчётная оценка по датам, она не подтверждена наблюдениями.");
+    else if (f.ovulation_estimated) bits.push("Овуляция — расчётная оценка по датам, она не подтверждена наблюдениями");
     if (f.data_stale) bits.push("Последняя запись старая: прогноз может не отражать текущий цикл. Отметьте прошедшие месячные.");
     if (f.irregular) bits.push("Цикл нерегулярный: прогноз особенно приблизителен.");
-    bits.push("Пропущенные дни дневника не считаются «днями без симптомов».");
-    return `<details class="flo-fold"><summary class="flo-fold-title">Как считается прогноз?</summary><ul class="flo-explain">${bits.map(b => `<li>${b}</li>`).join("")}</ul></details>`;
+    bits.push("Пропущенные дни дневника не считаются «днями без симптомов»");
+    return `<details class="flo-fold flo-forecast"><summary class="flo-fold-title">Как считается прогноз?</summary><ul class="flo-explain">${bits.map(b => `<li>${b}</li>`).join("")}</ul></details>`;
   }
 
   function renderFloView() {
@@ -3455,6 +3552,31 @@
         <button type="button" class="secondary full card-action" data-action="flo-retry">Повторить</button></section>`;
     }
     if (!floState.onboarded && !floWizardDismissed) return renderFloWizard();
+    return `
+      ${floState.onboarded ? "" : floBannerHtml()}
+      ${renderSegment("flo", floView, [["today", "Сегодня"], ["cycle", "Цикл"], ["stats", "Статистика"], ["health", "Здоровье"], ["settings", "Настройки"]], "is-sub")}
+      <div id="flo-body">${renderFloSection()}</div>`;
+  }
+
+  // Тело активной под-вкладки «Фло»: секции те же, что были на одной странице,
+  // просто разнесены по группам. Партнёрский вид (renderFloPartnerView) под-бар
+  // не получает — у него короткий экран без дневника и настроек.
+  function renderFloSection() {
+    if (floView === "cycle") return `${renderFloHistory()}${renderFloPeriodEditor()}`;
+    if (floView === "stats") return renderFloStats();
+    if (floView === "health") return renderFloMeds();
+    if (floView === "settings") return `
+      <section class="card">
+        <p class="eyebrow flo-group">Отчёт и экспорт</p>
+        <button type="button" class="secondary full card-action" data-action="flo-report-open">Медицинский отчёт</button>
+        <p class="flo-disclaimer">Печать в PDF — через диалог печати браузера. CSV и JSON скачиваются файлом.</p>
+      </section>
+      ${renderFloSettings()}`;
+    return renderFloToday();
+  }
+
+  // «Сегодня»: прогноз, календарь месяца и дневник выбранного дня.
+  function renderFloToday() {
     const f = floState.forecast;
     const openStart = floState.open_period_start;
     const actionBtn = openStart
@@ -3480,13 +3602,12 @@
       if (!openStart && f.phase !== "delay" && f.phase !== "stale" && f.next_period_early && f.next_period_late) {
         lines.push(`Ориентировочно: ${esc(f.next_period_early)} — ${esc(f.next_period_late)}`);
       }
-      if (f.quality === "insufficient") lines.push("Личной истории пока мало — даты примерные.");
+      if (f.quality === "insufficient") lines.push("Личной истории пока мало — даты примерные");
       if (f.phase !== "delay" && f.phase !== "stale" && f.ovulation_in > 0) lines.push(`Овуляция примерно через ${f.ovulation_in} дн.`);
       if (f.irregular) lines.push(`Цикл нерегулярный, прогнозы приблизительные.`);
       todayBody = lines.map(l => `<p class="flo-line">${l}</p>`).join("");
     }
     return `
-      ${floState.onboarded ? "" : floBannerHtml()}
       <section class="card flo-today">
         <p class="eyebrow">Фло · сегодня</p>
         ${todayBody}
@@ -3495,18 +3616,7 @@
         <p class="flo-disclaimer">${esc(floState.disclaimer)}</p>
       </section>
       ${renderFloCalendar()}
-      ${renderFloDayCard()}
-      ${renderFloHistory()}
-      ${renderFloPeriodEditor()}
-      ${renderFloStats()}
-      <section class="card">
-        <p class="eyebrow flo-group">Отчёт и экспорт</p>
-        <button type="button" class="secondary full card-action" data-action="flo-report-toggle">${floReportOpen ? "Скрыть отчёт" : "Медицинский отчёт"}</button>
-        <p class="flo-disclaimer">Печать в PDF — через диалог печати браузера. CSV и JSON скачиваются файлом.</p>
-      </section>
-      ${floReportOpen ? renderFloReport() : ""}
-      ${renderFloSettings()}
-      ${renderFloMeds()}`;
+      ${renderFloDayCard()}`;
   }
 
   async function handleFloAction(action, btn) {
@@ -3535,7 +3645,16 @@
     if (action === "flo-day-end") return floSave({ start: floState.open_period_start, end: date });
     if (action === "flo-set-sex") {
       const value = btn.dataset.sex;
-      return floPostLog(date, { sex: floDayLog(date).sex === value ? null : value });
+      const cur = floDayLog(date);
+      // Повторный тап по той же отметке снимает её; смена типа сохраняет счётчик.
+      if (cur.sex === value) return floPostLog(date, { sex: null, sex_count: 0 });
+      return floPostLog(date, { sex: value, sex_count: value === "none" ? 0 : Math.max(1, cur.sex_count || 1) });
+    }
+    if (action === "flo-sex-inc" || action === "flo-sex-dec") {
+      const cur = floDayLog(date);
+      const delta = action === "flo-sex-inc" ? 1 : -1;
+      const sex_count = Math.min(20, Math.max(1, (cur.sex_count || 1) + delta));
+      return floPostLog(date, { sex_count });
     }
     if (action === "flo-set-flow") {
       const flow = btn.dataset.flow;
@@ -3683,10 +3802,8 @@
       floStats = undefined;
       return loadFloStats();
     }
-    if (action === "flo-report-toggle") {
-      floReportOpen = !floReportOpen;
-      if (floReportOpen && !floReport) loadFloReport();
-      return render();
+    if (action === "flo-report-open") {
+      return openFloReportDialog();
     }
     if (action === "flo-report-months") {
       if (floReport) floReport = { ...floReport, months: Number(btn.dataset.months) || 6 };
@@ -5158,6 +5275,7 @@
     mountMovieSwitch();
     mountGoalsSwitch();
     mountPlansSwitch();
+    mountFloSwitch();
     mountPinFields();
   }
 
@@ -5206,6 +5324,7 @@
   let movieSwitch = null;    // внутренний «В планах / Просмотрено» в кино
   let goalsSwitch = null;    // внутренний «Предстоящие / Выполненные» в целях
   let plansSwitch = null;    // внутренний «Предстоящие / Выполненные» в планах
+  let floSwitch = null;      // внутренний бар под-вкладок внутри «Фло»
 
   function switchValue(key) {
     if (key === "pair") return pairView;
@@ -5235,6 +5354,7 @@
     if (movieSwitch) { movieSwitch.destroy(); movieSwitch = null; }
     if (goalsSwitch) { goalsSwitch.destroy(); goalsSwitch = null; }
     if (plansSwitch) { plansSwitch.destroy(); plansSwitch = null; }
+    if (floSwitch) { floSwitch.destroy(); floSwitch = null; }
   }
 
   function createSwitch(container, key) {
@@ -5295,6 +5415,41 @@
     if (!instance) return;
     instance.setActive(moviesView, false);
     movieSwitch = instance;
+  }
+
+  // Под-бар «Сегодня / Цикл / …» внутри «Фло»: третий уровень капли —
+  // живёт в теле #pair-body рядом с переключателем «Профиль/…».
+  function mountFloSwitch() {
+    if (floSwitch) {
+      floSwitch.destroy();
+      floSwitch = null;
+    }
+    const container = document.querySelector('.seg-switch[data-switch="flo"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitFloView(value)
+    });
+    if (!instance) return;
+    instance.setActive(floView, false);
+    floSwitch = instance;
+  }
+
+  // Переключение под-вкладки «Фло»: меняем только #flo-body, капля и бар живые.
+  function commitFloView(value) {
+    if (floView === value) return;
+    floView = value;
+    const body = document.getElementById("flo-body");
+    if (!body) { render(); return; }
+    body.innerHTML = renderFloSection();
+    floSwitch?.setActive(value, true);
+    document.querySelectorAll('.seg-switch[data-switch="flo"] .seg-switch-btn').forEach((btn) => {
+      btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+    });
   }
 
   // Переключение «В планах / Просмотрено»: меняем только список, чтобы капля
@@ -5527,6 +5682,11 @@
       plansSwitch.destroy();
       plansSwitch = null;
     }
+    // Под-бар «Фло» живёт в теле «Наша пара» — снимаем до замены разметки.
+    if (key === "pair" && floSwitch) {
+      floSwitch.destroy();
+      floSwitch = null;
+    }
     body.innerHTML = key === "pair" ? renderPairView()
       : key === "dates" ? renderDatesBody()
         : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : tasksView === "goals" ? renderGoalsBody() : renderTasksBody())
@@ -5538,7 +5698,10 @@
     document.querySelectorAll(`.seg-switch[data-switch="${key}"] .seg-switch-btn`).forEach((btn) => {
       btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
     });
-    if (key === "pair") mountWishSwitch();
+    if (key === "pair") {
+      mountWishSwitch();
+      if (pairView === "flo") mountFloSwitch();
+    }
     if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
     if (key === "tasks" && tasksView === "goals") mountGoalsSwitch();
     if (key === "tasks" && tasksView === "plans") mountPlansSwitch();
@@ -6066,6 +6229,11 @@
         }
         if (key === "plans") {
           commitSwitch("plans", value, plansSwitch);
+          return;
+        }
+        // Под-вкладки «Фло»: свой экземпляр капли, как у «Кино»/«Целей».
+        if (key === "flo") {
+          commitFloView(value);
           return;
         }
         if (!["pair", "dates", "memories", "tasks", "places"].includes(key)) return;

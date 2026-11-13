@@ -205,7 +205,7 @@ SCHEMA: list[str] = [
     (
         "CREATE TABLE IF NOT EXISTS cycle_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "tg_id INTEGER NOT NULL, date TEXT NOT NULL, flow TEXT, clots INTEGER NOT NULL DEFAULT 0, "
-        "energy TEXT, mood TEXT, symptoms TEXT, symptoms_clear INTEGER NOT NULL DEFAULT 0, note TEXT, sex TEXT, "
+        "energy TEXT, mood TEXT, symptoms TEXT, symptoms_clear INTEGER NOT NULL DEFAULT 0, note TEXT, sex TEXT, sex_count INTEGER NOT NULL DEFAULT 1, "
         "leakage TEXT, pain_score INTEGER, pain_locations TEXT, life_impact TEXT, "
         "mucus TEXT, sleep_hours REAL, sleep_quality TEXT, stress TEXT, "
         "sick INTEGER NOT NULL DEFAULT 0, travel INTEGER NOT NULL DEFAULT 0, weight_kg REAL, "

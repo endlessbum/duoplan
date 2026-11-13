@@ -369,10 +369,10 @@ test("POST /api/cycle/log stores leakage, pain, locations and life_impact", asyn
   await api(request, env, new URL("https://duoplan.test/api/cycle/log"));
   const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_logs"));
   ok(insert, "запись дня должна сохраниться");
-  equal(insert.args[10], "night", "leakage");
-  equal(insert.args[11], 7, "pain_score");
-  equal(insert.args[12], '["lower_abdomen","lower_back"]', "pain_locations");
-  equal(insert.args[13], "limited", "life_impact");
+  equal(insert.args[11], "night", "leakage");
+  equal(insert.args[12], 7, "pain_score");
+  equal(insert.args[13], '["lower_abdomen","lower_back"]', "pain_locations");
+  equal(insert.args[14], "limited", "life_impact");
 });
 
 test("POST /api/cycle/log rejects invalid pain_score", async () => {
@@ -414,13 +414,13 @@ test("POST /api/cycle/log stores mucus and day factors", async () => {
   await api(request, env, new URL("https://duoplan.test/api/cycle/log"));
   const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_logs"));
   ok(insert, "запись дня должна сохраниться");
-  equal(insert.args[14], '{"amount":"medium","consistency":"watery","color":"clear","discomfort":true}', "mucus");
-  equal(insert.args[15], 7.5, "sleep_hours");
-  equal(insert.args[16], "good", "sleep_quality");
-  equal(insert.args[17], "high", "stress");
-  equal(insert.args[18], 1, "sick");
-  equal(insert.args[19], 0, "travel");
-  equal(insert.args[20], 62.4, "weight_kg");
+  equal(insert.args[15], '{"amount":"medium","consistency":"watery","color":"clear","discomfort":true}', "mucus");
+  equal(insert.args[16], 7.5, "sleep_hours");
+  equal(insert.args[17], "good", "sleep_quality");
+  equal(insert.args[18], "high", "stress");
+  equal(insert.args[19], 1, "sick");
+  equal(insert.args[20], 0, "travel");
+  equal(insert.args[21], 62.4, "weight_kg");
 });
 
 test("POST /api/cycle/log rejects invalid mucus, sleep, stress and weight", async () => {

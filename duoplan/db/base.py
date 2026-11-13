@@ -25,7 +25,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -114,6 +114,10 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     # период с неизвестной датой окончания не считается открытым.
     11: (
         "ALTER TABLE cycle_periods ADD COLUMN end_unknown INTEGER NOT NULL DEFAULT 0",
+    ),
+    # Фло: несколько актов за день (migrations/0041) — sex_count рядом с sex.
+    12: (
+        "ALTER TABLE cycle_logs ADD COLUMN sex_count INTEGER NOT NULL DEFAULT 1",
     ),
 }
 
