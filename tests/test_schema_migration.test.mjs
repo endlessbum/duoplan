@@ -54,6 +54,9 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = 
     wishes: new Set(["id", "pair_id", "owner_id", "body", "done", "created_at"]),
     memories: new Set(["id", "pair_id", "author_id", "body", "day", "created_at"]),
     movies: new Set(["id", "pair_id", "created_by", "imdb_id", "title", "year", "kind", "rating", "genres", "runtime", "seasons", "episodes", "url", "watched", "watched_at", "watched_by", "created_at"]),
+    cycle_profiles: new Set(["tg_id", "avg_cycle_length", "avg_period_length", "share_enabled", "share_level", "onboarded", "notify_enabled", "notify_period", "notify_ovulation", "notify_fertile", "notify_delay", "notify_period_days", "notify_delay_days", "share_notify", "created_at", "updated_at"]),
+    cycle_logs: new Set(["id", "tg_id", "date", "flow", "symptoms", "mood", "note", "sex", "created_at", "updated_at"]),
+    cycle_periods: new Set(["id", "tg_id", "start_date", "end_date", "created_at", "updated_at"]),
     tasks: new Set(["id", "pair_id", "title", "status", "created_by", "created_at", "completed_by", "completed_at"]),
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
     rate_limits: new Set(["bucket_key", "count"])
@@ -106,11 +109,13 @@ test("гонка isolate: duplicate column name обрабатывается п�
   // users.timezone упал с "duplicate column name" и был отработан,
   // pairs.timezone добавлен этим isolate штатно.
   deepStrictEqual(log.alters.sort(), [
-    "accent_color", "awaiting_return", "comment", "created_by", "custom_name", "dates_digest_enabled", "dates_digest_time", "day",
-    "details", "digest_enabled", "digest_time", "done_at", "expires_at", "gender", "is_private",
-    "is_private", "kind", "last_partner", "monthly", "monthly", "partner_custom_name", "photo_url",
-    "rating_checked_at", "rating_source", "show_avatar",
-    "time", "time", "timezone", "timezone", "title", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "yearly"
+    "accent_color", "awaiting_return", "clots", "comment", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
+    "details", "digest_enabled", "digest_time", "done_at", "end_unknown", "energy", "expires_at", "gender", "is_private",
+    "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "mucus",
+    "notify_diary",
+    "pain_locations", "pain_score", "partner_custom_name", "photo_url",
+    "rating_checked_at", "rating_source", "show_avatar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
 
@@ -125,7 +130,14 @@ test("чистый проход миграции без гонки записы�
   // + awaiting_return/last_partner (pairs, заморозка контента после выхода
   // партнёра и резерв кода за ушедшим)
   // + 3 настройки недельной сводки (users)
-  deepStrictEqual(log.alters.length, 35);
+  // + cycle_length_known (cycle_profiles, аудит 3.1.D)
+  // + clots/energy/symptoms_clear (cycle_logs, этап 4: разделение дневника)
+  // + leakage/pain_score/pain_locations/life_impact (cycle_logs, этап 4/P1)
+  // + mucus/sleep_hours/sleep_quality/stress/sick/travel/weight_kg
+  //   (cycle_logs, этап 6/P2: слизь и факторы дня)
+  // + notify_diary (cycle_profiles, P3: напоминание о дневнике)
+  // + end_unknown (cycle_periods, история прошлых циклов: «конец не помним»)
+  deepStrictEqual(log.alters.length, 52);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

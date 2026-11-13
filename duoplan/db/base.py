@@ -25,7 +25,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -99,6 +99,21 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     # Бот и Worker читают одну и ту же колонку (test_schema_parity).
     9: (
         "ALTER TABLE wishes ADD COLUMN comment TEXT",
+    ),
+    # Фло: колонка mood в дневнике дня (migrations/0034) и журнал дедупликации
+    # уведомлений notification_log (migrations/0014) — нужны напоминаниям бота.
+    10: (
+        "ALTER TABLE cycle_logs ADD COLUMN mood TEXT",
+        (
+            "CREATE TABLE IF NOT EXISTS notification_log (tg_id INTEGER NOT NULL, "
+            "day TEXT NOT NULL, kind TEXT NOT NULL, sent_at INTEGER NOT NULL, "
+            "PRIMARY KEY (tg_id, day, kind))"
+        ),
+    ),
+    # Фло: end_unknown у cycle_periods (migrations/0040) — исторический
+    # период с неизвестной датой окончания не считается открытым.
+    11: (
+        "ALTER TABLE cycle_periods ADD COLUMN end_unknown INTEGER NOT NULL DEFAULT 0",
     ),
 }
 

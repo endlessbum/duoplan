@@ -10,7 +10,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.11.54` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.12.67` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -22,7 +22,8 @@ Telegram Mini App для пар: общие планы, значимые дат�
 | Места | Список «куда сходить», ссылка на карту, отметка посещения; кнопка «Рандом» тянет случайное непосещённое место из колоды — показ и подтверждение посещения разделены |
 | Дневник | Записи с необязательным заголовком, разметка в тексте, догрузка архива страницами; сегмент «Цитаты» — фразы с автором или источником |
 | Желания | Внутри «Нашей пары»: два списка «Мои / Его (Её)», ссылка на подарок, уточнение от автора (размер, цвет, где купить), отметка «исполнено» с датой вручения |
-| Наша пара | Переключатель «Профиль / Желания», календарь месяца, настройки (сводки, акцент, аватар, имя партнёра), PIN, часовой пояс, экспорт, выход |
+| Фло | Женский календарь (трекер цикла): месячные, прогноз (овуляция, фертильное окно, задержка), дневник дня (интенсивность, настроение, симптомы, заметка, секс), история и статистика, шеринг с партнёром (4 уровня доступа), напоминания. Сегмент «Фло» в «Наша пара», виден только женщине или партнёру при включённом шеринге. |
+| Наша пара | Переключатель «Профиль / Желания / Копилка / Фло», календарь месяца, настройки (сводки, акцент, аватар, имя партнёра), PIN, часовой пояс, экспорт, выход |
 
 Напоминания приходят от бота: утренняя сводка (в ней дни рождения — отдельным
 абзацем), сводка о завтрашних датах, предупреждение о дне рождения за 3 дня и
@@ -34,7 +35,7 @@ Telegram Mini App для пар: общие планы, значимые дат�
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 31 миграция схемы D1 |
+| `migrations/` | 34 миграции схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
@@ -70,7 +71,7 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 `wishes`, `quotes`, `places`, `trips`, `goals`, `goal_items`, `movies`,
 `movie_ratings`, `savings`, `savings_deposits`, `daily_rolls`,
 `daily_completions`, `rate_limits`, `telegram_updates`, `notification_log`,
-`app_meta`, `closed_codes`.
+`app_meta`, `closed_codes`, `cycle_profiles`, `cycle_periods`, `cycle_logs`.
 
 | Миграция | Что добавляет |
 |---|---|
@@ -105,6 +106,9 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0029_weekly_digest` | `users.weekly_digest_enabled`, `weekly_digest_time`, `weekly_digest_day` — недельная сводка (выключена по умолчанию, день `sun`/`mon`) |
 | `0030_member_stats` | `member_stats` — снимок личной статистики (очки, серии, последняя активность) на момент выхода из пары; возвращение прежнего партнёра восстанавливает историю |
 | `0031_wishes_comment` | `wishes.comment` — необязательное уточнение автора к контексту желаемого подарка |
+| `0032_cycle_tracker` | `cycle_profiles` (настройки трекера), `cycle_periods` (фактические месячные) — Фло, фаза 1 |
+| `0033_cycle_logs` | `cycle_logs` (дневник дня: flow, symptoms, note, sex) — Фло, фаза 2 |
+| `0034_cycle_mood` | `cycle_logs.mood` — отдельное поле настроения (колонка добавлена через ALTER TABLE) — Фло, фаза 3 |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -285,7 +289,8 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 | `POST /api/gender` | Пол `{ gender: "male" \| "female" }`, доступно до онбординга |
 | `POST /api/settings` | `accent_color`, `digest_time`, `digest_enabled`, `dates_digest_time`, `dates_digest_enabled`, `show_avatar`, `partner_name` |
 | `GET /api/archive` | Страница архива: `type=memories\|done_tasks\|wishes\|done_wishes`, `page` (по 20, не дальше 500) |
-| `POST /api/data/export` | Выслать в чат «Экспорт.txt» с выбранными разделами |
+| `POST /api/data/export` | Выслать в чат «Экспорт.txt» с выбранными разделами (включая Фло — только владелице) |
+| Фло API (под `/api/cycle/`) | `state` — прогноз и настройки; `period` — запись/редактирование месячных; `log` — дневник дня; `stats` — статистика за 12 месяцев; `share` — шеринг с партнёром; `notify` — напоминания; `export` — JSON в чат; `delete` — удаление данных; `onboard` — мастер настройки; `history` — история за диапазон дат; `partner` — вид партнёра |
 | `POST /api/tasks` | План `{ title, day, time, monthly, yearly, is_private }` |
 | `POST /api/dates` | Дата `{ title, day, time, recurs, monthly, is_private, kind }`: `kind='birthday'` — день рождения (всегда ежегодный, без времени и ежемесячного повтора) |
 | `POST /api/memories` | Запись дневника `{ title, body }` (день ставится по часовому поясу пары) |

@@ -43,7 +43,7 @@ const RENDER_DEPS = [
     extractLine("  const DONE_ICON"),
     extractLine("  const EDIT_ICON"),
     extractLine("  const DELETE_ICON"),
-    extractLine("  const SHARE_ICON"),
+    extractLine("  const COPY_ICON"),
     extractBraced("function esc"),
       extractBraced("function itemActionButton"),
       extractBraced("function itemActions"),

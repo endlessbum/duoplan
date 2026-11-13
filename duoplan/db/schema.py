@@ -158,6 +158,13 @@ SCHEMA: list[str] = [
         "CREATE TABLE IF NOT EXISTS fsm_states (key TEXT PRIMARY KEY, state TEXT, "
         "data TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL)"
     ),
+    # Журнал дедупликации уведомлений: то же, что notification_log в D1
+    # (migrations/0014). Нужен Python-боту для напоминаний Фло.
+    (
+        "CREATE TABLE IF NOT EXISTS notification_log (tg_id INTEGER NOT NULL, "
+        "day TEXT NOT NULL, kind TEXT NOT NULL, sent_at INTEGER NOT NULL, "
+        "PRIMARY KEY (tg_id, day, kind))"
+    ),
     "CREATE INDEX IF NOT EXISTS idx_tasks_pair ON tasks(pair_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_dates_pair ON dates(pair_id, day)",
     "CREATE INDEX IF NOT EXISTS idx_memories_pair ON memories(pair_id, created_at)",
@@ -181,4 +188,52 @@ SCHEMA: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_users_pair ON users(pair_id)",
     "CREATE INDEX IF NOT EXISTS idx_pairs_user_a ON pairs(user_a)",
     "CREATE INDEX IF NOT EXISTS idx_pairs_user_b ON pairs(user_b)",
+    (
+        "CREATE TABLE IF NOT EXISTS cycle_profiles (tg_id INTEGER PRIMARY KEY, "
+        "avg_cycle_length INTEGER NOT NULL DEFAULT 28, avg_period_length INTEGER NOT NULL DEFAULT 5, "
+        "cycle_length_known INTEGER NOT NULL DEFAULT 0, "
+        "share_enabled INTEGER NOT NULL DEFAULT 0, share_level TEXT NOT NULL DEFAULT 'phases', onboarded INTEGER NOT NULL DEFAULT 0, notify_enabled INTEGER NOT NULL DEFAULT 0, notify_period INTEGER NOT NULL DEFAULT 1, notify_ovulation INTEGER NOT NULL DEFAULT 1, notify_fertile INTEGER NOT NULL DEFAULT 1, notify_delay INTEGER NOT NULL DEFAULT 1, notify_period_days INTEGER NOT NULL DEFAULT 2, notify_delay_days INTEGER NOT NULL DEFAULT 3, notify_diary INTEGER NOT NULL DEFAULT 0, share_notify INTEGER NOT NULL DEFAULT 1, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS cycle_periods (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "tg_id INTEGER NOT NULL, start_date TEXT NOT NULL, end_date TEXT, "
+        "end_unknown INTEGER NOT NULL DEFAULT 0, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tg_id,start_date))"
+    ),
+    "CREATE INDEX IF NOT EXISTS idx_cycle_periods_tg_start ON cycle_periods(tg_id, start_date)",
+    (
+        "CREATE TABLE IF NOT EXISTS cycle_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "tg_id INTEGER NOT NULL, date TEXT NOT NULL, flow TEXT, clots INTEGER NOT NULL DEFAULT 0, "
+        "energy TEXT, mood TEXT, symptoms TEXT, symptoms_clear INTEGER NOT NULL DEFAULT 0, note TEXT, sex TEXT, "
+        "leakage TEXT, pain_score INTEGER, pain_locations TEXT, life_impact TEXT, "
+        "mucus TEXT, sleep_hours REAL, sleep_quality TEXT, stress TEXT, "
+        "sick INTEGER NOT NULL DEFAULT 0, travel INTEGER NOT NULL DEFAULT 0, weight_kg REAL, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tg_id,date))"
+    ),
+    "CREATE INDEX IF NOT EXISTS idx_cycle_logs_tg_date ON cycle_logs(tg_id, date)",
+    # Этап 6/P2: измерения (BBT/ЛГ), препараты и факт приёма.
+    # Паритет с migrations/0038_p2_measurements.sql и worker.js ensureSchema.
+    (
+        "CREATE TABLE IF NOT EXISTS cycle_measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "tg_id INTEGER NOT NULL, date TEXT NOT NULL, time TEXT, kind TEXT NOT NULL, "
+        "value REAL, unit TEXT, result TEXT, note TEXT, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    ),
+    "CREATE INDEX IF NOT EXISTS idx_cycle_measurements_tg_date ON cycle_measurements(tg_id, date)",
+    (
+        "CREATE TABLE IF NOT EXISTS cycle_meds (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "tg_id INTEGER NOT NULL, name TEXT NOT NULL, category TEXT, dosage TEXT, form TEXT, "
+        "schedule TEXT, start_date TEXT NOT NULL, end_date TEXT, "
+        "status TEXT NOT NULL DEFAULT 'active', note TEXT, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    ),
+    "CREATE INDEX IF NOT EXISTS idx_cycle_meds_tg ON cycle_meds(tg_id, status)",
+    (
+        "CREATE TABLE IF NOT EXISTS cycle_med_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "med_id INTEGER NOT NULL, tg_id INTEGER NOT NULL, date TEXT NOT NULL, time TEXT, "
+        "status TEXT NOT NULL, dose_taken TEXT, note TEXT, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(med_id,date))"
+    ),
+    "CREATE INDEX IF NOT EXISTS idx_cycle_med_logs_tg_date ON cycle_med_logs(tg_id, date)",
 ]

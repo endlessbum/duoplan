@@ -37,7 +37,7 @@ const loadWishItem = new Function(
     "const DONE_ICON = " + appSource.match(/const DONE_ICON = ('.*');/)?.[1] + ";",
     "const EDIT_ICON = " + appSource.match(/const EDIT_ICON = ('.*');/)?.[1] + ";",
     "const DELETE_ICON = " + appSource.match(/const DELETE_ICON = ('.*');/)?.[1] + ";",
-    "const SHARE_ICON = " + appSource.match(/const SHARE_ICON = ('.*');/)?.[1] + ";",
+    "const COPY_ICON = " + appSource.match(/const COPY_ICON = ('.*');/)?.[1] + ";",
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function itemActionButton"),
     extractBraced(appSource, "function itemActions"),
@@ -128,7 +128,7 @@ test("wishShareText: название, уточнение и ссылка иду
 });
 
 test("формы создания и редактирования желания работают с полем comment", () => {
-  match(appSource, /<textarea name="comment" rows="3" maxlength="500"/);
+  match(appSource, /<textarea name="comment" data-fmt="\*\* _ __ ~~" rows="3" maxlength="500"/);
   match(appSource, /request\("\/api\/wishes", \{ method: "POST", body: \{ body: fd\.get\("body"\), comment: fd\.get\("comment"\)/);
   match(appSource, /if \(fd\.get\("comment"\) !== undefined\) body\.comment = fd\.get\("comment"\)/);
 });

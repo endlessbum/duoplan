@@ -15,6 +15,9 @@ from duoplan.handlers import router
 from duoplan.middlewares import EnsureUserMiddleware, PrivateBotMiddleware
 from duoplan.services import DuoPlanService
 
+# Фло: напоминания по расписанию.
+from duoplan import cycle as flo  # noqa: E402
+
 log = logging.getLogger(__name__)
 
 WEBHOOK_HINT = (
@@ -82,6 +85,10 @@ async def main() -> int:
                 BotCommand(command="menu", description="Наше пространство"),
                 BotCommand(command="cancel", description="Отменить ввод"),
                 BotCommand(command="help", description="Как работает DuoPlan"),
+                BotCommand(command="flo", description="Фло — трекер цикла"),
+                BotCommand(command="flo_log", description="Дневник дня Фло"),
+                BotCommand(command="flo_settings", description="Настройки Фло"),
+                BotCommand(command="flo_partner", description="Вид партнёра Фло"),
             ]
         )
         log.info(
@@ -89,6 +96,23 @@ async def main() -> int:
             settings.tz_name,
             settings.db_path,
         )
+        # Фоновая задача: напоминания Фло раз в минуту (аналог cron в worker.js).
+        async def cycle_reminder_loop() -> None:
+            while True:
+                try:
+                    now = datetime.now(service.tz)
+                    await flo.send_cycle_reminders(
+                        db,
+                        lambda tg_id, text: bot.send_message(tg_id, text),
+                        lambda tg_id: db.one("SELECT timezone FROM users WHERE tg_id=?", (tg_id,)).get("timezone") if db else None,
+                        now,
+                    )
+                    await flo.prune_old_notifications(db, days=7)
+                except Exception:
+                    log.exception("cycle_reminder_loop failed")
+                await asyncio.sleep(60)
+
+        asyncio.create_task(cycle_reminder_loop())
         await dp.start_polling(bot)
         return 0
     finally:

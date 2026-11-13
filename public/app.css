@@ -733,6 +733,16 @@ html.dialog-locked {
   transform: scale(0.98);
 }
 
+/* Опасные действия (удаление данных Фло, периодов): тревожный цвет —
+   фиксированный cherry, как и остальные семантические цвета. */
+.secondary.is-danger {
+  color: var(--cherry);
+}
+
+.primary.is-danger {
+  background: var(--cherry);
+}
+
 .full {
   width: 100%;
 }
@@ -1119,6 +1129,14 @@ select.settings-select {
   -webkit-appearance: none;
 }
 
+/* В строке настроек («День сводки») селект — такой же правый контрол, как
+   input[type=time]/text: auto-отступы центрировали его в свободном месте
+   и он «плавал» левее правого края. */
+.settings-row select.settings-select {
+  margin: 0;
+  flex: none;
+}
+
 .item-row {
   display: flex;
   align-items: flex-start;
@@ -1327,6 +1345,11 @@ select.settings-select {
 
 .fmt-toolbar button:active {
   background: var(--berry-soft);
+}
+
+/* Кнопки, не разрешённые политикой data-fmt активного поля (syncFmtButtons). */
+.fmt-toolbar button[hidden] {
+  display: none;
 }
 
 .fmt-spoiler-dot {
@@ -2160,3 +2183,295 @@ input[type="checkbox"]:active {
 .cal-dot.is-birthday {
   background: var(--cal-birthday);
 }
+
+/* ------------------------------------------------------------------
+   Фло: трекер цикла. Каркас общий с остальными вкладками — карточки
+   (.card), кнопки (.primary/.secondary), поля (.field), пилюли
+   (.day-chip) и календарная сетка (.cal-*). Свои — только семантика
+   цикла, состояния дней и чипы-переключатели.
+------------------------------------------------------------------- */
+:root {
+  /* Месячные красятся акцентом пользователя: --flo-period ссылается на
+     --berry, который applyAccent переопределяет под выбранную палитру.
+     Фертильное окно — фиксированный бирюзовый в обеих темах, как
+     семантические цвета календаря (--cal-*). */
+  --flo-fertile: #2e9c8d;
+}
+
+:root[data-theme="dark"] {
+  --flo-fertile: #55c3b2;
+}
+
+.flo-today .flo-line { margin: 4px 0; }
+
+.flo-line {
+  margin: 4px 0;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.flo-sub {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.flo-disclaimer {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Отступ перед группой внутри карточки (интенсивность, секс, данные). */
+.flo-group { margin-top: 16px; }
+
+.flo-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+/* Чипы-переключатели (интенсивность, настроение, симптомы, шеринг,
+   напоминания): пилюля с рамкой, как .secondary, выбор — мягкая
+   акцентная заливка, как у выбранного дня календаря. */
+.flo-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.flo-chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  min-height: 34px;
+  padding: 0 14px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.flo-chip:active {
+  transform: scale(0.96);
+}
+
+.flo-chip.is-on {
+  background: var(--berry-soft);
+  border-color: transparent;
+  color: var(--berry);
+  font-weight: 600;
+}
+
+/* Шкала боли 0–10: компактные числовые чипы в одну-две строки. */
+.flo-pain-scale .flo-chip {
+  min-width: 36px;
+  padding: 0 8px;
+  text-align: center;
+}
+
+/* Компактные поля внутри строк действий (БТ/ЛГ, время и доза приёма):
+   вид как у .field > input, высота — как у кнопок .secondary (44px),
+   чтобы инпут и кнопка в одной строке были одной высоты. */
+.flo-input {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 12px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+/* История циклов и список дат в партнёрском виде. */
+.flo-history {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.flo-hist {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+/* Статистика за год: столбики циклов и симптомы по фазам. */
+.flo-chart { width: 100%; height: auto; margin-top: 8px; }
+.flo-bar { fill: var(--flo-period, var(--berry)); opacity: 0.85; }
+.flo-avg { stroke: var(--muted); stroke-dasharray: 4 4; }
+.flo-phase { margin-top: 10px; }
+.flo-bar-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr 40px;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.flo-meter {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.flo-meter i {
+  display: block;
+  height: 100%;
+  background: var(--flo-period, var(--berry));
+  border-radius: 4px;
+}
+.flo-legend { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+
+/* Состояния дней в календаре Фло: сетка общая с «Нашей парой» (.cal-day),
+   краска цикла — своя. Порядок важен: месячные (непрозрачная заливка)
+   перекрывают прочие фоны, а кольца «сегодня»/«выбран» возвращаются
+   поверх заливки контуром. */
+.cal-day.is-period {
+  background: var(--flo-period, var(--berry));
+  color: #fff;
+  font-weight: 600;
+}
+
+.cal-day.is-predicted {
+  background: color-mix(in srgb, var(--flo-period, var(--berry)) 22%, transparent);
+}
+
+.cal-day.is-fertile {
+  background: color-mix(in srgb, var(--flo-fertile, #2e9c8d) 24%, transparent);
+}
+
+.cal-day.is-ovulation {
+  box-shadow: inset 0 0 0 2px var(--flo-ovulation, var(--flo-fertile, #2e9c8d));
+}
+
+.cal-day.is-delay { opacity: 0.5; }
+
+.cal-day.is-period.is-today,
+.cal-day.is-period.is-selected {
+  box-shadow: inset 0 0 0 1.5px var(--ink);
+}
+
+/* Точки цикла в легендах обеих календарей. «Месячные» — не круглая точка,
+   а капля (острый кончик вверх) серого цвета --cal-private, чтобы она не
+   спорила с цветовыми точками планов и дат. */
+.cal-dot.is-cycle,
+.cal-dot.is-period {
+  background: var(--cal-private);
+  border-radius: 0 50% 50% 50%;
+  transform: rotate(45deg);
+}
+.cal-dot.is-predicted {
+  background: color-mix(in srgb, var(--flo-period, var(--berry)) 22%, transparent);
+}
+.cal-dot.is-fertile {
+  background: color-mix(in srgb, var(--flo-fertile, #2e9c8d) 24%, transparent);
+}
+.cal-dot.is-ovulation { background: var(--flo-ovulation, var(--flo-fertile, #2e9c8d)); }
+/* Запись дня (флоу/настроение/симптомы) — нейтральная точка. */
+.cal-dot.is-log { background: var(--muted); }
+
+/* --- Фло, этап 6/P2: препараты, измерения, отчёт --- */
+.flo-med-row {
+  padding: 8px 0;
+  border-top: 1px solid var(--line, rgba(127,127,127,.18));
+}
+.flo-med-row:first-of-type { border-top: 0; }
+.flo-med-form {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line, rgba(127,127,127,.18));
+  border-radius: 12px;
+}
+.flo-report-doc h2 { font-size: 1.15rem; margin: 0 0 4px; }
+.flo-report-doc h3 { font-size: 1rem; margin: 14px 0 6px; }
+.flo-report-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .82rem;
+}
+.flo-report-table th,
+.flo-report-table td {
+  border: 1px solid var(--line, rgba(127,127,127,.25));
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+.flo-report-table th {
+  background: rgba(127,127,127,.08);
+  font-weight: 600;
+}
+.flo-report-doc small { color: var(--muted); }
+@media print {
+  .no-print { display: none !important; }
+  body * { visibility: hidden; }
+  #flo-report, #flo-report * { visibility: visible; }
+  #flo-report {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: #fff;
+    color: #111;
+    padding: 16px;
+  }
+  .flo-report-table { font-size: 10pt; }
+  .flo-report-table th, .flo-report-table td { border-color: #999; }
+  .flo-report-doc h2, .flo-report-doc h3 { color: #111; }
+  .flo-report-doc .flo-disclaimer { color: #333; }
+  .flo-report-doc tr { break-inside: avoid; }
+  .flo-report-table thead { display: table-header-group; }
+}
+
+/* --- Фло, этап P3: сворачиваемые секции, объяснение прогноза, доступность --- */
+.flo-fold {
+  border-top: 1px solid var(--line, rgba(127,127,127,.15));
+  padding: 6px 0;
+}
+.flo-fold-title {
+  cursor: pointer;
+  font-size: .85rem;
+  font-weight: 600;
+  color: var(--muted);
+  list-style: none;
+  padding: 4px 0;
+}
+.flo-fold-title::before {
+  content: "▸ ";
+}
+.flo-fold[open] > .flo-fold-title::before {
+  content: "▾ ";
+}
+.flo-fold-title::-webkit-details-marker { display: none; }
+.flo-fold .flo-chips, .flo-fold .field, .flo-fold .flo-actions { margin-top: 6px; }
+.flo-explain {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: .85rem;
+  color: var(--muted);
+}
+.flo-explain li { margin: 3px 0; }
+.flo-chip:focus-visible,
+.flo-fold-title:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent, #4a7dff);
+  outline-offset: 2px;
+}
+
+/* Графики по дням (P2): точки боли, столбцы кровотечения, БТ/ЛГ. */
+.flo-dot { fill: var(--berry, #c0392b); }
+.flo-bbt-dot { fill: var(--flo-ovulation, #2e9c8d); }
+.flo-bbt-line { fill: none; stroke: var(--flo-ovulation, #2e9c8d); stroke-width: 1.5; opacity: .8; }
+.flo-lh-pos { fill: #2e9c8d; }
+.flo-lh-unclear { fill: #b8860b; }
+.flo-lh-neg { fill: var(--muted); }

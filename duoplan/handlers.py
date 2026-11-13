@@ -187,6 +187,20 @@ class Form(StatesGroup):
     memory = State()
     wish = State()
     wish_comment = State()  # необязательное уточнение к желанию
+    # Фло: логирование дня (интенсивность, сгустки, настроение, энергия,
+    # симптомы, заметка, секс).
+    flo_log_date = State()
+    flo_log_flow = State()
+    flo_log_clots = State()
+    flo_log_mood = State()
+    flo_log_energy = State()
+    flo_log_symptoms = State()
+    flo_log_note = State()
+    flo_log_sex = State()
+    # Фло: настройки (avg_cycle_length, avg_period_length, notify_*).
+    flo_settings_cycle = State()
+    flo_settings_period = State()
+    flo_settings_notify = State()
 
 
 ALL_FORMS = StateFilter(
@@ -198,6 +212,17 @@ ALL_FORMS = StateFilter(
     Form.memory,
     Form.wish,
     Form.wish_comment,
+    Form.flo_log_date,
+    Form.flo_log_flow,
+    Form.flo_log_clots,
+    Form.flo_log_mood,
+    Form.flo_log_energy,
+    Form.flo_log_symptoms,
+    Form.flo_log_note,
+    Form.flo_log_sex,
+    Form.flo_settings_cycle,
+    Form.flo_settings_period,
+    Form.flo_settings_notify,
 )
 
 
@@ -1251,3 +1276,324 @@ async def fallback(message: Message) -> None:
         "Откройте пространство через /menu или используйте /cancel, "
         "чтобы выйти из текущего ввода."
     )
+
+
+# ---------------------------------------------------------------------------
+# Фло (трекер цикла) в боте: /flo, шеринг, уведомления партнёра, выгрузка, /flo_partner.
+# Дневник симптомов и секс-логи здесь не ведутся: они только в Mini App.
+# ---------------------------------------------------------------------------
+from datetime import datetime as _flo_datetime  # noqa: E402
+
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup  # noqa: E402
+
+from duoplan import cycle as flo  # noqa: E402
+
+
+def _flo_keyboard(has_open: bool, share: dict) -> InlineKeyboardMarkup:
+    period = InlineKeyboardButton(
+        text="Завершить месячные" if has_open else "Отметить месячные",
+        callback_data="flo:end" if has_open else "flo:start",
+    )
+    share_btn = InlineKeyboardButton(
+        text="Выключить шеринг" if share["enabled"] else "Включить шеринг",
+        callback_data="flo:share",
+    )
+    notify_btn = InlineKeyboardButton(
+        text="Не уведомлять партнёра" if share["notify"] else "Уведомлять партнёра",
+        callback_data="flo:notify",
+    )
+    export_btn = InlineKeyboardButton(text="Выгрузить файл", callback_data="flo:export")
+    return InlineKeyboardMarkup(inline_keyboard=[[period], [share_btn], [notify_btn], [export_btn]])
+
+
+async def _flo_view(service: DuoPlanService, tg_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    now_dt = _flo_datetime.now(service.tz)
+    today = now_dt.date()
+    profile = await flo.load_profile(service.db, tg_id, int(now_dt.timestamp()))
+    periods = await flo.load_periods(service.db, tg_id)
+    measurements = await flo.load_measurements(service.db, tg_id)
+    forecast = flo.cycle_forecast(
+        periods, today,
+        profile["avg_cycle_length"], profile["avg_period_length"],
+        profile.get("cycle_length_known", 0), measurements,
+    )
+    open_start = next((s for s, e, u in (flo._period_parts(p) for p in periods) if e is None and not u), None)
+    share = await flo.share_state(service.db, tg_id)
+    return flo.cycle_text(forecast, open_start), _flo_keyboard(open_start is not None, share)
+
+
+# ---------------------------------------------------------------------------
+# Фло: команды /flo_log (дневник) и /flo_settings (настройки).
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("flo_log"))
+async def flo_log_start(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    tg_id = _sender(message).id
+    if not await flo.is_female(service.db, tg_id):
+        await message.answer("Фло доступен только владелице календаря.")
+        return
+    await message.answer("Дневник дня. Введите дату в формате ГГГГ-ММ-ДД (например, 2026-11-12) или «сегодня».")
+    await state.set_state(Form.flo_log_date)
+
+
+@router.message(StateFilter(Form.flo_log_date), F.text)
+async def flo_log_date(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    try:
+        if text == "сегодня":
+            day = await user_today(service.db, _sender(message).id)
+        else:
+            day = date.fromisoformat(text)
+    except ValueError:
+        await message.answer("Проверьте дату (ГГГГ-ММ-ДД или «сегодня»).")
+        return
+    await state.update_data(log_date=day)
+    await message.answer(
+        "Интенсивность выделений (один код или пропустите):\n"
+        "spotting (мажь), light (слабые), medium (средние), heavy (сильные)"
+    )
+    await state.set_state(Form.flo_log_flow)
+
+
+@router.message(StateFilter(Form.flo_log_flow), F.text)
+async def flo_log_flow(message: Message, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"", "-", "пропустить", "нет"}:
+        flow = None
+    elif text in flo.FLOW_CODES:
+        flow = text
+    else:
+        await message.answer("Неверный код. Введите один из: spotting, light, medium, heavy или пропустите.")
+        return
+    await state.update_data(log_flow=flow)
+    await message.answer("Были ли сгустки? (да / нет или пропустите)")
+    await state.set_state(Form.flo_log_clots)
+
+
+@router.message(StateFilter(Form.flo_log_clots), F.text)
+async def flo_log_clots(message: Message, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"", "-", "пропустить"}:
+        clots = None
+    elif text in {"да", "yes", "y", "+"}:
+        clots = True
+    elif text in {"нет", "no", "n"}:
+        clots = False
+    else:
+        await message.answer("Ответьте «да» или «нет» (или пропустите).")
+        return
+    await state.update_data(log_clots=clots)
+    await message.answer(
+        "Настроение (один код или пропустите):\n"
+        "happy (радость), calm (спокойствие), sensitive (чувствительность), "
+        "irritable (раздражительность), anxious (тревожность), sad (грусть), mood_swings (перепады)"
+    )
+    await state.set_state(Form.flo_log_mood)
+
+
+@router.message(StateFilter(Form.flo_log_mood), F.text)
+async def flo_log_mood(message: Message, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"", "-", "пропустить", "нет"}:
+        mood = None
+    elif text in flo.MOOD_CODES:
+        mood = text
+    else:
+        await message.answer("Неверный код. Введите один из: happy, calm, sensitive, irritable, anxious, sad, mood_swings или пропустите.")
+        return
+    await state.update_data(log_mood=mood)
+    await message.answer(
+        "Энергия (один код или пропустите):\n"
+        "very_low (очень низкая), low (низкая), normal (обычная), high (высокая)"
+    )
+    await state.set_state(Form.flo_log_energy)
+
+
+@router.message(StateFilter(Form.flo_log_energy), F.text)
+async def flo_log_energy(message: Message, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"", "-", "пропустить", "нет"}:
+        energy = None
+    elif text in flo.ENERGY_CODES:
+        energy = text
+    else:
+        await message.answer("Неверный код. Введите один из: very_low, low, normal, high или пропустите.")
+        return
+    await state.update_data(log_energy=energy)
+    await message.answer(
+        "Симптомы (коды через запятую, «не было», или пропустите):\n"
+        "cramps, headache, bloating, breast_tenderness, fatigue, acne, nausea, back_pain, dizziness, constipation, diarrhea, exercise, good_sleep, poor_sleep, water"
+    )
+    await state.set_state(Form.flo_log_symptoms)
+
+
+@router.message(StateFilter(Form.flo_log_symptoms), F.text)
+async def flo_log_symptoms(message: Message, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    # «не было» — явная отметка «сегодня симптомов не было», отличается
+    # от пропуска (пропущенный день ничего не утверждает).
+    symptoms_clear = text == "не было"
+    if text in {"", "-", "пропустить", "нет", "не было"}:
+        symptoms = []
+    else:
+        raw = [s.strip() for s in text.split(",")]
+        symptoms = [s for s in raw if s in flo.SYMPTOM_CODES]
+        if len(symptoms) != len(raw):
+            await message.answer("Некоторые коды не распознаны и пропущены.")
+    await state.update_data(log_symptoms=symptoms, log_symptoms_clear=symptoms_clear)
+    await message.answer("Заметка (до 2000 символов или пропустите).")
+    await state.set_state(Form.flo_log_note)
+
+
+@router.message(StateFilter(Form.flo_log_note), F.text)
+async def flo_log_note(message: Message, state: FSMContext) -> None:
+    note = message.text[:2000] if message.text else ""
+    await state.update_data(log_note=note)
+    await message.answer(
+        "Секс (protected, unprotected, none или пропустите — партнёру не передаётся)."
+    )
+    await state.set_state(Form.flo_log_sex)
+
+
+@router.message(StateFilter(Form.flo_log_sex), F.text)
+async def flo_log_sex(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"", "-", "пропустить", "нет"}:
+        sex = None
+    elif text in flo.SEX_CODES:
+        sex = text
+    else:
+        await message.answer("Неверный код. Введите один из: protected, unprotected, none или пропустите.")
+        return
+    data = await state.get_data()
+    await flo.upsert_log(
+        service.db,
+        _sender(message).id,
+        data["log_date"],
+        flow=data.get("log_flow"),
+        mood=data.get("log_mood"),
+        symptoms=data.get("log_symptoms"),
+        note=data.get("log_note"),
+        sex=sex,
+        clots=data.get("log_clots") is True,
+        energy=data.get("log_energy"),
+        symptoms_clear=data.get("log_symptoms_clear") is True,
+    )
+    await message.answer("Дневник дня сохранён.")
+    await state.clear()
+
+
+@router.message(Command("flo_settings"))
+async def flo_settings_start(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    tg_id = _sender(message).id
+    if not await flo.is_female(service.db, tg_id):
+        await message.answer("Фло доступен только владелице календаря.")
+        return
+    profile = await flo.load_profile(service.db, tg_id, int(datetime.now(service.tz).timestamp()))
+    await message.answer(
+        f"Средняя длина цикла (20–45 дней): {profile['avg_cycle_length']}\n"
+        f"Средняя длительность месячных (2–10 дней): {profile['avg_period_length']}\n"
+        "Изменить? Введите два числа через пробел (цикл месячные) или «нет»."
+    )
+    await state.set_state(Form.flo_settings_cycle)
+
+
+@router.message(StateFilter(Form.flo_settings_cycle), F.text)
+async def flo_settings_cycle(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"нет", "-", "пропустить"}:
+        await state.clear()
+        await message.answer("Настройки без изменений.")
+        return
+    parts = text.split()
+    if len(parts) != 2:
+        await message.answer("Два числа через пробел или «нет».")
+        return
+    try:
+        cycle_len = int(parts[0])
+        period_len = int(parts[1])
+    except ValueError:
+        await message.answer("Числа должны быть целыми.")
+        return
+    if not (20 <= cycle_len <= 45) or not (2 <= period_len <= 10):
+        await message.answer("Цикл 20–45 дней, месячные 2–10 дней.")
+        return
+    now = int(datetime.now(service.tz).timestamp())
+    await flo.update_profile(service.db, _sender(message).id, {"avg_cycle_length": cycle_len, "avg_period_length": period_len}, now)
+    await message.answer("Средние значения обновлены. Настройки напоминаний? (вкл/выкл или «нет»)")
+    await state.set_state(Form.flo_settings_notify)
+
+
+@router.message(StateFilter(Form.flo_settings_notify), F.text)
+async def flo_settings_notify(message: Message, service: DuoPlanService, state: FSMContext) -> None:
+    text = message.text.strip().lower()
+    if text in {"нет", "-", "пропустить"}:
+        await state.clear()
+        await message.answer("Напоминания без изменений.")
+        return
+    enabled = text in {"вкл", "да", "yes", "1", "включить"}
+    now = int(datetime.now(service.tz).timestamp())
+    await flo.update_profile(service.db, _sender(message).id, {"notify_enabled": 1 if enabled else 0}, now)
+    await message.answer("Напоминания обновлены.")
+    await state.clear()
+
+
+# ---------------------------------------------------------------------------
+# Фло: команды /flo, /flo_partner (существующие, без изменений).
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("flo"))
+async def flo_command(message: Message, service: DuoPlanService) -> None:
+    tg_id = _sender(message).id
+    if not await flo.is_female(service.db, tg_id):
+        await message.answer("Фло доступен только владелице календаря.")
+        return
+    text, keyboard = await _flo_view(service, tg_id)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.message(Command("flo_partner"))
+async def flo_partner_command(message: Message, service: DuoPlanService) -> None:
+    tg_id = _sender(message).id
+    today = _flo_datetime.now(service.tz).date()
+    for owner_id in await flo.partner_ids(service.db, tg_id):
+        text = await flo.partner_view_text(service.db, owner_id, today)
+        if text:
+            await message.answer(text)
+            return
+    await message.answer("Партнёрша пока не делится календарём.")
+
+
+@router.callback_query(F.data.in_({"flo:start", "flo:end", "flo:share", "flo:notify", "flo:export"}))
+async def flo_action(call: CallbackQuery, service: DuoPlanService) -> None:
+    tg_id = call.from_user.id
+    if not await flo.is_female(service.db, tg_id):
+        await call.answer("Фло доступен только владелице", show_alert=True)
+        return
+    now_dt = _flo_datetime.now(service.tz)
+    stamp = int(now_dt.timestamp())
+    today = now_dt.date()
+    if call.data == "flo:export":
+        data = await flo.export_json(service.db, tg_id, stamp)
+        if call.message:
+            await call.message.answer_document(BufferedInputFile(data, filename="flo-export.json"), caption="Фло: выгрузка")
+        await call.answer()
+        return
+    if call.data == "flo:start":
+        await flo.mark_period(service.db, tg_id, today, None, stamp)
+    elif call.data == "flo:end":
+        if not await flo.close_open_period(service.db, tg_id, today, stamp):
+            await call.answer("Открытых месячных нет", show_alert=True)
+            return
+    elif call.data == "flo:share":
+        share = await flo.share_state(service.db, tg_id)
+        await flo.set_share(service.db, tg_id, not share["enabled"], stamp)
+    elif call.data == "flo:notify":
+        share = await flo.share_state(service.db, tg_id)
+        await flo.set_share_notify(service.db, tg_id, not share["notify"], stamp)
+    text, keyboard = await _flo_view(service, tg_id)
+    if call.message:
+        await call.message.answer(text, reply_markup=keyboard)
+    await call.answer()
