@@ -2750,8 +2750,8 @@
         <details class="flo-fold"${floMeds().length ? " open" : ""}><summary class="flo-fold-title">Лекарства и препараты</summary>
         ${renderFloDayMeds(d, future)}
         </details>
-        <details class="flo-fold"><summary class="flo-fold-title">Секс (только вам)</summary>
-        <p class="settings-hint">Видно только вам — партнёру не передаётся. Повторите отметку для нескольких раз за день</p>
+        <details class="flo-fold"><summary class="flo-fold-title">Секс</summary>
+        <p class="settings-hint">Повторите отметку для нескольких раз за день</p>
         <div class="flo-chips">${[["protected", "с защитой"], ["unprotected", "без защиты"], ["none", "без секса"]].map(([code, label]) => chip("flo-set-sex", label, log.sex === code, "data-sex", code)).join("")}</div>
         ${(log.sex === "protected" || log.sex === "unprotected") ? `<div class="flo-chips" style="margin-top:6px">
           <button type="button" class="flo-chip" data-action="flo-sex-dec" data-date="${d}" aria-label="Убрать одну отметку">−</button>
@@ -2900,6 +2900,109 @@
     render();
   }
 
+  // Партнёрский вид Фло: только чтение — календарь с отметками и карточка
+  // выбранного дня (секс, настроение, качество сна, БТ). Дневник,
+  // препараты и редактирование партнёру недоступны.
+  function floPartnerDayLog(date) {
+    return (floPartner?.days || []).find(l => l.date === date) || null;
+  }
+  function floPartnerBbt(date) {
+    return (floPartner?.bbt || []).filter(m => m.date === date);
+  }
+  function floPartnerInPeriod(date) {
+    const today = floPartner?.today || "";
+    return (floPartner?.calendar_periods || []).some(p =>
+      date >= p.start_date && date <= (p.end_date || (p.end_unknown ? p.start_date : today)));
+  }
+  function floPartnerDayClasses(date, inMonth = true) {
+    const f = floPartner?.forecast || {};
+    const fh = f.empty ? {} : f;
+    const today = floPartner?.today || "";
+    const classes = [];
+    if (floPartnerInPeriod(date)) classes.push("is-period");
+    else if (!fh.empty && date >= fh.next_period_start && date <= fh.next_period_end) classes.push("is-predicted");
+    if (!fh.empty && date >= fh.fertile_start && date <= fh.fertile_end) classes.push("is-fertile");
+    if (!fh.empty && date === fh.ovulation_date) classes.push("is-ovulation");
+    if (!fh.empty && fh.phase === "delay" && date >= fh.next_period_start && date <= today) classes.push("is-delay");
+    if (inMonth && date === today) classes.push("is-today");
+    return classes;
+  }
+  function floPartnerDayDots(date) {
+    const log = floPartnerDayLog(date);
+    const sexCount = (log?.sex === "protected" || log?.sex === "unprotected") ? (log.sex_count || 1) : 0;
+    const hasOther = log?.mood || log?.sleep_quality || floPartnerBbt(date).length;
+    return `${hasOther ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}`;
+  }
+  function renderFloPartnerCalendar() {
+    const v = floPartner;
+    if (!v?.shared) return "";
+    if (!floMonth) floMonth = (v.today || new Date().toISOString().slice(0, 10)).slice(0, 7);
+    const [year, month] = floMonth.split("-").map(Number);
+    const cells = calendarGrid(year, month).map(cell => {
+      const classes = ["cal-day", ...floPartnerDayClasses(cell.key, cell.inMonth)];
+      if (!cell.inMonth) classes.push("is-outside");
+      if (cell.key === floSelectedDate) classes.push("is-selected");
+      const dots = floPartnerDayDots(cell.key);
+      if (dots) classes.push("has-events");
+      return `<button type="button" class="${classes.join(" ")}" data-action="flo-select-day" data-date="${cell.key}"
+        aria-label="${esc(calendarLongDate(cell.key))}"${cell.key === floSelectedDate ? ' aria-pressed="true"' : ""}>
+        <span class="cal-num">${cell.day}</span>
+        ${dots ? `<span class="cal-dots" aria-hidden="true">${dots}</span>` : ""}
+      </button>`;
+    }).join("");
+    return `
+      <section class="card calendar-card">
+        <div class="cal-head">
+          <button type="button" class="cal-nav-btn" data-action="flo-month-prev" aria-label="Предыдущий месяц">${CHEVRON_LEFT}</button>
+          <h3 class="cal-title">${esc(calendarMonthTitle(year, month))}</h3>
+          <button type="button" class="cal-nav-btn" data-action="flo-month-next" aria-label="Следующий месяц">${CHEVRON_RIGHT}</button>
+        </div>
+        <div class="cal-weekdays" aria-hidden="true">${["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map(w => `<span>${w}</span>`).join("")}</div>
+        <div class="cal-grid">${cells}</div>
+        <div class="cal-legend">
+          <span><i class="cal-dot is-period" aria-hidden="true"></i>Месячные</span>
+          <span><i class="cal-dot is-predicted" aria-hidden="true"></i>Прогноз</span>
+          <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно</span>
+          <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция</span>
+          <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
+          <span><i class="cal-dot is-log" aria-hidden="true"></i>Отметки</span>
+        </div>
+      </section>`;
+  }
+  function renderFloPartnerDayCard() {
+    const v = floPartner;
+    if (!v?.shared || !floSelectedDate) return "";
+    const d = floSelectedDate;
+    const log = floPartnerDayLog(d);
+    const bbt = floPartnerBbt(d);
+    const states = floPartnerDayClasses(d).filter(c => ["is-period", "is-predicted", "is-fertile", "is-ovulation", "is-delay"].includes(c));
+    const stateNames = { "is-period": "Месячные", "is-predicted": "Прогноз месячных", "is-fertile": "Фертильное окно", "is-ovulation": "Овуляция", "is-delay": "Задержка" };
+    const sexCount = (log?.sex === "protected" || log?.sex === "unprotected") ? (log.sex_count || 1) : 0;
+    const lines = [];
+    if (states.length) lines.push(`<p class="flo-line">${states.map(c => esc(stateNames[c])).join(" · ")}</p>`);
+    if (sexCount) {
+      lines.push(`<p class="flo-line">${FLO_HEART_ICON.repeat(Math.min(sexCount, 5))}${sexCount > 5 ? `<span class="cal-sex-more">+${sexCount - 5}</span>` : ""} ${esc(log.sex === "protected" ? "с защитой" : "без защиты")}${sexCount > 1 ? ` ×${sexCount}` : ""}</p>`);
+    }
+    if (log?.mood) {
+      const mood = FLO_MOODS.find(([c]) => c === log.mood)?.[1] || log.mood;
+      lines.push(`<p class="flo-line">Настроение: ${esc(mood)}</p>`);
+    }
+    if (log?.sleep_quality) {
+      const sq = FLO_SLEEP_QUALITY.find(([c]) => c === log.sleep_quality)?.[1] || log.sleep_quality;
+      lines.push(`<p class="flo-line">Сон: ${esc(sq)}</p>`);
+    }
+    if (bbt.length) {
+      lines.push(`<p class="flo-line">Температура: ${bbt.map(m => `${esc(String(m.value))}°${m.unit === "F" ? "F" : "C"}${m.time ? ` · ${esc(m.time)}` : ""}`).join("; ")}</p>`);
+    }
+    if (!lines.length) lines.push(`<p class="cal-empty">Отметок нет.</p>`);
+    return `
+      <section class="card">
+        <p class="eyebrow">Выбранный день</p>
+        <h3>${esc(formatDay(d))}</h3>
+        ${lines.join("")}
+      </section>`;
+  }
+
   function renderFloPartnerView() {
     const v = floPartner;
     if (!v || v.shared !== true) {
@@ -2937,7 +3040,9 @@
         ${lines.map(l => `<p class="flo-line">${l}</p>`).join("")}
         ${extra}
         <p class="flo-disclaimer">${esc(v.disclaimer || "")}</p>
-      </section>`;
+      </section>
+      ${renderFloPartnerCalendar()}
+      ${renderFloPartnerDayCard()}`;
   }
 
   function floBannerHtml() {
@@ -3531,7 +3636,7 @@
     if (f.quality === "insufficient") bits.push("Данных недостаточно: все даты очень примерные");
     else if (f.quality === "few") bits.push("Истории немного: даты могут заметно отличаться от факта.");
     if (f.next_period_early && f.next_period_late) {
-      bits.push(`Разброс ожидания месячных: ${esc(f.next_period_early)} — ${esc(f.next_period_late)}. Это календарная оценка, а не гарантия`);
+      bits.push(`Разброс ожидания месячных: ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}. Это календарная оценка, а не гарантия`);
     }
     if (f.ovulation_source === "lh") bits.push("Дата овуляции уточнена по положительному тесту ЛГ — это оценка, а не подтверждение.");
     else if (f.ovulation_source === "bbt") bits.push("Дата овуляции уточнена по подъёму базальной температуры — это оценка, а не подтверждение.");
@@ -3575,6 +3680,15 @@
     return renderFloToday();
   }
 
+  // «7 декабря» — число цифрой + месяц письменно, без года (для строк
+  // прогноза в карточке «сегодня»).
+  function floDayMonth(key) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key ?? ""));
+    if (!m) return String(key ?? "");
+    return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", timeZone: "UTC" })
+      .format(new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))));
+  }
+
   // «Сегодня»: прогноз, календарь месяца и дневник выбранного дня.
   function renderFloToday() {
     const f = floState.forecast;
@@ -3600,7 +3714,7 @@
       else if (!f.data_stale) lines.push(`Месячные примерно через ${f.next_period_in} дн.`);
       // Этап 5/P1: диапазон ожидания и честная оценка качества данных.
       if (!openStart && f.phase !== "delay" && f.phase !== "stale" && f.next_period_early && f.next_period_late) {
-        lines.push(`Ориентировочно: ${esc(f.next_period_early)} — ${esc(f.next_period_late)}`);
+        lines.push(`Ориентировочно: ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}`);
       }
       if (f.quality === "insufficient") lines.push("Личной истории пока мало — даты примерные");
       if (f.phase !== "delay" && f.phase !== "stale" && f.ovulation_in > 0) lines.push(`Овуляция примерно через ${f.ovulation_in} дн.`);

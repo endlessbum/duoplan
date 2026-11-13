@@ -742,3 +742,83 @@ test("onboard skips previous period conflicting with existing data", async () =>
   // upsert последней + 1 kept previous; конфликтующий не доходит до batch.
   ok(inserts.every(w => w.args[1] !== "2026-09-10"), "конфликтующий период не пишется");
 });
+
+// ---------------------------------------------------------------------------
+// Партнёрский вид Фло (cycleViewForPartner): календарь, секс, настроение,
+// качество сна и БТ — и ничего лишнего из дневника.
+// ---------------------------------------------------------------------------
+const buildPartnerView = new Function(
+  [
+    extractLine("const CYCLE_LEVELS"),
+    extractBraced("function cyclePhaseTip"),
+    extractBraced("function cycleViewForPartner"),
+    "return cycleViewForPartner;"
+  ].join("\n")
+);
+
+const PARTNER_STATE = {
+  today: "2026-11-13",
+  disclaimer: "Прогноз приблизительный",
+  forecast: {
+    empty: false, phase: "follicular", cycle_day: 10, next_period_in: 18,
+    delay_days: 0, ovulation_in: 6, irregular: false,
+    fertile_start: "2026-11-15", fertile_end: "2026-11-19", ovulation_date: "2026-11-17",
+    next_period_start: "2026-11-28", next_period_end: "2026-12-02"
+  },
+  periods: Array.from({ length: 8 }, (_, i) => ({
+    start_date: `2026-0${(i % 9) + 1}-0${(i % 8) + 1}`, end_date: "2026-01-05", end_unknown: 0
+  })),
+  logs: [{
+    date: "2026-11-12", sex: "protected", sex_count: 2, mood: "calm",
+    sleep_quality: "good", flow: "medium", symptoms: ["cramps"], note: "секрет"
+  }, {
+    date: "2026-11-10", sex: "none", sex_count: 0, mood: null, sleep_quality: "ok",
+    flow: null, symptoms: [], note: ""
+  }],
+  measurements: [
+    { date: "2026-11-12", time: "07:30", kind: "bbt", value: 36.6, unit: "C" },
+    { date: "2026-11-11", time: "08:00", kind: "lh", value: 25, unit: null },
+    { date: "2026-11-10", time: null, kind: "bbt", value: null, unit: "C" }
+  ]
+};
+
+test("partner view: days expose only sex/mood/sleep, never diary fields", () => {
+  const view = buildPartnerView()(PARTNER_STATE, "symptoms");
+  ok(view.shared === true);
+  equal(view.today, "2026-11-13");
+  deepStrictEqual(view.days, [
+    { date: "2026-11-12", sex: "protected", sex_count: 2, mood: "calm", sleep_quality: "good" },
+    { date: "2026-11-10", sex: null, sex_count: 0, mood: null, sleep_quality: "ok" }
+  ]);
+  // Ни одно разрешённое поле не должно протаскивать дневник.
+  for (const d of view.days) {
+    ok(!("flow" in d) && !("symptoms" in d) && !("note" in d), "дневник не утекает");
+  }
+});
+
+test("partner view: bbt contains only bbt measurements with value", () => {
+  const view = buildPartnerView()(PARTNER_STATE, "symptoms");
+  deepStrictEqual(view.bbt, [{ date: "2026-11-12", time: "07:30", value: 36.6, unit: "C" }]);
+});
+
+test("partner view: calendar_periods covers full history, periods stays short", () => {
+  const view = buildPartnerView()(PARTNER_STATE, "periods");
+  equal(view.periods.length, 6);
+  equal(view.calendar_periods.length, 8);
+  // Календарные отметки (секс/настроение/сон/БТ) открываются с уровня periods.
+  ok(Array.isArray(view.days) && Array.isArray(view.bbt));
+});
+
+test("partner view: phases level keeps calendar marks closed", () => {
+  const view = buildPartnerView()(PARTNER_STATE, "phases");
+  ok(view.days === undefined && view.bbt === undefined && view.calendar_periods === undefined);
+});
+
+test("partner view: forecast carries fertile/ovulation windows for the calendar", () => {
+  const view = buildPartnerView()(PARTNER_STATE, "phases");
+  equal(view.forecast.fertile_start, "2026-11-15");
+  equal(view.forecast.fertile_end, "2026-11-19");
+  equal(view.forecast.ovulation_date, "2026-11-17");
+  // Без next_period_* на уровне phases — даты месячных закрыты.
+  ok(view.forecast.next_period_start === undefined);
+});

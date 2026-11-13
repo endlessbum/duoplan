@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.13.22";
+const APP_VERSION = "2026.11.13.24";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.13.22";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.13.22";
+const DB_SCHEMA_VERSION = "2026.11.13.24";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -4709,8 +4709,10 @@ function cycleForecast(periods, profile, today, measurements) {
   };
 }
 // Что видит партнёр на каждом уровне шеринга. Чем выше уровень, тем больше полей:
-// phases — фаза и сроки в днях; periods — даты месячных; symptoms — флоу и симптомы
-// за сегодня; full — ещё и заметка за сегодня. Пол, секс и история логов не отдаются.
+// phases — фаза и расчётные окна; periods — даты месячных и календарные отметки
+// (секс, настроение, качество сна, БТ); symptoms — флоу и симптомы за сегодня;
+// full — ещё и заметка за сегодня. Флоу/симптомы/заметки истории и препараты
+// не отдаются.
 // Короткие подсказки партнёру по фазе. Без деталей владелицы, только что происходит и как поддержать.
 function cyclePhaseTip(phase) {
   const tips = {
@@ -4731,18 +4733,42 @@ function cycleViewForPartner(state, level) {
   const view = {
     shared: true,
     level,
+    today: state.today,
     disclaimer: state.disclaimer,
     tip: f.empty ? null : cyclePhaseTip(f.phase),
     forecast: f.empty
       ? { empty: true }
-      : { empty: false, phase: f.phase, cycle_day: f.cycle_day, next_period_in: f.next_period_in, delay_days: f.delay_days, ovulation_in: f.ovulation_in, irregular: f.irregular }
+      : {
+          empty: false, phase: f.phase, cycle_day: f.cycle_day, next_period_in: f.next_period_in,
+          delay_days: f.delay_days, ovulation_in: f.ovulation_in, irregular: f.irregular,
+          // Расчётные окна — того же уровня, что фаза: партнёрский календарь
+          // красит дни без доступа к дневнику.
+          fertile_start: f.fertile_start, fertile_end: f.fertile_end, ovulation_date: f.ovulation_date
+        }
   };
   if (rank >= 1) {
     view.periods = state.periods.slice(0, 6).map(p => ({ start_date: p.start_date, end_date: p.end_date, end_unknown: !!p.end_unknown }));
+    // Полный список периодов — для календаря партнёра на произвольный месяц
+    // (view.periods выше — только короткая история для списка).
+    view.calendar_periods = state.periods.map(p => ({ start_date: p.start_date, end_date: p.end_date, end_unknown: !!p.end_unknown }));
     if (!f.empty) {
       view.forecast.next_period_start = f.next_period_start;
       view.forecast.next_period_end = f.next_period_end;
     }
+    // Партнёрский календарь: только разрешённые поля дневника — секс с
+    // количеством, настроение и качество сна; плюс базальная температура.
+    // Остальные поля (флоу, симптомы, заметки, препараты) не отдаются.
+    view.days = state.logs
+      .filter(l => l.sex || l.mood || l.sleep_quality)
+      .map(l => ({
+        date: l.date,
+        sex: (l.sex === "protected" || l.sex === "unprotected") ? l.sex : null,
+        sex_count: (l.sex === "protected" || l.sex === "unprotected") ? (l.sex_count || 1) : 0,
+        mood: l.mood || null, sleep_quality: l.sleep_quality || null
+      }));
+    view.bbt = (state.measurements || [])
+      .filter(m => m.kind === "bbt" && m.value !== null && m.value !== undefined)
+      .map(m => ({ date: m.date, time: m.time || null, value: m.value, unit: m.unit || null }));
   }
   if (rank >= 2) {
     const log = state.logs.find(l => l.date === state.today);
