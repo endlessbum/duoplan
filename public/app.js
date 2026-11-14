@@ -82,8 +82,6 @@
   // партнёра + напоминания бота о приёме. Данные персональные (tg_id).
   let healthState = null;
   let healthBusy = false;
-  let healthMedForm = null; // открытая форма препарата
-  let healthMedDeleteArmed = null;
   // Контакты («Дневник → Контакты»): телефонная книга, у каждого партнёра
   // своя. Вид «mine/partner» разделяет списки, поиск фильтрует клиентски.
   let contactsState = null;
@@ -4833,8 +4831,11 @@
   // Сегмент-переключатель вида: те же кнопки, что в доке, но внутри вкладки.
   // data-action="seg-switch" обрабатывается общим делегированным кликом.
   function renderSegment(key, value, options, extraClass = "") {
+    // 4+ вкладки («Дневник», «Наша пара») — плотный шаг: стандартные отступы
+    // выталкивали бар за границу дисплея.
+    const dense = options.length >= 4 ? " is-dense" : "";
     return `
-      <div class="seg-switch${extraClass ? ` ${extraClass}` : ""}" data-switch="${key}" role="tablist">
+      <div class="seg-switch${dense}${extraClass ? ` ${extraClass}` : ""}" data-switch="${key}" role="tablist">
         ${options.map(([id, label]) => `
           <button class="seg-switch-btn${id === value ? " is-active" : ""}" type="button" role="tab"
             aria-selected="${id === value}" data-action="seg-switch" data-switch="${key}" data-tab="${id}">${esc(label)}</button>
@@ -4997,52 +4998,94 @@
     };
   }
 
-  function renderHealthMedForm() {
-    const f = healthMedForm;
-    if (!f) return "";
-    const del = healthMedDeleteArmed === f.id
-      ? `<button type="button" class="primary is-danger full card-action" data-action="health-med-delete" data-id="${f.id}">Точно удалить</button>`
-      : f.id ? `<button type="button" class="secondary is-danger full card-action" data-action="health-med-delete-arm" data-id="${f.id}">Удалить</button>` : "";
+  // Диалог препарата (добавление/правка) — как в других вкладках: отдельное
+  // окно поверх, а не разворачивающийся список. Чистый сборщик тела запроса
+  // вынесен отдельно (тестируется без диалога).
+  function healthMedDialogFields(m) {
+    const f = m || {};
     return `
-      <div class="flo-med-form">
-        <label class="field"><span>Название</span>
-          <input id="health-med-name" type="text" maxlength="120" value="${esc(f.name || "")}" placeholder="Например, магний">
+      <label class="field"><span>Название</span>
+        <input name="name" data-fmt="none" type="text" maxlength="120" required value="${esc(f.name || "")}" placeholder="Например, магний">
+      </label>
+      <div class="flo-actions" style="margin-top:6px">
+        <label class="field" style="flex:1"><span>Форма</span>
+          <select name="form"><option value="">—</option>${HEALTH_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         </label>
-        <div class="flo-actions" style="margin-top:6px">
-          <label class="field" style="flex:1"><span>Форма</span>
-            <select id="health-med-form"><option value="">—</option>${HEALTH_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
-          </label>
-          <label class="field" style="flex:1"><span>Статус</span>
-            <select id="health-med-status">${HEALTH_MED_STATUS.map(([c, l]) => `<option value="${c}"${(f.status || "active") === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
-          </label>
-        </div>
-        <label class="field"><span>Доза (справочно)</span>
-          <input id="health-med-dosage" type="text" maxlength="120" value="${esc(f.dosage || "")}" placeholder="Например, 1 таблетка">
+        <label class="field" style="flex:1"><span>Статус</span>
+          <select name="status">${HEALTH_MED_STATUS.map(([c, l]) => `<option value="${c}"${(f.status || "active") === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         </label>
-        <label class="field"><span>Схема приёма</span>
-          <input id="health-med-schedule" type="text" maxlength="200" value="${esc(f.schedule || "")}" placeholder="Например, 1 раз в день после еды">
+      </div>
+      <label class="field"><span>Доза (справочно)</span>
+        <input name="dosage" data-fmt="none" type="text" maxlength="120" value="${esc(f.dosage || "")}" placeholder="Например, 1 таблетка">
+      </label>
+      <label class="field"><span>Схема приёма</span>
+        <input name="schedule" data-fmt="none" type="text" maxlength="200" value="${esc(f.schedule || "")}" placeholder="Например, 1 раз в день после еды">
+      </label>
+      <div class="flo-actions" style="margin-top:6px">
+        <label class="field" style="flex:1"><span>Начало курса</span>
+          <input name="start_date" type="date" required value="${esc(f.start_date || healthToday())}">
         </label>
-        <div class="flo-actions" style="margin-top:6px">
-          <label class="field" style="flex:1"><span>Начало курса</span>
-            <input id="health-med-start" type="date" value="${esc(f.start_date || healthToday())}">
-          </label>
-          <label class="field" style="flex:1"><span>Конец курса</span>
-            <input id="health-med-end" type="date" value="${esc(f.end_date || "")}">
-          </label>
-        </div>
-        <div class="flo-actions" style="margin-top:6px">
-          <button type="button" class="flo-chip${f.remind_enabled ? " is-on" : ""}" data-action="health-form-remind-toggle" aria-pressed="${!!f.remind_enabled}">${f.remind_enabled ? "Напоминание: включено" : "Напоминание: выключено"}</button>
-          <input id="health-med-remind-time" class="flo-input" type="time" value="${esc(f.remind_time || "09:00")}" aria-label="Время напоминания" style="width:110px">
-        </div>
-        <p class="settings-hint">Бот напомнит о приёме в указанное время, пока курс активен. Отметка о приёме — общий итог за день.</p>
-        <label class="field"><span>Комментарий</span>
-          <input id="health-med-note" type="text" maxlength="1000" value="${esc(f.note || "")}">
+        <label class="field" style="flex:1"><span>Конец курса</span>
+          <input name="end_date" type="date" value="${esc(f.end_date || "")}">
         </label>
-        <button type="button" class="primary full card-action" data-action="health-med-save">Сохранить</button>
-        <button type="button" class="secondary full card-action" data-action="health-med-cancel">Отмена</button>
-        ${del}
-        <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш личный журнал. Препараты не видны партнёру.</p>
-      </div>`;
+      </div>
+      <label class="field"><span><input type="checkbox" name="remind_enabled"${f.remind_enabled ? " checked" : ""}> Напоминание в боте</span></label>
+      <label class="field"><span>Время напоминания</span>
+        <input name="remind_time" type="time" value="${esc(f.remind_time || "09:00")}">
+      </label>
+      <p class="settings-hint">Бот напомнит о приёме в указанное время, пока курс активен. Отметка о приёме — общий итог за день.</p>
+      <label class="field"><span>Комментарий</span>
+        <input name="note" data-fmt="none" type="text" maxlength="1000" value="${esc(f.note || "")}">
+      </label>
+      ${f.id ? `<button type="button" class="secondary is-danger full card-action" data-action="health-med-delete" data-id="${f.id}">Удалить препарат</button>` : ""}
+      <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш личный журнал. Препараты не видны партнёру.</p>`;
+  }
+
+  // FormData диалога → тело запроса. Ошибки несут code, чтобы тост показал
+  // понятный текст, а диалог остался открытым для правки.
+  function healthMedBodyFromForm(fd, id) {
+    const name = String(fd.get("name") || "").trim();
+    if (!name) {
+      const err = new Error("Укажите название препарата");
+      err.code = "INVALID_NAME";
+      throw err;
+    }
+    const startDate = String(fd.get("start_date") || "");
+    if (!startDate) {
+      const err = new Error("Укажите дату начала курса");
+      err.code = "INVALID_DATE";
+      throw err;
+    }
+    const remindEnabled = fd.get("remind_enabled") === "on";
+    const remindTime = String(fd.get("remind_time") || "");
+    if (remindEnabled && !remindTime) {
+      const err = new Error("Укажите время напоминания");
+      err.code = "INVALID_TIME";
+      throw err;
+    }
+    return {
+      name, dosage: String(fd.get("dosage") || "").trim() || null,
+      form: String(fd.get("form") || "") || null, schedule: String(fd.get("schedule") || "").trim() || null,
+      start_date: startDate, end_date: String(fd.get("end_date") || "") || null,
+      status: String(fd.get("status") || "active"), note: String(fd.get("note") || "").trim() || null,
+      remind_enabled: remindEnabled, remind_time: remindEnabled ? remindTime : null,
+      ...(id ? { id } : {})
+    };
+  }
+
+  function openHealthMedDialog(m = null) {
+    openDialog({
+      title: m ? "Изменить препарат" : "Новый препарат",
+      submitLabel: m ? "Сохранить" : "Добавить",
+      cancelLabel: "Отмена",
+      fields: healthMedDialogFields(m),
+      onSubmit: async (fd) => {
+        const body = healthMedBodyFromForm(fd, m?.id);
+        healthState = await request("/api/health/med", { method: "POST", body });
+        showToast(body.remind_enabled ? "Препарат сохранён — бот напомнит о приёме" : "Препарат сохранён");
+        return appState;
+      }
+    });
   }
 
   function renderHealthBody() {
@@ -5084,7 +5127,7 @@
         <h3>Мои препараты</h3>
         <p class="settings-hint">Личный журнал: препараты и приём не видны партнёру. Бот напомнит о приёме в заданное время, пока курс активен.</p>
         ${rows || `<p class="flo-disclaimer">Пока нет препаратов.</p>`}
-        ${healthMedForm ? renderHealthMedForm() : `<button type="button" class="secondary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>`}
+        <button type="button" class="secondary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>
         <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение.</p>
       </section>`;
   }
@@ -5093,66 +5136,30 @@
     const medId = Number(btn.dataset.med || btn.dataset.id);
     if (action === "health-retry") { healthState = null; return render(); }
     if (action === "health-med-new") {
-      healthMedForm = { name: "", dosage: "", form: "", schedule: "", remind_enabled: false, remind_time: "09:00", start_date: healthToday(), end_date: "", status: "active", note: "" };
-      return render();
-    }
-    if (action === "health-med-cancel") {
-      healthMedForm = null;
-      healthMedDeleteArmed = null;
-      return render();
+      openHealthMedDialog(null);
+      return;
     }
     if (action === "health-med-edit") {
       const m = (healthState?.meds || []).find(x => x.id === medId);
-      if (!m) return;
-      healthMedForm = { ...m, end_date: m.end_date || "" };
-      healthMedDeleteArmed = null;
-      return render();
-    }
-    if (action === "health-form-remind-toggle") {
-      healthMedForm = { ...(healthMedForm || {}), remind_enabled: !(healthMedForm?.remind_enabled) };
-      return render();
-    }
-    if (action === "health-med-delete-arm") {
-      healthMedDeleteArmed = medId;
-      return render();
+      if (m) openHealthMedDialog(m);
+      return;
     }
     if (action === "health-med-delete") {
-      try {
-        healthState = await request("/api/health/med/delete", { method: "POST", body: { id: medId } });
-        healthMedForm = null;
-        healthMedDeleteArmed = null;
-        showToast("Препарат и история приёма удалены");
-      } catch (error) { handleRequestError(error); }
-      return render();
-    }
-    if (action === "health-med-save") {
-      const f = { ...(healthMedForm || {}) };
-      f.name = document.getElementById("health-med-name")?.value || "";
-      f.dosage = document.getElementById("health-med-dosage")?.value || "";
-      f.form = document.getElementById("health-med-form")?.value || "";
-      f.status = document.getElementById("health-med-status")?.value || "active";
-      f.schedule = document.getElementById("health-med-schedule")?.value || "";
-      f.start_date = document.getElementById("health-med-start")?.value || "";
-      f.end_date = document.getElementById("health-med-end")?.value || "";
-      f.note = document.getElementById("health-med-note")?.value || "";
-      const remindTime = document.getElementById("health-med-remind-time")?.value || null;
-      if (!f.name.trim()) { showToast("Укажите название препарата"); return; }
-      if (!f.start_date) { showToast("Укажите дату начала курса"); return; }
-      if (f.remind_enabled && !remindTime) { showToast("Укажите время напоминания"); return; }
-      const body = {
-        name: f.name, dosage: f.dosage || null, form: f.form || null, schedule: f.schedule || null,
-        start_date: f.start_date, end_date: f.end_date || null, status: f.status || "active",
-        note: f.note || null, remind_enabled: f.remind_enabled === true,
-        remind_time: f.remind_enabled ? remindTime : null,
-        ...(f.id ? { id: f.id } : {})
-      };
-      try {
-        healthState = await request("/api/health/med", { method: "POST", body });
-        healthMedForm = null;
-        healthMedDeleteArmed = null;
-        showToast(body.remind_enabled ? "Препарат сохранён — бот напомнит о приёме" : "Препарат сохранён");
-      } catch (error) { handleRequestError(error); }
-      return render();
+      const m = (healthState?.meds || []).find(x => x.id === medId);
+      if (!m) return;
+      dialog.close();
+      openDialog({
+        title: "Удалить препарат?",
+        fields: `<p>«${esc(m.name)}» и история приёма будут удалены.</p>`,
+        submitLabel: "Удалить",
+        cancelLabel: "Оставить",
+        onSubmit: async () => {
+          healthState = await request("/api/health/med/delete", { method: "POST", body: { id: m.id } });
+          showToast("Препарат и история приёма удалены");
+          return appState;
+        }
+      });
+      return;
     }
     if (action === "health-intake" || action === "health-intake-clear") {
       const d = healthToday();
@@ -5169,11 +5176,11 @@
       const m = (healthState?.meds || []).find(x => x.id === medId);
       if (!m) return;
       if (btn.dataset.enabled === "true" && !m.remind_time) {
-        // Включение без времени — открываем форму: «вкл без времени» на
+        // Включение без времени — открываем диалог: «вкл без времени» на
         // сервере отклоняется, лучше сразу дать ввести время.
-        healthMedForm = { ...m, end_date: m.end_date || "", remind_enabled: true };
+        openHealthMedDialog({ ...m, end_date: m.end_date || "", remind_enabled: true });
         showToast("Укажите время напоминания и сохраните");
-        return render();
+        return;
       }
       try {
         healthState = await request("/api/health/med", {
@@ -5256,11 +5263,7 @@
 
   function renderContactsList() {
     const list = contactsCurrentList();
-    if (!list.length) {
-      return contactsSearch.trim()
-        ? `<section class="card"><p class="eyebrow">Контакты</p><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>`
-        : `<section class="card"><p class="eyebrow">Контакты</p><p>${contactsView === "mine" ? "Добавьте первый контакт — имя и номера появятся в общей книге" : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
-    }
+    if (!list.length) return "";
     // Одна карточка на контакт: номера группируются под именем, высота
     // карточки растёт с числом номеров. Кнопок в списке нет — тап по имени
     // открывает окно контакта, тап по номеру копирует его.
@@ -5287,16 +5290,34 @@
     }
     const isMine = contactsView === "mine";
     const hasAny = (contactsState.mine || []).length || (contactsState.partner || []).length;
-    return `
-      ${isMine ? `<button class="primary full add-button" type="button" data-action="add-contact">Добавить контакт</button>` : ""}
+    const searching = Boolean(contactsSearch.trim());
+    const list = contactsCurrentList();
+    // Переключатель — сразу под баром «Записи/Цитаты/Здоровье/Контакты».
+    const switchHtml = `
       <div class="wish-switch" role="tablist" aria-label="Чьи контакты показывать">
         <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="contacts-view" data-view="mine" data-tab="mine">Мои</button>
         <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="contacts-view" data-view="partner" data-tab="partner">${esc(contactPartnerLabel())}</button>
-      </div>
-      ${hasAny ? `<label class="field contacts-search"><span>Поиск</span>
-        <input id="contacts-search" type="text" data-fmt="none" placeholder="Имя, фамилия, номер или комментарий" value="${esc(contactsSearch)}">
-      </label>` : ""}
-      <div id="contacts-list">${renderContactsList()}</div>`;
+      </div>`;
+    // Кнопка добавления: пока контактов нет — внутри карточки-приглашения
+    // (как в других вкладках); после первого контакта — под переключателем.
+    const addButton = `<button class="primary full card-action" type="button" data-action="add-contact">Добавить контакт</button>`;
+    let bodyHtml;
+    if (!(contactsView === "mine" ? contactsState.mine : contactsState.partner).length) {
+      bodyHtml = isMine && !searching
+        ? `<section class="card"><p class="eyebrow">Контакты</p><h3>Контакт</h3>
+            <p>Имена и номера всегда под рукой — и ваши, и партнёрши</p>
+            <div style="margin-top:12px;">${addButton}</div>
+          </section>`
+        : `<section class="card"><p class="eyebrow">Контакты</p><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
+    } else {
+      bodyHtml = `
+        ${isMine ? addButton : ""}
+        ${hasAny ? `<label class="field contacts-search"><span>Поиск</span>
+          <input id="contacts-search" type="text" data-fmt="none" placeholder="Имя, фамилия, номер или комментарий" value="${esc(contactsSearch)}">
+        </label>` : ""}
+        <div id="contacts-list">${renderContactsList() || (searching ? `<section class="card"><p class="eyebrow">Контакты</p><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>` : "")}</div>`;
+    }
+    return `${switchHtml}${bodyHtml}`;
   }
 
   // Строка номера в диалоге: префикс «+7» уже стоит, вводятся только 10 цифр.
@@ -5381,9 +5402,17 @@
         const surname = String(fd.get("surname") || "").trim();
         const comment = String(fd.get("comment") || "").trim();
         const digitsList = [...new Set((fd.getAll("phones") || []).map(v => String(v).replace(/\D/g, "")).filter(Boolean))];
-        if (!digitsList.length) throw new Error("Введите хотя бы один номер");
+        if (!digitsList.length) {
+          const err = new Error("Введите хотя бы один номер");
+          err.code = "INVALID_PHONES";
+          throw err;
+        }
         for (const d of digitsList) {
-          if (d.length !== 10) throw new Error("Введите полный номер — 10 цифр после +7, он сохранится как +7 ХХХ ХХХ ХХ ХХ");
+          if (d.length !== 10) {
+            const err = new Error("Введите полный номер — 10 цифр после +7, он сохранится как +7 ХХХ ХХХ ХХ ХХ");
+            err.code = "INVALID_PHONE";
+            throw err;
+          }
         }
         const phonesOut = digitsList.map(d => `+7 ${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6, 8)} ${d.slice(8, 10)}`);
         const body = { name, surname: surname || null, comment: comment || null, phones: phonesOut, ...(source.id ? { id: source.id } : {}) };

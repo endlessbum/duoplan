@@ -93,14 +93,17 @@ test("C4: у контакта без фамилии и комментария л
 });
 
 test("C5: поиск — по имени, цифрам номера и комментарию", () => {
+  const idsOf = (html) => (html.match(/data-id="\d+"/g) || []);
   const byPhone = buildContacts(state, { contactsSearch: "123 45" });
-  assert.deepEqual(byPhone.renderContactsList().match(/data-id="\d+"/g), ['data-id="1"']);
+  assert.deepEqual(idsOf(byPhone.renderContactsBody()), ['data-id="1"']);
   const byName = buildContacts(state, { contactsSearch: "бор" });
-  assert.deepEqual(byName.renderContactsList().match(/data-id="\d+"/g), ['data-id="3"']);
+  assert.deepEqual(idsOf(byName.renderContactsBody()), ['data-id="3"']);
   const byComment = buildContacts(state, { contactsSearch: "работы" });
-  assert.deepEqual(byComment.renderContactsList().match(/data-id="\d+"/g), ['data-id="1"']);
+  assert.deepEqual(idsOf(byComment.renderContactsBody()), ['data-id="1"']);
   const noMatch = buildContacts(state, { contactsSearch: "ксюша" });
-  assert.ok(noMatch.renderContactsList().includes("не нашлось"));
+  assert.ok(noMatch.renderContactsBody().includes("не нашлось"), "пустой результат поиска объясняется");
+  // Поле поиска не пропадает во время ввода.
+  assert.ok(noMatch.renderContactsBody().includes('id="contacts-search"'));
 });
 
 test("C6: вид «Его» — список партнёра без кнопки добавления", () => {

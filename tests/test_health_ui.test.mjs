@@ -22,10 +22,14 @@ const stubs = `
     querySelectorAll: () => [],
     createElement: () => ({ click: () => {}, style: {}, setAttribute: () => {} })
   };
-  function showToast() {}
+  function showToast(m) { globalThis.__toasts.push(m); }
+  globalThis.__toasts = [];
+  globalThis.__dialogs = [];
+  function openDialog(cfg) { globalThis.__dialogs.push(cfg); }
+  const dialog = { close: () => {} };
   function handleRequestError() {}
   function render() {}
-  const EDIT_ICON = "e", DELETE_ICON = "d";
+  const EDIT_ICON = "e", DELETE_ICON = "d", COPY_ICON = "c";
   function esc(v) {
     return String(v ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   }
@@ -38,11 +42,9 @@ function buildHealth(healthStateValue, extra = {}, reqImpl = null) {
     : `const request = () => Promise.reject(new Error("network off"));`;
   const setters = [
     `  healthState = ${JSON.stringify(healthStateValue)};`,
-    `  healthBusy = false;`,
-    `  healthMedForm = ${JSON.stringify(extra.healthMedForm ?? null)};`,
-    `  healthMedDeleteArmed = ${JSON.stringify(extra.healthMedDeleteArmed ?? null)};`
+    `  healthBusy = false;`
   ].join("\n");
-  const src = `${stubs}\n${requestSrc}\n${setters}\n${section}\nreturn { renderHealthBody, renderHealthMedForm, handleHealthAction, loadHealth, getState: () => healthState, getForm: () => healthMedForm, healthToday };`;
+  const src = `${stubs}\n${requestSrc}\n${setters}\n${section}\nreturn { renderHealthBody, healthMedDialogFields, healthMedBodyFromForm, openHealthMedDialog, handleHealthAction, loadHealth, getState: () => healthState, getDialogs: () => globalThis.__dialogs, healthToday };`;
   return new Function(src)();
 }
 
@@ -88,14 +90,15 @@ test("H4: у препарата на паузе нет чипов приёма",
   assert.ok(!row.includes('data-action="health-intake"'), "пауза — отметок приёма нет");
 });
 
-test("H5: форма препарата содержит настройку напоминания", () => {
-  const form = { name: "", dosage: "", form: "", schedule: "", remind_enabled: true, remind_time: "09:00", start_date: today, end_date: "", status: "active", note: "" };
-  const ui = buildHealth({ meds: [], med_logs: [] }, { healthMedForm: form });
-  const html = ui.renderHealthMedForm();
-  assert.ok(html.includes("health-med-remind-time"), "время напоминания вводится");
-  assert.ok(html.includes("Напоминание: включено"));
-  assert.ok(html.includes("Бот напомнит о приёме в указанное время"));
-  assert.ok(html.includes("Точно удалить") === false, "для нового препарата кнопки удаления нет");
+test("H5: диалог препарата содержит настройку напоминания", () => {
+  const ui = buildHealth({ meds: [], med_logs: [] });
+  const fields = ui.healthMedDialogFields(null);
+  assert.ok(fields.includes('name="remind_time"'), "время напоминания вводится");
+  assert.ok(fields.includes('name="remind_enabled"'), "переключатель напоминания есть");
+  assert.ok(fields.includes("Бот напомнит о приёме в указанное время"));
+  assert.ok(fields.includes("Удалить препарат") === false, "для нового препарата кнопки удаления нет");
+  const editing = ui.healthMedDialogFields({ id: 7, name: "Магний", remind_enabled: true, remind_time: "09:00" });
+  assert.ok(editing.includes("Удалить препарат"), "в правке есть удаление");
 });
 
 test("H6: отметка приёма уходит в /api/health/med-log с личной датой", async () => {
@@ -115,13 +118,14 @@ test("H6: отметка приёма уходит в /api/health/med-log с л�
   delete globalThis.__healthState;
 });
 
-test("H7: включение напоминания без времени открывает форму", async () => {
+test("H7: включение напоминания без времени открывает диалог", async () => {
   const noTime = { meds: [{ ...richState.meds[0], remind_enabled: false, remind_time: null }], med_logs: [] };
   const ui = buildHealth(noTime);
   await ui.handleHealthAction("health-remind-toggle", { dataset: { med: "7", enabled: "true" } });
-  const form = ui.getForm();
-  assert.ok(form && form.remind_enabled === true, "форма открыта с включённым напоминанием");
-  assert.equal(form.id, 7);
+  const dialogs = ui.getDialogs();
+  assert.equal(dialogs.length, 1, "диалог открыт поверх");
+  assert.ok(dialogs[0].fields.includes('name="remind_time"'), "в диалоге есть время напоминания");
+  assert.ok(dialogs[0].fields.includes(" checked"), "напоминание предвключено");
 });
 
 test("H8: переключение напоминания сохраняет препарат целиком", async () => {
@@ -139,20 +143,25 @@ test("H8: переключение напоминания сохраняет п�
   delete globalThis.__calls;
 });
 
-test("H9: сохранение препарата — напоминание выключено, время не уходит", async () => {
-  globalThis.__inputs = { "health-med-name": "Магний", "health-med-dosage": "", "health-med-form": "tablet", "health-med-status": "active", "health-med-schedule": "", "health-med-start": today, "health-med-end": "", "health-med-note": "", "health-med-remind-time": "09:00" };
-  globalThis.__calls = [];
-  const ui = buildHealth({ meds: [], med_logs: [] }, { healthMedForm: { name: "", remind_enabled: false, start_date: today } }, async (url, opts) => {
-    globalThis.__calls.push({ url, body: opts?.body });
-    return { meds: [], med_logs: [] };
-  });
-  await ui.handleHealthAction("health-med-save", { dataset: {} });
-  const call = globalThis.__calls[0];
-  assert.ok(call.url.includes("/api/health/med"));
-  assert.equal(call.body.remind_enabled, false);
-  assert.equal(call.body.remind_time, null, "выключенное напоминание шлёт null");
-  delete globalThis.__inputs;
-  delete globalThis.__calls;
+test("H9: сохранение препарата — напоминание выключено, время не уходит", () => {
+  const ui = buildHealth({ meds: [], med_logs: [] });
+  const fd = new FormData();
+  fd.set("name", "Магний");
+  fd.set("start_date", today);
+  fd.set("remind_time", "09:00");
+  fd.set("status", "active");
+  // Чекбокс не отмечен — напоминание выключено.
+  const body = ui.healthMedBodyFromForm(fd, null);
+  assert.equal(body.remind_enabled, false);
+  assert.equal(body.remind_time, null, "выключенное напоминание шлёт null");
+  // Включённое с пустым временем отклоняется с понятным текстом.
+  fd.set("remind_enabled", "on");
+  fd.set("remind_time", "");
+  assert.throws(() => ui.healthMedBodyFromForm(fd, null), /Укажите время напоминания/);
+  fd.set("remind_time", "09:00");
+  const on = ui.healthMedBodyFromForm(fd, 7);
+  assert.equal(on.remind_time, "09:00");
+  assert.equal(on.id, 7);
 });
 
 test("H10: ошибка загрузки — повторить; загрузка — «Загружаем список…»", () => {
