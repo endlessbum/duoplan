@@ -109,12 +109,12 @@ test("гонка isolate: duplicate column name обрабатывается п�
   // users.timezone упал с "duplicate column name" и был отработан,
   // pairs.timezone добавлен этим isolate штатно.
   deepStrictEqual(log.alters.sort(), [
-    "accent_color", "awaiting_return", "clots", "comment", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
+    "accent_color", "awaiting_return", "bleeding_details", "clots", "comment", "context", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
     "details", "digest_enabled", "digest_time", "done_at", "end_unknown", "energy", "expires_at", "gender", "is_private",
     "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "mucus",
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url",
-    "rating_checked_at", "rating_source", "sex_count", "show_avatar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "rating_checked_at", "rating_source", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "show_avatar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -138,7 +138,10 @@ test("чистый проход миграции без гонки записы�
   // + notify_diary (cycle_profiles, P3: напоминание о дневнике)
   // + end_unknown (cycle_periods, история прошлых циклов: «конец не помним»)
   // + sex_count (cycle_logs, несколько актов за день — migrations/0041)
-  deepStrictEqual(log.alters.length, 53);
+  // + bleeding_details (cycle_logs) + context (cycle_profiles) — переработка 7/5.1
+  // + share_sex/share_mood/share_sleep/share_bbt/share_confirmed
+  //   (cycle_profiles, переработка P0: категории шеринга)
+  deepStrictEqual(log.alters.length, 60);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

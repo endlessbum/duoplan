@@ -43,9 +43,24 @@ SYMPTOM_CODES = (
 CYCLE_LEVELS = ("phases", "periods", "symptoms", "full")
 CYCLE_LEVEL_RANK = {level: i for i, level in enumerate(CYCLE_LEVELS)}
 
+# Категории общего доступа (переработка P0): паритет с CYCLE_SHARE_CATEGORIES
+# в worker.js. Календарь — базовая часть (share_enabled), прочие — флаги.
+CYCLE_SHARE_CATEGORIES = ("sex", "mood", "sleep", "bbt")
+
+# Контекст цикла (переработка 5.1): паритет с CYCLE_CONTEXT_KEYS в worker.js.
+CYCLE_CONTEXT_KEYS = (
+    "pregnancy", "postpartum", "breastfeeding", "perimenopause",
+    "hormonal_contraception", "cycle_affecting_meds", "very_irregular", "unusual_bleeding",
+)
+
 # Короткие русские подписи для партнёрского вида (паритет CYCLE_*_LABELS
 # в worker.js): flow и симптомы на уровне symptoms/full.
 FLOW_LABELS = {"spotting": "мажь", "light": "слабые", "medium": "средние", "heavy": "сильные"}
+MOOD_LABELS = {
+    "happy": "радость", "calm": "спокойствие", "sensitive": "чувствительность",
+    "irritable": "раздражительность", "anxious": "тревожность", "sad": "грусть",
+    "mood_swings": "перепады",
+}
 SYMPTOM_LABELS = {
     "cramps": "судороги", "headache": "голова", "bloating": "вздутие",
     "breast_tenderness": "грудь", "fatigue": "усталость", "acne": "акне",
@@ -65,6 +80,8 @@ PARTNER_NOTICES = {
 # Колонки cycle_profiles, которые разрешено менять через update_profile.
 _PROFILE_FIELDS = {
     "avg_cycle_length", "avg_period_length", "share_enabled", "share_level",
+    "share_sex", "share_mood", "share_sleep", "share_bbt", "share_confirmed",
+    "context",
     "onboarded", "notify_enabled", "notify_period", "notify_ovulation",
     "notify_fertile", "notify_delay", "notify_period_days", "notify_delay_days",
     "notify_diary", "share_notify",
@@ -183,21 +200,26 @@ def _cycle_data_quality(usable_count: int, cycle_known: Any) -> str:
     return "few" if cycle_known else "insufficient"
 
 
-def _observed_ovulation(
+def _ovulation_estimates(
     measurements: Sequence[dict[str, Any]] | None,
     last: int,
     nxt: int,
     today_num: int,
-    calendar_ov: int,
-) -> dict[str, Any] | None:
-    """LH/БТ уточняют оценку овуляции (паритет cycleObservedOvulation в worker.js).
+    sick_days: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Независимые оценки овуляции внутри цикла (паритет cycleOvulationEstimates).
 
     Положительный тест ЛГ предшествует овуляции ~24–36 ч → +1 день;
     устойчивый подъём БТ ≥0.2°C три дня → овуляция ~за день до подъёма.
-    Наблюдение принимается только в окне цикла и при сдвиге ≤7 дней.
+    sick_days — дни «болезнь/температура» в дневнике: искажают БТ и ЛГ,
+    исключаются целиком (6). Оценки считаются по отдельности (§4/§6: при
+    расхождении показываются обе); календарная привязка (≤7 дней) — в
+    вызывающем коде. Также используется самообучением по всей истории.
     """
     if not measurements:
-        return None
+        return []
+    sick = sick_days or set()
+    estimates: list[dict[str, Any]] = []
 
     def in_window(d: int) -> bool:
         return last + 5 <= d <= nxt - 7 and d <= today_num
@@ -212,13 +234,11 @@ def _observed_ovulation(
         d for m in measurements
         if m.get("kind") == "lh" and m.get("result") == "positive"
         for d in [day_num(str(m.get("date") or ""))]
-        if d is not None and in_window(d)
+        if d is not None and in_window(d) and d not in sick
     )
     if lh_days:
-        ov = lh_days[-1] + 1
-        if abs(ov - calendar_ov) <= 7:
-            return {"day": ov, "source": "lh"}
-    # БТ: средняя температура по дню, F → C.
+        estimates.append({"source": "lh", "day": lh_days[-1] + 1})
+    # БТ: средняя температура по дню, F → C. Дни болезни исключаются целиком.
     temps: dict[int, list[float]] = {}
     for m in measurements:
         if m.get("kind") != "bbt":
@@ -228,7 +248,7 @@ def _observed_ovulation(
         except (TypeError, ValueError):
             continue
         d = day_num(str(m.get("date") or ""))
-        if d is None or not in_window(d):
+        if d is None or not in_window(d) or d in sick:
             continue
         celsius = (v - 32) * 5 / 9 if m.get("unit") == "F" else v
         temps.setdefault(d, []).append(celsius)
@@ -246,9 +266,51 @@ def _observed_ovulation(
         baseline = sum(base) / len(base)
         if min(a["t"], b["t"], c["t"]) >= baseline + 0.2:
             ov = a["d"] - 1
-            if last + 8 <= ov <= nxt - 7 and abs(ov - calendar_ov) <= 7:
-                return {"day": ov, "source": "bbt"}
-    return None
+            if last + 8 <= ov <= nxt - 7:
+                estimates.append({"source": "bbt", "day": ov})
+                break
+    return estimates
+
+
+# Санити-границы личного смещения овуляции (продуктовое правило, паритет с
+# worker.js): овуляция в 9–17 день цикла от старта; вне — наблюдение не
+# считается пригодным для самообучения.
+CYCLE_OVULATION_OFFSET_MIN = 9
+CYCLE_OVULATION_OFFSET_MAX = 17
+
+
+def _learned_ovulation_offset(
+    periods: Sequence[tuple],
+    measurements: Sequence[dict[str, Any]] | None,
+    today_num: int,
+    sick_days: set[int] | None = None,
+) -> dict[str, int] | None:
+    """Самообучение смещения овуляции (паритет cycleLearnedOvulationOffset).
+
+    Для каждого завершённого цикла LH+/БТ дают смещение от старта цикла.
+    При ≥2 наблюдениях из ≥2 разных циклов медиана заменяет фиксированные
+    «−14 дней» в календарной оценке — прогноз уточняется сам по мере ведения
+    дневника. Границы 9–17 — санити, не клиническая норма; результат всегда
+    остаётся оценкой (ovulation_estimated).
+    """
+    parts = [_period_parts(p) for p in periods]
+    starts = sorted(_d(start.isoformat()) for start, _, _ in parts)
+    offsets: list[int] = []
+    for i in range(len(starts) - 1):
+        ests = _ovulation_estimates(measurements, starts[i], starts[i + 1], today_num, sick_days)
+        if not ests:
+            continue
+        offset = ests[0]["day"] - starts[i]
+        if CYCLE_OVULATION_OFFSET_MIN <= offset <= CYCLE_OVULATION_OFFSET_MAX:
+            offsets.append(offset)
+    if len(offsets) < 2:
+        return None
+    sorted_o = sorted(offsets)
+    n = len(sorted_o)
+    median = sorted_o[(n - 1) // 2] if n % 2 else (
+        _round_half_up((sorted_o[n // 2 - 1] + sorted_o[n // 2]) / 2)
+    )
+    return {"offset": median, "cycles": len(offsets)}
 
 
 def cycle_forecast(
@@ -258,12 +320,15 @@ def cycle_forecast(
     avg_period: int = 5,
     cycle_known: Any = 0,
     measurements: Sequence[dict[str, Any]] | None = None,
+    sick_dates: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Прогноз по периодам (старт, конец|None). None, если периодов нет.
 
     Паритет с cycleForecast в worker.js: пригодные интервалы 15–60,
     медиана последних циклов, based_on/quality, диапазон
     next_period_early/late, ovulation_estimated, data_stale, LH/БТ.
+    sick_dates — даты «YYYY-MM-DD» с отметкой болезни в дневнике: из
+    температурных наблюдений исключаются (переработка 6).
     """
     if not periods:
         return None
@@ -280,6 +345,12 @@ def cycle_forecast(
     irregular = usable_count >= 2 and info["spread"] is not None and info["spread"] > 7
     based_on = "history" if usable_count >= 1 else ("profile" if cycle_known_flag else "default")
     today_num = _d(today.isoformat())
+    sick_days = set()
+    for s in sick_dates or []:
+        try:
+            sick_days.add(_d(s))
+        except (ValueError, AttributeError):
+            continue
     if not starts:
         return {
             "phase": None, "empty": True, "avg_cycle_length": cycle, "avg_period_length": period_len,
@@ -288,9 +359,25 @@ def cycle_forecast(
         }
     last = starts[-1]
     nxt = last + cycle
-    calendar_ov = nxt - 14
-    observed = _observed_ovulation(measurements, last, nxt, today_num, calendar_ov)
+    # Календарная оценка овуляции: по умолчанию «ожидаемый старт − 14 дней»,
+    # при накопленных наблюдениях — личное смещение (самообучение, §4).
+    learned = _learned_ovulation_offset(periods, measurements, today_num, sick_days)
+    calendar_ov = last + learned["offset"] if learned and usable_count >= 1 else nxt - 14
+    # Оценки по каждому признаку отдельно; расхождение показывается (§6).
+    estimates = [
+        e for e in _ovulation_estimates(measurements, last, nxt, today_num, sick_days)
+        if abs(e["day"] - calendar_ov) <= 7
+    ]
+    lh_est = next((e for e in estimates if e["source"] == "lh"), None)
+    bbt_est = next((e for e in estimates if e["source"] == "bbt"), None)
+    observed = lh_est or bbt_est
     ovulation = observed["day"] if observed else calendar_ov
+    ovulation_conflict = None
+    if lh_est and bbt_est and lh_est["day"] != bbt_est["day"]:
+        ovulation_conflict = {
+            "lh": _date_str(lh_est["day"]),
+            "bbt": _date_str(bbt_est["day"]),
+        }
     # Открытый период — end=None и end_unknown=0; «конец не помним»
     # (end_unknown=1) открытой записью не считается (паритет с worker.js).
     open_start = next((s for s, e, u in (_period_parts(p) for p in periods) if e is None and not u), None)
@@ -322,6 +409,7 @@ def cycle_forecast(
         "avg_cycle_length": cycle,
         "avg_period_length": period_len,
         "irregular": irregular,
+        "last_period_start": _from_d(last),
         "next_period_start": _from_d(nxt),
         "next_period_end": _from_d(nxt + period_len - 1),
         "next_period_early": _from_d(nxt - rng),
@@ -332,6 +420,10 @@ def cycle_forecast(
         "ovulation_in": ovulation - today_num,
         "ovulation_estimated": True,
         "ovulation_source": observed["source"] if observed else "calendar",
+        # Самообучение и расхождение признаков (паритет с worker.js).
+        "ovulation_offset_learned": learned["offset"] if learned else None,
+        "ovulation_offset_observations": learned["cycles"] if learned else 0,
+        "ovulation_conflict": ovulation_conflict,
         "based_on": based_on,
         "quality": _cycle_data_quality(usable_count, cycle_known),
         "usable_cycles": usable_count,
@@ -341,7 +433,12 @@ def cycle_forecast(
 
 
 def cycle_reminder_kinds(forecast: dict[str, Any] | None, prefs: dict[str, Any] | None = None) -> list[tuple[str, str]]:
-    """Те же правила и тексты, что cycleReminderKinds в worker.js."""
+    """Те же правила и тексты, что cycleReminderKinds в worker.js.
+
+    Овуляция и фертильное окно не анонсируются при недостаточном качестве
+    данных (прогноз по дефолтным 28 дням) или устаревшей истории —
+    уверенное уведомление по календарной оценке вводит в заблуждение (4.2).
+    """
     if not forecast:
         return []
     prefs = prefs or {}
@@ -357,10 +454,23 @@ def cycle_reminder_kinds(forecast: dict[str, Any] | None, prefs: dict[str, Any] 
     if on("period") and forecast["phase"] not in ("menstruation", "delay") and forecast["next_period_in"] == period_days:
         text = "Завтра ожидаются месячные" if period_days == 1 else f"Через {period_days} дн. ожидаются месячные"
         out.append(("cycle_period", text))
-    if on("ovulation") and forecast["ovulation_in"] == 0:
-        out.append(("cycle_ovulation", "Сегодня вероятный день овуляции"))
-    if on("fertile") and forecast["ovulation_in"] == 5:
-        out.append(("cycle_fertile", "Начинается фертильное окно"))
+    # Fail-safe: отсутствие quality/based_on трактуется как недостаточные
+    # данные, не как достаточные (паритет с worker.js).
+    ovulation_trustworthy = (
+        forecast.get("quality") is not None
+        and forecast.get("quality") != "insufficient"
+        and forecast.get("data_stale") is not True
+        and forecast.get("based_on") is not None
+        and forecast.get("based_on") != "default"
+    )
+    if on("ovulation") and forecast["ovulation_in"] == 0 and ovulation_trustworthy:
+        out.append(("cycle_ovulation", (
+            "Сегодня вероятный день овуляции — календарная оценка, не подтверждение"
+        )))
+    if on("fertile") and forecast["ovulation_in"] == 5 and ovulation_trustworthy:
+        out.append(("cycle_fertile", (
+            "Начинается календарное фертильное окно — приблизительная оценка"
+        )))
     if on("delay") and forecast["phase"] == "delay" and forecast["delay_days"] == delay_days:
         out.append(("cycle_delay", "Возможна задержка, загляни в календарь Фло"))
     return out
@@ -470,24 +580,45 @@ async def close_open_period(db: Any, tg_id: int, end: date, now_ts: int) -> bool
     return bool(changes)
 
 
-# Подсказки партнёру (как в Mini App): только общие фразы о фазе.
+# Подсказки партнёру (как в Mini App): нейтральные фразы о фазе. Без
+# стереотипов о самочувствии — фаза его не определяет (переработка 11.2).
 PARTNER_TIPS = {
-    "menstruation": "Сейчас месячные: тепло, отдых и тихая поддержка помогают.",
-    "follicular": "Энергии обычно больше, хорошее время для планов.",
-    "fertile": "Фертильное окно: если планируете или наоборот, обсудите защиту заранее.",
-    "ovulation": "День овуляции: у многих энергии больше, настроение может быть неровным.",
-    "luteal": "Возможны усталость и перепады настроения. Больше терпения.",
-    "delay": "Задержка: не всегда тревожно. Спокойно поддержи и не дави.",
+    "menstruation": "Сейчас месячные: спроси, какая поддержка нужна — она знает лучше.",
+    "follicular": "Календарная фаза — фолликулярная. Не делай вывод о самочувствии только по фазе.",
+    "fertile": "Календарная оценка фертильного окна. Обсудите планы между собой.",
+    "ovulation": "Календарная оценка дня овуляции, не подтверждённое наблюдение.",
+    "luteal": "Календарная фаза — лютеиновая. Персональных данных о самочувствии нет — просто спроси.",
+    "delay": "Месячные не начались к ожидаемой дате. Спокойно поддержи и не дави.",
+}
+
+# Короткие уведомления партнёру при смене фазы: нейтральные, без
+# стереотипов о самочувствии (переработка 11.2, паритет с worker.js).
+PARTNER_NOTICES = {
+    "menstruation": "У партнёрши начались месячные. Спроси, какая поддержка сейчас нужна.",
+    "ovulation": "Календарная оценка дня овуляции — приблизительный расчёт, не подтверждение.",
+    "delay": "Месячные не начались к ожидаемой дате. Спокойная поддержка помогает.",
 }
 
 
 async def share_state(db: Any, tg_id: int) -> dict[str, Any]:
-    rows = await db.query("SELECT share_enabled, share_level, share_notify FROM cycle_profiles WHERE tg_id=?", (tg_id,))
+    rows = await db.query(
+        "SELECT share_enabled, share_level, share_notify, share_sex, share_mood,"
+        " share_sleep, share_bbt, share_confirmed"
+        " FROM cycle_profiles WHERE tg_id=?",
+        (tg_id,),
+    )
     row = rows[0] if rows else {}
     return {
         "enabled": int(row.get("share_enabled") or 0) == 1,
         "level": row.get("share_level") or "phases",
         "notify": int(row.get("share_notify") if row.get("share_notify") is not None else 1) == 1,
+        "categories": {
+            "sex": int(row.get("share_sex") or 0) == 1,
+            "mood": int(row.get("share_mood") or 0) == 1,
+            "sleep": int(row.get("share_sleep") or 0) == 1,
+            "bbt": int(row.get("share_bbt") or 0) == 1,
+        },
+        "confirmed": int(row.get("share_confirmed") or 0) == 1,
     }
 
 
@@ -508,33 +639,38 @@ async def partner_ids(db: Any, tg_id: int) -> list[int]:
 
 
 async def partner_view_text(db: Any, owner_id: int, today: date) -> str | None:
-    """Что видит партнёр в боте — белый список по share_level, как в Mini App.
+    """Что видит партнёр в боте — белый список по категориям, как в Mini App.
 
-    phases — фаза и подсказка; periods — даты месячных; symptoms — запись за
-    сегодня (флоу и симптомы); full — ещё и заметка за сегодня. Пол, секс и
-    история дневника не отдаются никогда.
+    Календарь (фаза + подсказка + даты месячных) — базовая часть включённого
+    шеринга. Секс, настроение, качество сна (только good/ok/poor) и
+    базальная температура — только по включённым категориям и после
+    подтверждения состава. Симптомы, заметки и прочие личные поля не
+    отдаются никогда; при отсутствии подтверждения передаётся только
+    календарная оценка (паритет с cycleViewForPartner в worker.js).
     """
     share = await share_state(db, owner_id)
     if not share["enabled"] or not await is_female(db, owner_id):
         return None
+    cats = share["categories"] if share["confirmed"] else {}
     periods = await load_periods(db, owner_id)
     measurements = await load_measurements(db, owner_id)
     rows = await db.query(
         "SELECT avg_cycle_length, avg_period_length, cycle_length_known FROM cycle_profiles WHERE tg_id=?", (owner_id,)
     )
     row = rows[0] if rows else {}
+    today_logs = await load_logs(db, owner_id, today, today)
+    sick_dates = [entry["date"] for entry in today_logs if entry.get("sick")]
     forecast = cycle_forecast(
         periods, today,
         int(row.get("avg_cycle_length") or 28), int(row.get("avg_period_length") or 5),
-        row.get("cycle_length_known"), measurements,
+        row.get("cycle_length_known"), measurements, sick_dates,
     )
     if not forecast:
         return "Партнёрша делится календарём, но данных пока мало."
     label = CYCLE_PHASE_LABELS.get(forecast["phase"], "")
     lines = [f"Фаза: <b>{label}</b>. {PARTNER_TIPS.get(forecast['phase'], '')}"]
-    rank = CYCLE_LEVEL_RANK.get(share["level"], -1)
-    if rank >= 1:
-        # periods — последние 6 стартов, DESC как в load_periods.
+    # Даты месячных — часть календарной категории (после подтверждения).
+    if share["confirmed"]:
         recent = periods[:6]
         if recent:
             parts = []
@@ -546,25 +682,30 @@ async def partner_view_text(db: Any, owner_id: int, today: date) -> str | None:
                 else:
                     parts.append(f"{start.isoformat()} (идут)")
             lines.append("Месячные: " + "; ".join(parts))
-    if rank >= 2:
-        logs = await db.query(
-            "SELECT flow, symptoms, note FROM cycle_logs WHERE tg_id=? AND date=?", (owner_id, today.isoformat())
-        )
-        log = logs[0] if logs else None
-        if log:
-            bits = []
-            if log.get("flow"):
-                bits.append(FLOW_LABELS.get(log["flow"], log["flow"]))
-            symptoms = json.loads(log.get("symptoms") or "[]")
-            named = [SYMPTOM_LABELS.get(s, s) for s in symptoms if s in SYMPTOM_LABELS]
-            if named:
-                bits.append(", ".join(named))
-            if bits:
-                lines.append("Сегодня: " + "; ".join(bits))
-            if rank >= 3 and log.get("note"):
-                lines.append(f"Заметка: {log['note']}")
-    if rank < 3:
-        lines.append("Без заметок и истории дневника.")
+        lines.append("Прогноз приблизительный и не является методом контрацепции.")
+    if cats.get("sex"):
+        for day_log in today_logs:
+            if day_log.get("sex") in ("protected", "unprotected"):
+                lines.append("Секс: " + ("с защитой" if day_log["sex"] == "protected" else "без защиты"))
+            elif day_log.get("sex") == "none":
+                lines.append("Секс: без секса (отмечено)")
+    if cats.get("mood"):
+        for day_log in today_logs:
+            if day_log.get("mood"):
+                lines.append(f"Настроение: {MOOD_LABELS.get(day_log['mood'], day_log['mood'])}")
+    if cats.get("sleep"):
+        sleep_labels = {"good": "хорошо", "ok": "средне", "poor": "плохо"}
+        for day_log in today_logs:
+            if day_log.get("sleep_quality") in sleep_labels:
+                lines.append(f"Сон: {sleep_labels[day_log['sleep_quality']]}")
+    if cats.get("bbt"):
+        for m in measurements:
+            if m.get("date") == today.isoformat() and m.get("kind") == "bbt":
+                unit = m.get("unit") or "C"
+                lines.append(f"БТ: {m.get('value')}°{unit}")
+    if not share["confirmed"]:
+        lines.append("Подробные отметки появятся после подтверждения состава данных.")
+    lines.append("Без симптомов, заметок и препаратов.")
     return "\n".join(lines)
 
 
@@ -578,7 +719,7 @@ async def export_json(db: Any, tg_id: int, now_ts: int) -> bytes:
         "SELECT start_date, end_date, end_unknown FROM cycle_periods WHERE tg_id=? ORDER BY start_date ASC, id ASC", (tg_id,)
     )
     logs = await db.query(
-        "SELECT date, flow, clots, energy, mood, symptoms, symptoms_clear, note, sex, leakage, pain_score, pain_locations, life_impact, mucus, sleep_hours, sleep_quality, stress, sick, travel, weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date ASC, id ASC", (tg_id,)
+        "SELECT date, flow, clots, energy, mood, symptoms, symptoms_clear, note, sex, leakage, pain_score, pain_locations, life_impact, mucus, sleep_hours, sleep_quality, stress, sick, travel, weight_kg, bleeding_details FROM cycle_logs WHERE tg_id=? ORDER BY date ASC, id ASC", (tg_id,)
     )
     meds = await db.query(
         "SELECT id, name, category, dosage, form, schedule, start_date, end_date, status, note FROM cycle_meds WHERE tg_id=? ORDER BY start_date ASC, id ASC", (tg_id,)
@@ -626,6 +767,9 @@ async def export_json(db: Any, tg_id: int, now_ts: int) -> bytes:
                 "sick": bool(r.get("sick")),
                 "travel": bool(r.get("travel")),
                 "weight_kg": r.get("weight_kg"),
+                "bleeding_details": (
+                    json.loads(r["bleeding_details"]) if r.get("bleeding_details") else None
+                ),
             }
             for r in logs
         ],
@@ -687,7 +831,7 @@ async def load_logs(db: Any, tg_id: int, from_date: date | None = None, to_date:
         where += " AND date<=?"
         params.append(to_date.isoformat())
     rows = await db.query(
-        f"SELECT date, flow, clots, energy, mood, symptoms, symptoms_clear, note, sex, leakage, pain_score, pain_locations, life_impact, mucus, sleep_hours, sleep_quality, stress, sick, travel, weight_kg FROM cycle_logs {where} ORDER BY date ASC, id ASC",
+        f"SELECT date, flow, clots, energy, mood, symptoms, symptoms_clear, note, sex, leakage, pain_score, pain_locations, life_impact, mucus, sleep_hours, sleep_quality, stress, sick, travel, weight_kg, bleeding_details FROM cycle_logs {where} ORDER BY date ASC, id ASC",
         tuple(params),
     )
     return [
@@ -712,6 +856,9 @@ async def load_logs(db: Any, tg_id: int, from_date: date | None = None, to_date:
             "sick": bool(r.get("sick")),
             "travel": bool(r.get("travel")),
             "weight_kg": r.get("weight_kg"),
+            "bleeding_details": (
+                json.loads(r["bleeding_details"]) if r.get("bleeding_details") else None
+            ),
         }
         for r in rows
     ]
@@ -740,14 +887,15 @@ async def upsert_log(
     sick: bool | None = None,
     travel: bool | None = None,
     weight_kg: float | None = None,
+    bleeding_details: dict[str, Any] | None = None,
     now_ts: int | None = None,
 ) -> None:
     """Записать или обновить дневник дня. Валидация кодов — в handlers.py."""
     if now_ts is None:
         now_ts = int(datetime.now(UTC).timestamp())
     await db.execute(
-        """INSERT INTO cycle_logs(tg_id, date, flow, clots, energy, mood, symptoms, symptoms_clear, note, sex, leakage, pain_score, pain_locations, life_impact, mucus, sleep_hours, sleep_quality, stress, sick, travel, weight_kg, created_at, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """INSERT INTO cycle_logs(tg_id, date, flow, clots, energy, mood, symptoms, symptoms_clear, note, sex, leakage, pain_score, pain_locations, life_impact, mucus, sleep_hours, sleep_quality, stress, sick, travel, weight_kg, bleeding_details, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(tg_id, date) DO UPDATE SET
         flow=excluded.flow, clots=excluded.clots, energy=excluded.energy, mood=excluded.mood,
         symptoms=excluded.symptoms, symptoms_clear=excluded.symptoms_clear,
@@ -756,7 +904,8 @@ async def upsert_log(
         life_impact=excluded.life_impact, mucus=excluded.mucus,
         sleep_hours=excluded.sleep_hours, sleep_quality=excluded.sleep_quality,
         stress=excluded.stress, sick=excluded.sick, travel=excluded.travel,
-        weight_kg=excluded.weight_kg, updated_at=excluded.updated_at""",
+        weight_kg=excluded.weight_kg, bleeding_details=excluded.bleeding_details,
+        updated_at=excluded.updated_at""",
         (
             tg_id,
             day.isoformat(),
@@ -779,6 +928,7 @@ async def upsert_log(
             int(bool(sick)),
             int(bool(travel)),
             weight_kg,
+            json.dumps(bleeding_details) if bleeding_details else None,
             now_ts,
             now_ts,
         ),
@@ -876,10 +1026,12 @@ async def send_cycle_reminders(
         periods = await load_periods(db, tg_id)
         measurements = await load_measurements(db, tg_id)
         profile = await load_profile(db, tg_id, now_ts)
+        recent_logs = await load_logs(db, tg_id, today_local - timedelta(days=400), today_local)
+        sick_dates = [entry["date"] for entry in recent_logs if entry.get("sick")]
         forecast = cycle_forecast(
             periods, today_local,
             profile["avg_cycle_length"], profile["avg_period_length"],
-            profile.get("cycle_length_known", 0), measurements,
+            profile.get("cycle_length_known", 0), measurements, sick_dates,
         )
 
         # Напоминания владелице.
@@ -908,16 +1060,28 @@ async def send_cycle_reminders(
                     await mark_notification_sent(db, tg_id, today_local, kind, now_ts)
 
         # Напоминания партнёру (только при смене фазы, без дат и подробностей).
+        # Уведомление об овуляции — только при достаточном качестве данных:
+        # календарная оценка по дефолту не повод для уверенного сообщения
+        # (переработка 4.2, паритет с worker.js).
         if int(owner.get("share_enabled", 0)) == 1 and int(owner.get("share_notify", 1)) == 1 and not forecast.get("empty"):
             yesterday = today_local - timedelta(days=1)
             before = cycle_forecast(
                 periods, yesterday,
                 profile["avg_cycle_length"], profile["avg_period_length"],
-                profile.get("cycle_length_known", 0), measurements,
+                profile.get("cycle_length_known", 0), measurements, sick_dates,
             )
             before_phase = before.get("phase") if before else None
             phase = forecast.get("phase")
+            ovulation_trustworthy = (
+                forecast.get("quality") is not None
+                and forecast.get("quality") != "insufficient"
+                and forecast.get("data_stale") is not True
+                and forecast.get("based_on") is not None
+                and forecast.get("based_on") != "default"
+            )
             text = PARTNER_NOTICES.get(phase)
+            if phase == "ovulation" and not ovulation_trustworthy:
+                text = None
             if text and phase != before_phase:
                 partners = await partner_ids(db, tg_id)
                 for partner_id in partners:

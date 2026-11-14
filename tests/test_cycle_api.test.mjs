@@ -42,6 +42,11 @@ const buildApi = new Function(
     extractLine("const clean = "),
     extractLine("const CYCLE_DATE_RE"),
     extractLine("const CYCLE_LEVELS"),
+    extractLine("const CYCLE_SHARE_CATEGORIES"),
+    extractLine("const CYCLE_SHARE_COLUMNS"),
+    extractLine("const CYCLE_BLEEDING_SATURATION"),
+    extractLine("const CYCLE_PERIOD_MAX_DAYS"),
+    extractLine("const CYCLE_CONTEXT_KEYS"),
     extractLine("const CYCLE_FLOWS"),
     extractLine("const CYCLE_ENERGY"),
     extractLine("const CYCLE_MOOD_CODES"),
@@ -66,6 +71,10 @@ const buildApi = new Function(
     extractBraced("function cycleDayNum"),
     extractBraced("function cycleDateStr"),
     extractBraced("function cycleToday"),
+    extractBraced("function cyclePhaseTip"),
+    extractBraced("function cycleShareCategories"),
+    extractBraced("function cycleViewForPartner"),
+    extractBraced("async function cyclePartnerView"),
     extractBraced("function cyclePeriodItemsPlan"),
     extractBraced("function cyclePeriodsOverlapError"),
     extractBraced("function cycleOnboardPlan"),
@@ -127,8 +136,25 @@ function createMockDB(gender = null, periods = [], medExists = true) {
   };
 }
 
-function makeEnv({ gender = null, body = {}, method = "POST", periods = [], medExists = true } = {}) {
+function makeEnv({ gender = null, body = {}, method = "POST", periods = [], medExists = true, shareRow = null, membershipPair = null, stateMock = null } = {}) {
   const db = createMockDB(gender, periods, medExists);
+  const baseFirst = db.prepare.bind(db);
+  if (shareRow) {
+    const innerPrepare = db.prepare;
+    db.prepare = (sql) => {
+      const bound = innerPrepare(sql);
+      if (sql.includes("FROM cycle_profiles p JOIN users u")) {
+        return {
+          bind: () => ({
+            async first() { return shareRow; },
+            async all() { return { results: [] }; },
+            async run() { return { meta: { changes: 1 } }; }
+          })
+        };
+      }
+      return bound;
+    };
+  }
   const request = { method, headers: { get: () => null } };
   const api = buildApi(
     (data, status = 200) => ({ data, status }),
@@ -139,10 +165,10 @@ function makeEnv({ gender = null, body = {}, method = "POST", periods = [], medE
     async () => {},
     async () => body,
     async () => ({ user: { tg_id: 777, gender }, pair: null }),
-    async () => null,
+    async () => membershipPair,
     async () => [],
     // Mock DB does not store periods/logs, so state is always empty.
-    async () => ({ periods: [], logs: [] })
+    stateMock || (async () => ({ periods: [], logs: [] }))
   );
   return { api, env: { DB: db }, request, writes: db.writes };
 }
@@ -744,13 +770,17 @@ test("onboard skips previous period conflicting with existing data", async () =>
 });
 
 // ---------------------------------------------------------------------------
-// Партнёрский вид Фло (cycleViewForPartner): календарь, секс, настроение,
-// качество сна и БТ — и ничего лишнего из дневника.
+// Партнёрский вид Фло (cycleViewForPartner): категориальный allowlist —
+// календарь (после подтверждения), секс, настроение, качество сна и БТ —
+// и ничего лишнего из дневника.
 // ---------------------------------------------------------------------------
 const buildPartnerView = new Function(
   [
     extractLine("const CYCLE_LEVELS"),
+    extractLine("const CYCLE_SHARE_CATEGORIES"),
+    extractLine("const CYCLE_SLEEP_QUALITY"),
     extractBraced("function cyclePhaseTip"),
+    extractBraced("function cycleShareCategories"),
     extractBraced("function cycleViewForPartner"),
     "return cycleViewForPartner;"
   ].join("\n")
@@ -763,7 +793,8 @@ const PARTNER_STATE = {
     empty: false, phase: "follicular", cycle_day: 10, next_period_in: 18,
     delay_days: 0, ovulation_in: 6, irregular: false,
     fertile_start: "2026-11-15", fertile_end: "2026-11-19", ovulation_date: "2026-11-17",
-    next_period_start: "2026-11-28", next_period_end: "2026-12-02"
+    next_period_start: "2026-11-28", next_period_end: "2026-12-02",
+    based_on: "history", quality: "full", usable_cycles: 5
   },
   periods: Array.from({ length: 8 }, (_, i) => ({
     start_date: `2026-0${(i % 9) + 1}-0${(i % 8) + 1}`, end_date: "2026-01-05", end_unknown: 0
@@ -782,43 +813,261 @@ const PARTNER_STATE = {
   ]
 };
 
+const CONFIRMED_ALL = { enabled: true, confirmed: true, categories: { sex: true, mood: true, sleep: true, bbt: true } };
+const CALENDAR_ONLY = { enabled: true, confirmed: true, categories: { sex: false, mood: false, sleep: false, bbt: false } };
+const UNCONFIRMED = { enabled: true, confirmed: false, categories: { sex: true, mood: true, sleep: true, bbt: true } };
+
 test("partner view: days expose only sex/mood/sleep, never diary fields", () => {
-  const view = buildPartnerView()(PARTNER_STATE, "symptoms");
+  const view = buildPartnerView()(PARTNER_STATE, CONFIRMED_ALL);
   ok(view.shared === true);
   equal(view.today, "2026-11-13");
   deepStrictEqual(view.days, [
-    { date: "2026-11-12", sex: "protected", sex_count: 2, mood: "calm", sleep_quality: "good" },
-    { date: "2026-11-10", sex: null, sex_count: 0, mood: null, sleep_quality: "ok" }
+    { date: "2026-11-12", sex: "protected", sex_count: 2, mood: "calm", sleep: "good" },
+    { date: "2026-11-10", sex: "none", sex_count: 0, sleep: "ok" }
   ]);
   // Ни одно разрешённое поле не должно протаскивать дневник.
   for (const d of view.days) {
-    ok(!("flow" in d) && !("symptoms" in d) && !("note" in d), "дневник не утекает");
+    ok(!("flow" in d) && !("symptoms" in d) && !("note" in d) && !("sleep_quality" in d), "дневник не утекает");
   }
 });
 
 test("partner view: bbt contains only bbt measurements with value", () => {
-  const view = buildPartnerView()(PARTNER_STATE, "symptoms");
+  const view = buildPartnerView()(PARTNER_STATE, CONFIRMED_ALL);
   deepStrictEqual(view.bbt, [{ date: "2026-11-12", time: "07:30", value: 36.6, unit: "C" }]);
 });
 
 test("partner view: calendar_periods covers full history, periods stays short", () => {
-  const view = buildPartnerView()(PARTNER_STATE, "periods");
+  const view = buildPartnerView()(PARTNER_STATE, CALENDAR_ONLY);
   equal(view.periods.length, 6);
   equal(view.calendar_periods.length, 8);
-  // Календарные отметки (секс/настроение/сон/БТ) открываются с уровня periods.
-  ok(Array.isArray(view.days) && Array.isArray(view.bbt));
+  ok(view.days === undefined && view.bbt === undefined);
 });
 
-test("partner view: phases level keeps calendar marks closed", () => {
-  const view = buildPartnerView()(PARTNER_STATE, "phases");
+test("partner view: unconfirmed share keeps day marks closed", () => {
+  const view = buildPartnerView()(PARTNER_STATE, UNCONFIRMED);
   ok(view.days === undefined && view.bbt === undefined && view.calendar_periods === undefined);
+  ok(view.confirmed === false);
 });
 
 test("partner view: forecast carries fertile/ovulation windows for the calendar", () => {
-  const view = buildPartnerView()(PARTNER_STATE, "phases");
+  const view = buildPartnerView()(PARTNER_STATE, CONFIRMED_ALL);
   equal(view.forecast.fertile_start, "2026-11-15");
   equal(view.forecast.fertile_end, "2026-11-19");
   equal(view.forecast.ovulation_date, "2026-11-17");
-  // Без next_period_* на уровне phases — даты месячных закрыты.
-  ok(view.forecast.next_period_start === undefined);
+  equal(view.forecast.next_period_start, "2026-11-28");
+  equal(view.forecast.quality, "full");
+  ok(view.forecast_disclaimer.length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Переработка «Фло» (P0/P1): категории шеринга, конфликт symptoms_clear,
+// единый предел длительности периода, дополнительные сведения о кровотечении.
+// ---------------------------------------------------------------------------
+
+test("PATCH /api/cycle/share validates categories are booleans", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { enabled: true, categories: { sex: "да" } }
+  });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/cycle/share")),
+    err => isHttpError(err, 400, "INVALID_SHARE")
+  );
+});
+
+test("PATCH /api/cycle/share rejects unknown shape of categories", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { enabled: true, categories: ["sex"] }
+  });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/cycle/share")),
+    err => isHttpError(err, 400, "INVALID_SHARE")
+  );
+});
+
+test("PATCH /api/cycle/share persists categories and confirmation", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { enabled: true, categories: { sex: true, bbt: false }, confirmed: true }
+  });
+  const response = await api(request, env, new URL("https://duoplan.test/api/cycle/share"));
+  ok(response.status === 200, "маршрут отвечает состоянием");
+  const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET"));
+  ok(update, "запись в cycle_profiles выполняется");
+  ok(update.sql.includes("share_enabled=?"), "главный выключатель сохраняется");
+  ok(update.sql.includes("share_sex=?"), "категория секс сохраняется");
+  ok(update.sql.includes("share_confirmed=?"), "подтверждение состава сохраняется");
+});
+
+test("PATCH /api/cycle/share master off does not touch categories", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "PATCH", body: { enabled: false }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/share"));
+  const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET"));
+  ok(update.sql.includes("share_enabled=?"));
+  ok(!update.sql.includes("share_sex=?"), "выключение не переписывает категории");
+  ok(!update.sql.includes("share_confirmed=?"));
+});
+
+test("POST /api/cycle/log rejects symptoms_clear together with symptoms (9.2)", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "female", method: "POST",
+    body: { date: "2026-11-01", symptoms: ["cramps"], symptoms_clear: true }
+  });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/cycle/log")),
+    err => isHttpError(err, 400, "INVALID_SYMPTOMS_CONFLICT")
+  );
+});
+
+test("POST /api/cycle/log accepts explicit symptoms_clear without symptoms", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "POST",
+    body: { date: "2026-11-01", symptoms: [], symptoms_clear: true }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/log"));
+  const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_logs"));
+  ok(insert, "дневник сохраняется");
+  ok(insert.args.includes("[]") || insert.args.some(a => String(a) === "[]"), "пустой список симптомов сохраняется");
+});
+
+test("POST /api/cycle/log accepts explicit sex=none without count (9.4)", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "POST",
+    body: { date: "2026-11-01", sex: "none" }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/log"));
+  const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_logs"));
+  ok(insert);
+  const sexIdx = insert.sql.split(",").findIndex(col => col.trim() === "sex");
+  equal(insert.args[sexIdx], "none");
+});
+
+test("POST /api/cycle/log validates bleeding_details shape (7)", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "female", method: "POST",
+    body: { date: "2026-11-01", bleeding_details: { changes_per_day: 99 } }
+  });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/cycle/log")),
+    err => isHttpError(err, 400, "INVALID_BLEEDING")
+  );
+});
+
+test("POST /api/cycle/log persists bleeding_details", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "POST",
+    body: { date: "2026-11-01", bleeding_details: { changes_per_day: 4, saturation: "high", night_change: true } }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/log"));
+  const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_logs"));
+  ok(insert.sql.includes("bleeding_details"), "колонка bleeding_details сохраняется");
+  ok(JSON.stringify(insert.args).includes("saturation"), "значения сохраняются");
+});
+
+test("POST /api/cycle/period rejects longer than 14 days (7)", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "female", method: "POST",
+    body: { start: "2026-10-01", end: "2026-10-20" }
+  });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/cycle/period")),
+    err => isHttpError(err, 400, "INVALID_PERIOD")
+  );
+});
+
+test("PATCH /api/cycle/period rejects longer than 14 days (7)", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { original_start: "2026-10-01", start: "2026-10-01", end: "2026-10-20" }
+  });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/cycle/period")),
+    err => isHttpError(err, 400, "INVALID_PERIOD")
+  );
+});
+
+test("PATCH /api/cycle/context validates keys and persists flags (5.1)", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { context: { pregnancy: true, bogus_key: true, hormonal_contraception: false } }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/context"));
+  const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET context=?"));
+  ok(update, "контекст сохраняется");
+  deepStrictEqual(JSON.parse(update.args[0]), { pregnancy: true }, "неизвестные ключи отбрасываются, false не сохраняется");
+});
+
+test("GET /api/cycle/partner: полный allowlist-ответ по HTTP, без запрещённых полей (E)", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "male", method: "GET",
+    membershipPair: { user_a: 1, user_b: 777 },
+    shareRow: {
+      share_enabled: 1, share_level: "phases",
+      share_sex: 1, share_mood: 1, share_sleep: 1, share_bbt: 1, share_confirmed: 1,
+      gender: "female"
+    },
+    stateMock: async () => ({
+      today: "2026-11-13",
+      disclaimer: "d",
+      forecast: {
+        empty: false, phase: "follicular", cycle_day: 10, next_period_in: 18, delay_days: 0,
+        ovulation_in: 6, irregular: false, ovulation_source: "calendar",
+        fertile_start: "2026-11-15", fertile_end: "2026-11-19", ovulation_date: "2026-11-17",
+        next_period_start: "2026-11-28", next_period_end: "2026-12-02",
+        based_on: "history", quality: "full", usable_cycles: 5, data_stale: false
+      },
+      periods: [{ start_date: "2026-10-27", end_date: "2026-10-31", end_unknown: 0 }],
+      logs: [{
+        date: "2026-11-12", flow: "light", symptoms: ["cramps"], note: "секрет",
+        sex: "protected", sex_count: 2, mood: "calm", sleep_quality: "good",
+        weight_kg: 64.4, stress: "high", pain_score: 5
+      }],
+      meds: [{ id: 1, name: "Секретный препарат" }],
+      med_logs: [{ med_id: 1, date: "2026-11-12", status: "taken" }],
+      measurements: [
+        { date: "2026-11-12", time: "07:30", kind: "bbt", value: 36.6, unit: "C" },
+        { date: "2026-11-12", kind: "lh", result: "positive" }
+      ]
+    })
+  });
+  const response = await api(request, env, new URL("https://duoplan.test/api/cycle/partner"));
+  const json = JSON.stringify(response.data);
+  // Разрешённое присутствует.
+  ok(response.data.shared === true);
+  ok(response.data.days.some(d => d.sex === "protected" && d.sex_count === 2 && d.mood === "calm" && d.sleep === "good"));
+  ok(response.data.bbt.length === 1 && response.data.periods.length === 1);
+  ok(response.data.forecast.quality === "full");
+  // Запрещённое отсутствует даже при прямом обращении к API.
+  for (const bad of ["секрет", "cramps", "light", "Секретный препарат", "taken", "positive", "weight", "stress", "pain_score", "meds", "med_logs"]) {
+    equal(json.includes(bad), false, `запрещённое поле «${bad}» утекло через /api/cycle/partner`);
+  }
+});
+
+test("GET /api/cycle/partner: неподтверждённый шеринг не отдаёт дневниковые данные", async () => {
+  const { api, env, request } = makeEnv({
+    gender: "male", method: "GET",
+    membershipPair: { user_a: 1, user_b: 777 },
+    shareRow: {
+      share_enabled: 1, share_level: "full",
+      share_sex: 1, share_mood: 1, share_sleep: 1, share_bbt: 1, share_confirmed: 0,
+      gender: "female"
+    },
+    stateMock: async () => ({
+      today: "2026-11-13",
+      disclaimer: "d",
+      forecast: { empty: true },
+      periods: [{ start_date: "2026-10-27", end_date: "2026-10-31", end_unknown: 0 }],
+      logs: [{ date: "2026-11-12", note: "секрет", sex: "none" }],
+      meds: [], med_logs: [], measurements: []
+    })
+  });
+  const response = await api(request, env, new URL("https://duoplan.test/api/cycle/partner"));
+  const json = JSON.stringify(response.data);
+  ok(response.data.shared === true && response.data.confirmed === false);
+  ok("periods" in response.data === false && "days" in response.data === false);
+  equal(json.includes("секрет"), false);
+  equal(json.includes("2026-10-27"), false);
 });

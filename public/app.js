@@ -37,7 +37,7 @@
     tasks: { title: "Наши планы", sub: "Общие дела, свидания и идеи" },
     dates: { title: "Даты", sub: "Значимые дни и дни рождения" },
     places: { title: "Места", sub: "Куда сходить вместе" },
-    memories: { title: "Дневник", sub: "Записи и цитаты" },
+    memories: { title: "Дневник", sub: "Записи, цитаты, здоровье и контакты" },
     pair: { title: "Наша пара", sub: "Профиль, желания и настройки" }
   };
 
@@ -49,7 +49,7 @@
   // минутный refresh и возврат на вкладку не сбрасывали выбранный вид.
   let pairView = "profile";
   let floState = null;
-  // Под-вкладки внутри «Фло»: Сегодня / Цикл / Статистика / Здоровье / Настройки.
+  // Под-вкладки внутри «Фло»: Сегодня / Цикл / Статистика / Препараты / Настройки.
   let floView = "today";
   let floMonth = null;
   let floSelectedDate = null;
@@ -66,7 +66,10 @@
   let floStatsBusy = false;
   // Пагинация истории (P1): помесячная догрузка через /api/cycle/history
   // для месяцев старше окна /api/cycle/state (36 периодов / 400 записей).
-  let floExtra = { periods: [], logs: [] };
+  // Исторический API отдаёт периоды, дневник, препараты, факт приёма и
+  // измерения — храним весь набор (переработка 9.3), иначе старые БТ/ЛГ и
+  // приёмы пропадают из карточки дня при листании календаря назад.
+  let floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
   let floFetchedMonths = new Set();
   let floEditing = null;
   // P2: отчёт (печать/CSV/JSON), препараты и черновики форм.
@@ -75,6 +78,18 @@
   let floMedForm = null; // { id?, ...поля } — открытая форма препарата
   let floMedDeleteArmed = null;
   let floMedDetail = null; // "medId:date" — раскрытые поля факта приёма
+  // Здоровье («Дневник → Здоровье»): личный журнал препаратов каждого
+  // партнёра + напоминания бота о приёме. Данные персональные (tg_id).
+  let healthState = null;
+  let healthBusy = false;
+  let healthMedForm = null; // открытая форма препарата
+  let healthMedDeleteArmed = null;
+  // Контакты («Дневник → Контакты»): телефонная книга, у каждого партнёра
+  // своя. Вид «mine/partner» разделяет списки, поиск фильтрует клиентски.
+  let contactsState = null;
+  let contactsBusy = false;
+  let contactsView = "mine";
+  let contactsSearch = "";
   let datesView = "dates";
   let memoriesView = "memories";
   // «Планы / Цели / Кино» — виды вкладки «Планы».
@@ -2250,7 +2265,7 @@
     floBusy = true;
     try {
       floState = await request("/api/cycle/state");
-      floExtra = { periods: [], logs: [] };
+      floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
       floFetchedMonths = new Set();
       if (!floMonth) floMonth = floState.today.slice(0, 7);
     } catch (error) {
@@ -2291,6 +2306,10 @@
 
   // Догрузка месяца через /api/cycle/history, если он старше окна state.
   // Каждый месяц запрашивается не более одного раза (floFetchedMonths).
+  // История приносит весь набор данных: периоды, дневник, препараты, факт
+  // приёма и измерения (переработка 9.3). Дедуп: периоды/дневник по ключу
+  // даты, препараты по id, приёмы и измерения по естественным ключам —
+  // повторная догрузка того же месяца не создаёт дубликаты.
   async function floEnsureMonth(ym) {
     if (!floState || floState.failed || floBusy) return;
     if (ym === floState.today.slice(0, 7)) return;
@@ -2306,6 +2325,15 @@
       const lMap = new Map(floExtra.logs.map(l => [l.date, l]));
       for (const l of data.logs || []) lMap.set(l.date, l);
       floExtra.logs = [...lMap.values()];
+      const mMap = new Map(floExtra.meds.map(x => [x.id, x]));
+      for (const x of data.meds || []) mMap.set(x.id, x);
+      floExtra.meds = [...mMap.values()];
+      const mlMap = new Map(floExtra.med_logs.map(x => [`${x.med_id}:${x.date}`, x]));
+      for (const x of data.med_logs || []) mlMap.set(`${x.med_id}:${x.date}`, x);
+      floExtra.med_logs = [...mlMap.values()];
+      const measMap = new Map(floExtra.measurements.map(x => [x.id, x]));
+      for (const x of data.measurements || []) measMap.set(x.id, x);
+      floExtra.measurements = [...measMap.values()];
     } catch (error) {
       floFetchedMonths.delete(ym);
       handleRequestError(error);
@@ -2390,11 +2418,15 @@
     // При устаревших данных прогнозный диапазон целиком в прошлом —
     // подсветку не рисуем, чтобы не создавать ложную картину.
     const fh = f.data_stale ? {} : f;
+    // Ориентировочная оценка следующих месячных допустима даже при малой
+    // истории (§4.1), но уверенное фертильное окно и день овуляции при
+    // недостатке данных не рисуются вовсе — расчёт показан только текстом.
+    const ovulationTrusted = fh.quality !== undefined && fh.quality !== "insufficient";
     const classes = [];
     if (floInPeriod(date)) classes.push("is-period");
     else if (!fh.empty && date >= fh.next_period_start && date <= fh.next_period_end) classes.push("is-predicted");
-    if (!fh.empty && date >= fh.fertile_start && date <= fh.fertile_end) classes.push("is-fertile");
-    if (!fh.empty && date === fh.ovulation_date) classes.push("is-ovulation");
+    if (ovulationTrusted && !fh.empty && date >= fh.fertile_start && date <= fh.fertile_end) classes.push("is-fertile");
+    if (ovulationTrusted && !fh.empty && date === fh.ovulation_date) classes.push("is-ovulation");
     if (!fh.empty && fh.phase === "delay" && date >= fh.next_period_start && date <= floState.today) classes.push("is-delay");
     // «Сегодня» — только в своём месяце, как в общем календаре: кольцо
     // на приглушённой ячейке соседнего месяца читается как выбор.
@@ -2415,12 +2447,15 @@
 
   function floDayDots(date) {
     const log = floDayLog(date);
-    // Секс — отдельный маркер: красные сердечки по числу отметок.
+    // Секс — отдельный маркер: красные сердечки по числу отметок. Явная
+    // отметка «без секса» — тоже факт, показывает её другим маркером (9.4).
     const sexCount = (log.sex === "protected" || log.sex === "unprotected") ? (log.sex_count || 1) : 0;
+    const noSex = log.sex === "none";
     // Любая запись дня даёт индикатор: флоу, сгустки, настроение, энергия,
-    // симптомы (включая «симптомов не было»), заметка, протечки, боль.
-    const hasLog = log.flow || log.clots || log.mood || log.energy || log.symptoms?.length || log.symptoms_clear || log.note || log.leakage || log.pain_score !== null && log.pain_score !== undefined || log.life_impact || log.pain_locations?.length;
-    return `${hasLog ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}`;
+    // симптомы (включая «симптомов не было»), заметка, протечки, боль,
+    // сон, стресс, слизь, факторы, вес, сведения о кровотечении.
+    const hasLog = log.flow || log.clots || log.mood || log.energy || log.symptoms?.length || log.symptoms_clear || log.note || log.leakage || log.pain_score !== null && log.pain_score !== undefined || log.life_impact || log.pain_locations?.length || log.sleep_hours !== null && log.sleep_hours !== undefined || log.sleep_quality || log.stress || log.sick || log.travel || log.weight_kg !== null && log.weight_kg !== undefined || log.mucus || log.bleeding_details;
+    return `${hasLog ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}${noSex ? `<i class="cal-dot is-no-sex" aria-hidden="true"></i>` : ""}`;
   }
 
   // Сводка записей выбранного дня под календарём — как cal-events в общем
@@ -2442,12 +2477,22 @@
     const mucusParts = log.mucus ? [log.mucus.amount && label(FLO_MUCUS_AMOUNTS, log.mucus.amount), log.mucus.consistency && label(FLO_MUCUS_CONSISTENCY, log.mucus.consistency), log.mucus.color && label(FLO_MUCUS_COLORS, log.mucus.color)].filter(Boolean) : [];
     if (mucusParts.length) facts.push(`Слизь: ${mucusParts.join(", ")}`);
     if (log.sleep_hours !== null && log.sleep_hours !== undefined) facts.push(`Сон ${log.sleep_hours} ч`);
+    if (log.sleep_quality) facts.push(`Сон: ${label(FLO_SLEEP_QUALITY, log.sleep_quality)}`);
+    const bleedingParts = log.bleeding_details ? [
+      log.bleeding_details.changes_per_day !== null && log.bleeding_details.changes_per_day !== undefined ? `смен ${log.bleeding_details.changes_per_day}` : "",
+      log.bleeding_details.saturation ? `пропитывание: ${label(FLO_BLEEDING_SATURATION, log.bleeding_details.saturation)}` : "",
+      log.bleeding_details.night_change ? "ночная смена" : ""
+    ].filter(Boolean) : [];
+    if (bleedingParts.length) facts.push(`Гигиена: ${bleedingParts.join(", ")}`);
     const factors = [log.stress ? `стресс: ${label(FLO_STRESS, log.stress)}` : "", log.sick ? "болезнь" : "", log.travel ? "поездка" : "", log.weight_kg ? `${log.weight_kg} кг` : ""].filter(Boolean);
     if (factors.length) facts.push(factors.join(", "));
     if (facts.length) rows.push({ icon: "log", title: "Дневник", meta: facts.join(" · ") });
     const sexCount = (log.sex === "protected" || log.sex === "unprotected") ? (log.sex_count || 1) : 0;
     if (sexCount) {
       rows.push({ icon: "heart", title: "Секс", meta: `${log.sex === "protected" ? "с защитой" : "без защиты"}${sexCount > 1 ? ` ×${sexCount}` : ""}` });
+    } else if (log.sex === "none") {
+      // Явная отметка «без секса» — не пустая ячейка, а записанный факт (9.4).
+      rows.push({ icon: "none", title: "Секс", meta: "без секса (отмечено)" });
     }
     if (log.note) rows.push({ icon: "log", title: "Заметка", meta: log.note.length > 80 ? `${log.note.slice(0, 80)}…` : log.note });
     for (const m of floMeasurements(date)) {
@@ -2491,10 +2536,12 @@
         <div class="cal-legend">
           <span><i class="cal-dot is-period" aria-hidden="true"></i>Месячные</span>
           <span><i class="cal-dot is-predicted" aria-hidden="true"></i>Прогноз</span>
-          <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно</span>
-          <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция</span>
+          <span><i class="cal-dot is-delay" aria-hidden="true"></i>Задержка</span>
+          <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно (расчёт)</span>
+          <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция (расчёт)</span>
           <span><i class="cal-dot is-log" aria-hidden="true"></i>Запись</span>
           <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
+          <span><i class="cal-dot is-no-sex" aria-hidden="true"></i>Без секса</span>
         </div>
         ${(() => {
           if (!floSelectedDate) return "";
@@ -2503,7 +2550,7 @@
             <p class="cal-events-date">${esc(calendarLongDate(floSelectedDate))}</p>
             ${rows.length ? rows.map(row => `
               <div class="cal-event">
-                ${row.icon === "heart" ? FLO_HEART_ICON : `<i class="cal-dot ${row.icon === "period" ? "is-period" : "is-log"}" aria-hidden="true"></i>`}
+                ${row.icon === "heart" ? FLO_HEART_ICON : `<i class="cal-dot ${row.icon === "period" ? "is-period" : row.icon === "none" ? "is-no-sex" : "is-log"}" aria-hidden="true"></i>`}
                 <div class="cal-event-body">
                   <span class="cal-event-title">${esc(row.title)}</span>
                   <span class="cal-event-meta">${esc(row.meta)}</span>
@@ -2539,6 +2586,7 @@
   const FLO_MUCUS_CONSISTENCY = [["dry", "сухая"], ["sticky", "липкая"], ["creamy", "сливкообразная"], ["watery", "водянистая"], ["stringy", "тягучая"]];
   const FLO_MUCUS_COLORS = [["clear", "прозрачная"], ["white", "белая"], ["cloudy", "мутная"], ["other", "другая"]];
   const FLO_SLEEP_QUALITY = [["good", "хорошо"], ["ok", "средне"], ["poor", "плохо"]];
+  const FLO_BLEEDING_SATURATION = [["low", "слабое"], ["medium", "среднее"], ["high", "сильное"]];
   const FLO_STRESS = [["low", "низкий"], ["medium", "средний"], ["high", "высокий"]];
   const FLO_MED_CATEGORIES = [["hormonal", "гормональный"], ["contraceptive", "контрацепция"], ["supplement", "БАД"], ["other", "прочее"]];
   const FLO_MED_FORMS = [["tablet", "таблетка"], ["capsule", "капсула"], ["injection", "укол"], ["patch", "пластырь"], ["iud", "спираль"], ["other", "прочее"]];
@@ -2564,6 +2612,10 @@
       sick: !!current.sick, travel: !!current.travel, weight_kg: current.weight_kg ?? null,
       ...patch
     };
+    // «Симптомов не было» и конкретные симптомы взаимоисключающие (9.2):
+    // выбор одного снимает другой, иначе сервер отклонит запись.
+    if (body.symptoms_clear && (body.symptoms || []).length) body.symptoms = [];
+    if ((body.symptoms || []).length) body.symptoms_clear = false;
     try {
       floState = await request("/api/cycle/log", { method: "POST", body });
       floExtraPutLog({ date, ...body });
@@ -2575,14 +2627,28 @@
   }
 
   // --- P2: измерения (БТ/ЛГ) и факт приёма препаратов за выбранный день ---
+  // Данные за старые месяцы живут в floExtra (догрузка истории): объединяем
+  // с окном state. State выигрывает при совпадении ключа — он новее.
+  function floAllMeasurements() {
+    const map = new Map(floExtra.measurements.map(m => [m.id, m]));
+    for (const m of floState?.measurements || []) map.set(m.id, m);
+    return [...map.values()];
+  }
+  function floAllMedLogs() {
+    const map = new Map(floExtra.med_logs.map(l => [`${l.med_id}:${l.date}`, l]));
+    for (const l of floState?.med_logs || []) map.set(`${l.med_id}:${l.date}`, l);
+    return [...map.values()];
+  }
   function floMeasurements(date) {
-    return (floState?.measurements || []).filter(m => m.date === date);
+    return floAllMeasurements().filter(m => m.date === date);
   }
   function floMedLogFor(medId, date) {
-    return (floState?.med_logs || []).find(l => l.med_id === medId && l.date === date) || null;
+    return floAllMedLogs().find(l => l.med_id === medId && l.date === date) || null;
   }
   function floMeds() {
-    return floState?.meds || [];
+    const map = new Map(floExtra.meds.map(m => [m.id, m]));
+    for (const m of floState?.meds || []) map.set(m.id, m);
+    return [...map.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
   }
   let floLhDraft = { date: null, result: null };
 
@@ -2611,6 +2677,7 @@
     const lhOn = floLhDraft.date === d ? floLhDraft.result : null;
     return `
       ${list || `<p class="flo-disclaimer">За этот день измерений нет</p>`}
+      <p class="settings-hint">БТ: измеряйте сразу после пробуждения, до подъёма с кровати, в одно и то же время, после не менее 3 часов сна. Болезнь, поздний отбой и алкоголь искажают результат — в такой день отметьте «болезнь/температура» в факторах дня, и замер не попадёт в температурный сдвиг.</p>
       <div class="flo-actions" style="margin-top:6px">
         <input id="flo-bbt" class="flo-input" type="number" inputmode="decimal" min="34" max="42" step="0.05" placeholder="БТ, °C" style="width:110px">
         <input id="flo-bbt-time" class="flo-input" type="time" aria-label="Время">
@@ -2618,7 +2685,7 @@
       </div>
       <div class="flo-chips" style="margin-top:6px">
         ${FLO_LH_RESULTS.map(([code, label]) =>
-          `<button type="button" class="flo-chip${lhOn === code ? " is-on" : ""}" data-action="flo-pick-lh" data-date="${d}" data-value="${code}" aria-pressed="${lhOn === code}">${label}</button>`).join("")}
+          `<button type="button" class="flo-chip${lhOn === code ? " is-on" : ""}" data-action="flo-pick-lh" data-date="${d}" data-value="${code}"${dis} aria-pressed="${lhOn === code}">${label}</button>`).join("")}
       </div>
       <div class="flo-actions" style="margin-top:6px">
         <input id="flo-lh-time" class="flo-input" type="time" aria-label="Время теста">
@@ -2657,6 +2724,7 @@
       </div>`;
     }).join("");
     return `${rows}
+      <p class="settings-hint">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся.</p>
       <p class="flo-disclaimer">Состав и дозы — в «Моих препаратах» в настройках. Приложение не назначает и не отменяет приём.</p>`;
   }
 
@@ -2672,12 +2740,23 @@
   async function floPostMedLog(body) {
     try {
       floState = await request("/api/cycle/med-log", { method: "POST", body });
+      // Синхронизируем догруженные месяцы: иначе старый месяц показывал бы
+      // устаревший факт приёма (тот же принцип, что floExtraPutLog).
+      const map = new Map(floExtra.med_logs.map(x => [`${x.med_id}:${x.date}`, x]));
+      map.set(`${body.med_id}:${body.date}`, { med_id: body.med_id, date: body.date, status: body.status, time: body.time || null, dose_taken: body.dose_taken || null, note: body.note || null });
+      floExtra.med_logs = [...map.values()];
     } catch (error) {
       handleRequestError(error);
     }
     render();
   }
 
+  // Карточка дня (переработка 12): три уровня ввода — быстрая отметка
+  // (кровотечение, боль, настроение, энергия), дополнительные наблюдения
+  // (симптомы по группам, сон, стресс, слизь, измерения, секс) и подробный
+  // дневник (препараты, заметка, факторы, сведения о кровотечении).
+  // Будущие дни — только просмотр (9.1): сервер всё равно отклоняет записи,
+  // так что все элементы ввода дизейблятся.
   function renderFloDayCard() {
     if (!floSelectedDate) return "";
     const open = floState.open_period_start;
@@ -2685,83 +2764,105 @@
     const future = d > floState.today;
     const canEnd = Boolean(open && d >= open && !future);
     const log = floDayLog(d);
+    const dis = future ? " disabled" : "";
     const chip = (action, label, on, attr, value) =>
-      `<button type="button" class="flo-chip${on ? " is-on" : ""}" data-action="${action}" data-date="${d}" ${attr}="${esc(value)}" aria-pressed="${on}">${esc(label)}</button>`;
+      `<button type="button" class="flo-chip${on ? " is-on" : ""}" data-action="${action}" data-date="${d}" ${attr}="${esc(value)}"${future ? " disabled" : ""} aria-pressed="${on}">${esc(label)}</button>`;
+    // Симптомы по категориям (переработка 5): физиологические симптомы,
+    // активность, сон и привычки — раздельные группы. Коды хранятся в одном
+    // списке symptoms, группировка — только отображение, старые записи совместимы.
+    const symptomGroups = [
+      ["Симптомы", ["cramps", "headache", "bloating", "breast_tenderness", "fatigue", "acne", "nausea", "back_pain", "dizziness", "constipation", "diarrhea"]],
+      ["Активность", ["exercise"]],
+      ["Сон", ["good_sleep", "poor_sleep"]],
+      ["Привычки", ["water"]]
+    ];
+    const symptomChips = symptomGroups.map(([groupTitle, codes]) =>
+      `<p class="flo-sub">${esc(groupTitle)}</p><div class="flo-chips">${codes.map(code => {
+        const found = FLO_SYMPTOMS.find(([c]) => c === code);
+        return chip("flo-toggle-symptom", found?.[1] || code, log.symptoms.includes(code), "data-code", code);
+      }).join("")}</div>`).join("");
     return `
       <section class="card" id="flo-day-card">
         <p class="eyebrow">Выбранный день</p>
         <h3>${esc(formatDay(d))}</h3>
-        <button type="button" class="primary full card-action" data-action="flo-day-start" data-date="${d}"${future ? " disabled" : ""}>Начало месячных</button>
-        ${canEnd ? `<button type="button" class="secondary full card-action" data-action="flo-day-end" data-date="${d}">Конец месячных</button>` : ""}
-        ${future ? `<p class="settings-hint">Будущая дата: отметить начало или конец месячных можно только сегодня или в прошлом.</p>` : ""}
+        ${future ? `<p class="settings-hint">Будущий день — просмотр: записи можно делать сегодня или в прошлом.</p>` : ""}
+        <button type="button" class="primary full card-action" data-action="flo-day-start" data-date="${d}"${dis}>Начало месячных</button>
+        ${canEnd ? `<button type="button" class="secondary full card-action" data-action="flo-day-end" data-date="${d}"${dis}>Конец месячных</button>` : ""}
         ${!future && d < floState.today && !floDayHasRecord(d) ? `<p class="settings-hint">За этот день записей нет — это не то же самое, что «симптомов не было»: день просто пропущен.</p>` : ""}
-        <p class="eyebrow flo-group">Кровотечение</p>
+        <p class="eyebrow flo-group">Быстрая отметка</p>
+        <p class="flo-sub">Кровотечение</p>
         <div class="flo-chips">${FLO_FLOWS.map(([code, label]) => chip("flo-set-flow", label, log.flow === code, "data-flow", code)).join("")}</div>
-        <div class="flo-chips" style="margin-top:6px">
-          <button type="button" class="flo-chip${log.clots ? " is-on" : ""}" data-action="flo-set-clots" data-date="${d}" data-value="${!log.clots}" aria-pressed="${log.clots}">Сгустки были</button>
-          ${FLO_LEAKAGE.map(([code, label]) => chip("flo-set-leakage", label, log.leakage === code, "data-leakage", code)).join("")}
-        </div>
-        <p class="settings-hint">Если сгустки крупные или их много — покажите это врачу</p>
-        <p class="eyebrow flo-group">Боль, 0–10</p>
+        <p class="flo-sub">Боль, 0–10</p>
         <div class="flo-chips flo-pain-scale">${Array.from({ length: 11 }, (_, n) => chip("flo-set-pain", String(n), log.pain_score === n, "data-pain", n)).join("")}</div>
-        <div class="flo-chips" style="margin-top:6px">
-          ${FLO_PAIN_LOCATIONS.map(([code, label]) => chip("flo-toggle-pain-loc", label, (log.pain_locations || []).includes(code), "data-code", code)).join("")}
-        </div>
-        <p class="eyebrow flo-group">Настроение</p>
+        <p class="flo-sub">Настроение</p>
         <div class="flo-chips">${FLO_MOODS.map(([code, label]) => chip("flo-set-mood", label, log.mood === code, "data-mood", code)).join("")}</div>
-        <p class="eyebrow flo-group">Энергия</p>
+        <p class="flo-sub">Энергия</p>
         <div class="flo-chips">${FLO_ENERGY.map(([code, label]) => chip("flo-set-energy", label, log.energy === code, "data-energy", code)).join("")}</div>
-        <p class="eyebrow flo-group">Симптомы</p>
-        <div class="flo-chips">
-          ${FLO_SYMPTOMS.map(([code, label]) => chip("flo-toggle-symptom", label, log.symptoms.includes(code), "data-code", code)).join("")}
-          <button type="button" class="flo-chip${log.symptoms_clear ? " is-on" : ""}" data-action="flo-toggle-clear" data-date="${d}" aria-pressed="${log.symptoms_clear}">Симптомов не было</button>
+        <div class="flo-chips" style="margin-top:6px">
+          <button type="button" class="flo-chip${log.symptoms_clear ? " is-on" : ""}" data-action="flo-toggle-clear" data-date="${d}"${dis} aria-pressed="${log.symptoms_clear}">Симптомов не было</button>
         </div>
-        <p class="settings-hint">«Симптомов не было» — явная отметка: день записан, но ничего не беспокоило</p>
-        <details class="flo-fold"><summary class="flo-fold-title">Влияние на жизнь</summary>
-        <div class="flo-chips">${FLO_LIFE_IMPACT.map(([code, label]) => chip("flo-set-impact", label, log.life_impact === code, "data-impact", code)).join("")}</div>
-        </details>
-        <details class="flo-fold"><summary class="flo-fold-title">Слизь и выделения</summary>
-        <p class="flo-sub">Цвет и консистенция — приблизительное наблюдение, не диагноз</p>
+        <p class="settings-hint">«Симптомов не было» — явная отметка: день записан, но ничего не беспокоило. Пропущенный день — не отметка</p>
+        <details class="flo-fold"><summary class="flo-fold-title">Дополнительно: симптомы, сон, слизь, измерения, секс</summary>
+        ${symptomChips}
+        <p class="flo-sub">Сон</p>
+        <div class="flo-chips">${FLO_SLEEP_QUALITY.map(([code, label]) => chip("flo-set-sleep-quality", label, log.sleep_quality === code, "data-value", code)).join("")}</div>
+        <p class="flo-sub">Стресс</p>
+        <div class="flo-chips">${FLO_STRESS.map(([code, label]) => chip("flo-set-stress", label, log.stress === code, "data-value", code)).join("")}</div>
+        <p class="flo-sub">Слизь и выделения</p>
+        <p class="settings-hint">Цвет и консистенция — приблизительное наблюдение, не диагноз</p>
         ${([["amount", FLO_MUCUS_AMOUNTS], ["consistency", FLO_MUCUS_CONSISTENCY], ["color", FLO_MUCUS_COLORS]]).map(([field, opts]) =>
           `<div class="flo-chips"${field === "amount" ? "" : ` style="margin-top:6px"`}>${opts.map(([code, label]) =>
-            `<button type="button" class="flo-chip${log.mucus?.[field] === code ? " is-on" : ""}" data-action="flo-set-mucus" data-date="${d}" data-field="${field}" data-value="${esc(code)}" aria-pressed="${log.mucus?.[field] === code}">${esc(label)}</button>`).join("")}</div>`).join("")}
+            `<button type="button" class="flo-chip${log.mucus?.[field] === code ? " is-on" : ""}" data-action="flo-set-mucus" data-date="${d}" data-field="${field}" data-value="${esc(code)}"${dis} aria-pressed="${log.mucus?.[field] === code}">${esc(label)}</button>`).join("")}</div>`).join("")}
         <div class="flo-chips" style="margin-top:6px">
-          <button type="button" class="flo-chip${log.mucus?.discomfort ? " is-on" : ""}" data-action="flo-toggle-mucus-discomfort" data-date="${d}" aria-pressed="${!!log.mucus?.discomfort}">Дискомфорт</button>
+          <button type="button" class="flo-chip${log.mucus?.discomfort ? " is-on" : ""}" data-action="flo-toggle-mucus-discomfort" data-date="${d}"${dis} aria-pressed="${!!log.mucus?.discomfort}">Дискомфорт</button>
         </div>
-        </details>
-        <details class="flo-fold"><summary class="flo-fold-title">Сон и факторы дня</summary>
-        <div class="flo-chips">${FLO_SLEEP_QUALITY.map(([code, label]) => chip("flo-set-sleep-quality", label, log.sleep_quality === code, "data-value", code)).join("")}</div>
-        <label class="field" style="margin-top:6px"><span>Сон, часов</span>
-          <input id="flo-sleep-hours" type="number" inputmode="decimal" min="0" max="24" step="0.5" value="${log.sleep_hours ?? ""}" placeholder="не указано">
-        </label>
-        <div class="flo-chips" style="margin-top:6px">${FLO_STRESS.map(([code, label]) => chip("flo-set-stress", label, log.stress === code, "data-value", code)).join("")}</div>
-        <div class="flo-chips" style="margin-top:6px">
-          <button type="button" class="flo-chip${log.sick ? " is-on" : ""}" data-action="flo-toggle-sick" data-date="${d}" aria-pressed="${!!log.sick}">Болезнь/температура</button>
-          <button type="button" class="flo-chip${log.travel ? " is-on" : ""}" data-action="flo-toggle-travel" data-date="${d}" aria-pressed="${!!log.travel}">Поездка/смена времени</button>
-        </div>
-        <label class="field" style="margin-top:6px"><span>Вес, кг</span>
-          <input id="flo-weight" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${log.weight_kg ?? ""}" placeholder="не указано">
-        </label>
-        <button type="button" class="secondary full card-action" data-action="flo-save-factors" data-date="${d}">Сохранить сон и вес</button>
-        </details>
-        <details class="flo-fold"${floMeds().length ? " open" : ""}><summary class="flo-fold-title">Измерения</summary>
+        <p class="flo-sub">Измерения</p>
         ${renderFloMeasurements(d, future)}
-        </details>
-        <details class="flo-fold"${floMeds().length ? " open" : ""}><summary class="flo-fold-title">Лекарства и препараты</summary>
-        ${renderFloDayMeds(d, future)}
-        </details>
-        <details class="flo-fold"><summary class="flo-fold-title">Секс</summary>
+        <p class="flo-sub">Секс</p>
         <p class="settings-hint">Повторите отметку для нескольких раз за день</p>
         <div class="flo-chips">${[["protected", "с защитой"], ["unprotected", "без защиты"], ["none", "без секса"]].map(([code, label]) => chip("flo-set-sex", label, log.sex === code, "data-sex", code)).join("")}</div>
         ${(log.sex === "protected" || log.sex === "unprotected") ? `<div class="flo-chips" style="margin-top:6px">
-          <button type="button" class="flo-chip" data-action="flo-sex-dec" data-date="${d}" aria-label="Убрать одну отметку">−</button>
+          <button type="button" class="flo-chip" data-action="flo-sex-dec" data-date="${d}"${dis} aria-label="Убрать одну отметку">−</button>
           <span class="flo-sex-count">Отметок: ${log.sex_count || 1}</span>
-          <button type="button" class="flo-chip" data-action="flo-sex-inc" data-date="${d}" aria-label="Добавить отметку">+</button>
+          <button type="button" class="flo-chip" data-action="flo-sex-inc" data-date="${d}"${dis} aria-label="Добавить отметку">+</button>
         </div>` : ""}
         </details>
-        <details class="flo-fold"><summary class="flo-fold-title">Заметка</summary>
-        <label class="field"><span>Заметка</span><textarea id="flo-note" rows="2" maxlength="2000">${esc(log.note || "")}</textarea></label>
-        <button type="button" class="secondary full card-action" data-action="flo-save-note" data-date="${d}">Сохранить заметку</button>
+        <details class="flo-fold"><summary class="flo-fold-title">Подробный дневник: препараты, факторы, кровотечение, заметка</summary>
+        <p class="flo-sub">Лекарства и препараты</p>
+        ${renderFloDayMeds(d, future)}
+        <p class="flo-sub">Факторы дня</p>
+        <div class="flo-chips">
+          <button type="button" class="flo-chip${log.sick ? " is-on" : ""}" data-action="flo-toggle-sick" data-date="${d}"${dis} aria-pressed="${!!log.sick}">Болезнь/температура</button>
+          <button type="button" class="flo-chip${log.travel ? " is-on" : ""}" data-action="flo-toggle-travel" data-date="${d}"${dis} aria-pressed="${!!log.travel}">Поездка/смена времени</button>
+        </div>
+        <label class="field" style="margin-top:6px"><span>Сон, часов</span>
+          <input id="flo-sleep-hours" type="number" inputmode="decimal" min="0" max="24" step="0.5" value="${log.sleep_hours ?? ""}" placeholder="не указано"${dis}>
+        </label>
+        <label class="field" style="margin-top:6px"><span>Вес, кг</span>
+          <input id="flo-weight" type="number" inputmode="decimal" min="30" max="250" step="0.1" value="${log.weight_kg ?? ""}" placeholder="не указано"${dis}>
+        </label>
+        <button type="button" class="secondary full card-action" data-action="flo-save-factors" data-date="${d}"${dis}>Сохранить сон и вес</button>
+        <p class="flo-sub">Кровотечение подробнее</p>
+        <div class="flo-chips">
+          <button type="button" class="flo-chip${log.clots ? " is-on" : ""}" data-action="flo-set-clots" data-date="${d}" data-value="${!log.clots}"${dis} aria-pressed="${log.clots}">Сгустки были</button>
+          ${FLO_LEAKAGE.map(([code, label]) => chip("flo-set-leakage", label, log.leakage === code, "data-leakage", code)).join("")}
+        </div>
+        <p class="settings-hint">Если сгустки крупные или их много — покажите это врачу</p>
+        <div class="flo-chips" style="margin-top:6px">
+          ${FLO_BLEEDING_SATURATION.map(([code, label]) => chip("flo-set-bleeding-saturation", label, log.bleeding_details?.saturation === code, "data-value", code)).join("")}
+        </div>
+        <label class="field" style="margin-top:6px"><span>Смен средства гигиены за день</span>
+          <input id="flo-bleeding-changes" type="number" inputmode="numeric" min="0" max="24" step="1" value="${log.bleeding_details?.changes_per_day ?? ""}" placeholder="не указано"${dis}>
+        </label>
+        <div class="flo-chips" style="margin-top:6px">
+          <button type="button" class="flo-chip${log.bleeding_details?.night_change ? " is-on" : ""}" data-action="flo-toggle-bleeding-night" data-date="${d}"${dis} aria-pressed="${!!log.bleeding_details?.night_change}">Ночная смена</button>
+        </div>
+        <button type="button" class="secondary full card-action" data-action="flo-save-bleeding" data-date="${d}"${dis}>Сохранить сведения о кровотечении</button>
+        <p class="flo-sub">Влияние на жизнь</p>
+        <div class="flo-chips">${FLO_LIFE_IMPACT.map(([code, label]) => chip("flo-set-impact", label, log.life_impact === code, "data-impact", code)).join("")}</div>
+        <p class="flo-sub">Заметка</p>
+        <label class="field"><span>Заметка</span><textarea id="flo-note" rows="2" maxlength="2000"${dis}>${esc(log.note || "")}</textarea></label>
+        <button type="button" class="secondary full card-action" data-action="flo-save-note" data-date="${d}"${dis}>Сохранить заметку</button>
         </details>
       </section>`;
   }
@@ -2809,19 +2910,44 @@
       </section>`;
   }
 
+  // Настройки общего доступа (переработка P0): категории вместо уровней.
+  // Календарь — базовая часть: прогноз и даты месячных передаются самим
+  // фактом включённого шеринга. Остальные категории — по явному выбору, и
+  // состав подтверждается отдельно (share_confirmed): до подтверждения
+  // партнёру передаётся только календарная оценка.
+  const FLO_SHARE_CATEGORIES = [
+    ["sex", "Секс", "Факты активности: «с защитой», «без защиты» и явная отметка «без секса», с числом отметок за день. Подробностей в записях нет."],
+    ["mood", "Настроение", "Только настроение, которое вы отметили сами. Никаких прогнозов настроения."],
+    ["sleep", "Качество сна", "Только «хорошо», «средне» или «плохо». Часы сна и другие подробности не передаются."],
+    ["bbt", "Базальная температура", "Фактические измерения с датой, временем и единицами. Без интерпретации."]
+  ];
   function renderFloShareControls() {
-    const share = floState.share || { enabled: false, level: "phases" };
-    // Формулировки уровней честные: полный уровень передаёт запись и заметку
-    // только за сегодня — не «всё» (аудит 3.2).
-    const levels = [["phases", "фаза и прогноз"], ["periods", "даты месячных"], ["symptoms", "запись за сегодня"], ["full", "запись и заметка за сегодня"]];
+    const share = floState.share || { enabled: false, categories: {}, confirmed: false, notify: false };
+    const cats = share.categories || {};
+    const consentNeeded = share.enabled && !share.confirmed;
     return `
         <p class="flo-sub">Шеринг с партнёром: ${share.enabled ? "включён" : "выключен"}</p>
         <div class="flo-chips">
           <button type="button" class="flo-chip${share.enabled ? " is-on" : ""}" data-action="flo-share-toggle" data-enabled="${!share.enabled}">${share.enabled ? "Выключить шеринг" : "Включить шеринг"}</button>
         </div>
-        <div class="flo-chips">${levels.map(([code, label]) => `<button type="button" class="flo-chip${share.level === code ? " is-on" : ""}" data-action="flo-share-level" data-level="${code}">${esc(label)}</button>`).join("")}</div>
+        <p class="settings-hint">Главный выключатель закрывает доступ сразу. Календарь (прогноз и даты месячных) — базовая часть общего доступа.</p>
+        <p class="flo-sub">Категории данных для партнёра</p>
+        ${FLO_SHARE_CATEGORIES.map(([key, title, hint]) => `
+          <div class="flo-share-cat">
+            <div class="flo-share-cat-head">
+              <span>${esc(title)}</span>
+              <button type="button" class="flo-chip${cats[key] ? " is-on" : ""}" data-action="flo-share-cat" data-cat="${key}" data-enabled="${!cats[key]}" aria-pressed="${!!cats[key]}">${cats[key] ? "Передаётся" : "Не передаётся"}</button>
+            </div>
+            <p class="settings-hint">${esc(hint)}</p>
+          </div>`).join("")}
+        ${consentNeeded ? `
+        <div class="flo-consent">
+          <p class="flo-line">Партнёру сейчас передаётся только календарная оценка — новый состав данных нужно подтвердить. После подтверждения партнёр увидит: календарь (прогноз, даты месячных)${FLO_SHARE_CATEGORIES.filter(([key]) => cats[key]).map(([, title]) => `, ${title.toLowerCase()}`).join("") || ""}.</p>
+          <p class="settings-hint">Симптомы, заметки, препараты, боль, вес и стресс не передаются никогда.</p>
+          <button type="button" class="primary full card-action" data-action="flo-share-confirm">Подтвердить состав данных</button>
+        </div>` : ""}
         <div class="flo-chips"><button type="button" class="flo-chip${share.notify ? " is-on" : ""}" data-action="flo-share-notify" data-enabled="${!share.notify}">${share.notify ? "Уведомлять партнёра: да" : "Уведомлять партнёра: нет"}</button></div>
-        <p class="flo-disclaimer">Партнёру не передаются секс, история дневника и личные записи. Выключение закрывает доступ сразу.</p>`;
+        <p class="flo-disclaimer">Партнёру не передаются симптомы, заметки, флоу и сгустки, боль, слизь, препараты, вес и стресс. Выключение категории прекращает передачу именно её сразу.</p>`;
   }
 
   function renderFloNotifyControl() {
@@ -2859,6 +2985,17 @@
 
   function renderFloSettings() {
     const p = floState.profile || {};
+    const context = floState.context || {};
+    const contextOptions = [
+      ["pregnancy", "Беременность"],
+      ["postpartum", "Недавние роды"],
+      ["breastfeeding", "Грудное вскармливание"],
+      ["perimenopause", "Перименопауза"],
+      ["hormonal_contraception", "Гормональная контрацепция"],
+      ["cycle_affecting_meds", "Препараты, влияющие на цикл или температуру"],
+      ["very_irregular", "Выраженно нерегулярные циклы"],
+      ["unusual_bleeding", "Необычные или межменструальные кровотечения"]
+    ];
     return `
       <section class="card">
         <p class="eyebrow">Настройки Фло</p>
@@ -2875,6 +3012,12 @@
         ${Number(p.cycle_length_known) === 1
           ? `<p class="flo-disclaimer">Пока накоплено меньше двух циклов, прогноз считается по этим значениям.</p>`
           : `<p class="flo-disclaimer">Сейчас используется стандартная длина цикла 28 дней — это не ваша личная норма. Сохраните своё значение или отметьте два цикла, и прогноз уточнится.</p>`}
+        <p class="eyebrow flo-group">Контекст цикла</p>
+        <p class="settings-hint">Необязательные сведения: они ограничивают применимость календарных прогнозов, чтобы не показывать уверенные даты там, где расчёт неприменим. Это не медицинская анкета.</p>
+        <div class="flo-chips">
+          ${contextOptions.map(([key, title]) =>
+            `<button type="button" class="flo-chip${context[key] ? " is-on" : ""}" data-action="flo-context-toggle" data-key="${key}" data-enabled="${!context[key]}" aria-pressed="${!!context[key]}">${esc(title)}</button>`).join("")}
+        </div>
         ${renderFloDataControls()}
       </section>`;
   }
@@ -2883,9 +3026,12 @@
     return appState?.user?.gender === "female";
   }
 
-  // Вкладка видна владелице всегда, партнёру — только когда есть активный шеринг.
+  // Вкладка «Фло» доступна обоим партнёрам (переработка 2): владелице —
+  // её дневник, партнёру — read-only представление согласованных данных.
+  // Если шеринг не включён, партнёр видит понятный пустой экран вместо
+  // скрытой вкладки.
   function showFloTab() {
-    return floIsOwner() || floPartner?.shared === true;
+    return true;
   }
 
   async function loadFloPartner() {
@@ -2900,9 +3046,10 @@
     render();
   }
 
-  // Партнёрский вид Фло: только чтение — календарь с отметками и карточка
-  // выбранного дня (секс, настроение, качество сна, БТ). Дневник,
-  // препараты и редактирование партнёру недоступны.
+  // Партнёрский вид Фло (мужская версия): только чтение. Данные приходят
+  // строго из allowlist-ответа /api/cycle/partner — категории, которые
+  // владелица включила и подтвердила. Редактирования нет: никаких кнопок
+  // записи, только просмотр фактов и календарных оценок.
   function floPartnerDayLog(date) {
     return (floPartner?.days || []).find(l => l.date === date) || null;
   }
@@ -2918,11 +3065,14 @@
     const f = floPartner?.forecast || {};
     const fh = f.empty ? {} : f;
     const today = floPartner?.today || "";
+    // Паритет с владелицей (§4.1): при недостатке данных уверенные
+    // фертильное окно и овуляция не красятся.
+    const ovulationTrusted = fh.quality !== undefined && fh.quality !== "insufficient";
     const classes = [];
     if (floPartnerInPeriod(date)) classes.push("is-period");
     else if (!fh.empty && date >= fh.next_period_start && date <= fh.next_period_end) classes.push("is-predicted");
-    if (!fh.empty && date >= fh.fertile_start && date <= fh.fertile_end) classes.push("is-fertile");
-    if (!fh.empty && date === fh.ovulation_date) classes.push("is-ovulation");
+    if (ovulationTrusted && !fh.empty && date >= fh.fertile_start && date <= fh.fertile_end) classes.push("is-fertile");
+    if (ovulationTrusted && !fh.empty && date === fh.ovulation_date) classes.push("is-ovulation");
     if (!fh.empty && fh.phase === "delay" && date >= fh.next_period_start && date <= today) classes.push("is-delay");
     if (inMonth && date === today) classes.push("is-today");
     return classes;
@@ -2930,8 +3080,9 @@
   function floPartnerDayDots(date) {
     const log = floPartnerDayLog(date);
     const sexCount = (log?.sex === "protected" || log?.sex === "unprotected") ? (log.sex_count || 1) : 0;
-    const hasOther = log?.mood || log?.sleep_quality || floPartnerBbt(date).length;
-    return `${hasOther ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}`;
+    const noSex = log?.sex === "none";
+    const hasOther = log?.mood || log?.sleep || floPartnerBbt(date).length;
+    return `${hasOther ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}${noSex ? `<i class="cal-dot is-no-sex" aria-hidden="true"></i>` : ""}`;
   }
   function renderFloPartnerCalendar() {
     const v = floPartner;
@@ -2962,10 +3113,12 @@
         <div class="cal-legend">
           <span><i class="cal-dot is-period" aria-hidden="true"></i>Месячные</span>
           <span><i class="cal-dot is-predicted" aria-hidden="true"></i>Прогноз</span>
-          <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно</span>
-          <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция</span>
-          <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
+          <span><i class="cal-dot is-delay" aria-hidden="true"></i>Задержка</span>
+          <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно (расчёт)</span>
+          <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция (расчёт)</span>
           <span><i class="cal-dot is-log" aria-hidden="true"></i>Отметки</span>
+          <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
+          <span><i class="cal-dot is-no-sex" aria-hidden="true"></i>Без секса</span>
         </div>
       </section>`;
   }
@@ -2976,23 +3129,30 @@
     const log = floPartnerDayLog(d);
     const bbt = floPartnerBbt(d);
     const states = floPartnerDayClasses(d).filter(c => ["is-period", "is-predicted", "is-fertile", "is-ovulation", "is-delay"].includes(c));
-    const stateNames = { "is-period": "Месячные", "is-predicted": "Прогноз месячных", "is-fertile": "Фертильное окно", "is-ovulation": "Овуляция", "is-delay": "Задержка" };
+    const stateNames = { "is-period": "Месячные", "is-predicted": "Прогноз месячных", "is-fertile": "Фертильное окно (расчёт)", "is-ovulation": "Овуляция (расчёт)", "is-delay": "Задержка" };
     const sexCount = (log?.sex === "protected" || log?.sex === "unprotected") ? (log.sex_count || 1) : 0;
     const lines = [];
     if (states.length) lines.push(`<p class="flo-line">${states.map(c => esc(stateNames[c])).join(" · ")}</p>`);
     if (sexCount) {
       lines.push(`<p class="flo-line">${FLO_HEART_ICON.repeat(Math.min(sexCount, 5))}${sexCount > 5 ? `<span class="cal-sex-more">+${sexCount - 5}</span>` : ""} ${esc(log.sex === "protected" ? "с защитой" : "без защиты")}${sexCount > 1 ? ` ×${sexCount}` : ""}</p>`);
+    } else if (log?.sex === "none") {
+      // Явно отмеченное «без секса» — факт, а не отсутствие записи (9.4).
+      lines.push(`<p class="flo-line"><i class="cal-dot is-no-sex" aria-hidden="true"></i> Без секса — отмечено партнёршей</p>`);
     }
     if (log?.mood) {
       const mood = FLO_MOODS.find(([c]) => c === log.mood)?.[1] || log.mood;
       lines.push(`<p class="flo-line">Настроение: ${esc(mood)}</p>`);
     }
-    if (log?.sleep_quality) {
-      const sq = FLO_SLEEP_QUALITY.find(([c]) => c === log.sleep_quality)?.[1] || log.sleep_quality;
+    if (log?.sleep) {
+      // Качество сна передаётся строго тремя значениями (good/ok/poor) —
+      // сервер нормализует allowlist'ом; часы и подробности не приходят.
+      const sq = FLO_SLEEP_QUALITY.find(([c]) => c === log.sleep)?.[1] || log.sleep;
       lines.push(`<p class="flo-line">Сон: ${esc(sq)}</p>`);
     }
     if (bbt.length) {
-      lines.push(`<p class="flo-line">Температура: ${bbt.map(m => `${esc(String(m.value))}°${m.unit === "F" ? "F" : "C"}${m.time ? ` · ${esc(m.time)}` : ""}`).join("; ")}</p>`);
+      // Базальная температура: фактические измерения, единицы и время —
+      // как записала владелица. Без интерпретации.
+      lines.push(`<p class="flo-line">Базальная температура: ${bbt.map(m => `${esc(String(m.value))}°${m.unit === "F" ? "F" : "C"}${m.time ? ` · ${esc(m.time)}` : ""}`).join("; ")}</p>`);
     }
     if (!lines.length) lines.push(`<p class="cal-empty">Отметок нет.</p>`);
     return `
@@ -3006,7 +3166,7 @@
   function renderFloPartnerView() {
     const v = floPartner;
     if (!v || v.shared !== true) {
-      return `<section class="card"><p class="eyebrow">Фло</p><p>Партнёрша пока не делится календарём.</p></section>`;
+      return `<section class="card"><p class="eyebrow">Фло</p><p>Партнёрша пока не делится календарём. Когда она включит общий доступ, здесь появится её календарь.</p></section>`;
     }
     const f = v.forecast || {};
     const lines = [];
@@ -3014,31 +3174,42 @@
       lines.push("Пока мало данных для прогноза.");
     } else {
       lines.push(`<b>День ${f.cycle_day} цикла</b> · ${esc(FLO_PHASE_LABELS[f.phase] || "")}`);
-      if (f.phase === "stale") lines.push("Данные устарели — партнёр видит только фазу.");
+      if (f.phase === "stale") lines.push("Данные давно не обновлялись — прогноз может не отражать текущий цикл.");
       else if (f.phase === "delay") lines.push(`Задержка ${f.delay_days} дн.`);
       else if (f.next_period_in === 0) lines.push("Месячные по прогнозу ожидаются сегодня");
+      else if (!f.data_stale && f.next_period_early && f.next_period_late) lines.push(`Месячные ориентировочно ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}`);
       else if (!f.data_stale) lines.push(`Месячные примерно через ${f.next_period_in} дн.`);
-      if (f.phase !== "delay" && f.phase !== "stale" && f.ovulation_in > 0) lines.push(`Овуляция примерно через ${f.ovulation_in} дн.`);
+      // Методика и качество — сразу в карточке (переработка 11).
+      if (f.based_on === "history" && f.usable_cycles) lines.push(`Расчёт по ${f.usable_cycles} завершённым циклам${v.last_period_start ? `, последнее начало отмечено ${esc(floDayMonth(v.last_period_start))}` : ""}.`);
+      else if (f.based_on === "profile") lines.push("Расчёт по длине цикла, указанной партнёршей.");
+      else lines.push("Расчёт по стандартной длине цикла — личной истории пока мало.");
+      if (f.quality === "insufficient") lines.push("Данных недостаточно: даты очень примерные");
+      if (f.ovulation_in > 0 && f.phase !== "delay" && f.phase !== "stale") {
+        // §4.1: при недостатке данных уверенной даты овуляции партнёру нет.
+        if (f.quality === "insufficient") {
+          lines.push("Данных для оценки овуляции пока недостаточно.");
+        } else if (f.ovulation_source === "lh" || f.ovulation_source === "bbt") {
+          lines.push(`Овуляция — оценка по ${f.ovulation_source === "lh" ? "тесту ЛГ" : "температурному сдвигу"}, примерно через ${f.ovulation_in} дн. Косвенный признак, не подтверждение.`);
+        } else {
+          lines.push(`Овуляция — календарная оценка, примерно через ${f.ovulation_in} дн. Не подтверждена наблюдениями.`);
+        }
+      }
       if (f.irregular) lines.push("Цикл нерегулярный, прогнозы приблизительные.");
     }
     if (v.tip) lines.push(esc(v.tip));
     let extra = "";
-    if (v.periods) {
+    if (v.periods?.length) {
       extra += `<p class="flo-sub">Месячные</p><ul class="flo-hist">${v.periods.map(p => `<li>${esc(p.start_date)} · ${esc(p.end_date || (p.end_unknown ? "конец неизвестен" : "идут"))}</li>`).join("")}</ul>`;
     }
-    if (v.today_log) {
-      const flow = FLO_FLOWS.find(([code]) => code === v.today_log.flow)?.[1];
-      const symptoms = v.today_log.symptoms.map(code => FLO_SYMPTOMS.find(([k]) => k === code)?.[1]).filter(Boolean);
-      extra += `<p class="flo-sub">Сегодня</p>`;
-      if (flow) extra += `<p class="flo-line">Интенсивность: ${esc(flow)}</p>`;
-      if (symptoms.length) extra += `<div class="flo-chips">${symptoms.map(s => `<span class="day-chip">${esc(s)}</span>`).join("")}</div>`;
-      if (v.today_log.note) extra += `<p class="flo-sub">Заметка</p><p class="flo-line">${esc(v.today_log.note)}</p>`;
+    if (!v.confirmed) {
+      extra += `<p class="flo-disclaimer">Партнёрша делится календарной оценкой. Подробные отметки появятся, когда она подтвердит состав данных в своих настройках.</p>`;
     }
     return `
       <section class="card flo-today">
-        <p class="eyebrow">Фло · партнёрский вид</p>
+        <p class="eyebrow">Фло</p>
         ${lines.map(l => `<p class="flo-line">${l}</p>`).join("")}
         ${extra}
+        <p class="flo-disclaimer">${esc(v.forecast_disclaimer || "Прогнозы приблизительны и не являются методом контрацепции")}</p>
         <p class="flo-disclaimer">${esc(v.disclaimer || "")}</p>
       </section>
       ${renderFloPartnerCalendar()}
@@ -3062,7 +3233,8 @@
     if (w.step === 0) {
       return shell("знакомство", `
         <p class="flo-line">Фло поможет следить за циклом и предсказывать месячные, овуляцию и задержки.</p>
-        <p class="flo-line">Партнёр ничего не увидит, пока вы сами не включите шеринг. Варианты: только фаза и прогноз, даты месячных, симптомы, заметки.</p>
+        <p class="flo-line">Партнёр ничего не увидит, пока вы сами не включите шеринг. Базовая часть — календарь: прогноз и даты месячных. Дополнительно можно открыть секс, настроение, качество сна (только «хорошо/средне/плохо») и базальную температуру — состав подтверждается явно.</p>
+        <p class="flo-line">Симптомы, заметки и препараты партнёру не передаются.</p>
         <p class="flo-disclaimer">Это не замена консультации врача.</p>`,
         `<button type="button" class="secondary full card-action" data-action="flo-wiz-postpone">Позже</button>
          <button type="button" class="primary full card-action" data-action="flo-wiz-begin">Начать</button>`);
@@ -3101,10 +3273,13 @@
          <button type="button" class="primary full card-action" data-action="flo-wiz-next">Дальше</button>`);
     }
     return shell("шаг 5 из 5", `
-      <p class="flo-line">Хотите делиться с партнёром? По умолчанию нет, и это можно поменять в настройках.</p>`,
-      `<button type="button" class="primary full card-action" data-action="flo-wiz-set" data-field="share" data-value="none">Пока нет</button>
-       <button type="button" class="secondary full card-action" data-action="flo-wiz-set" data-field="share" data-value="phases">Фаза и прогноз</button>
-       <button type="button" class="secondary full card-action" data-action="flo-wiz-set" data-field="share" data-value="periods">Даты месячных</button>
+      <p class="flo-line">Хотите делиться с партнёром? По умолчанию нет, и это можно поменять в настройках.</p>
+      <p class="flo-sub">Базовая часть — календарь: прогноз и даты месячных. Отметьте дополнительные категории, если хотите передавать их.</p>
+      ${FLO_SHARE_CATEGORIES.map(([key, title]) =>
+        `<button type="button" class="flo-chip${(w.shareCategories || {})[key] ? " is-on" : ""}" data-action="flo-wiz-share-cat" data-cat="${key}">${esc(title)}</button>`).join("")}
+      <p class="settings-hint">Симптомы, заметки и препараты не передаются никогда. Состав можно изменить позже в настройках Фло.</p>`,
+      `<button type="button" class="primary full card-action" data-action="flo-wiz-set" data-field="share" data-value="none">Пока не делиться</button>
+       <button type="button" class="secondary full card-action" data-action="flo-wiz-set" data-field="share" data-value="share">Делиться с партнёром</button>
        <button type="button" class="secondary full card-action" data-action="flo-wiz-back">Назад</button>`);
   }
 
@@ -3115,8 +3290,11 @@
       period_length: w.periodLen || 5,
       cycle_length: w.cycle ?? null,
       previous_periods: (w.previous || []).length ? w.previous : undefined,
-      share_enabled: share !== "none",
-      share_level: share === "none" ? "phases" : share
+      share_enabled: share === "share",
+      share_level: share === "share" ? "phases" : "phases",
+      // Категории передаются всегда: при выключенном шеринге сервер сохранит
+      // их как намерение (confirmed=0, передача не начнётся).
+      share_categories: { ...(w.shareCategories || {}) }
     };
     try {
       floState = await request("/api/cycle/onboard", { method: "POST", body });
@@ -3446,7 +3624,9 @@
   }
 
   // P2/графики: временные ряды по дням — боль, кровотечение, БТ и ЛГ.
-  // Только фактические отметки; пропуски — просто отсутствие точек.
+  // Только фактические отметки; пропуски — отсутствие точек и разрыв линии,
+  // не ноль (переработка 13). Ось подписана датами периода; БТ в один день
+  // агрегируется средним для линии, отдельные замеры видны точками.
   function floStatsDayCharts(s) {
     const daily = s.daily || [];
     const meas = s.measurements || [];
@@ -3455,54 +3635,122 @@
     const dates = [...new Set([...daily.map(d => d.date), ...meas.map(m => m.date)])].sort();
     const idx = new Map(dates.map((d, i) => [d, i]));
     const X = i => dates.length === 1 ? W / 2 : pad + i * (W - 2 * pad) / (dates.length - 1);
+    // Подписи оси: первая и последняя даты + месяц на серединах.
+    const axisLabels = [];
+    if (dates.length) {
+      axisLabels.push(`<text x="${X(0).toFixed(1)}" y="${H - 2}" class="flo-axis" text-anchor="start">${esc(dates[0].slice(5))}</text>`);
+      if (dates.length > 4) {
+        const mid = Math.floor((dates.length - 1) / 2);
+        axisLabels.push(`<text x="${X(mid).toFixed(1)}" y="${H - 2}" class="flo-axis" text-anchor="middle">${esc(dates[mid].slice(5))}</text>`);
+      }
+      if (dates.length > 1) {
+        axisLabels.push(`<text x="${X(dates.length - 1).toFixed(1)}" y="${H - 2}" class="flo-axis" text-anchor="end">${esc(dates[dates.length - 1].slice(5))}</text>`);
+      }
+    }
+    const axisSvg = axisLabels.join("");
     const flowLvl = { spotting: 1, light: 2, medium: 3, heavy: 4 };
     const painPts = daily.filter(d => d.pain_score !== null && d.pain_score !== undefined)
-      .map(d => ({ x: X(idx.get(d.date)), y: H - pad - (d.pain_score / 10) * (H - 2 * pad), label: `${d.date}: боль ${d.pain_score}/10` }));
+      .map(d => ({ x: X(idx.get(d.date)), y: H - pad - 6 - (d.pain_score / 10) * (H - 2 * pad), label: `${d.date}: боль ${d.pain_score}/10` }));
     const painSvg = painPts.length
-      ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Боль по дням">${painPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" class="flo-dot"><title>${esc(p.label)}</title></circle>`).join("")}</svg>
+      ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Боль по дням">${painPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" class="flo-dot"><title>${esc(p.label)}</title></circle>`).join("")}${axisSvg}</svg>
         <p class="flo-legend">Боль 0–10: каждая точка — день с отметкой (${painPts.length}). Пропуски не считаются нулём</p>`
       : `<p class="flo-disclaimer">Боль не отмечали за период.</p>`;
     const flowBars = daily.filter(d => d.flow)
       .map(d => {
         const lvl = flowLvl[d.flow] || 0;
         const bw = Math.max(3, (W - 2 * pad) / dates.length - 2);
-        const h = (lvl / 4) * (H - 2 * pad);
-        return `<rect x="${(X(idx.get(d.date)) - bw / 2).toFixed(1)}" y="${(H - pad - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" class="flo-bar"><title>${esc(d.date)}: ${esc(FLO_FLOWS.find(([c]) => c === d.flow)?.[1] || d.flow)}</title></rect>`;
+        const h = (lvl / 4) * (H - 2 * pad - 6);
+        return `<rect x="${(X(idx.get(d.date)) - bw / 2).toFixed(1)}" y="${(H - pad - 4 - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" class="flo-bar"><title>${esc(d.date)}: ${esc(FLO_FLOWS.find(([c]) => c === d.flow)?.[1] || d.flow)}</title></rect>`;
       }).join("");
     const flowSvg = flowBars
-      ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Кровотечение по дням">${flowBars}</svg>
+      ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Кровотечение по дням">${flowBars}${axisSvg}</svg>
         <p class="flo-legend">Высота столбца — интенсивность: ${esc(FLO_FLOWS.map(([, l]) => l).join(" / "))}</p>`
       : `<p class="flo-disclaimer">Кровотечение не отмечали за период.</p>`;
-    // БТ (приводим °F к °C) + маркеры ЛГ-тестов в верхней полосе.
-    const bbtPts = meas.filter(m => m.kind === "bbt" && m.value !== null && m.value !== undefined)
-      .map(m => ({ x: X(idx.get(m.date)), v: m.unit === "F" ? (m.value - 32) * 5 / 9 : m.value, m }));
+    // БТ (°F → °C) + маркеры ЛГ в верхней полосе. Несколько замеров в день
+    // агрегируются средним для линии — документированное правило; отдельные
+    // замеры остаются видимыми точками. Линия соединяет только соседние дни:
+    // пропуски разрывают её, а не соединяются «непрерывным наблюдением».
+    const byDay = new Map();
+    for (const m of meas) {
+      if (m.kind !== "bbt" || m.value === null || m.value === undefined) continue;
+      const v = m.unit === "F" ? (m.value - 32) * 5 / 9 : m.value;
+      const arr = byDay.get(m.date) || [];
+      arr.push({ v, m });
+      byDay.set(m.date, arr);
+    }
+    const bbtDays = [...byDay.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(d => {
+        const arr = byDay.get(d);
+        const mean = arr.reduce((sum, x) => sum + x.v, 0) / arr.length;
+        return { d, mean, first: arr[0], all: arr, x: X(idx.get(d)) };
+      });
     const lhPts = meas.filter(m => m.kind === "lh" && m.result)
       .map(m => ({ x: X(idx.get(m.date)), result: m.result, m }));
     let measSvg = `<p class="flo-disclaimer">Измерений (БТ, ЛГ) за период нет</p>`;
-    if (bbtPts.length || lhPts.length) {
-      const vals = bbtPts.map(p => p.v);
+    if (bbtDays.length || lhPts.length) {
+      const vals = bbtDays.map(p => p.mean);
       const lo = Math.min(...(vals.length ? vals : [36.2]), 36.2);
       const hi = Math.max(...(vals.length ? vals : [37.6]), 37.6);
-      const Y = v => H - pad - ((v - lo) / (hi - lo || 1)) * (H - 2 * pad);
-      const line = bbtPts.length > 1
-        ? `<polyline points="${bbtPts.map(p => `${p.x.toFixed(1)},${Y(p.v).toFixed(1)}`).join(" ")}" class="flo-bbt-line"/>` : "";
+      const Y = v => H - pad - 6 - ((v - lo) / (hi - lo || 1)) * (H - 2 * pad);
+      // Линия по агрегированным дням: сегмент рисуется только между
+      // соседними датами — разрыв (день без измерений) не соединяется.
+      const segments = [];
+      for (let i = 0; i < bbtDays.length; i++) {
+        const run = [bbtDays[i]];
+        while (i + 1 < bbtDays.length && floDayDiff(bbtDays[i].d, bbtDays[i + 1].d) === 1) {
+          run.push(bbtDays[i + 1]);
+          i += 1;
+        }
+        if (run.length > 1) segments.push(run);
+      }
+      const line = segments.map(run =>
+        `<polyline points="${run.map(p => `${p.x.toFixed(1)},${Y(p.mean).toFixed(1)}`).join(" ")}" class="flo-bbt-line"/>`
+      ).join("");
+      // Пропущенные дни видны явно: серые чёрточки на базовой линии (§13).
+      const gapTicks = dates.length <= 120
+        ? dates.filter(d => !byDay.has(d)).map(d =>
+          `<rect x="${(X(idx.get(d)) - 0.75).toFixed(1)}" y="${(H - pad - 3).toFixed(1)}" width="1.5" height="4" class="flo-gap-tick"><title>${esc(d)}: измерений нет</title></rect>`).join("")
+        : "";
       measSvg = `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Базальная температура и тесты ЛГ">
         ${line}
-        ${bbtPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="3.5" class="flo-bbt-dot"><title>${esc(`${p.m.date}${p.m.time ? " " + p.m.time : ""}: БТ ${p.m.value}°${p.m.unit || "C"}`)}</title></circle>`).join("")}
+        ${gapTicks}
+        ${bbtDays.flatMap(p => p.all.map(x => `<circle cx="${p.x.toFixed(1)}" cy="${Y(x.v).toFixed(1)}" r="3.5" class="flo-bbt-dot"><title>${esc(`${p.d}${x.m.time ? " " + x.m.time : ""}: БТ ${x.m.value}°${x.m.unit || "C"}`)}</title></circle>`)).join("")}
         ${lhPts.map(p => {
           const y = p.result === "positive" ? pad + 4 : p.result === "unclear" ? pad + 14 : pad + 24;
           const cls = p.result === "positive" ? "flo-lh-pos" : p.result === "unclear" ? "flo-lh-unclear" : "flo-lh-neg";
           const label = { positive: "положительный", negative: "отрицательный", unclear: "неясно" }[p.result] || p.result;
           return `<circle cx="${p.x.toFixed(1)}" cy="${y}" r="4" class="${cls}"><title>${esc(`${p.m.date}${p.m.time ? " " + p.m.time : ""}: ЛГ ${label}`)}</title></circle>`;
         }).join("")}
+        ${axisSvg}
       </svg>
-      <p class="flo-legend">Линия — базальная температура (°C, °F приведены к °C). Маркеры вверху — тесты ЛГ: <span class="flo-lh-pos">●</span> положительный, <span class="flo-lh-unclear">●</span> неясно, <span class="flo-lh-neg">●</span> отрицательный.</p>`;
+      <p class="flo-legend">Линия — базальная температура по дням (°C, °F приведены к °C; несколько замеров за день усредняются, точка есть у каждого замера). Разрыв линии и серые чёрточки внизу — дни без измерений. Маркеры вверху — тесты ЛГ: <span class="flo-lh-pos">●</span> положительный, <span class="flo-lh-unclear">●</span> неясно, <span class="flo-lh-neg">●</span> отрицательный.</p>`;
     }
+    // Текстовое представление рядов (§13): точные даты и значения доступны
+    // без наведения мыши — на мобильном <title> не читается.
+    const lhByDate = new Map();
+    for (const p of lhPts) lhByDate.set(p.m.date, p.result);
+    const textRows = dates.map(d => {
+      const day = daily.find(x => x.date === d);
+      const bits = [];
+      if (day?.pain_score !== null && day?.pain_score !== undefined) bits.push(`боль ${day.pain_score}/10`);
+      if (day?.flow) bits.push(`кровотечение: ${FLO_FLOWS.find(([c]) => c === day.flow)?.[1] || day.flow}`);
+      const dayBbt = byDay.get(d);
+      if (dayBbt) bits.push(dayBbt.map(x => `БТ ${x.m.value}°${x.m.unit || "C"}${x.m.time ? ` (${x.m.time})` : ""}`).join("; "));
+      if (lhByDate.has(d)) bits.push(`ЛГ: ${{ positive: "положительный", negative: "отрицательный", unclear: "неясно" }[lhByDate.get(d)] || lhByDate.get(d)}`);
+      return bits.length ? `<tr><td>${esc(d)}</td><td>${esc(bits.join(" · "))}</td></tr>` : "";
+    }).join("");
+    const textBlock = textRows
+      ? `<details class="flo-fold"><summary class="flo-fold-title">Данные по дням (текстом)</summary>
+        <div class="flo-report-table-wrap"><table class="flo-report-table"><tbody>${textRows}</tbody></table></div>
+        <p class="flo-disclaimer">Дни без строк — дни без отметок; пропуски не приравниваются к нулю.</p>
+      </details>`
+      : "";
     return `
       <p class="flo-sub">По дням (только отмеченные дни)</p>
       <p class="flo-line"><b>Боль</b></p>${painSvg}
       <p class="flo-line" style="margin-top:8px"><b>Кровотечение</b></p>${flowSvg}
-      <p class="flo-line" style="margin-top:8px"><b>Измерения</b></p>${measSvg}`;
+      <p class="flo-line" style="margin-top:8px"><b>Измерения</b></p>${measSvg}
+      ${textBlock}`;
   }
 
   function renderFloStats() {
@@ -3515,7 +3763,10 @@
     if (!s.cycles.length && !s.logged_days) {
       return `<section class="card"><p class="eyebrow">Статистика</p><p>Пока мало данных: нужны два старта месячных и несколько записей дня.</p></section>`;
     }
-    let chart = `<p class="flo-disclaimer">Нужно минимум два старта месячных за год</p>`;
+    // Подпись фактического диапазона (переработка 10.3): статистика всегда
+    // помечена теми датами, по которым она посчитана.
+    const rangeLabel = `с ${esc(formatDay(s.from || ""))} по ${esc(formatDay(s.to || ""))}`;
+    let chart = `<p class="flo-disclaimer">Нужно минимум два старта месячных за период</p>`;
     if (s.cycles.length) {
       const W = 320, H = 130, pad = 18;
       const slot = (W - pad * 2) / s.cycles.length;
@@ -3536,68 +3787,127 @@
           ${bars}
           <line x1="${pad}" x2="${W - pad}" y1="${avgY}" y2="${avgY}" class="flo-avg"></line>
         </svg>
-        <p class="flo-legend">Столбцы: длина цикла. Линия: средняя ${s.avg_cycle_length} дн. Последние ${s.cycles.length} циклов за год.</p>`;
+        <p class="flo-legend">Столбцы: длина цикла. Линия: средняя длина завершённых циклов — ${s.avg_cycle_length} дн. (по ${s.cycles.length} ${s.cycles.length === 1 ? "циклу" : "циклам"} периода).</p>`;
     }
-    // Этап 5/P1: медиана, разброс, границы и необычные интервалы — все
-    // значения фактические, ничего не скрываем и не «подчищаем».
+    // Этап 5/P1 + 10.4: среднее и медиана подписаны разными словами, у
+    // каждого расчёта указано количество циклов — под одинаковыми подписями
+    // разные методы не скрываются.
     const statBits = [];
-    if (s.median_cycle_length !== null && s.median_cycle_length !== undefined) statBits.push(`медиана ${s.median_cycle_length} дн.`);
+    if (s.cycles.length) statBits.push(`средняя длина завершённых циклов ${s.avg_cycle_length} дн. (${s.cycles.length})`);
+    if (s.median_cycle_length !== null && s.median_cycle_length !== undefined) statBits.push(`медиана ${s.median_cycle_length} дн. (последние пригодные циклы: ${s.usable_cycles})`);
     if (s.min_cycle_length !== null && s.max_cycle_length !== null) statBits.push(`от ${s.min_cycle_length} до ${s.max_cycle_length} дн.`);
     if (s.spread) statBits.push(`разброс ${s.spread} дн.`);
-    if (s.period_lengths) statBits.push(`Месячные в среднем ${s.period_lengths.avg} дн. (от ${s.period_lengths.min} до ${s.period_lengths.max})`);
-    if (s.logged_days) statBits.push(`дней с записями: ${s.logged_days}`);
+    if (s.period_lengths) statBits.push(`Месячные в среднем ${s.period_lengths.avg} дн. (от ${s.period_lengths.min} до ${s.period_lengths.max}, ${s.period_lengths.count} закрытых)`);
     const statLine = statBits.length ? `<p class="flo-line">${statBits.map(esc).join(" · ")}</p>` : "";
     const unusual = (s.unusual_intervals || []).length
       ? `<p class="flo-disclaimer">Необычные интервалы (вне 15–60 дн.) сохранены в истории, но не участвуют в среднем: ${s.unusual_intervals.map(iv => `${iv.start} — ${iv.length} дн.`).join(", ")}.</p>`
       : "";
+    // Длинные периоды не отбрасываются молча (переработка 7).
+    const longPeriods = (s.long_periods || []).length
+      ? `<p class="flo-disclaimer">Необычно длинные месячные (больше 14 дней) сохранены как есть, но не участвуют в средней длительности: ${s.long_periods.map(p => `${formatDay(p.start)} — ${p.length} дн.`).join(", ")}. Если это повторяется, обсудите с врачом.</p>`
+      : "";
+    // Охват дневника (переработка 10.1): сколько календарных дней периода
+    // заполнено хотя бы одной записью.
+    const coverage = s.coverage && s.coverage.days_total
+      ? `<p class="flo-line">Дневник заполнен за ${s.coverage.diary_days} из ${s.coverage.days_total} дней выбранного периода${s.logged_days ? ` (в фазах учтено дней с записями: ${s.logged_days})` : ""}.</p>`
+      : "";
+    // Доля показывается как «N из D дней» с числителем и знаменателем
+    // (переработка 10.1): у каждого показателя свой знаменатель — дни, где
+    // он вообще отмечался.
+    const frac = (n, d) => d > 0 ? `${n} из ${d} дн. · ${Math.round((n / d) * 100)}%` : "нет отметок";
     const order = [["menstruation", "Менструация"], ["follicular", "Фолликулярная"], ["fertile", "Фертильное окно"], ["ovulation", "Овуляция"], ["luteal", "Лютеиновая"]];
     const rows = order.filter(([key]) => s.phases[key]).map(([key, label]) => {
       const bucket = s.phases[key];
       const top = Object.entries(bucket.symptoms).sort((a, b) => b[1] - a[1]).slice(0, 3);
       const meters = top.length
         ? top.map(([code, n]) => {
-          const pct = Math.round((n / bucket.days) * 100);
+          const pct = Math.round((n / bucket.symptom_days) * 100);
           const name = FLO_SYMPTOMS.find(([c]) => c === code)?.[1] || code;
-          return `<div class="flo-bar-row"><span>${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span>${pct}%</span></div>`;
+          return `<div class="flo-bar-row"><span>${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span>${esc(frac(n, bucket.symptom_days))}</span></div>`;
         }).join("")
         : `<p class="flo-disclaimer">Симптомов не отмечали</p>`;
-      // Настроение и энергия — отдельно от физических симптомов (этап 4).
+      const symptomDen = bucket.symptom_days
+        ? `<p class="flo-sub">Симптомы: знаменатель — дни с заполненным дневником симптомов (${bucket.symptom_days}${bucket.clear_days ? `, из них «симптомов не было»: ${bucket.clear_days}` : ""}).</p>`
+        : "";
       const moodTop = Object.entries(bucket.moods || {}).sort((a, b) => b[1] - a[1]).slice(0, 3);
       const moodRows = moodTop.length
         ? moodTop.map(([code, n]) => {
-          const pct = Math.round((n / bucket.days) * 100);
+          const pct = Math.round((n / bucket.mood_days) * 100);
           const name = FLO_MOODS.find(([c]) => c === code)?.[1] || code;
-          return `<div class="flo-bar-row"><span>${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span>${pct}%</span></div>`;
+          return `<div class="flo-bar-row"><span>${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span>${esc(frac(n, bucket.mood_days))}</span></div>`;
         }).join("")
         : `<p class="flo-disclaimer">Настроение не отмечали</p>`;
       const energyParts = Object.entries(bucket.energy || {}).sort((a, b) => b[1] - a[1])
-        .map(([code, n]) => `${esc(FLO_ENERGY.find(([c]) => c === code)?.[1] || code)} ${Math.round((n / bucket.days) * 100)}%`);
+        .map(([code, n]) => `${esc(FLO_ENERGY.find(([c]) => c === code)?.[1] || code)} ${esc(frac(n, bucket.energy_days))}`);
       const energyLine = energyParts.length ? `<p class="flo-line">Энергия: ${energyParts.join(" · ")}</p>` : "";
-      const painLine = bucket.avg_pain !== null && bucket.avg_pain !== undefined ? `<p class="flo-line">Боль в среднем ${bucket.avg_pain}/10</p>` : "";
-      return `<div class="flo-phase"><p class="flo-line"><b>${label}</b> · дней с записями: ${bucket.days}</p>${meters}${moodRows}${energyLine}${painLine}</div>`;
+      const painLine = bucket.avg_pain !== null && bucket.avg_pain !== undefined ? `<p class="flo-line">Боль в среднем ${bucket.avg_pain}/10 (за ${bucket.pain_count} ${bucket.pain_count === 1 ? "отметку" : "отметок"})</p>` : "";
+      return `<div class="flo-phase"><p class="flo-line"><b>${label}</b> · дней с записями: ${bucket.days}</p>${symptomDen}${meters}${moodRows}${energyLine}${painLine}</div>`;
     }).join("");
+    // Расширенная аналитика (переработка 10.5): описательные блоки по
+    // фактическим записям, без причинно-следственных утверждений.
+    const ins = s.insights || {};
+    const insightBits = [];
+    if (ins.bleeding && ins.bleeding.flow_days) {
+      insightBits.push(`<p class="flo-line"><b>Кровотечение</b></p>
+        <p class="flo-line">Дни с отмеченным кровотечением: ${ins.bleeding.flow_days}, из них обильные: ${ins.bleeding.heavy_days}, со сгустками: ${ins.bleeding.clot_days}.</p>
+        ${s.period_lengths ? `<p class="flo-line">Длительность закрытых месячных в периоде: ${s.period_lengths.min}–${s.period_lengths.max} дн., в среднем ${s.period_lengths.avg} дн.</p>` : ""}`);
+    }
+    if (ins.wellbeing && ins.wellbeing.symptom_days) {
+      const top = (ins.wellbeing.top_symptoms || []).map(t => {
+        const name = FLO_SYMPTOMS.find(([c]) => c === t.code)?.[1] || t.code;
+        return `${esc(name)} — ${esc(frac(t.count, t.denominator))}`;
+      }).join("; ");
+      insightBits.push(`<p class="flo-line"><b>Самочувствие</b></p>
+        <p class="flo-line">Самые частые симптомы: ${top}.</p>
+        ${ins.wellbeing.avg_pain !== null && ins.wellbeing.avg_pain !== undefined ? `<p class="flo-line">Боль в среднем ${ins.wellbeing.avg_pain}/10 за ${ins.wellbeing.pain_days} отметок.</p>` : ""}`);
+    }
+    if (ins.reproductive && (ins.reproductive.bbt_days || ins.reproductive.lh_days || ins.reproductive.mucus_days)) {
+      // Пригодные БТ-дни — без дней болезни (переработка 6); пик слизи —
+      // отдельное наблюдение, в смещение овуляции не подставляется (§4).
+      const peak = (ins.reproductive.mucus_peak_dates || []).map(d => formatDay(d)).join(", ");
+      insightBits.push(`<p class="flo-line"><b>Репродуктивные наблюдения</b></p>
+        <p class="flo-line">БТ — дней с измерениями: ${ins.reproductive.bbt_days}, пригодных (без болезни): ${ins.reproductive.bbt_days_usable}; тесты ЛГ — дней: ${ins.reproductive.lh_days}, из них положительных: ${ins.reproductive.lh_positive_days}; слизь — дней с отметкой: ${ins.reproductive.mucus_days}${peak ? `, плодородный тип: ${esc(peak)}` : ""}.</p>`);
+    }
+    if (ins.lifestyle && (ins.lifestyle.sleep.good || ins.lifestyle.sleep.ok || ins.lifestyle.sleep.poor || ins.lifestyle.stress_days)) {
+      insightBits.push(`<p class="flo-line"><b>Образ жизни</b></p>
+        <p class="flo-line">Сон: хорошо — ${ins.lifestyle.sleep.good}, средне — ${ins.lifestyle.sleep.ok}, плохо — ${ins.lifestyle.sleep.poor}${ins.lifestyle.sleep_hours_avg !== null && ins.lifestyle.sleep_hours_avg !== undefined ? `; средняя длительность ${ins.lifestyle.sleep_hours_avg} ч за ${ins.lifestyle.sleep_hours_days} отметок` : ""}.</p>
+        ${ins.lifestyle.stress_days ? `<p class="flo-line">Стресс отмечен ${ins.lifestyle.stress_days} дн.</p>` : ""}`);
+    }
+    if ((s.meds || []).length) {
+      insightBits.push(`<p class="flo-line"><b>Препараты</b></p>
+        ${s.meds.map(m => `<p class="flo-line">${esc(m.name)}: принято ${m.taken}, пропущено ${m.skipped}.</p>`).join("")}`);
+    }
+    const insightsBlock = insightBits.length ? `<p class="flo-sub">Аналитика за период</p>${insightBits.join("")}` : "";
     return `
       <section class="card">
         <p class="eyebrow">Статистика</p>
+        <p class="flo-sub">Период: ${rangeLabel}</p>
         <div class="flo-chips" style="margin-bottom:8px">
           ${[3, 6, 12].map(m => `<button type="button" class="flo-chip${floStatsMonths === m ? " is-on" : ""}" data-action="flo-stats-months" data-months="${m}">${m} мес.</button>`).join("")}
         </div>
         ${chart}
         ${statLine}
         ${unusual}
-        <p class="flo-sub">Симптомы по фазам (доля дней с записями)</p>
+        ${longPeriods}
+        ${coverage}
+        <p class="flo-sub">Симптомы по фазам (у каждого показателя свой знаменатель)</p>
         ${rows || `<p class="flo-disclaimer">Пока нет записей по фазам.</p>`}
+        ${insightsBlock}
         ${floStatsDayCharts(s)}
         ${(s.pms_patterns || []).length ? `
         <p class="flo-sub">Повторяющиеся симптомы перед месячными (ПМС-паттерны, описательно)</p>
         <div class="flo-history">
           ${s.pms_patterns.map(p => {
             const name = FLO_SYMPTOMS.find(([c]) => c === p.code)?.[1] || p.code;
+            const confidence = p.confidence === "good"
+              ? "достаточная база"
+              : "мало данных";
             return `<div class="item-row"><div class="item-main"><p class="item-title">${esc(name)}</p>
-              <div class="item-meta"><span>в среднем за ${p.avg_lead_days} дн. до месячных</span><span>повторялось в ${p.cycles} циклах</span></div></div></div>`;
+              <div class="item-meta"><span>обычно за ${p.avg_lead_days} дн. до месячных</span><span>в ${p.cycles_with_symptom} из ${p.cycles_with_data} циклов с записями</span></div>
+              <div class="item-meta"><span>дней с отметкой: ${p.days}</span><span>${confidence}</span></div></div></div>`;
           }).join("")}
         </div>
-        <p class="flo-disclaimer">Паттерн — не диагноз: это повторяемость отметок в ваших записях.</p>` : ""}
+        <p class="flo-disclaimer">Паттерн — не диагноз: это повторяемость отметок в ваших записях. Уверенный вывод строится только от 3 циклов с заполненным предменструальным окном; при меньшей базе паттерн показан как предварительный.</p>` : ""}
         <p class="flo-disclaimer">Фазы и овуляция — расчётные по датам месячных, не подтверждённые. Это не диагноз</p>
       </section>`;
   }
@@ -3638,12 +3948,15 @@
     if (f.next_period_early && f.next_period_late) {
       bits.push(`Разброс ожидания месячных: ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}. Это календарная оценка, а не гарантия`);
     }
-    if (f.ovulation_source === "lh") bits.push("Дата овуляции уточнена по положительному тесту ЛГ — это оценка, а не подтверждение.");
-    else if (f.ovulation_source === "bbt") bits.push("Дата овуляции уточнена по подъёму базальной температуры — это оценка, а не подтверждение.");
-    else if (f.ovulation_estimated) bits.push("Овуляция — расчётная оценка по датам, она не подтверждена наблюдениями");
+    if (f.ovulation_source === "lh") bits.push("Дата овуляции уточнена по положительному тесту ЛГ — это оценка по косвенному признаку, а не подтверждение: тест не доказывает, что овуляция произошла.");
+    else if (f.ovulation_source === "bbt") bits.push("Дата овуляции уточнена по подъёму базальной температуры — это оценка по косвенному признаку, а не подтверждение.");
+    else if (f.ovulation_estimated && f.ovulation_offset_learned) bits.push(`Овуляция — календарная оценка с личным смещением, подобранным по вашим наблюдениям (${f.ovulation_offset_observations} цикла). Приложение продолжает уточнять смещение по новым данным.`);
+    else if (f.ovulation_estimated) bits.push("Овуляция — календарная оценка (ожидаемое начало месячных минус 14 дней), она не подтверждена наблюдениями. Личные наблюдения ЛГ и БТ из нескольких циклов уточнят смещение автоматически.");
+    if (f.ovulation_conflict) bits.push(`Признаки расходятся (ЛГ: ${esc(floDayMonth(f.ovulation_conflict.lh))}, БТ: ${esc(floDayMonth(f.ovulation_conflict.bbt))}) — показаны оба, для расчёта взят признак ЛГ как более ранний. Никакая дата овуляции не является подтверждённой.`);
     if (f.data_stale) bits.push("Последняя запись старая: прогноз может не отражать текущий цикл. Отметьте прошедшие месячные.");
     if (f.irregular) bits.push("Цикл нерегулярный: прогноз особенно приблизителен.");
     bits.push("Пропущенные дни дневника не считаются «днями без симптомов»");
+    bits.push("Календарные прогнозы не являются надёжным методом предотвращения беременности");
     return `<details class="flo-fold flo-forecast"><summary class="flo-fold-title">Как считается прогноз?</summary><ul class="flo-explain">${bits.map(b => `<li>${b}</li>`).join("")}</ul></details>`;
   }
 
@@ -3659,7 +3972,7 @@
     if (!floState.onboarded && !floWizardDismissed) return renderFloWizard();
     return `
       ${floState.onboarded ? "" : floBannerHtml()}
-      ${renderSegment("flo", floView, [["today", "Сегодня"], ["cycle", "Цикл"], ["stats", "Статистика"], ["health", "Здоровье"], ["settings", "Настройки"]], "is-sub")}
+      ${renderSegment("flo", floView, [["today", "Сегодня"], ["cycle", "Цикл"], ["stats", "Статистика"], ["meds", "Препараты"], ["settings", "Настройки"]], "is-sub")}
       <div id="flo-body">${renderFloSection()}</div>`;
   }
 
@@ -3669,7 +3982,7 @@
   function renderFloSection() {
     if (floView === "cycle") return `${renderFloHistory()}${renderFloPeriodEditor()}`;
     if (floView === "stats") return renderFloStats();
-    if (floView === "health") return renderFloMeds();
+    if (floView === "meds") return renderFloMeds();
     if (floView === "settings") return `
       <section class="card">
         <p class="eyebrow flo-group">Отчёт и экспорт</p>
@@ -3690,7 +4003,27 @@
   }
 
   // «Сегодня»: прогноз, календарь месяца и дневник выбранного дня.
-  function renderFloToday() {
+  // Карточка прогноза стоит над календарём и сама объясняет, на основании
+  // чего посчитана (переработка 11): что прогнозируется, по скольким циклам,
+  // когда последнее начало, насколько полны данные и что ограничивает
+  // достоверность. Методика — в раскрывающемся блоке.
+  // Ограничения применимости прогноза по контексту цикла (переработка 5.1):
+  // паритет с cycleContextCaveats в worker.js — менять синхронно.
+  const FLO_CONTEXT_CAVEATS = {
+    pregnancy: "Отмечена беременность: календарные прогнозы месячных и овуляции неприменимы.",
+    postpartum: "После родов и на грудном вскармливании цикл часто нерегулярный: прогнозы особенно приблизительны.",
+    breastfeeding: "После родов и на грудном вскармливании цикл часто нерегулярный: прогнозы особенно приблизительны.",
+    perimenopause: "В перименопаузе цикл меняется: прогнозы приблизительны.",
+    hormonal_contraception: "Гормональная контрацепция управляет циклом сама: календарный прогноз овуляции неприменим.",
+    cycle_affecting_meds: "Препараты, влияющие на цикл или температуру, могут искажать прогноз и температурные наблюдения.",
+    very_irregular: "Отмечены выраженно нерегулярные циклы: прогнозы очень приблизительные.",
+    unusual_bleeding: "Отмечены необычные или межменструальные кровотечения — если это повторяется, обсудите с врачом."
+  };
+  function floContextCaveats() {
+    const context = floState.context || {};
+    return Object.keys(FLO_CONTEXT_CAVEATS).filter(key => context[key]).map(key => FLO_CONTEXT_CAVEATS[key]);
+  }
+  function renderFloForecastCard() {
     const f = floState.forecast;
     const openStart = floState.open_period_start;
     const actionBtn = openStart
@@ -3711,14 +4044,34 @@
         if (openDays >= 10) lines.push(`Месячные идут уже ${openDays} дн. — уточните дату окончания в календаре. Если кровотечение заметно дольше обычного, обсудите это с врачом.`);
       }
       else if (f.next_period_in === 0) lines.push("Месячные по прогнозу ожидаются сегодня");
-      else if (!f.data_stale) lines.push(`Месячные примерно через ${f.next_period_in} дн.`);
-      // Этап 5/P1: диапазон ожидания и честная оценка качества данных.
-      if (!openStart && f.phase !== "delay" && f.phase !== "stale" && f.next_period_early && f.next_period_late) {
-        lines.push(`Ориентировочно: ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}`);
+      else if (!f.data_stale) lines.push(`Месячные ориентировочно ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}`);
+      // Основание прогноза — прямо в карточке, без необходимости искать методику.
+      if (f.based_on === "history" && f.usable_cycles) lines.push(`Расчёт по ${f.usable_cycles} ${f.usable_cycles === 1 ? "завершённому циклу" : "завершённым циклам"}. Последнее начало месячных отмечено ${esc(floDayMonth(f.last_period_start))}.`);
+      else if (f.based_on === "profile") lines.push("Расчёт по указанной вами длине цикла — личной истории пока мало.");
+      else lines.push("Расчёт по стандартной длине цикла 28 дней — это не ваша личная норма.");
+      if (f.quality === "insufficient") lines.push("Данных недостаточно: даты очень примерные");
+      // §4.1: при недостатке данных уверенной оценки овуляции нет вовсе —
+      // вместо даты показывается, каких данных не хватает.
+      if (f.phase !== "delay" && f.phase !== "stale" && f.ovulation_in > 0) {
+        if (f.quality === "insufficient") {
+          lines.push("Для оценки овуляции данных пока недостаточно: отметьте ещё один цикл или наблюдения (ЛГ, БТ), и оценка появится.");
+        } else if (f.ovulation_source === "lh") {
+          lines.push(`Овуляция — оценка по положительному тесту ЛГ, примерно через ${f.ovulation_in} дн. Это косвенный признак, не подтверждение.`);
+        } else if (f.ovulation_source === "bbt") {
+          lines.push(`Овуляция — оценка по температурному сдвигу, примерно через ${f.ovulation_in} дн. Это косвенный признак, не подтверждение.`);
+        } else if (f.ovulation_offset_learned) {
+          lines.push(`Овуляция — календарная оценка, примерно через ${f.ovulation_in} дн. Смещение подобрано по вашим наблюдениям (${f.ovulation_offset_observations} цикла).`);
+        } else {
+          lines.push("Овуляция — календарная оценка (старт минус 14 дней), не подтверждена наблюдениями.");
+        }
       }
-      if (f.quality === "insufficient") lines.push("Личной истории пока мало — даты примерные");
-      if (f.phase !== "delay" && f.phase !== "stale" && f.ovulation_in > 0) lines.push(`Овуляция примерно через ${f.ovulation_in} дн.`);
+      // §6: расхождение ЛГ и БТ показывается по отдельности, а не усредняется.
+      if (f.ovulation_conflict) {
+        lines.push(`Наблюдения расходятся: ЛГ указывает на ${esc(floDayMonth(f.ovulation_conflict.lh))}, температурный сдвиг — на ${esc(floDayMonth(f.ovulation_conflict.bbt))}. Показаны оба признака; уточнит следующий цикл.`);
+      }
       if (f.irregular) lines.push(`Цикл нерегулярный, прогнозы приблизительные.`);
+      const caveats = floContextCaveats();
+      for (const c of caveats) lines.push(esc(c));
       todayBody = lines.map(l => `<p class="flo-line">${l}</p>`).join("");
     }
     return `
@@ -3726,9 +4079,24 @@
         <p class="eyebrow">Фло · сегодня</p>
         ${todayBody}
         ${actionBtn}<button type="button" class="secondary full card-action" data-action="flo-record-today">Записать сегодня</button>
+        ${floFreshnessLine()}
         ${floForecastExplain(f)}
-        <p class="flo-disclaimer">${esc(floState.disclaimer)}</p>
-      </section>
+        <p class="flo-disclaimer">${esc(floState.disclaimer)}. ${esc(floState.contraception_disclaimer || "Календарные прогнозы не являются надёжным методом предотвращения беременности")}</p>
+      </section>`;
+  }
+
+  // Актуальность данных по категориям (§11.1): последнее начало месячных,
+  // запись дневника, измерение и приём препарата — отдельно, «нет записей»
+  // не приравнивается к нулю и не смешивается с устареванием.
+  function floFreshnessLine() {
+    const fr = floState.data_freshness || {};
+    const fmt = d => d ? floDayMonth(d) : "нет записей";
+    return `<p class="flo-sub">Свежесть данных</p>
+      <p class="flo-line">Месячные: ${esc(fmt(fr.last_period_start))} · Дневник: ${esc(fmt(fr.last_diary_date))} · Измерения: ${esc(fmt(fr.last_measurement_date))} · Препараты: ${esc(fmt(fr.last_medication_log_date))}</p>`;
+  }
+  function renderFloToday() {
+    return `
+      ${renderFloForecastCard()}
       ${renderFloCalendar()}
       ${renderFloDayCard()}`;
   }
@@ -3802,7 +4170,9 @@
       return floPostLog(date, { energy: floDayLog(date).energy === energy ? null : energy });
     }
     if (action === "flo-toggle-clear") {
-      return floPostLog(date, { symptoms_clear: !floDayLog(date).symptoms_clear });
+      // Включение «симптомов не было» снимает конкретные симптомы (9.2).
+      const next = !floDayLog(date).symptoms_clear;
+      return floPostLog(date, next ? { symptoms_clear: true, symptoms: [] } : { symptoms_clear: false });
     }
     if (action === "flo-set-mood") {
       const mood = btn.dataset.mood;
@@ -3812,7 +4182,8 @@
       const code = btn.dataset.code;
       const current = floDayLog(date).symptoms;
       const symptoms = current.includes(code) ? current.filter(c => c !== code) : [...current, code];
-      return floPostLog(date, { symptoms });
+      // Выбор симптома снимает «симптомов не было» (9.2).
+      return floPostLog(date, symptoms.length ? { symptoms, symptoms_clear: false } : { symptoms });
     }
     if (action === "flo-save-note") {
       return floPostLog(date, { note: document.getElementById("flo-note")?.value || "" });
@@ -3829,6 +4200,32 @@
       const mucus = { ...(floDayLog(date).mucus || {}) };
       if (mucus.discomfort) delete mucus.discomfort; else mucus.discomfort = true;
       return floPostLog(date, { mucus: Object.keys(mucus).length ? mucus : null });
+    }
+    // Дополнительные сведения о кровотечении (переработка 7): пропитывание —
+    // чип, частота смены и ночная смена — форма с сохранением.
+    if (action === "flo-set-bleeding-saturation") {
+      const value = btn.dataset.value;
+      const current = floDayLog(date).bleeding_details || {};
+      const saturation = current.saturation === value ? null : value;
+      return floPostLog(date, { bleeding_details: { ...current, saturation } });
+    }
+    if (action === "flo-toggle-bleeding-night") {
+      const current = floDayLog(date).bleeding_details || {};
+      return floPostLog(date, { bleeding_details: { ...current, night_change: !current.night_change } });
+    }
+    if (action === "flo-save-bleeding") {
+      const raw = document.getElementById("flo-bleeding-changes")?.value;
+      const changes = raw === "" || raw === undefined ? null : Number(raw);
+      if (changes !== null && (!Number.isInteger(changes) || changes < 0 || changes > 24)) {
+        showToast("Смен средства гигиены — от 0 до 24");
+        return;
+      }
+      const current = floDayLog(date).bleeding_details || {};
+      const details = { ...current, changes_per_day: changes };
+      if (details.changes_per_day === null && details.saturation === undefined && !details.night_change) {
+        return floPostLog(date, { bleeding_details: null });
+      }
+      return floPostLog(date, { bleeding_details: details });
     }
     if (action === "flo-set-sleep-quality") {
       const v = btn.dataset.value;
@@ -3874,14 +4271,20 @@
     }
     if (action === "flo-add-lh") {
       if (floLhDraft.date !== date || !floLhDraft.result) return;
+      const result = floLhDraft.result;
+      floLhDraft = { date: null, result: null };
       return floPostMeasurement({
-        date, kind: "lh", result: floLhDraft.result,
+        date, kind: "lh", result,
         time: document.getElementById("flo-lh-time")?.value || null
-      });then(() => { floLhDraft = { date: null, result: null }; });
+      });
     }
     if (action === "flo-del-measurement") {
       try {
         floState = await request("/api/cycle/measurement/delete", { method: "POST", body: { id: Number(btn.dataset.id) } });
+        // Точка исчезает из графиков и расчётов сразу: кэш статистики
+        // инвалидируется вместе с удалением (9.5).
+        floStats = undefined;
+        floExtra.measurements = floExtra.measurements.filter(m => m.id !== Number(btn.dataset.id));
       } catch (error) { handleRequestError(error); }
       return render();
     }
@@ -3896,6 +4299,7 @@
       if (action === "flo-med-intake-clear") {
         try {
           floState = await request("/api/cycle/med-log/delete", { method: "POST", body: { med_id: medId, date: d } });
+          floExtra.med_logs = floExtra.med_logs.filter(x => !(x.med_id === medId && x.date === d));
         } catch (error) { handleRequestError(error); }
         floMedDetail = null;
         return render();
@@ -3998,12 +4402,39 @@
       } catch (error) { handleRequestError(error); }
       return render();
     }
-    if (action === "flo-share-toggle" || action === "flo-share-level") {
-      const current = floState.share || { enabled: false, level: "phases" };
-      const enabled = action === "flo-share-toggle" ? btn.dataset.enabled === "true" : current.enabled;
-      const level = action === "flo-share-level" ? btn.dataset.level : current.level;
+    if (action === "flo-share-toggle") {
+      const enabled = btn.dataset.enabled === "true";
       try {
-        floState = await request("/api/cycle/share", { method: "PATCH", body: { enabled, level } });
+        floState = await request("/api/cycle/share", { method: "PATCH", body: { enabled } });
+        showToast(enabled
+          ? "Шеринг включён: партнёр видит календарную оценку. Подтвердите состав данных, чтобы открыть категории."
+          : "Шеринг выключен — передача данных прекращена сразу");
+      } catch (error) {
+        handleRequestError(error);
+      }
+      return render();
+    }
+    if (action === "flo-share-cat") {
+      const key = btn.dataset.cat;
+      const current = floState.share || { enabled: false, categories: {} };
+      const categories = { ...(current.categories || {}), [key]: btn.dataset.enabled === "true" };
+      try {
+        // Категории можно менять при выключенном шеринге: сохраняются как
+        // намерение и начнут передаваться только после включения и подтверждения.
+        floState = await request("/api/cycle/share", { method: "PATCH", body: { enabled: current.enabled === true, categories } });
+      } catch (error) {
+        handleRequestError(error);
+      }
+      return render();
+    }
+    if (action === "flo-share-confirm") {
+      const current = floState.share || { enabled: false, categories: {} };
+      try {
+        floState = await request("/api/cycle/share", {
+          method: "PATCH",
+          body: { enabled: true, categories: current.categories || {}, confirmed: true }
+        });
+        showToast("Состав данных подтверждён — партнёр видит выбранные категории");
       } catch (error) {
         handleRequestError(error);
       }
@@ -4045,7 +4476,7 @@
       return render();
     }
     if (action === "flo-wiz-begin") {
-      floWizard = { step: 1, lastStart: floState.today, periodLen: 5, cycle: null, previous: [] };
+      floWizard = { step: 1, lastStart: floState.today, periodLen: 5, cycle: null, previous: [], shareCategories: {} };
       return render();
     }
     if (action === "flo-wiz-back") {
@@ -4088,6 +4519,12 @@
         return render();
       }
       return floWizardFinish(btn.dataset.value);
+    }
+    if (action === "flo-wiz-share-cat") {
+      const key = btn.dataset.cat;
+      const current = floWizard?.shareCategories || {};
+      floWizard = { ...floWizard, shareCategories: { ...current, [key]: !current[key] } };
+      return render();
     }
     // Импорт прошлых периодов: общий редактор для мастера (wiz) и истории (hist).
     if (action === "flo-prev-add") {
@@ -4151,7 +4588,7 @@
       try {
         const sent = floHistPrev.length;
         floState = await request("/api/cycle/periods", { method: "POST", body: { periods: floHistPrev } });
-        floExtra = { periods: [], logs: [] };
+        floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
         floHistPrev = [];
         floHistPrevOpen = false;
         floStats = undefined;
@@ -4242,6 +4679,17 @@
       };
       try {
         floState = await request("/api/cycle/profile", { method: "PATCH", body });
+      } catch (error) {
+        handleRequestError(error);
+      }
+      return render();
+    }
+    if (action === "flo-context-toggle") {
+      const key = btn.dataset.key;
+      const current = floState.context || {};
+      const context = { ...current, [key]: btn.dataset.enabled === "true" };
+      try {
+        floState = await request("/api/cycle/context", { method: "PATCH", body: { context } });
       } catch (error) {
         handleRequestError(error);
       }
@@ -4490,10 +4938,563 @@
       return renderListTab(quotes, "add-quote", "Добавить цитату", "Ни одной цитаты", "Сохраните фразу партнёра, которая зацепила или показалось смешной", quoteItem)
         + archiveMoreHtml("quotes", (appState.quotes || []).length);
     }
+    if (memoriesView === "health") {
+      // Личный журнал препаратов: загружается один раз, при переключении вида.
+      if (!healthState && !healthBusy) loadHealth();
+      return renderHealthBody();
+    }
+    if (memoriesView === "contacts") {
+      // Телефонная книга: живёт в пространстве пары, у каждого партнёра свой список.
+      if (partnerMissing()) {
+        return `<section class="card"><p class="eyebrow">Контакты</p><p>Контакты живут в пространстве пары — сначала добавьте партнёра.</p></section>`;
+      }
+      if (!contactsState && !contactsBusy) loadContacts();
+      return renderContactsBody();
+    }
     const recentMemories = appState.memories || [];
     return renderListTab(mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться", memoryItem)
       + archiveMoreHtml("memories", recentMemories.length);
   }
+
+  // ------------------------------------------------------------------
+  // Здоровье: личный журнал препаратов (вкладка «Дневник → Здоровье»).
+  // Данные строго персональные (tg_id на сервере): партнёр список не видит
+  // и не редактирует. Бот напоминает о приёме в заданное время (HH:MM),
+  // пока курс активен; отметка приёма — общий итог за день.
+  // ------------------------------------------------------------------
+  const HEALTH_MED_FORMS = [["tablet", "таблетка"], ["capsule", "капсула"], ["injection", "укол"], ["patch", "пластырь"], ["iud", "спираль"], ["other", "прочее"]];
+  const HEALTH_MED_STATUS = [["active", "активен"], ["paused", "пауза"], ["completed", "завершён"]];
+  const HEALTH_MED_STATUS_LABELS = Object.fromEntries(HEALTH_MED_STATUS);
+
+  // «Сегодня» зрителя: отметки приёма привязаны к личному дню, не к паре.
+  function healthToday() {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: viewerTimeZone(), year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  }
+
+  async function loadHealth(force = false) {
+    if (healthBusy || (healthState && !force)) return;
+    healthBusy = true;
+    try {
+      healthState = await request("/api/health/meds");
+    } catch (error) {
+      healthState = { failed: true };
+      handleRequestError(error);
+    } finally {
+      healthBusy = false;
+    }
+    render();
+  }
+
+  function healthMedLog(medId, date) {
+    return (healthState?.med_logs || []).find(l => l.med_id === medId && l.date === date) || null;
+  }
+
+  function healthIntakeCounts(medId) {
+    const logs = healthState?.med_logs || [];
+    return {
+      taken: logs.filter(l => l.med_id === medId && l.status === "taken").length,
+      skipped: logs.filter(l => l.med_id === medId && l.status === "skipped").length
+    };
+  }
+
+  function renderHealthMedForm() {
+    const f = healthMedForm;
+    if (!f) return "";
+    const del = healthMedDeleteArmed === f.id
+      ? `<button type="button" class="primary is-danger full card-action" data-action="health-med-delete" data-id="${f.id}">Точно удалить</button>`
+      : f.id ? `<button type="button" class="secondary is-danger full card-action" data-action="health-med-delete-arm" data-id="${f.id}">Удалить</button>` : "";
+    return `
+      <div class="flo-med-form">
+        <label class="field"><span>Название</span>
+          <input id="health-med-name" type="text" maxlength="120" value="${esc(f.name || "")}" placeholder="Например, магний">
+        </label>
+        <div class="flo-actions" style="margin-top:6px">
+          <label class="field" style="flex:1"><span>Форма</span>
+            <select id="health-med-form"><option value="">—</option>${HEALTH_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          </label>
+          <label class="field" style="flex:1"><span>Статус</span>
+            <select id="health-med-status">${HEALTH_MED_STATUS.map(([c, l]) => `<option value="${c}"${(f.status || "active") === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          </label>
+        </div>
+        <label class="field"><span>Доза (справочно)</span>
+          <input id="health-med-dosage" type="text" maxlength="120" value="${esc(f.dosage || "")}" placeholder="Например, 1 таблетка">
+        </label>
+        <label class="field"><span>Схема приёма</span>
+          <input id="health-med-schedule" type="text" maxlength="200" value="${esc(f.schedule || "")}" placeholder="Например, 1 раз в день после еды">
+        </label>
+        <div class="flo-actions" style="margin-top:6px">
+          <label class="field" style="flex:1"><span>Начало курса</span>
+            <input id="health-med-start" type="date" value="${esc(f.start_date || healthToday())}">
+          </label>
+          <label class="field" style="flex:1"><span>Конец курса</span>
+            <input id="health-med-end" type="date" value="${esc(f.end_date || "")}">
+          </label>
+        </div>
+        <div class="flo-actions" style="margin-top:6px">
+          <button type="button" class="flo-chip${f.remind_enabled ? " is-on" : ""}" data-action="health-form-remind-toggle" aria-pressed="${!!f.remind_enabled}">${f.remind_enabled ? "Напоминание: включено" : "Напоминание: выключено"}</button>
+          <input id="health-med-remind-time" class="flo-input" type="time" value="${esc(f.remind_time || "09:00")}" aria-label="Время напоминания" style="width:110px">
+        </div>
+        <p class="settings-hint">Бот напомнит о приёме в указанное время, пока курс активен. Отметка о приёме — общий итог за день.</p>
+        <label class="field"><span>Комментарий</span>
+          <input id="health-med-note" type="text" maxlength="1000" value="${esc(f.note || "")}">
+        </label>
+        <button type="button" class="primary full card-action" data-action="health-med-save">Сохранить</button>
+        <button type="button" class="secondary full card-action" data-action="health-med-cancel">Отмена</button>
+        ${del}
+        <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш личный журнал. Препараты не видны партнёру.</p>
+      </div>`;
+  }
+
+  function renderHealthBody() {
+    if (healthState?.failed) {
+      return `<section class="card"><p class="eyebrow">Здоровье</p><p>Не получилось загрузить список.</p>
+        <button type="button" class="secondary full card-action" data-action="health-retry">Повторить</button></section>`;
+    }
+    if (!healthState) {
+      return `<section class="card"><p class="eyebrow">Здоровье</p><p>Загружаем список…</p></section>`;
+    }
+    const today = healthToday();
+    const meds = healthState.meds || [];
+    const rows = meds.map(m => {
+      const log = healthMedLog(m.id, today);
+      const statusLabel = HEALTH_MED_STATUS_LABELS[m.status] || m.status;
+      const { taken, skipped } = healthIntakeCounts(m.id);
+      const meta = [m.dosage, m.schedule, m.form ? HEALTH_MED_FORMS.find(([c]) => c === m.form)?.[1] : ""].filter(Boolean).join(" · ");
+      const remind = m.remind_enabled && m.remind_time ? `<span class="day-chip">Напоминание ${esc(m.remind_time)}</span>` : "";
+      const chips = m.status === "active" ? `
+        <div class="flo-chips" style="margin-top:6px">
+          <button type="button" class="flo-chip${log?.status === "taken" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="taken">Принят</button>
+          <button type="button" class="flo-chip${log?.status === "skipped" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="skipped">Пропущен</button>
+          ${log ? `<button type="button" class="flo-chip" data-action="health-intake-clear" data-med="${m.id}">Снять отметку</button>` : ""}
+          <button type="button" class="flo-chip${m.remind_enabled ? " is-on" : ""}" data-action="health-remind-toggle" data-med="${m.id}" data-enabled="${!m.remind_enabled}">${m.remind_enabled ? `Напоминание: ${esc(m.remind_time)}` : "Напоминание: выкл"}</button>
+        </div>` : "";
+      return `<div class="item-row">
+        <div class="item-main">
+          <p class="item-title">${esc(m.name)}</p>
+          <div class="item-meta"><span class="day-chip is-muted">${esc(statusLabel)}</span>${remind}<span>${esc(meta)}</span></div>
+          <div class="item-meta"><span>${esc(m.start_date || "")}${m.end_date ? ` — ${esc(m.end_date)}` : ""}</span><span>принято ${taken} · пропущено ${skipped}</span></div>
+          ${chips}
+        </div>
+        <button class="icon-btn" type="button" data-action="health-med-edit" data-id="${m.id}" aria-label="Изменить">${EDIT_ICON}</button>
+      </div>`;
+    }).join("");
+    return `
+      <section class="card">
+        <p class="eyebrow">Здоровье</p>
+        <h3>Мои препараты</h3>
+        <p class="settings-hint">Личный журнал: препараты и приём не видны партнёру. Бот напомнит о приёме в заданное время, пока курс активен.</p>
+        ${rows || `<p class="flo-disclaimer">Пока нет препаратов.</p>`}
+        ${healthMedForm ? renderHealthMedForm() : `<button type="button" class="secondary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>`}
+        <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение.</p>
+      </section>`;
+  }
+
+  async function handleHealthAction(action, btn) {
+    const medId = Number(btn.dataset.med || btn.dataset.id);
+    if (action === "health-retry") { healthState = null; return render(); }
+    if (action === "health-med-new") {
+      healthMedForm = { name: "", dosage: "", form: "", schedule: "", remind_enabled: false, remind_time: "09:00", start_date: healthToday(), end_date: "", status: "active", note: "" };
+      return render();
+    }
+    if (action === "health-med-cancel") {
+      healthMedForm = null;
+      healthMedDeleteArmed = null;
+      return render();
+    }
+    if (action === "health-med-edit") {
+      const m = (healthState?.meds || []).find(x => x.id === medId);
+      if (!m) return;
+      healthMedForm = { ...m, end_date: m.end_date || "" };
+      healthMedDeleteArmed = null;
+      return render();
+    }
+    if (action === "health-form-remind-toggle") {
+      healthMedForm = { ...(healthMedForm || {}), remind_enabled: !(healthMedForm?.remind_enabled) };
+      return render();
+    }
+    if (action === "health-med-delete-arm") {
+      healthMedDeleteArmed = medId;
+      return render();
+    }
+    if (action === "health-med-delete") {
+      try {
+        healthState = await request("/api/health/med/delete", { method: "POST", body: { id: medId } });
+        healthMedForm = null;
+        healthMedDeleteArmed = null;
+        showToast("Препарат и история приёма удалены");
+      } catch (error) { handleRequestError(error); }
+      return render();
+    }
+    if (action === "health-med-save") {
+      const f = { ...(healthMedForm || {}) };
+      f.name = document.getElementById("health-med-name")?.value || "";
+      f.dosage = document.getElementById("health-med-dosage")?.value || "";
+      f.form = document.getElementById("health-med-form")?.value || "";
+      f.status = document.getElementById("health-med-status")?.value || "active";
+      f.schedule = document.getElementById("health-med-schedule")?.value || "";
+      f.start_date = document.getElementById("health-med-start")?.value || "";
+      f.end_date = document.getElementById("health-med-end")?.value || "";
+      f.note = document.getElementById("health-med-note")?.value || "";
+      const remindTime = document.getElementById("health-med-remind-time")?.value || null;
+      if (!f.name.trim()) { showToast("Укажите название препарата"); return; }
+      if (!f.start_date) { showToast("Укажите дату начала курса"); return; }
+      if (f.remind_enabled && !remindTime) { showToast("Укажите время напоминания"); return; }
+      const body = {
+        name: f.name, dosage: f.dosage || null, form: f.form || null, schedule: f.schedule || null,
+        start_date: f.start_date, end_date: f.end_date || null, status: f.status || "active",
+        note: f.note || null, remind_enabled: f.remind_enabled === true,
+        remind_time: f.remind_enabled ? remindTime : null,
+        ...(f.id ? { id: f.id } : {})
+      };
+      try {
+        healthState = await request("/api/health/med", { method: "POST", body });
+        healthMedForm = null;
+        healthMedDeleteArmed = null;
+        showToast(body.remind_enabled ? "Препарат сохранён — бот напомнит о приёме" : "Препарат сохранён");
+      } catch (error) { handleRequestError(error); }
+      return render();
+    }
+    if (action === "health-intake" || action === "health-intake-clear") {
+      const d = healthToday();
+      try {
+        if (action === "health-intake-clear") {
+          healthState = await request("/api/health/med-log/delete", { method: "POST", body: { med_id: medId, date: d } });
+        } else {
+          healthState = await request("/api/health/med-log", { method: "POST", body: { med_id: medId, date: d, status: btn.dataset.status } });
+        }
+      } catch (error) { handleRequestError(error); }
+      return render();
+    }
+    if (action === "health-remind-toggle") {
+      const m = (healthState?.meds || []).find(x => x.id === medId);
+      if (!m) return;
+      if (btn.dataset.enabled === "true" && !m.remind_time) {
+        // Включение без времени — открываем форму: «вкл без времени» на
+        // сервере отклоняется, лучше сразу дать ввести время.
+        healthMedForm = { ...m, end_date: m.end_date || "", remind_enabled: true };
+        showToast("Укажите время напоминания и сохраните");
+        return render();
+      }
+      try {
+        healthState = await request("/api/health/med", {
+          method: "POST",
+          body: {
+            id: m.id, name: m.name, dosage: m.dosage, form: m.form, schedule: m.schedule,
+            start_date: m.start_date, end_date: m.end_date, status: m.status, note: m.note,
+            remind_enabled: btn.dataset.enabled === "true", remind_time: m.remind_time
+          }
+        });
+      } catch (error) { handleRequestError(error); }
+      return render();
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Контакты: телефонная книга пары (вкладка «Дневник → Контакты»).
+  // У каждого партнёра свой список; списки обоих видны («Мои / Её(Его)»),
+  // редактировать можно только свой. Номера — до 3 на контакт, единый
+  // формат «+7 ХХХ ХХХ ХХ ХХ», неполные не сохраняются. Тап по имени
+  // открывает окно контакта, тап по номеру копирует его в буфер.
+  // ------------------------------------------------------------------
+  function contactPartnerLabel() {
+    return appState.pair?.partner_gender === "female" ? "Её" : "Его";
+  }
+
+  // Цифры номера → «ХХХ ХХХ ХХ ХХ» (без префикса +7: он стоит в отдельном
+  // префиксе поля, пользователь вводит только 10 цифр).
+  function contactsFormatDigits(digits) {
+    const d = String(digits || "").replace(/\D/g, "").slice(0, 10);
+    return [d.slice(0, 3), d.slice(3, 6), d.slice(6, 8), d.slice(8, 10)].filter(Boolean).join(" ");
+  }
+
+  // Читаемая строка номера из любого ввода: «+79151234567», «8915…»,
+  // «915 123 45 67» → «+7 915 123 45 67». null — неполный номер.
+  function contactsNormalizePhone(raw) {
+    let digits = String(raw || "").replace(/\D/g, "");
+    if (digits.length === 11 && (digits[0] === "7" || digits[0] === "8")) digits = digits.slice(1);
+    if (digits.length !== 10) return null;
+    return `+7 ${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 8)} ${digits.slice(8, 10)}`;
+  }
+
+  async function loadContacts(force = false) {
+    if (contactsBusy || (contactsState && !force)) return;
+    contactsBusy = true;
+    try {
+      contactsState = await request("/api/contacts");
+    } catch (error) {
+      contactsState = { failed: true };
+      handleRequestError(error);
+    } finally {
+      contactsBusy = false;
+    }
+    render();
+  }
+
+  function contactsListFor(isMine) {
+    const list = isMine ? (contactsState?.mine || []) : (contactsState?.partner || []);
+    // Алфавитный порядок по имени; сервер сортирует тоже, но поиск и локальные
+    // мутации держат порядок на клиенте.
+    return [...list].sort((a, b) => String(a.name).localeCompare(String(b.name), "ru"));
+  }
+
+  // Поиск по имени, фамилии, цифрам номера и комментарию.
+  function contactsMatches(contact, query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    const qDigits = q.replace(/\D/g, "");
+    if (qDigits.length >= 3) {
+      const allPhones = (contact.phones || []).join(" ").replace(/\D/g, "");
+      if (allPhones.includes(qDigits)) return true;
+    }
+    return [contact.name, contact.surname, contact.comment]
+      .some(field => String(field || "").toLowerCase().includes(q));
+  }
+
+  function contactsCurrentList() {
+    return contactsListFor(contactsView === "mine").filter(c => contactsMatches(c, contactsSearch));
+  }
+
+  function renderContactsList() {
+    const list = contactsCurrentList();
+    if (!list.length) {
+      return contactsSearch.trim()
+        ? `<section class="card"><p class="eyebrow">Контакты</p><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>`
+        : `<section class="card"><p class="eyebrow">Контакты</p><p>${contactsView === "mine" ? "Добавьте первый контакт — имя и номера появятся в общей книге" : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
+    }
+    // Одна карточка на контакт: номера группируются под именем, высота
+    // карточки растёт с числом номеров. Кнопок в списке нет — тап по имени
+    // открывает окно контакта, тап по номеру копирует его.
+    return list.map(c => `
+      <section class="card contact-card">
+        <button class="contact-name" type="button" data-action="contact-open" data-id="${c.id}">
+          ${esc(c.name)}${c.surname ? ` <span class="contact-surname">${esc(c.surname)}</span>` : ""}
+        </button>
+        <div class="contact-phones">
+          ${(c.phones || []).map(phone => `
+            <button class="contact-phone" type="button" data-action="contacts-copy" data-phone="${esc(phone)}">${esc(phone)}</button>`).join("")}
+        </div>
+        ${c.comment ? `<p class="contact-comment">${esc(c.comment)}</p>` : ""}
+      </section>`).join("");
+  }
+
+  function renderContactsBody() {
+    if (contactsState?.failed) {
+      return `<section class="card"><p class="eyebrow">Контакты</p><p>Не получилось загрузить книгу.</p>
+        <button type="button" class="secondary full card-action" data-action="contacts-retry">Повторить</button></section>`;
+    }
+    if (!contactsState) {
+      return `<section class="card"><p class="eyebrow">Контакты</p><p>Загружаем книгу…</p></section>`;
+    }
+    const isMine = contactsView === "mine";
+    const hasAny = (contactsState.mine || []).length || (contactsState.partner || []).length;
+    return `
+      ${isMine ? `<button class="primary full add-button" type="button" data-action="add-contact">Добавить контакт</button>` : ""}
+      <div class="wish-switch" role="tablist" aria-label="Чьи контакты показывать">
+        <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="contacts-view" data-view="mine" data-tab="mine">Мои</button>
+        <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="contacts-view" data-view="partner" data-tab="partner">${esc(contactPartnerLabel())}</button>
+      </div>
+      ${hasAny ? `<label class="field contacts-search"><span>Поиск</span>
+        <input id="contacts-search" type="text" data-fmt="none" placeholder="Имя, фамилия, номер или комментарий" value="${esc(contactsSearch)}">
+      </label>` : ""}
+      <div id="contacts-list">${renderContactsList()}</div>`;
+  }
+
+  // Строка номера в диалоге: префикс «+7» уже стоит, вводятся только 10 цифр.
+  function contactPhoneRowHtml(phone) {
+    const digits = String(phone || "").replace(/\D/g, "");
+    const trimmed = digits.length === 11 && (digits[0] === "7" || digits[0] === "8") ? digits.slice(1) : digits;
+    return `
+      <div class="goal-step-row contact-phone-row">
+        <span class="contact-phone-prefix" aria-hidden="true">+7</span>
+        <input name="phones" data-contact-phone data-fmt="none" inputmode="tel" maxlength="13" placeholder="ХХХ ХХХ ХХ ХХ" value="${esc(contactsFormatDigits(trimmed))}">
+        <button class="icon-btn" type="button" data-action="remove-contact-phone" aria-label="Удалить номер" hidden>${DELETE_ICON}</button>
+      </div>`;
+  }
+
+  function contactPhonesBox() {
+    return document.getElementById("contact-phones");
+  }
+
+  function syncContactPhoneButtons() {
+    const box = contactPhonesBox();
+    if (!box) return;
+    const rows = Array.from(box.querySelectorAll(".contact-phone-row"));
+    for (const row of rows) {
+      const del = row.querySelector("[data-action='remove-contact-phone']");
+      if (del) del.hidden = rows.length <= 1;
+    }
+  }
+
+  function addContactPhoneRow() {
+    const box = contactPhonesBox();
+    if (!box) return;
+    if (box.querySelectorAll(".contact-phone-row").length >= 3) {
+      showToast("Максимум 3 номера на контакт");
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.innerHTML = contactPhoneRowHtml("");
+    box.appendChild(wrap.firstElementChild);
+    syncContactPhoneButtons();
+    box.querySelector(".contact-phone-row:last-child input")?.focus();
+  }
+
+  function removeContactPhoneRow(btn) {
+    const box = contactPhonesBox();
+    const row = btn.closest(".contact-phone-row");
+    if (!box || !row) return;
+    if (box.querySelectorAll(".contact-phone-row").length <= 1) return;
+    row.remove();
+    syncContactPhoneButtons();
+  }
+
+  // Диалог контакта: создание, правка и вариант «имя занято» (warning).
+  // warning: undefined — обычный диалог; "proceed" — подтверждение добавления
+  // при занятом имени; "block" — оба контакта без комментария: менять имя
+  // или добавить комментарий, иначе сервер отклонит (409 NAME_TAKEN).
+  function openContactDialog(contact = null, opts = {}) {
+    const draft = opts.draft || null;
+    const source = contact || draft || {};
+    const warning = opts.warning;
+    const phones = (source.phones && source.phones.length ? source.phones : [""]);
+    const header = warning
+      ? `<p class="contact-name-warning">Имя занято. Укажите наводящую информацию в комментарии или измените имя.</p>`
+      : "";
+    const config = {
+      title: warning ? "Имя занято" : (contact ? "Изменить контакт" : "Новый контакт"),
+      submitLabel: warning === "proceed" ? "Всё равно добавить" : (contact ? "Сохранить" : "Добавить"),
+      cancelLabel: warning ? "Изменить имя" : "Отмена",
+      fields: `
+        ${header}
+        <label class="field"><span>Имя</span><input name="name" data-fmt="none" maxlength="120" required placeholder="Как записать в книге" value="${esc(source.name || "")}"></label>
+        <label class="field"><span>Фамилия (необязательно)</span><input name="surname" data-fmt="none" maxlength="120" placeholder="Чтобы не путать однофамильцев" value="${esc(source.surname || "")}"></label>
+        <div class="field"><span>Номера — до 3</span>
+          <div class="goal-steps" id="contact-phones">
+            ${phones.map(p => contactPhoneRowHtml(p)).join("")}
+          </div>
+        </div>
+        <button class="goal-add" type="button" data-action="add-contact-phone" aria-label="Добавить номер">+</button>
+        <label class="field"><span>Комментарий (необязательно)</span><textarea name="comment" data-fmt="none" rows="2" maxlength="500" placeholder="Кто это, где знакомы, наводящая информация">${esc(source.comment || "")}</textarea></label>
+      `,
+      onSubmit: async (fd) => {
+        const name = String(fd.get("name") || "").trim();
+        const surname = String(fd.get("surname") || "").trim();
+        const comment = String(fd.get("comment") || "").trim();
+        const digitsList = [...new Set((fd.getAll("phones") || []).map(v => String(v).replace(/\D/g, "")).filter(Boolean))];
+        if (!digitsList.length) throw new Error("Введите хотя бы один номер");
+        for (const d of digitsList) {
+          if (d.length !== 10) throw new Error("Введите полный номер — 10 цифр после +7, он сохранится как +7 ХХХ ХХХ ХХ ХХ");
+        }
+        const phonesOut = digitsList.map(d => `+7 ${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6, 8)} ${d.slice(8, 10)}`);
+        const body = { name, surname: surname || null, comment: comment || null, phones: phonesOut, ...(source.id ? { id: source.id } : {}) };
+        if (!warning) {
+          const other = (contactsState?.mine || []).find(c => c.id !== source.id && String(c.name || "").trim().toLowerCase() === name.toLowerCase());
+          if (other && !other.comment) {
+            // Точное совпадение имени: существующий без комментария —
+            // предупреждение. С комментарием у нового — можно продолжить,
+            // оба пустых — сервер отклонит, диалог требует правку.
+            config.chain = () => openContactDialog(null, {
+              draft: { name, surname, comment, phones: phonesOut, id: source.id },
+              warning: comment ? "proceed" : "block"
+            });
+            return appState;
+          }
+          // Существующий с комментарием — пропускаем без предупреждения.
+        }
+        contactsState = await request("/api/contacts", { method: "POST", body });
+        showToast(source.id ? "Контакт сохранён" : "Контакт добавлен");
+        return appState;
+      }
+    };
+    openDialog(config);
+  }
+
+  // Окно контакта: вся информация, копирование номеров с иконкой, правка
+  // и удаление — только для своего списка.
+  function openContactInfoDialog(contact) {
+    const isMine = Number(contact.owner_id) === Number(appState.user?.tg_id);
+    const rows = (contact.phones || []).map(phone => `
+      <div class="contact-info-row">
+        <button class="contact-phone" type="button" data-action="contacts-copy" data-phone="${esc(phone)}">${esc(phone)}</button>
+        <button class="icon-btn" type="button" data-action="contacts-copy" data-phone="${esc(phone)}" aria-label="Скопировать номер">${COPY_ICON}</button>
+      </div>`).join("");
+    openDialog({
+      title: "Контакт",
+      submitLabel: null,
+      readOnly: true,
+      cancelLabel: "Закрыть",
+      fields: `
+        <p class="contact-info-name">${esc(contact.name)}${contact.surname ? ` <span class="contact-surname">${esc(contact.surname)}</span>` : ""}</p>
+        <div class="field"><span>Номера — тап копирует</span>
+          <div class="contact-phones">${rows || `<p class="flo-disclaimer">Номеров нет.</p>`}</div>
+        </div>
+        ${contact.comment ? `<div class="field"><span>Комментарий</span><p class="contact-comment">${esc(contact.comment)}</p></div>` : ""}
+        ${isMine ? `
+        <button type="button" class="secondary full card-action" data-action="contacts-edit" data-id="${contact.id}">Изменить</button>
+        <button type="button" class="secondary is-danger full card-action" data-action="contacts-delete" data-id="${contact.id}">Удалить контакт</button>` : ""}
+      `
+    });
+  }
+
+  function findContactById(id) {
+    return [...(contactsState?.mine || []), ...(contactsState?.partner || [])].find(c => Number(c.id) === Number(id)) || null;
+  }
+
+  async function handleContactsAction(action, btn) {
+    const id = Number(btn.dataset.id);
+    if (action === "contacts-retry") { contactsState = null; return render(); }
+    if (action === "contacts-copy") {
+      const phone = btn.dataset.phone || "";
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(phone);
+          showToast("Номер скопирован");
+          return;
+        } catch (error) { /* фолбэк ниже */ }
+      }
+      showToast(`Номер: ${phone}`);
+      return;
+    }
+    if (action === "contact-open") {
+      const contact = findContactById(id);
+      if (contact) openContactInfoDialog(contact);
+      return;
+    }
+    if (action === "contacts-edit") {
+      const contact = findContactById(id);
+      if (!contact) return;
+      dialog.close();
+      openContactDialog(contact);
+      return;
+    }
+    if (action === "contacts-delete") {
+      const contact = findContactById(id);
+      if (!contact) return;
+      dialog.close();
+      openDialog({
+        title: "Удалить контакт?",
+        fields: `<p>«${esc(contact.name)}» и все его номера будут удалены.</p>`,
+        submitLabel: "Удалить",
+        cancelLabel: "Оставить",
+        onSubmit: async () => {
+          contactsState = await request("/api/contacts/delete", { method: "POST", body: { id: contact.id } });
+          showToast("Контакт удалён");
+          return appState;
+        }
+      });
+      return;
+    }
+  }
+
+  // Поиск по книге: перерисовывается только список — фокус в поле поиска
+  // не теряется, ввод не прерывается.
+  document.addEventListener("input", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== "contacts-search") return;
+    contactsSearch = target.value;
+    const list = document.getElementById("contacts-list");
+    if (list) list.innerHTML = renderContactsList();
+  });
 
   // Автор цитаты — select вместо свободного ввода: по запросу выбор
   // ограничен двумя пользователями пространства (имена из pair уже учитывают
@@ -5086,8 +6087,8 @@
 
   // Тело вкладки «Планы» для вида «Кино». «Рандом» живёт в карточке-информере
   // до первого запуска рандома (флаг в localStorage); после — карточка
-  // исчезает, и кнопка возвращается отдельной, под «Добавить фильм».
-  // Пустой список: «Добавить фильм» живёт в карточке «Пока пусто»,
+  // исчезает, и кнопка возвращается отдельной, под «Найти кино».
+  // Пустой список: «Найти кино» живёт в карточке «Пока пусто»,
   // карточка «Рандом» — под ней.
   // Сортировка списков «Кино». Выбор живёт отдельно для «В планах» и
   // «Просмотрено»: у просмотренных есть RAofP, у планов — нет.
@@ -5217,14 +6218,14 @@
   function renderOpenMovies() {
     const all = openMovies();
     // Пустые карточки и кнопки добавления смотрят на полный список — фильтр
-    // типа скрывает записи, но не должен прятать «Добавить фильм» и «Рандом».
+    // типа скрывает записи, но не должен прятать «Найти кино» и «Рандом».
     const open = filterMoviesByKind(all, "open");
     const watched = watchedMovies();
     const disabledClass = partnerMissing() ? " is-disabled" : "";
     const pick = currentMoviePick();
     const heroUsed = movieRandomUsed();
     let html = "";
-    // Пустой список планов — как в «Кино»: «Добавить фильм» внутри карточки.
+    // Пустой список планов — как в «Кино»: «Найти кино» внутри карточки.
     // Условие — по нефильтрованному all: пустой результат фильтра («только
     // фильмы» при одних сериалах) уже показывает movieEmptyByKind под
     // сортировкой, вторая «Пока пусто» сверху была бы дублем.
@@ -5235,13 +6236,13 @@
           <p>${watched.length
             ? "Все фильмы просмотрены — добавьте новый"
             : "Найдите фильм или сериал в IMDb — он появится здесь с рейтингом, жанром и длительностью"}</p>
-          <button class="primary full card-action${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>
+          <button class="primary full card-action${disabledClass}" type="button" data-action="add-movie">Найти кино</button>
         </section>
       `;
     }
     // «Рандом» — кнопка внутри карточки-информера до первого запуска на этом
     // устройстве; после первого выбора карточка исчезает, а кнопка
-    // возвращается отдельной — под «Добавить фильм». Подсказка различает
+    // возвращается отдельной — под «Найти кино». Подсказка различает
     // «список пуст» и «всё просмотрено», как в «Местах».
     if (!heroUsed) {
       // Пул рандома — нефильтрованный all: фильтр вида не сужает выбор.
@@ -5260,7 +6261,7 @@
     }
     if (pick) html += renderMoviePick(pick);
     if (all.length) {
-      html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-movie">Добавить фильм</button>`;
+      html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-movie">Найти кино</button>`;
       if (heroUsed) html += `<button class="secondary full place-random" type="button" data-action="random-movie">Рандом</button>`;
       // На месте прежнего заголовка «Хотим посмотреть» — сортировка списка.
       html += movieSortBar("open", open.length);
@@ -5371,13 +6372,13 @@
     } else if (currentTab === "memories") {
       appEl.innerHTML = `
         ${renderTabHeader("memories")}
-        ${renderSegment("memories", memoriesView, [["memories", "Записи"], ["quotes", "Цитаты"]])}
+        ${renderSegment("memories", memoriesView, [["memories", "Записи"], ["quotes", "Цитаты"], ["health", "Здоровье"], ["contacts", "Контакты"]])}
         <div id="tab-body">${renderMemoriesBody()}</div>
       `;
     } else if (currentTab === "pair") {
       appEl.innerHTML = `
         ${renderTabHeader("pair")}
-        ${renderSegment("pair", pairView, [["profile", "Профиль"], ["wishes", "Желания"], ["savings", "Копилка"], ...(showFloTab() ? [["flo", "Фло"]] : [])])}
+        ${renderSegment("pair", pairView, [["profile", "Профиль"], ["wishes", "Желания"], ["savings", "Копилка"], ["flo", "Фло"]])}
         <div id="pair-body">${renderPairView()}</div>
       `;
       // Если активных записей больше лимита /api/state, календарь догружает
@@ -5917,6 +6918,14 @@
   dialogFields.addEventListener("input", (e) => {
     const target = e.target;
     if (!(target instanceof HTMLInputElement)) return;
+    // Номер контакта: маска «ХХХ ХХХ ХХ ХХ» на 10 цифрах, «+7» стоит префиксом.
+    // Легаси-ввод «8 915…» / «+7915…» сворачивается до 10 цифр.
+    if (target.hasAttribute("data-contact-phone")) {
+      let digits = target.value.replace(/\D/g, "");
+      if (digits.length === 11 && (digits[0] === "7" || digits[0] === "8")) digits = digits.slice(1);
+      target.value = contactsFormatDigits(digits);
+      return;
+    }
     const form = target.closest("form");
     // Повторы требуют дату: без неё повторять нечего.
     if (target.hasAttribute("data-requires-day")) {
@@ -5941,7 +6950,7 @@
   });
 
   // ------------------------------------------------------------------
-  // Живые подсказки IMDb в диалоге «Добавить фильм»: печатаем название —
+  // Живые подсказки IMDb в диалоге «Найти кино»: печатаем название —
   // приходят совпадения; тап по строке сразу добавляет фильм и закрывает
   // диалог. Слушатели вешаются один раз на постоянный #dialog-fields,
   // как input-обработчик выше, поэтому на каждое открытие диалога ничего
@@ -6109,6 +7118,14 @@
     if (stepBtn) {
       if (stepBtn.dataset.action === "add-goal-step") addGoalStepRow();
       else removeGoalStepRow(stepBtn);
+      return;
+    }
+    // Номера контакта: «+» добавляет строку (до 3), крестик удаляет (кроме
+    // единственной — контакт без номеров не создаётся).
+    const phoneBtn = e.target.closest?.("[data-action='add-contact-phone'], [data-action='remove-contact-phone']");
+    if (phoneBtn) {
+      if (phoneBtn.dataset.action === "add-contact-phone") addContactPhoneRow();
+      else removeContactPhoneRow(phoneBtn);
       return;
     }
     const btn = e.target.closest?.(".movie-suggest-item");
@@ -6314,7 +7331,7 @@
     const action = btn.dataset.action;
 
     try {
-      if (["add-task", "add-goal", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-trip", "add-movie", "add-saving", "add-birthday"].includes(action) && partnerMissing()) {
+      if (["add-task", "add-goal", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-trip", "add-movie", "add-saving", "add-birthday", "add-contact"].includes(action) && partnerMissing()) {
         showToast("Сначала добавьте партнёра");
         return;
       }
@@ -6326,6 +7343,29 @@
         dialog.close();
       } else if (action.startsWith("flo-")) {
         handleFloAction(action, btn);
+      } else if (action.startsWith("health-")) {
+        // Здоровье — личный журнал: работает и без пары, блокировок нет.
+        handleHealthAction(action, btn);
+      } else if (action === "add-contact") {
+        openContactDialog(null);
+      } else if (action === "contacts-view") {
+        const view = btn.dataset.view === "partner" ? "partner" : "mine";
+        if (view !== contactsView) {
+          contactsView = view;
+          contactsSearch = "";
+          // Капля анимируется на живом экземпляре: перерисовываем только список.
+          const body = document.getElementById("tab-body");
+          if (body) {
+            body.innerHTML = renderContactsBody();
+            document.querySelectorAll(".wish-switch-btn[data-tab]").forEach((b) => {
+              b.setAttribute("aria-selected", String(b.dataset.tab === contactsView));
+            });
+          } else {
+            render();
+          }
+        }
+      } else if (["contacts-retry", "contact-open", "contacts-copy", "contacts-edit", "contacts-delete"].includes(action)) {
+        await handleContactsAction(action, btn);
       } else if (action === "seg-switch") {
         // Переключение вида внутри вкладки: меняем только тело, капля и сам
         // переключатель остаются живыми.
@@ -6498,7 +7538,7 @@
         // по подсказке (механика в делегированном слушателе dialogFields).
         // readOnly гасит нативный сабмит по Enter — диалог не закрывается.
         openDialog({
-          title: "Добавить фильм",
+          title: "Найти кино",
           submitLabel: null,
           readOnly: true,
           cancelLabel: "Закрыть",

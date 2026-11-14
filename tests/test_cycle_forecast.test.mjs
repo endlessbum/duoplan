@@ -97,62 +97,119 @@ test("дни считаются по календарю без сдвига ча
   assert.equal(cycleDayNum("2026-03-01") - cycleDayNum("2026-02-28"), 1);
 });
 
-// Приватность: партнёр получает только выбранный уровень шеринга.
+// Приватность: партнёр получает строго согласованные категории (allowlist).
 const shared = {
   today: "2026-11-12",
   periods: [{ start_date: "2026-11-10", end_date: null }, { start_date: "2026-10-12", end_date: "2026-10-16" }],
-  logs: [{ date: "2026-11-12", flow: "light", symptoms: ["cramps"], note: "секретная заметка" }],
+  logs: [
+    { date: "2026-11-12", flow: "light", symptoms: ["cramps"], note: "секретная заметка", sex: "protected", sex_count: 2, mood: "calm", sleep_quality: "good", stress: "high", weight_kg: 65.5, sick: false },
+    { date: "2026-11-11", sex: "none", mood: "sad", sleep_quality: "poor" },
+  ],
+  measurements: [
+    { kind: "bbt", date: "2026-11-10", time: "07:30", value: 36.6, unit: "C" },
+    { kind: "lh", date: "2026-11-10", result: "positive" },
+  ],
   disclaimer: "d",
   forecast: cycleForecast([{ start_date: "2026-10-12", end_date: "2026-10-16" }], profile, "2026-11-12"),
 };
+const fullShare = {
+  enabled: true,
+  confirmed: true,
+  categories: { sex: true, mood: true, sleep: true, bbt: true }
+};
 
-test("неизвестный уровень шеринга не открывает ничего", () => {
-  assert.deepEqual(cycleViewForPartner(shared, "bogus"), { shared: false });
+test("выключенный или неизвестный шеринг не открывает ничего", () => {
+  assert.deepEqual(cycleViewForPartner(shared, { enabled: false, confirmed: true, categories: fullShare.categories }), { shared: false });
+  assert.deepEqual(cycleViewForPartner(shared, null), { shared: false });
   assert.deepEqual(cycleViewForPartner(shared, undefined), { shared: false });
 });
 
-test("уровень phases: без дат, логов и заметок", () => {
-  const v = cycleViewForPartner(shared, "phases");
+test("без подтверждения состава партнёру отдаётся только календарная оценка", () => {
+  const v = cycleViewForPartner(shared, { enabled: true, confirmed: false, categories: fullShare.categories });
   const json = JSON.stringify(v);
   assert.equal(v.shared, true);
+  assert.equal(v.confirmed, false);
   assert.equal("periods" in v, false);
-  assert.equal("today_log" in v, false);
+  assert.equal("days" in v, false);
+  assert.equal("bbt" in v, false);
+  // Даже forecast не раскрывает точный диапазон без подтверждения.
   assert.equal("next_period_start" in v.forecast, false);
   assert.equal(json.includes("2026-10-12"), false);
   assert.equal(json.includes("секретная"), false);
 });
 
-test("уровень periods: даты месячных есть, симптомов и заметок нет", () => {
-  const v = cycleViewForPartner(shared, "periods");
+test("календарь подтверждён: даты месячных есть, дневниковых полей нет", () => {
+  const v = cycleViewForPartner(shared, { enabled: true, confirmed: true, categories: { sex: false, mood: false, sleep: false, bbt: false } });
   const json = JSON.stringify(v);
+  assert.equal(v.shared, true);
   assert.equal(v.periods.length, 2);
+  assert.equal(v.calendar_periods.length, 2);
+  assert.equal(v.forecast.next_period_start !== undefined, true);
+  assert.equal(v.last_period_start, "2026-11-10");
+  assert.equal("days" in v, false);
+  assert.equal("bbt" in v, false);
   assert.equal("today_log" in v, false);
   assert.equal(json.includes("секретная"), false);
   assert.equal(json.includes("cramps"), false);
+  assert.equal(json.includes("симптом"), false);
 });
 
-test("уровень symptoms: флоу и симптомы за сегодня, заметки нет", () => {
-  const v = cycleViewForPartner(shared, "symptoms");
-  assert.deepEqual(v.today_log, { flow: "light", symptoms: ["cramps"] });
-  assert.equal("note" in v.today_log, false);
-  assert.equal(JSON.stringify(v).includes("секретная"), false);
+test("категория секс: факты и явное «без секса», без лишних полей", () => {
+  const v = cycleViewForPartner(shared, { enabled: true, confirmed: true, categories: { sex: true, mood: false, sleep: false, bbt: false } });
+  assert.equal(v.days.length, 2);
+  assert.deepEqual(v.days[0], { date: "2026-11-12", sex: "protected", sex_count: 2 });
+  assert.deepEqual(v.days[1], { date: "2026-11-11", sex: "none", sex_count: 0 });
+  const json = JSON.stringify(v);
+  // Значения настроения/сна в днях отсутствуют (в метаданных категорий ключи
+  // есть всегда — это состав общего доступа, не данные).
+  assert.equal(json.includes("calm"), false);
+  assert.equal(json.includes("good"), false);
+  assert.equal(json.includes("секретная"), false);
 });
 
-test("уровень full: заметка за сегодня включается, история логов — нет", () => {
-  const v = cycleViewForPartner(shared, "full");
-  assert.equal(v.today_log.note, "секретная заметка");
-  assert.equal("logs" in v, false);
+test("настроение и сон передаются только своими категориями", () => {
+  const v = cycleViewForPartner(shared, { enabled: true, confirmed: true, categories: { sex: false, mood: true, sleep: true, bbt: false } });
+  assert.deepEqual(v.days[0], { date: "2026-11-12", mood: "calm", sleep: "good" });
+  assert.deepEqual(v.days[1], { date: "2026-11-11", mood: "sad", sleep: "poor" });
+  assert.equal(JSON.stringify(v).includes("sex_count"), false);
+});
+
+test("температура: только БТ, с единицами и временем; ЛГ не отдаётся", () => {
+  const v = cycleViewForPartner(shared, { enabled: true, confirmed: true, categories: { sex: false, mood: false, sleep: false, bbt: true } });
+  assert.deepEqual(v.bbt, [{ date: "2026-11-10", time: "07:30", value: 36.6, unit: "C" }]);
+  assert.equal(JSON.stringify(v).includes("lh"), false);
+});
+
+test("легаси-уровень не открывает дневниковые категории через старый формат вызова", () => {
+  // Старый клиент передаёт строку уровня вместо объекта — такого ответа нет.
+  assert.deepEqual(cycleViewForPartner(shared, "periods"), { shared: false });
+  assert.deepEqual(cycleViewForPartner(shared, "full"), { shared: false });
+});
+
+test("партнёрский прогноз несёт качество данных и оговорку о контрацепции", () => {
+  const v = cycleViewForPartner(shared, fullShare);
+  assert.equal(typeof v.forecast.quality, "string");
+  assert.equal(v.forecast.ovulation_estimated, true);
+  assert.equal(typeof v.forecast.based_on, "string");
+  assert.ok(v.forecast_disclaimer.includes("не является") || v.forecast_disclaimer.includes("не метод"));
 });
 
 test("экспорт: владелица получает полный журнал и настройки шеринга", () => {
   const payload = cycleExportPayload({
     profile: { avg_cycle_length: 30, avg_period_length: 4, cycle_length_known: 1 },
-    share: { enabled: true, level: "periods" },
+    share: { enabled: true, level: "periods", categories: { sex: true, mood: false, sleep: true, bbt: false }, confirmed: true },
     periods: [{ start_date: "2026-10-12", end_date: "2026-10-16" }],
     logs: [{ date: "2026-10-13", flow: "heavy", symptoms: ["cramps"], note: "заметка" }],
+    context: { context: { pregnancy: false, hormonal_contraception: true } },
   }, "2026-11-12T01:00:00.000Z");
   assert.equal(payload.format, "duoplan-cycle");
-  assert.deepEqual(payload.profile, { avg_cycle_length: 30, avg_period_length: 4, cycle_length_known: true, share_enabled: true, share_level: "periods" });
+  assert.deepEqual(payload.profile, {
+    avg_cycle_length: 30, avg_period_length: 4, cycle_length_known: true,
+    share_enabled: true, share_level: "periods",
+    share_categories: { sex: true, mood: false, sleep: true, bbt: false },
+    share_confirmed: true
+  });
+  assert.deepEqual(payload.context, { pregnancy: false, postpartum: false, breastfeeding: false, perimenopause: false, hormonal_contraception: true, cycle_affecting_meds: false, very_irregular: false, unusual_bleeding: false });
   assert.deepEqual(payload.periods, [{ start_date: "2026-10-12", end_date: "2026-10-16", end_unknown: false }]);
   assert.equal(payload.logs[0].note, "заметка");
 });
@@ -206,7 +263,7 @@ test("мастер: будущая дата, выход за пределы и �
 });
 
 test("напоминания: месячные за 2 дня, овуляция, начало окна и задержка", () => {
-  const base = { empty: false, phase: "luteal", next_period_in: 5, ovulation_in: 9, delay_days: 0 };
+  const base = { empty: false, phase: "luteal", next_period_in: 5, ovulation_in: 9, delay_days: 0, quality: "few", based_on: "history" };
   assert.deepEqual(cycleReminderKinds({ ...base, next_period_in: 2 }).map(r => r.kind), ["cycle_period"]);
   assert.deepEqual(cycleReminderKinds({ ...base, next_period_in: 1 }, { period_days: 1 }).map(r => r.text), ["Завтра ожидаются месячные"]);
   assert.deepEqual(cycleReminderKinds({ ...base, ovulation_in: 0 }).map(r => r.kind), ["cycle_ovulation"]);
@@ -218,6 +275,18 @@ test("напоминания: месячные идут или данных не
   assert.deepEqual(cycleReminderKinds({ empty: true }), []);
   assert.deepEqual(cycleReminderKinds({ empty: false, phase: "menstruation", next_period_in: 2, ovulation_in: 9, delay_days: 0 }), []);
   assert.deepEqual(cycleReminderKinds({ empty: false, phase: "luteal", next_period_in: 9, ovulation_in: 3, delay_days: 0 }), []);
+});
+
+// Переработка 4.2: гейтинг уведомлений об овуляции качеством данных.
+test("напоминания: овуляция не анонсируется при недостаточных данных", () => {
+  const base = { empty: false, phase: "luteal", next_period_in: 5, ovulation_in: 0, delay_days: 0 };
+  // Fail-safe: нет quality/based_on — не шлём.
+  assert.deepEqual(cycleReminderKinds({ ...base }), []);
+  assert.deepEqual(cycleReminderKinds({ ...base, quality: "insufficient", based_on: "default" }), []);
+  // Достаточная история — шлём; устаревшая — нет.
+  const few = { ...base, quality: "few", based_on: "history" };
+  assert.deepEqual(cycleReminderKinds(few).map(r => r.kind), ["cycle_ovulation"]);
+  assert.deepEqual(cycleReminderKinds({ ...few, data_stale: true }), []);
 });
 
 test("статистика: длины циклов и симптомы по фазам по дням с записями", () => {
@@ -236,10 +305,33 @@ test("статистика: длины циклов и симптомы по ф�
   assert.equal(s.cycles.length, 2);
   assert.equal(s.avg_cycle_length, 28);
   assert.equal(s.logged_days, 4);
-  assert.deepEqual(s.phases.menstruation, { days: 1, symptoms: { cramps: 1 }, moods: {}, energy: {}, avg_pain: null });
-  assert.deepEqual(s.phases.fertile, { days: 1, symptoms: {}, moods: {}, energy: {}, avg_pain: null });
-  assert.deepEqual(s.phases.ovulation, { days: 1, symptoms: { headache: 1 }, moods: {}, energy: {}, avg_pain: null });
-  assert.deepEqual(s.phases.luteal, { days: 1, symptoms: { fatigue: 1, cramps: 1 }, moods: {}, energy: {}, avg_pain: null });
+  // Знаменатель симптомов — дни с заполненным дневником симптомов:
+  // день без симптомов и без «симптомов не было» в знаменатель не входит.
+  assert.deepEqual(s.phases.menstruation.symptoms, { cramps: 1 });
+  assert.deepEqual(s.phases.ovulation.symptoms, { headache: 1 });
+  assert.deepEqual(s.phases.luteal.symptoms, { fatigue: 1, cramps: 1 });
+  assert.equal(s.phases.luteal.symptom_days, 1);
+  assert.equal(s.phases.menstruation.avg_pain, null);
+  assert.equal(s.phases.fertile.days, 1);
+});
+
+test("статистика: symptoms_clear входит в знаменатель как явное отсутствие", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+  ];
+  const logs = [
+    { date: "2026-01-30", symptoms: ["headache"], symptoms_clear: false },
+    { date: "2026-01-31", symptoms: [], symptoms_clear: true },
+    { date: "2026-02-01", symptoms: [], symptoms_clear: false },
+  ];
+  const s = cycleStats(periods, logs, "2026-02-20", { avg_cycle_length: 28, avg_period_length: 5 });
+  assert.equal(s.phases.menstruation.symptom_days, 2, "день с symptom_clear — заполненный день, пропущенный — нет");
+  assert.equal(s.phases.menstruation.clear_days, 1);
+  assert.deepEqual(s.phases.menstruation.symptoms, { headache: 1 });
+  // Покрытие дневника: заполнены 2 из 51 дня периода.
+  assert.equal(s.coverage.diary_days, 3);
+  assert.ok(s.coverage.days_total > 40);
 });
 
 test("статистика: настроение и энергия считаются отдельно от симптомов", () => {
@@ -256,6 +348,8 @@ test("статистика: настроение и энергия считаю�
   // Менструация: дни 29.01–02.02 — оба дня с тревожностью/раздражительностью и низкой энергией.
   assert.deepEqual(s.phases.menstruation.moods, { anxious: 1, irritable: 1 });
   assert.deepEqual(s.phases.menstruation.energy, { low: 2 });
+  assert.equal(s.phases.menstruation.mood_days, 2);
+  assert.equal(s.phases.menstruation.energy_days, 2);
   // Лютеиновая: 14.02 — грусть, обычная энергия.
   assert.deepEqual(s.phases.luteal.moods, { sad: 1 });
   assert.deepEqual(s.phases.luteal.energy, { normal: 1 });
@@ -276,7 +370,7 @@ test("подсказки партнёру: есть для каждой фазы
 });
 
 test("подсказка партнёру не раскрывает даты и заметки", () => {
-  const v = cycleViewForPartner(shared, "phases");
+  const v = cycleViewForPartner(shared, fullShare);
   assert.equal(typeof v.tip, "string");
   assert.equal(JSON.stringify(v.tip).includes("2026"), false);
   assert.equal(JSON.stringify(v.tip).includes("секретная"), false);
@@ -360,15 +454,15 @@ test("статистика: необычные интервалы видны в 
 });
 
 test("напоминания: свои дни до события и выключенные виды", () => {
-  const f = { empty: false, phase: "luteal", next_period_in: 3, ovulation_in: 0, delay_days: 0 };
+  const f = { empty: false, phase: "luteal", next_period_in: 3, ovulation_in: 0, delay_days: 0, quality: "few", based_on: "history" };
   assert.deepEqual(cycleReminderKinds(f, { period_days: 3 }).map(r => r.kind), ["cycle_period", "cycle_ovulation"]);
   assert.deepEqual(cycleReminderKinds(f, { period_days: 3, ovulation: false }).map(r => r.kind), ["cycle_period"]);
   assert.deepEqual(cycleReminderKinds(f, { period: false, ovulation: false }).map(r => r.kind), []);
   assert.deepEqual(cycleReminderKinds({ empty: false, phase: "delay", next_period_in: -5, ovulation_in: 9, delay_days: 5 }, { delay_days: 5 }).map(r => r.kind), ["cycle_delay"]);
 });
 
-// Этап 6/P2: ПМС-паттерны и боль по фазам в статистике.
-test("статистика: pms_patterns и avg_pain по фазам", () => {
+// Этап 6/P2 + переработка 10.2: ПМС-паттерны агрегируются по циклам, не по дням.
+test("статистика: pms_patterns считаются по циклам и avg_pain по фазам", () => {
   const periods = [
     { start_date: "2026-01-01", end_date: "2026-01-05" },
     { start_date: "2026-01-29", end_date: "2026-02-02" },
@@ -378,18 +472,87 @@ test("статистика: pms_patterns и avg_pain по фазам", () => {
     // День 25 каждого 28-дневного цикла — за 3 дня до следующего старта.
     { date: "2026-01-26", symptoms: ["bloating"], pain_score: 4 },
     { date: "2026-02-23", symptoms: ["bloating"], pain_score: 6 },
-    // Симптом один раз — в паттерн не попадает (cycles < 2).
+    // Симптом один раз — в паттерн не попадает (циклов < 2).
     { date: "2026-01-10", symptoms: ["headache"] },
   ];
   const s = cycleStats(periods, logs, "2026-03-10", { avg_cycle_length: 28, avg_period_length: 5 });
   const pms = s.pms_patterns.find(p => p.code === "bloating");
   assert.ok(pms, "bloating должен попасть в ПМС-паттерны");
   assert.equal(pms.avg_lead_days, 3);
-  assert.equal(pms.cycles, 2);
+  assert.equal(pms.cycles_with_symptom, 2);
+  assert.equal(pms.cycles_with_data, 2);
+  assert.equal(pms.confidence, "low", "два цикла — предварительный вывод");
   assert.ok(!s.pms_patterns.some(p => p.code === "headache"), "одиночный симптом — не паттерн");
   // Оба дня с болью — лютеиновая фаза (овуляция на 14-й день).
   assert.equal(s.phases.luteal.avg_pain, 5);
   assert.equal(s.phases.menstruation, undefined);
+});
+
+test("статистика: многодневная отметка в одном цикле — не три повторения", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+  ];
+  const logs = [
+    // Три дня подряд в одном цикле — это ОДИН цикл с симптомом, не три.
+    { date: "2026-01-24", symptoms: ["bloating"] },
+    { date: "2026-01-25", symptoms: ["bloating"] },
+    { date: "2026-01-26", symptoms: ["bloating"] },
+    { date: "2026-02-23", symptoms: ["bloating"] },
+  ];
+  const s = cycleStats(periods, logs, "2026-03-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  const pms = s.pms_patterns.find(p => p.code === "bloating");
+  assert.ok(pms);
+  assert.equal(pms.cycles_with_symptom, 2, "симптом в двух циклах, не в четырёх");
+  assert.equal(pms.days, 4, "дневные отметки видны отдельно");
+});
+
+test("статистика: 3 цикла с симптомом дают уверенный паттерн", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+    { start_date: "2026-03-26", end_date: "2026-03-30" },
+  ];
+  const logs = [
+    { date: "2026-01-26", symptoms: ["bloating"] },
+    { date: "2026-02-23", symptoms: ["bloating"] },
+    { date: "2026-03-23", symptoms: ["bloating"] },
+  ];
+  const s = cycleStats(periods, logs, "2026-04-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  const pms = s.pms_patterns.find(p => p.code === "bloating");
+  assert.ok(pms);
+  assert.equal(pms.cycles_with_symptom, 3);
+  assert.equal(pms.confidence, "good");
+});
+
+// Переработка 10.3: диапазон статистики ограничен выбранным периодом.
+test("статистика: циклы вне выбранного периода не попадают в среднее", () => {
+  const periods = [
+    { start_date: "2025-08-01", end_date: "2025-08-05" },
+    { start_date: "2025-08-29", end_date: "2025-09-02" }, // цикл в прошлом годе, вне 3 мес.
+    { start_date: "2026-10-01", end_date: "2026-10-05" },
+    { start_date: "2026-10-29", end_date: "2026-11-02" }, // цикл внутри 3 мес.
+  ];
+  const logs = [];
+  const s = cycleStats(periods, logs, "2026-11-12", { avg_cycle_length: 28, avg_period_length: 5 }, { from: "2026-08-14" });
+  assert.equal(s.cycles.length, 1, "только цикл со стартом внутри периода");
+  assert.equal(s.cycles[0].start, "2026-10-01");
+  assert.equal(s.avg_cycle_length, 28);
+});
+
+// Переработка 7: длинные периоды не отбрасываются молча.
+test("статистика: длинные периоды видны отдельно от средних", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },  // 5 дн.
+    { start_date: "2026-01-29", end_date: "2026-02-02" },  // 5 дн.
+    { start_date: "2026-02-26", end_date: "2026-03-15" },  // 18 дн. — длинный
+  ];
+  const s = cycleStats(periods, [], "2026-04-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  assert.equal(s.long_periods.length, 1);
+  assert.equal(s.long_periods[0].length, 18);
+  assert.equal(s.period_lengths.count, 2, "среднее — только по обычным длительностям");
 });
 
 // ---- P1: точность прогноза ----
@@ -488,4 +651,97 @@ test("устойчивый подъём БТ уточняет овуляцию",
   const f = cycleForecast(periods, profile, "2026-09-14", meas);
   assert.equal(f.ovulation_source, "bbt");
   assert.equal(f.ovulation_date, "2026-09-10");
+});
+
+// ---- Самообучение прогноза и независимые оценки овуляции (2026-11-14) ----
+
+test("самообучение: два цикла с ЛГ+ подбирают личное смещение овуляции", () => {
+  // Циклы 28 дней, ЛГ+ на 16-й день каждого завершённого цикла →
+  // овуляция на 17-й день (offset 16). Текущий цикл: старт 26.03.
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+    { start_date: "2026-03-26", end_date: null },
+  ];
+  // LH+ в завершённых циклах: 16.01 (день 16), 13.02 (день 19? нет: 13.02 − 29.01 = день 16)… берём день 16 каждого.
+  const meas = [
+    { kind: "lh", result: "positive", date: "2026-01-16" },
+    { kind: "lh", result: "positive", date: "2026-02-13" },
+    { kind: "lh", result: "positive", date: "2026-03-13" },
+  ];
+  const f = cycleForecast(periods, profile, "2026-04-05", meas);
+  assert.equal(f.ovulation_offset_learned, 16);
+  assert.equal(f.ovulation_offset_observations, 3, "три завершённых цикла с наблюдениями");
+  // Без обучения было бы next − 14 = 11.04; со смещением 16 → 26.03 + 16.
+  assert.equal(f.ovulation_date, "2026-04-11");
+  assert.equal(f.ovulation_source, "calendar");
+  assert.equal(f.ovulation_estimated, true, "самообучение не делает овуляцию подтверждённой");
+});
+
+test("самообучение: одно наблюдение не меняет стандартные −14 дней", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: null },
+  ];
+  const meas = [{ kind: "lh", result: "positive", date: "2026-01-16" }];
+  const f = cycleForecast(periods, profile, "2026-03-10", meas);
+  assert.equal(f.ovulation_offset_learned, null);
+  assert.equal(f.ovulation_date, "2026-03-12"); // 26.02 + 28 − 14
+});
+
+test("самообучение: смещение вне санити-границ 9–17 отбрасывается", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+    { start_date: "2026-03-26", end_date: null },
+  ];
+  // LH+ на 6-й день → смещение 7 — вне границ, в обучение не попадает.
+  const meas = [
+    { kind: "lh", result: "positive", date: "2026-01-06" },
+    { kind: "lh", result: "positive", date: "2026-02-03" },
+  ];
+  const f = cycleForecast(periods, profile, "2026-04-05", meas);
+  assert.equal(f.ovulation_offset_learned, null);
+});
+
+test("расхождение ЛГ и БТ показывается по отдельности, берётся ЛГ", () => {
+  const periods = [
+    { start_date: "2026-08-04", end_date: "2026-08-08" },
+    { start_date: "2026-09-01", end_date: "2026-09-05" }, // календарная ов 15.09
+  ];
+  const meas = [
+    { kind: "lh", result: "positive", date: "2026-09-13" }, // → ов 14.09 (±1 от календаря)
+    ...["2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08"].map(d => ({ kind: "bbt", value: 36.5, unit: "C", date: d })),
+    { kind: "bbt", value: 36.9, unit: "C", date: "2026-09-10" },
+    { kind: "bbt", value: 36.9, unit: "C", date: "2026-09-11" },
+    { kind: "bbt", value: 36.9, unit: "C", date: "2026-09-12" },
+  ];
+  const f = cycleForecast(periods, profile, "2026-09-14", meas);
+  assert.equal(f.ovulation_source, "lh");
+  assert.equal(f.ovulation_date, "2026-09-14");
+  assert.ok(f.ovulation_conflict, "расхождение не замалчивается");
+  assert.equal(f.ovulation_conflict.lh, "2026-09-14");
+  assert.equal(f.ovulation_conflict.bbt, "2026-09-09");
+});
+
+test("болезнь в день замера исключает БТ-сдвиг (18B)", () => {
+  const periods = [
+    { start_date: "2026-08-04", end_date: "2026-08-08" },
+    { start_date: "2026-09-01", end_date: "2026-09-05" },
+  ];
+  const meas = [
+    ...["2026-09-05", "2026-09-06", "2026-09-07", "2026-09-08"].map(d => ({ kind: "bbt", value: 36.5, unit: "C", date: d })),
+    { kind: "bbt", value: 36.9, unit: "C", date: "2026-09-10" },
+    { kind: "bbt", value: 36.9, unit: "C", date: "2026-09-11" },
+    { kind: "bbt", value: 36.9, unit: "C", date: "2026-09-12" },
+  ];
+  const withoutSick = cycleForecast(periods, profile, "2026-09-14", meas);
+  assert.equal(withoutSick.ovulation_source, "bbt");
+  // Средний день подъёма «болен» — сдвиг не распознаётся, остаётся календарь.
+  const withSick = cycleForecast(periods, profile, "2026-09-14", meas, ["2026-09-11"]);
+  assert.equal(withSick.ovulation_source, "calendar");
+  assert.equal(withSick.ovulation_date, "2026-09-15");
 });

@@ -192,7 +192,16 @@ SCHEMA: list[str] = [
         "CREATE TABLE IF NOT EXISTS cycle_profiles (tg_id INTEGER PRIMARY KEY, "
         "avg_cycle_length INTEGER NOT NULL DEFAULT 28, avg_period_length INTEGER NOT NULL DEFAULT 5, "
         "cycle_length_known INTEGER NOT NULL DEFAULT 0, "
-        "share_enabled INTEGER NOT NULL DEFAULT 0, share_level TEXT NOT NULL DEFAULT 'phases', onboarded INTEGER NOT NULL DEFAULT 0, notify_enabled INTEGER NOT NULL DEFAULT 0, notify_period INTEGER NOT NULL DEFAULT 1, notify_ovulation INTEGER NOT NULL DEFAULT 1, notify_fertile INTEGER NOT NULL DEFAULT 1, notify_delay INTEGER NOT NULL DEFAULT 1, notify_period_days INTEGER NOT NULL DEFAULT 2, notify_delay_days INTEGER NOT NULL DEFAULT 3, notify_diary INTEGER NOT NULL DEFAULT 0, share_notify INTEGER NOT NULL DEFAULT 1, "
+        "share_enabled INTEGER NOT NULL DEFAULT 0, share_level TEXT NOT NULL DEFAULT 'phases', "
+        "share_sex INTEGER NOT NULL DEFAULT 0, share_mood INTEGER NOT NULL DEFAULT 0, "
+        "share_sleep INTEGER NOT NULL DEFAULT 0, share_bbt INTEGER NOT NULL DEFAULT 0, "
+        "share_confirmed INTEGER NOT NULL DEFAULT 0, context TEXT, "
+        "onboarded INTEGER NOT NULL DEFAULT 0, notify_enabled INTEGER NOT NULL DEFAULT 0, "
+        "notify_period INTEGER NOT NULL DEFAULT 1, notify_ovulation INTEGER NOT NULL DEFAULT 1, "
+        "notify_fertile INTEGER NOT NULL DEFAULT 1, notify_delay INTEGER NOT NULL DEFAULT 1, "
+        "notify_period_days INTEGER NOT NULL DEFAULT 2, "
+        "notify_delay_days INTEGER NOT NULL DEFAULT 3, "
+        "notify_diary INTEGER NOT NULL DEFAULT 0, share_notify INTEGER NOT NULL DEFAULT 1, "
         "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     ),
     (
@@ -209,6 +218,7 @@ SCHEMA: list[str] = [
         "leakage TEXT, pain_score INTEGER, pain_locations TEXT, life_impact TEXT, "
         "mucus TEXT, sleep_hours REAL, sleep_quality TEXT, stress TEXT, "
         "sick INTEGER NOT NULL DEFAULT 0, travel INTEGER NOT NULL DEFAULT 0, weight_kg REAL, "
+        "bleeding_details TEXT, "
         "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(tg_id,date))"
     ),
     "CREATE INDEX IF NOT EXISTS idx_cycle_logs_tg_date ON cycle_logs(tg_id, date)",

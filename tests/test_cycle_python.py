@@ -125,40 +125,65 @@ async def test_end_unknown_lifecycle_in_db(db):
 
 
 async def test_partner_view_respects_share_level(db):
-    # Паритет с cycleViewForPartner: уровни phases/periods/symptoms/full.
+    # Паритет с cycleViewForPartner: категории + подтверждение состава.
+    # Симптомы, заметки и флоу не отдаются ни на какой конфигурации.
     await db.execute("INSERT INTO users(tg_id, display_name, gender, created_at, updated_at) VALUES(1,'А', 'female',1,1)")
     await db.execute(
-        "INSERT INTO cycle_profiles(tg_id, share_enabled, share_level, onboarded, created_at, updated_at) VALUES(1,1,'periods',1,1,1)"
+        "INSERT INTO cycle_profiles(tg_id, share_enabled, share_level, share_sex, share_mood, share_sleep, share_bbt, share_confirmed, onboarded, created_at, updated_at) "
+        "VALUES(1,1,'phases',1,1,1,1,1,1,1,1)"
     )
     await bulk_mark_periods(db, 1, [(date(2026, 1, 1), date(2026, 1, 5), False)], 1000)
-    text = await partner_view_text(db, 1, date(2026, 3, 10))
-    assert "Фаза:" in text
-    assert "2026-01-01" in text, "уровень periods показывает даты месячных"
-    assert "Сегодня:" not in text, "запись дня — только с уровня symptoms"
-
-    await db.execute("UPDATE cycle_profiles SET share_level='symptoms' WHERE tg_id=1")
     await db.execute(
-        "INSERT INTO cycle_logs(tg_id,date,flow,symptoms,symptoms_clear,note,created_at,updated_at) "
-        "VALUES(1,'2026-03-10','light','[\"cramps\"]',0,'секрет',1,1)"
+        "INSERT INTO cycle_logs(tg_id,date,flow,symptoms,symptoms_clear,note,sex,mood,sleep_quality,created_at,updated_at) "
+        "VALUES(1,'2026-03-10','light','[\"cramps\"]',0,'секрет','protected','calm','good',1,1)"
     )
     text = await partner_view_text(db, 1, date(2026, 3, 10))
-    assert "Сегодня:" in text and "судороги" in text
-    assert "секрет" not in text, "заметка — только уровень full"
+    assert "Фаза:" in text
+    assert "2026-01-01" in text, "календарь показывает даты месячных"
+    assert "Секс: с защитой" in text
+    assert "Настроение: спокойствие" in text
+    assert "Сон: хорошо" in text
+    # Симптомы, флоу, заметки — никогда.
+    assert "судороги" not in text
+    assert "секрет" not in text
 
-    await db.execute("UPDATE cycle_profiles SET share_level='phases' WHERE tg_id=1")
+    # Без подтверждения состава — только календарная оценка.
+    await db.execute("UPDATE cycle_profiles SET share_confirmed=0 WHERE tg_id=1")
     text = await partner_view_text(db, 1, date(2026, 3, 10))
-    assert "Месячные:" not in text and "Сегодня:" not in text
+    assert "Фаза:" in text
+    assert "Месячные:" not in text
+    assert "Секс:" not in text
+    assert "Настроение:" not in text
+    assert "Сон:" not in text
+
+    # Категории выключены — дневниковых строк нет, календарь остаётся.
+    await db.execute("UPDATE cycle_profiles SET share_confirmed=1, share_sex=0, share_mood=0, share_sleep=0, share_bbt=0 WHERE tg_id=1")
+    text = await partner_view_text(db, 1, date(2026, 3, 10))
+    assert "Секс:" not in text and "Настроение:" not in text
+    assert "Месячные:" in text
 
 
 def test_reminders_respect_prefs():
     f = cycle_forecast(PERIODS, date(2026, 3, 10))
     assert cycle_reminder_kinds(f, {"fertile": False}) == []
     assert cycle_reminder_kinds({**f, "ovulation_in": 0, "phase": "luteal"}, {}) == [
-        ("cycle_ovulation", "Сегодня вероятный день овуляции")
+        ("cycle_ovulation", "Сегодня вероятный день овуляции — календарная оценка, не подтверждение")
     ]
     assert cycle_reminder_kinds({**f, "next_period_in": 3, "phase": "luteal"}, {"period_days": 3}) == [
         ("cycle_period", "Через 3 дн. ожидаются месячные")
     ]
+
+
+def test_reminders_quality_gating():
+    """Гейтинг 4.2: овуляция/окно не анонсируются при недостаточных данных."""
+    base = {"empty": False, "phase": "luteal", "next_period_in": 5, "ovulation_in": 0, "delay_days": 0}
+    assert cycle_reminder_kinds(base, {}) == [], "нет quality/based_on — как insufficient"
+    insufficient = {**base, "quality": "insufficient", "based_on": "default"}
+    assert cycle_reminder_kinds(insufficient, {}) == []
+    few = {**base, "quality": "few", "based_on": "history"}
+    assert [kind for kind, _ in cycle_reminder_kinds(few, {})] == ["cycle_ovulation"]
+    stale = {**few, "data_stale": True}
+    assert cycle_reminder_kinds(stale, {}) == []
 
 
 if __name__ == "__main__":
@@ -226,3 +251,100 @@ def test_forecast_lh_and_bbt_observations():
     fb = cycle_forecast(periods, date(2026, 9, 14), 28, 5, 0, bbt)
     assert fb["ovulation_source"] == "bbt"
     assert fb["ovulation_date"] == date(2026, 9, 10)
+
+
+# ---- Самообучение прогноза (паритет с cycleLearnedOvulationOffset) ----
+
+def test_learned_ovulation_offset_applies_from_two_cycles():
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 5), False),
+        (date(2026, 1, 29), date(2026, 2, 2), False),
+        (date(2026, 2, 26), date(2026, 3, 2), False),
+        (date(2026, 3, 26), None, False),
+    ]
+    meas = [
+        {"kind": "lh", "result": "positive", "date": "2026-01-16"},
+        {"kind": "lh", "result": "positive", "date": "2026-02-13"},
+        {"kind": "lh", "result": "positive", "date": "2026-03-13"},
+    ]
+    f = cycle_forecast(periods, date(2026, 4, 5), measurements=meas)
+    assert f["ovulation_offset_learned"] == 16
+    assert f["ovulation_offset_observations"] == 3
+    # 26.03 + 16 = 11.04 (без обучения было бы 11.04 тоже при 28-дневном цикле
+    # и −14: 26.03 + 28 − 14 = 11.04 — проверяем реальное отличие на неравных
+    # циклах ниже), источник остаётся календарным и оценочным.
+    assert f["ovulation_source"] == "calendar"
+    assert f["ovulation_estimated"] is True
+
+
+def test_learned_offset_shifts_uneven_cycles():
+    # Циклы 30 дней, ЛГ+ на 12-й день → овуляция на 13-й (offset 12).
+    # Стандартная оценка дала бы старт+30−14 = день 16; обученная — день 12.
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 5), False),
+        (date(2026, 1, 31), date(2026, 2, 4), False),
+        (date(2026, 3, 2), date(2026, 3, 6), False),
+        (date(2026, 4, 1), None, False),
+    ]
+    meas = [
+        {"kind": "lh", "result": "positive", "date": "2026-01-12"},
+        {"kind": "lh", "result": "positive", "date": "2026-02-11"},
+    ]
+    f = cycle_forecast(periods, date(2026, 4, 15), measurements=meas)
+    assert f["ovulation_offset_learned"] == 12
+    assert f["ovulation_date"] == date(2026, 4, 13), "старт 01.04 + обученное смещение 12"
+
+
+def test_single_observation_keeps_default_offset():
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 5), False),
+        (date(2026, 1, 29), date(2026, 2, 2), False),
+        (date(2026, 2, 26), None, False),
+    ]
+    meas = [{"kind": "lh", "result": "positive", "date": "2026-01-16"}]
+    f = cycle_forecast(periods, date(2026, 3, 10), measurements=meas)
+    assert f["ovulation_offset_learned"] is None
+    assert f["ovulation_date"] == date(2026, 3, 12)
+
+
+def test_bbt_conflict_reported_separately():
+    periods = [
+        (date(2026, 8, 4), date(2026, 8, 8), False),
+        (date(2026, 9, 1), date(2026, 9, 5), False),
+    ]
+    meas = [
+        {"kind": "lh", "result": "positive", "date": "2026-09-13"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-05"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-06"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-07"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-08"},
+        {"kind": "bbt", "value": 36.9, "unit": "C", "date": "2026-09-10"},
+        {"kind": "bbt", "value": 36.9, "unit": "C", "date": "2026-09-11"},
+        {"kind": "bbt", "value": 36.9, "unit": "C", "date": "2026-09-12"},
+    ]
+    f = cycle_forecast(periods, date(2026, 9, 14), measurements=meas)
+    assert f["ovulation_source"] == "lh"
+    assert f["ovulation_date"] == date(2026, 9, 14)
+    assert f["ovulation_conflict"]["lh"] == "2026-09-14"
+    assert f["ovulation_conflict"]["bbt"] == "2026-09-09"
+
+
+def test_sick_day_blocks_bbt_shift():
+    periods = [
+        (date(2026, 8, 4), date(2026, 8, 8), False),
+        (date(2026, 9, 1), date(2026, 9, 5), False),
+    ]
+    meas = [
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-05"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-06"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-07"},
+        {"kind": "bbt", "value": 36.5, "unit": "C", "date": "2026-09-08"},
+        {"kind": "bbt", "value": 36.9, "unit": "C", "date": "2026-09-10"},
+        {"kind": "bbt", "value": 36.9, "unit": "C", "date": "2026-09-11"},
+        {"kind": "bbt", "value": 36.9, "unit": "C", "date": "2026-09-12"},
+    ]
+    ok_f = cycle_forecast(periods, date(2026, 9, 14), measurements=meas)
+    assert ok_f["ovulation_source"] == "bbt"
+    sick_f = cycle_forecast(periods, date(2026, 9, 14), measurements=meas, sick_dates=["2026-09-11"])
+    assert sick_f["ovulation_source"] == "calendar"
+    assert sick_f["ovulation_date"] == date(2026, 9, 15)

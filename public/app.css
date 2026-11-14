@@ -2415,6 +2415,125 @@ input[type="checkbox"]:active {
 .cal-dot.is-ovulation { background: var(--flo-ovulation, var(--flo-fertile, #2e9c8d)); }
 /* Запись дня (флоу/настроение/симптомы) — нейтральная точка. */
 .cal-dot.is-log { background: var(--muted); }
+/* Явная отметка «без секса» (9.4): полое кольцо того же цвета, что сердечки,
+   читается как «место есть, событие не отмечено», не как запись дневника. */
+.cal-dot.is-no-sex {
+  background: transparent;
+  border: 1.5px solid var(--flo-period);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+/* Точка задержки в легенде: приглушённый цвет месячных — день красится
+   прозрачностью ячейки (.cal-day.is-delay), точка показывает то же. */
+.cal-dot.is-delay {
+  background: color-mix(in srgb, var(--flo-period) 40%, var(--muted));
+}
+/* Подписи оси дат в графиках статистики (переработка 13). */
+.flo-axis {
+  font-size: 9px;
+  fill: var(--muted);
+}
+/* Дни без измерений на графике БТ: приглушённые чёрточки на базовой линии. */
+.flo-gap-tick { fill: color-mix(in srgb, var(--muted) 45%, transparent); }
+/* Настройка категорий общего доступа (переработка P0). */
+.flo-share-cat {
+  margin: 0 0 4px;
+  padding: 8px 0;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.flo-share-cat:first-of-type { border-top: none; }
+.flo-share-cat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+/* Подтверждение состава передаваемых данных — выделенный блок согласия. */
+.flo-consent {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1.5px solid var(--flo-period);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--flo-period) 6%, var(--surface));
+}
+
+/* --- Контакты: телефонная книга («Дневник → Контакты») --- */
+/* Одна карточка на контакт: номера группируются под именем, кнопок правки
+   в списке нет — тап по имени открывает окно контакта, тап по номеру
+   копирует его. */
+.contact-card { padding-bottom: 12px; }
+.contact-name {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0 0 6px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--ink);
+  cursor: pointer;
+}
+.contact-surname { font-weight: 450; color: var(--muted); font-size: 14px; }
+.contact-phones {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 4px;
+  padding-left: 14px;
+}
+.contact-phone {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 15px;
+  color: var(--ink);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.contact-comment {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.contact-phone-prefix {
+  flex: none;
+  align-self: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding-left: 2px;
+}
+.contact-phone-row input { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; }
+.contact-name-warning {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--flo-period);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--flo-period) 8%, var(--surface));
+  font-size: 14px;
+}
+.contact-info-name {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 700;
+}
+.contact-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.contact-info-row .contact-phone { flex: 1; }
+.contacts-search { margin: 10px 0 4px; }
 
 /* Секс в календаре Фло — красные сердечки по числу отметок вместо точки. */
 .cal-heart {

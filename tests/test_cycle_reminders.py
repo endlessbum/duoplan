@@ -35,6 +35,20 @@ async def _setup(pair, *, notify_enabled=1, share_enabled=1, share_notify=1):
         "INSERT INTO cycle_periods(tg_id, start_date, end_date, created_at, updated_at) VALUES(?,?,?,?,?)",
         (owner, "2026-10-29", "2026-11-02", ts, ts),
     )
+    # История из четырёх пригодных интервалов по 28 дней: качество «full»,
+    # based_on «history» — уведомления об овуляции проходят гейтинг (4.2).
+    # Последний старт 2026-10-29 → овуляция 2026-11-12 (сегодня в NOW).
+    # «Конец не помним» (end_unknown=1) — не открытые периоды.
+    for start, end in (
+        ("2026-10-01", "2026-10-05"),
+        ("2026-09-03", "2026-09-07"),
+        ("2026-08-06", "2026-08-10"),
+        ("2026-07-09", "2026-07-13"),
+    ):
+        await db.execute(
+            "INSERT INTO cycle_periods(tg_id, start_date, end_date, end_unknown, created_at, updated_at) VALUES(?,?,?,1,?,?)",
+            (owner, start, end, ts, ts),
+        )
     return db, owner, partner
 
 
@@ -69,6 +83,22 @@ async def test_no_phase_change_no_partner_notice(pair):
 
     partner_msgs = [t for tid, t in rec.sent if tid == partner]
     assert partner_msgs == []
+
+
+async def test_insufficient_history_no_ovulation_notices(pair):
+    """Гейтинг 4.2: без пригодной истории уверенных уведомлений об овуляции нет.
+
+    Один период → usable=0 → based_on=profile → quality=insufficient:
+    ни владелице, ни партнёру овуляция не анонсируется.
+    """
+    db, owner, _partner = await _setup(pair, notify_enabled=0, share_enabled=1)
+    await db.execute("UPDATE cycle_profiles SET notify_enabled=1 WHERE tg_id=?", (owner,))
+    await db.execute("DELETE FROM cycle_periods WHERE tg_id=? AND start_date<>'2026-10-29'", (owner,))
+    rec = _Recorder()
+    await send_cycle_reminders(db, rec.send, lambda _tg: "Europe/Moscow", now=NOW)
+
+    all_msgs = [t for _, t in rec.sent]
+    assert not any("овуляци" in t for t in all_msgs), "при недостаточных данных овуляция не анонсируется"
 
 
 async def test_notify_disabled_no_owner_reminder(pair):

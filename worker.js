@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.13.24";
+const APP_VERSION = "2026.11.14.27";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.13.24";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.13.24";
+const DB_SCHEMA_VERSION = "2026.11.14.27";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -2244,6 +2244,153 @@ async function api(request, env, url, ctx = null) {
     await joinPair(env, user, body.code, url, ctx);
     return json(await state(env, user.tg_id));
   }
+  // Контакты: телефонная книга пары. Списки обоих партнёров читаются,
+  // редактировать можно только свой (owner_id = сессия). Одинаковые имена:
+  // оба контакта без комментария запрещены (409 NAME_TAKEN), иначе —
+  // предупреждение решает клиент, сервер пропускает.
+  if (url.pathname.startsWith("/api/contacts")) {
+    const stamp = now();
+    const pair = await membership(env, user.tg_id);
+    if (!pair || !pair.user_b) throw new HttpError(400, "Контакты живут в пространстве пары — сначала добавьте партнёра", "NO_PAIR");
+    if (request.method === "GET" && url.pathname === "/api/contacts") {
+      return json(await contactsState(env, user.tg_id));
+    }
+    if (request.method === "POST" && url.pathname === "/api/contacts") {
+      const name = String(body.name || "").trim().slice(0, 120);
+      if (!name) throw new HttpError(400, "Укажите имя", "INVALID_NAME");
+      const surname = body.surname ? String(body.surname).trim().slice(0, 120) : null;
+      const comment = body.comment ? String(body.comment).trim().slice(0, 500) : null;
+      const rawPhones = Array.isArray(body.phones) ? body.phones.map(String) : [];
+      if (!rawPhones.length || rawPhones.length > CONTACT_MAX_PHONES) {
+        throw new HttpError(400, `Номеров — от 1 до ${CONTACT_MAX_PHONES}`, "INVALID_PHONES");
+      }
+      const phones = [];
+      for (const raw of rawPhones) {
+        const norm = contactNormalizePhone(raw);
+        if (!norm) throw new HttpError(400, "Введите полный номер — 10 цифр после +7", "INVALID_PHONE");
+        if (!phones.includes(norm)) phones.push(norm);
+      }
+      if (!phones.length) throw new HttpError(400, "Введите хотя бы один номер", "INVALID_PHONES");
+      const id = body.id ? Number(body.id) : null;
+      // Конфликт имён — только внутри своего списка, точное совпадение без учёта регистра.
+      const existing = (await env.DB.prepare("SELECT id, name, comment FROM contacts WHERE pair_id=? AND owner_id=?")
+        .bind(pair.id, user.tg_id).all()).results || [];
+      const conflict = existing.find(c => c.id !== id && String(c.name || "").trim().toLowerCase() === name.toLowerCase());
+      if (conflict && !comment && !conflict.comment) {
+        throw new HttpError(409, "Имя занято. Укажите наводящую информацию в комментарии или измените имя", "NAME_TAKEN");
+      }
+      if (id) {
+        const changed = await env.DB.prepare("UPDATE contacts SET name=?, surname=?, comment=?, updated_at=? WHERE id=? AND pair_id=? AND owner_id=?")
+          .bind(name, surname, comment, stamp, id, pair.id, user.tg_id).run();
+        if (!changed.meta.changes) throw new HttpError(404, "Контакт не найден", "NOT_FOUND");
+        // Номера заменяются целиком: до 3 строк, порядок как в форме.
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM contact_phones WHERE contact_id=?").bind(id),
+          ...phones.map((phone, sort) => env.DB.prepare("INSERT INTO contact_phones(contact_id, phone, sort, created_at) VALUES(?,?,?,?)")
+            .bind(id, phone, sort, stamp))
+        ]);
+      } else {
+        const insert = await env.DB.prepare("INSERT INTO contacts(pair_id, owner_id, name, surname, comment, created_at, updated_at) VALUES(?,?,?,?,?,?,?)")
+          .bind(pair.id, user.tg_id, name, surname, comment, stamp, stamp).run();
+        const newId = insert.meta?.last_row_id;
+        await env.DB.batch(phones.map((phone, sort) => env.DB.prepare("INSERT INTO contact_phones(contact_id, phone, sort, created_at) VALUES(?,?,?,?)")
+          .bind(newId, phone, sort, stamp)));
+      }
+      return json(await contactsState(env, user.tg_id));
+    }
+    if (request.method === "POST" && url.pathname === "/api/contacts/delete") {
+      const id = Number(body.id);
+      if (!Number.isInteger(id)) throw new HttpError(400, "Проверьте контакт", "INVALID_ID");
+      const changed = await env.DB.prepare("DELETE FROM contacts WHERE id=? AND pair_id=? AND owner_id=?")
+        .bind(id, pair.id, user.tg_id).run();
+      if (!changed.meta.changes) throw new HttpError(404, "Контакт не найден", "NOT_FOUND");
+      await env.DB.prepare("DELETE FROM contact_phones WHERE contact_id=?").bind(id).run();
+      return json(await contactsState(env, user.tg_id));
+    }
+    throw new HttpError(404, "Такого раздела контактов нет", "NOT_FOUND");
+  }
+  // Здоровье: личный журнал препаратов каждого партнёра (tg_id из сессии).
+  // Данные строго персональные — партнёр чужой список не видит и не редактирует;
+  // напоминает бот по настройке приёма (remind_enabled/remind_time).
+  if (url.pathname.startsWith("/api/health/")) {
+    const stamp = now();
+    if (request.method === "GET" && url.pathname === "/api/health/meds") {
+      const [medsRes, logsRes] = await Promise.all([
+        env.DB.prepare("SELECT id,name,dosage,form,schedule,remind_enabled,remind_time,start_date,end_date,status,note FROM health_meds WHERE tg_id=? ORDER BY status='completed', status='paused', start_date DESC, id DESC").bind(user.tg_id).all(),
+        env.DB.prepare("SELECT med_id,date,time,status,note FROM health_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 600").bind(user.tg_id).all()
+      ]);
+      return json({
+        meds: (medsRes.results || []).map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 })),
+        med_logs: logsRes.results || []
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/api/health/med") {
+      const name = String(body.name || "").trim().slice(0, 120);
+      if (!name) throw new HttpError(400, "Укажите название", "INVALID_NAME");
+      const form = body.form ? String(body.form) : null;
+      if (form && !HEALTH_MED_FORMS.includes(form)) throw new HttpError(400, "Неизвестная форма", "INVALID_FORM");
+      const status = body.status ? String(body.status) : "active";
+      if (!HEALTH_MED_STATUS.includes(status)) throw new HttpError(400, "Неизвестный статус", "INVALID_STATUS");
+      const start = body.start_date ? String(body.start_date) : "";
+      if (!cycleValidDate(start)) throw new HttpError(400, "Проверьте дату начала", "INVALID_DATE");
+      const end = body.end_date ? String(body.end_date) : null;
+      if (end && (!cycleValidDate(end) || end < start)) throw new HttpError(400, "Проверьте дату окончания", "INVALID_DATE");
+      // Напоминание: строго HH:MM и только при включённом флаге — иначе
+      // «включено без времени» молча не срабатывало бы в кроне.
+      const remindEnabled = body.remind_enabled === true;
+      let remindTime = body.remind_time ? String(body.remind_time) : null;
+      if (remindTime && !HEALTH_TIME_RE.test(remindTime)) throw new HttpError(400, "Время напоминания — ЧЧ:ММ", "INVALID_TIME");
+      if (remindEnabled && !remindTime) throw new HttpError(400, "Укажите время напоминания", "INVALID_TIME");
+      if (!remindEnabled) remindTime = null;
+      const str = (v, max) => v ? String(v).slice(0, max) : null;
+      const id = body.id ? Number(body.id) : null;
+      if (id) {
+        const changed = await env.DB.prepare("UPDATE health_meds SET name=?,dosage=?,form=?,schedule=?,remind_enabled=?,remind_time=?,start_date=?,end_date=?,status=?,note=?,updated_at=? WHERE id=? AND tg_id=?")
+          .bind(name, str(body.dosage, 120), form, str(body.schedule, 200), remindEnabled ? 1 : 0, remindTime, start, end, status, str(body.note, 1000), stamp, id, user.tg_id).run();
+        if (!changed.meta.changes) throw new HttpError(404, "Препарат не найден", "NOT_FOUND");
+      } else {
+        await env.DB.prepare("INSERT INTO health_meds(tg_id,name,dosage,form,schedule,remind_enabled,remind_time,start_date,end_date,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .bind(user.tg_id, name, str(body.dosage, 120), form, str(body.schedule, 200), remindEnabled ? 1 : 0, remindTime, start, end, status, str(body.note, 1000), stamp, stamp).run();
+      }
+      return json(await healthState(env, user.tg_id));
+    }
+    if (request.method === "POST" && url.pathname === "/api/health/med/delete") {
+      const id = Number(body.id);
+      if (!Number.isInteger(id)) throw new HttpError(400, "Проверьте препарат", "INVALID_ID");
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM health_med_logs WHERE med_id=? AND tg_id=?").bind(id, user.tg_id),
+        env.DB.prepare("DELETE FROM health_meds WHERE id=? AND tg_id=?").bind(id, user.tg_id)
+      ]);
+      return json(await healthState(env, user.tg_id));
+    }
+    // Факт приёма: один итог за день (UNIQUE(med_id, date)), как во Фло —
+    // приложение не ведёт контроль отдельных доз.
+    if (request.method === "POST" && url.pathname === "/api/health/med-log") {
+      const medId = Number(body.med_id);
+      const date = typeof body.date === "string" ? body.date : "";
+      const status = String(body.status || "");
+      if (!Number.isInteger(medId) || !cycleValidDate(date) || date > cycleToday(timezone)) {
+        throw new HttpError(400, "Проверьте препарат и дату", "INVALID_DATE");
+      }
+      if (!["taken", "skipped"].includes(status)) throw new HttpError(400, "Неизвестный статус приёма", "INVALID_STATUS");
+      const med = await env.DB.prepare("SELECT id FROM health_meds WHERE id=? AND tg_id=?").bind(medId, user.tg_id).first();
+      if (!med) throw new HttpError(404, "Препарат не найден", "NOT_FOUND");
+      const time = body.time ? String(body.time).slice(0, 5) : null;
+      const note = body.note ? String(body.note).slice(0, 500) : null;
+      await env.DB.prepare(`INSERT INTO health_med_logs(med_id,tg_id,date,time,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(med_id,date) DO UPDATE SET time=excluded.time, status=excluded.status, note=excluded.note, updated_at=excluded.updated_at`)
+        .bind(medId, user.tg_id, date, time, status, note, stamp, stamp).run();
+      return json(await healthState(env, user.tg_id));
+    }
+    if (request.method === "POST" && url.pathname === "/api/health/med-log/delete") {
+      const medId = Number(body.med_id);
+      const date = typeof body.date === "string" ? body.date : "";
+      if (!Number.isInteger(medId) || !cycleValidDate(date)) throw new HttpError(400, "Проверьте препарат и дату", "INVALID_DATE");
+      await env.DB.prepare("DELETE FROM health_med_logs WHERE med_id=? AND tg_id=? AND date=?").bind(medId, user.tg_id, date).run();
+      return json(await healthState(env, user.tg_id));
+    }
+    throw new HttpError(404, "Такого раздела здоровья нет", "NOT_FOUND");
+  }
   // Пол запрашивается гейтом до онбординга, поэтому маршрут обязан работать
   // без пары — как pair/create и pair/join: иначе новый пользователь не сможет
   // его сохранить и не попадёт к созданию пространства.
@@ -2290,9 +2437,14 @@ async function api(request, env, url, ctx = null) {
       const end = body.end ? String(body.end) : null;
       // Фактические месячные нельзя отмечать в будущем: клиентская блокировка
       // (disabled-кнопка) не защита — прямой API-запрос должен отклоняться тоже.
+      // Единый предел длительности с импортом (CYCLE_PERIOD_MAX_DAYS):
+      // дольше — отклоняем с пояснением, а не молча усекаем (переработка 7).
       if (!cycleValidDate(start) || start > today
         || (end && (!cycleValidDate(end) || end < start || end > today))) {
         throw new HttpError(400, "Проверьте даты месячных", "INVALID_DATE");
+      }
+      if (end && cycleDayNum(end) - cycleDayNum(start) + 1 > CYCLE_PERIOD_MAX_DAYS) {
+        throw new HttpError(400, `Менструация дольше ${CYCLE_PERIOD_MAX_DAYS} дней — проверьте даты; длительное кровотечение лучше обсудить с врачом`, "INVALID_PERIOD");
       }
       // Один открытый период и никаких пересечений: противоречивая фактическая
       // история ломает прогноз, статистику и календарь. Тот же старт — это
@@ -2366,6 +2518,12 @@ async function api(request, env, url, ctx = null) {
       if (symptoms.some(code => !CYCLE_SYMPTOM_CODES.includes(code))) throw new HttpError(400, "Неизвестный симптом", "INVALID_SYMPTOM");
       // Явная отметка «сегодня симптомов не было» — не то же самое, что пропуск.
       const symptomsClear = body.symptoms_clear === true ? 1 : 0;
+      // Противоречивая запись: «симптомов не было» и конкретные симптомы
+      // одновременно не сохраняются (переработка 9.2). Клиент снимает один из
+      // флагов заранее, прямой запрос должен отклоняться тоже.
+      if (symptomsClear && symptoms.length) {
+        throw new HttpError(400, "Отметьте либо «симптомов не было», либо конкретные симптомы", "INVALID_SYMPTOMS_CONFLICT");
+      }
       const note = body.note ? String(body.note).slice(0, 2000) : null;
       const sex = body.sex ? String(body.sex) : null;
       if (sex && !CYCLE_SEX.includes(sex)) throw new HttpError(400, "Неизвестное значение", "INVALID_SEX");
@@ -2435,9 +2593,28 @@ async function api(request, env, url, ctx = null) {
           throw new HttpError(400, "Проверьте вес", "INVALID_WEIGHT");
         }
       }
-      await env.DB.prepare(`INSERT INTO cycle_logs(tg_id,date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(tg_id,date) DO UPDATE SET flow=excluded.flow, clots=excluded.clots, energy=excluded.energy, mood=excluded.mood, symptoms=excluded.symptoms, symptoms_clear=excluded.symptoms_clear, note=excluded.note, sex=excluded.sex, sex_count=excluded.sex_count, leakage=excluded.leakage, pain_score=excluded.pain_score, pain_locations=excluded.pain_locations, life_impact=excluded.life_impact, mucus=excluded.mucus, sleep_hours=excluded.sleep_hours, sleep_quality=excluded.sleep_quality, stress=excluded.stress, sick=excluded.sick, travel=excluded.travel, weight_kg=excluded.weight_kg, updated_at=excluded.updated_at`)
-        .bind(user.tg_id, date, flow, clots, energy, mood, JSON.stringify(symptoms), symptomsClear, note, sex, sexCount, leakage, painScore, JSON.stringify(painLocations), lifeImpact, mucus ? JSON.stringify(mucus) : null, sleepHours, sleepQuality, stress, sick, travel, weightKg, stamp, stamp).run();
+      // Дополнительные сведения о кровотечении (переработка 7): частота
+      // смены средства гигиены, пропитывание, ночная смена. Все поля
+      // необязательные, NULL = не отмечено.
+      let bleedingDetails = null;
+      if (body.bleeding_details && typeof body.bleeding_details === "object" && !Array.isArray(body.bleeding_details)) {
+        const b = body.bleeding_details;
+        bleedingDetails = {};
+        if (b.changes_per_day !== undefined && b.changes_per_day !== null && b.changes_per_day !== "") {
+          const n = Number(b.changes_per_day);
+          if (!Number.isInteger(n) || n < 0 || n > 24) throw new HttpError(400, "Смен средства гигиены — от 0 до 24", "INVALID_BLEEDING");
+          bleedingDetails.changes_per_day = n;
+        }
+        if (b.saturation) {
+          if (!CYCLE_BLEEDING_SATURATION.includes(String(b.saturation))) throw new HttpError(400, "Неизвестная степень пропитывания", "INVALID_BLEEDING");
+          bleedingDetails.saturation = String(b.saturation);
+        }
+        if (b.night_change === true) bleedingDetails.night_change = true;
+        if (!Object.keys(bleedingDetails).length) bleedingDetails = null;
+      }
+      await env.DB.prepare(`INSERT INTO cycle_logs(tg_id,date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,bleeding_details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(tg_id,date) DO UPDATE SET flow=excluded.flow, clots=excluded.clots, energy=excluded.energy, mood=excluded.mood, symptoms=excluded.symptoms, symptoms_clear=excluded.symptoms_clear, note=excluded.note, sex=excluded.sex, sex_count=excluded.sex_count, leakage=excluded.leakage, pain_score=excluded.pain_score, pain_locations=excluded.pain_locations, life_impact=excluded.life_impact, mucus=excluded.mucus, sleep_hours=excluded.sleep_hours, sleep_quality=excluded.sleep_quality, stress=excluded.stress, sick=excluded.sick, travel=excluded.travel, weight_kg=excluded.weight_kg, bleeding_details=excluded.bleeding_details, updated_at=excluded.updated_at`)
+        .bind(user.tg_id, date, flow, clots, energy, mood, JSON.stringify(symptoms), symptomsClear, note, sex, sexCount, leakage, painScore, JSON.stringify(painLocations), lifeImpact, mucus ? JSON.stringify(mucus) : null, sleepHours, sleepQuality, stress, sick, travel, weightKg, bleedingDetails ? JSON.stringify(bleedingDetails) : null, stamp, stamp).run();
       return json(await cycleState(env, user.tg_id, timezone));
     }
     // Измерения цикла (этап 6/P2): базальная температура и тесты на ЛГ.
@@ -2547,8 +2724,8 @@ async function api(request, env, url, ctx = null) {
       await rateLimit(env, `cycle-export:${user.tg_id}`, 5, 3600);
       const [periodsRes, logsRes, profileRow, medsRes, medLogsRes, measRes] = await Promise.all([
         env.DB.prepare("SELECT start_date,end_date,end_unknown FROM cycle_periods WHERE tg_id=? ORDER BY start_date ASC, id ASC").bind(user.tg_id).all(),
-        env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all(),
-        env.DB.prepare("SELECT avg_cycle_length,avg_period_length,cycle_length_known,share_enabled,share_level FROM cycle_profiles WHERE tg_id=?").bind(user.tg_id).first(),
+        env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,bleeding_details FROM cycle_logs WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all(),
+        env.DB.prepare("SELECT avg_cycle_length,avg_period_length,cycle_length_known,share_enabled,share_level,share_sex,share_mood,share_sleep,share_bbt,share_confirmed,context FROM cycle_profiles WHERE tg_id=?").bind(user.tg_id).first(),
         env.DB.prepare("SELECT id,name,category,dosage,form,schedule,start_date,end_date,status,note FROM cycle_meds WHERE tg_id=? ORDER BY start_date ASC, id ASC").bind(user.tg_id).all(),
         env.DB.prepare("SELECT med_id,date,time,status,dose_taken,note FROM cycle_med_logs WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all(),
         env.DB.prepare("SELECT id,date,time,kind,value,unit,result,note FROM cycle_measurements WHERE tg_id=? ORDER BY date ASC, id ASC").bind(user.tg_id).all()
@@ -2557,12 +2734,18 @@ async function api(request, env, url, ctx = null) {
       const profile = profileRow || { avg_cycle_length: 28, avg_period_length: 5 };
       const payload = cycleExportPayload({
         profile,
-        share: { enabled: Number(profileRow?.share_enabled) === 1, level: profileRow?.share_level || "phases" },
+        share: {
+          enabled: Number(profileRow?.share_enabled) === 1,
+          level: profileRow?.share_level || "phases",
+          categories: cycleShareCategories({ sex: profileRow?.share_sex, mood: profileRow?.share_mood, sleep: profileRow?.share_sleep, bbt: profileRow?.share_bbt }),
+          confirmed: Number(profileRow?.share_confirmed) === 1
+        },
         periods: periodsRes.results || [],
         logs,
         meds: medsRes.results || [],
         med_logs: medLogsRes.results || [],
-        measurements: measRes.results || []
+        measurements: measRes.results || [],
+        context: profileRow
       }, new Date(stamp * 1000).toISOString());
       const form = new FormData();
       form.append("chat_id", String(user.tg_id));
@@ -2586,7 +2769,7 @@ async function api(request, env, url, ctx = null) {
         env.DB.prepare("DELETE FROM cycle_med_logs WHERE tg_id=?").bind(user.tg_id),
         env.DB.prepare("DELETE FROM cycle_meds WHERE tg_id=?").bind(user.tg_id),
         env.DB.prepare("DELETE FROM cycle_measurements WHERE tg_id=?").bind(user.tg_id),
-        env.DB.prepare("UPDATE cycle_profiles SET avg_cycle_length=28, avg_period_length=5, cycle_length_known=0, share_enabled=0, share_level='phases', notify_enabled=0, notify_period=1, notify_ovulation=1, notify_fertile=1, notify_delay=1, notify_period_days=2, notify_delay_days=3, notify_diary=0, share_notify=1, updated_at=? WHERE tg_id=?").bind(stamp, user.tg_id)
+        env.DB.prepare("UPDATE cycle_profiles SET avg_cycle_length=28, avg_period_length=5, cycle_length_known=0, share_enabled=0, share_level='phases', share_sex=0, share_mood=0, share_sleep=0, share_bbt=0, share_confirmed=0, context=NULL, notify_enabled=0, notify_period=1, notify_ovulation=1, notify_fertile=1, notify_delay=1, notify_period_days=2, notify_delay_days=3, notify_diary=0, share_notify=1, updated_at=? WHERE tg_id=?").bind(stamp, user.tg_id)
       ]);
       return json(await cycleState(env, user.tg_id, timezone));
     }
@@ -2618,8 +2801,15 @@ async function api(request, env, url, ctx = null) {
         else kept.push(p);
       }
       const statements = [
-        env.DB.prepare("UPDATE cycle_profiles SET avg_cycle_length=?, avg_period_length=?, cycle_length_known=?, share_enabled=?, share_level=?, onboarded=1, updated_at=? WHERE tg_id=?")
-          .bind(plan.cycle, plan.periodLen, plan.cycleKnown ? 1 : 0, plan.shareEnabled ? 1 : 0, plan.shareLevel, stamp, user.tg_id),
+        env.DB.prepare("UPDATE cycle_profiles SET avg_cycle_length=?, avg_period_length=?, cycle_length_known=?, share_enabled=?, share_level=?, share_sex=?, share_mood=?, share_sleep=?, share_bbt=?, share_confirmed=?, onboarded=1, updated_at=? WHERE tg_id=?")
+          .bind(
+            plan.cycle, plan.periodLen, plan.cycleKnown ? 1 : 0,
+            plan.shareEnabled ? 1 : 0, plan.shareLevel,
+            plan.shareCategories?.sex || 0, plan.shareCategories?.mood || 0,
+            plan.shareCategories?.sleep || 0, plan.shareCategories?.bbt || 0,
+            plan.shareEnabled && plan.shareConfirmed ? 1 : 0,
+            stamp, user.tg_id
+          ),
         // Последняя менструация сохраняется незакрытой: фактическую дату
         // окончания знает только владелица, завершит её в календаре.
         env.DB.prepare(`INSERT INTO cycle_periods(tg_id,start_date,end_date,created_at,updated_at) VALUES(?,?,?,?,?)
@@ -2647,25 +2837,35 @@ async function api(request, env, url, ctx = null) {
       const monthsRaw = Number(url.searchParams.get("months") || 12);
       const months = [3, 6, 12].includes(monthsRaw) ? monthsRaw : 12;
       const cutoff = cycleMonthsAgo(today, months);
-      const [periodsRes, logsRes, profileRow, measRes] = await Promise.all([
-        env.DB.prepare("SELECT start_date,end_date FROM cycle_periods WHERE tg_id=? AND start_date>=? ORDER BY start_date ASC, id ASC")
+      // Периоды догружаются с запасом 60 дней: длина цикла, начавшегося до
+      // границы, требует следующего старта внутри диапазона. В саму
+      // статистику циклы до границы не попадают (opts.from, переработка 10.3).
+      const [periodsRes, logsRes, profileRow, measRes, medRows, medLogRows] = await Promise.all([
+        env.DB.prepare("SELECT start_date,end_date,end_unknown FROM cycle_periods WHERE tg_id=? AND start_date>=? ORDER BY start_date ASC, id ASC")
           .bind(user.tg_id, cycleDateStr(cycleDayNum(cutoff) - 60)).all(),
-        env.DB.prepare("SELECT date,flow,symptoms,mood,energy,pain_score,life_impact FROM cycle_logs WHERE tg_id=? AND date>=? ORDER BY date ASC, id ASC")
+        env.DB.prepare("SELECT date,flow,clots,mood,energy,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,bleeding_details FROM cycle_logs WHERE tg_id=? AND date>=? ORDER BY date ASC, id ASC")
           .bind(user.tg_id, cutoff).all(),
         env.DB.prepare("SELECT avg_cycle_length,avg_period_length FROM cycle_profiles WHERE tg_id=?").bind(user.tg_id).first(),
         env.DB.prepare("SELECT date,time,kind,value,unit,result,note FROM cycle_measurements WHERE tg_id=? AND date>=? ORDER BY date ASC, id ASC")
-          .bind(user.tg_id, cutoff).all()
+          .bind(user.tg_id, cutoff).all(),
+        env.DB.prepare("SELECT id,name,status,start_date,end_date FROM cycle_meds WHERE tg_id=? ORDER BY start_date ASC, id ASC").bind(user.tg_id).all(),
+        env.DB.prepare("SELECT med_id,date,status FROM cycle_med_logs WHERE tg_id=? AND date>=? ORDER BY date ASC, id ASC").bind(user.tg_id, cutoff).all()
       ]);
-      const logs = (logsRes.results || []).map(l => ({
-        date: l.date,
-        flow: l.flow || null,
-        symptoms: (JSON.parse(l.symptoms || "[]")).filter(code => CYCLE_SYMPTOM_CODES.includes(code)),
-        mood: l.mood,
-        energy: l.energy,
-        pain_score: l.pain_score === null || l.pain_score === undefined ? null : Number(l.pain_score),
-        life_impact: l.life_impact || null
-      }));
-      const stats = cycleStats(periodsRes.results || [], logs, today, profileRow || { avg_cycle_length: 28, avg_period_length: 5 });
+      const logs = (logsRes.results || []).map(cycleLogFromRow);
+      const profileDefaults = profileRow || { avg_cycle_length: 28, avg_period_length: 5 };
+      const stats = cycleStats(periodsRes.results || [], logs, today, profileDefaults, { from: cutoff });
+      // Расширенная аналитика по выбранным данным (переработка 10.5).
+      stats.insights = cycleInsights(logs, measRes.results || []);
+      // Препараты: фактические отметки приёма за период (переработка 10.5,
+      // раздел «Препараты»).
+      stats.meds = (medRows.results || []).map(m => {
+        const marks = (medLogRows.results || []).filter(l => l.med_id === m.id);
+        return {
+          id: m.id, name: m.name, status: m.status || "active",
+          taken: marks.filter(l => l.status === "taken").length,
+          skipped: marks.filter(l => l.status === "skipped").length
+        };
+      });
       // Этап 6/P2 + графики: дневной ряд для временных графиков и измерения.
       stats.daily = logs.map(l => ({ date: l.date, flow: l.flow, pain_score: l.pain_score }));
       stats.measurements = (measRes.results || []).map(m => ({
@@ -2683,6 +2883,10 @@ async function api(request, env, url, ctx = null) {
       if (!cycleValidDate(original) || !cycleValidDate(start) || start > today
         || (end && (!cycleValidDate(end) || end < start || end > today))) {
         throw new HttpError(400, "Проверьте даты месячных", "INVALID_DATE");
+      }
+      // Единый предел длительности с POST и импортом (переработка 7).
+      if (end && cycleDayNum(end) - cycleDayNum(start) + 1 > CYCLE_PERIOD_MAX_DAYS) {
+        throw new HttpError(400, `Менструация дольше ${CYCLE_PERIOD_MAX_DAYS} дней — проверьте даты; длительное кровотечение лучше обсудить с врачом`, "INVALID_PERIOD");
       }
       // Редактирование не должно создавать пересечение с соседними периодами
       // или второй открытый период.
@@ -2746,12 +2950,34 @@ async function api(request, env, url, ctx = null) {
         .bind(...values, stamp, user.tg_id).run();
       return json(await cycleState(env, user.tg_id, timezone));
     }
+    // Настройка общего доступа (переработка P0): главный выключатель +
+    // отдельные категории {sex, mood, sleep, bbt} + подтверждение состава.
+    // Выключение любой категории немедленно прекращает передачу именно её;
+    // главный выключатель — передачу целиком. Состав подтверждается явно
+    // (confirmed), до подтверждения партнёру передаётся только календарь.
     if (request.method === "PATCH" && url.pathname === "/api/cycle/share") {
       if (typeof body.enabled !== "boolean") throw new HttpError(400, "Проверьте настройку шеринга", "INVALID_SHARE");
-      const level = body.level === undefined ? "phases" : String(body.level);
-      if (!CYCLE_LEVELS.includes(level)) throw new HttpError(400, "Неизвестный уровень шеринга", "INVALID_SHARE");
-      await env.DB.prepare("UPDATE cycle_profiles SET share_enabled=?, share_level=?, updated_at=? WHERE tg_id=?")
-        .bind(body.enabled ? 1 : 0, level, stamp, user.tg_id).run();
+      const sets = ["share_enabled=?", "updated_at=?"];
+      const values = [body.enabled ? 1 : 0];
+      if (body.categories !== undefined) {
+        if (!body.categories || typeof body.categories !== "object" || Array.isArray(body.categories)) {
+          throw new HttpError(400, "Проверьте категории общего доступа", "INVALID_SHARE");
+        }
+        for (const key of CYCLE_SHARE_CATEGORIES) {
+          const v = body.categories[key];
+          if (v === undefined) continue;
+          if (typeof v !== "boolean") throw new HttpError(400, "Категории общего доступа — булевы флаги", "INVALID_SHARE");
+          sets.push(`${CYCLE_SHARE_COLUMNS[key]}=?`);
+          values.push(v ? 1 : 0);
+        }
+      }
+      if (body.confirmed !== undefined) {
+        if (typeof body.confirmed !== "boolean") throw new HttpError(400, "Подтверждение — булево", "INVALID_SHARE");
+        sets.push("share_confirmed=?");
+        values.push(body.confirmed ? 1 : 0);
+      }
+      values.push(stamp, user.tg_id);
+      await env.DB.prepare(`UPDATE cycle_profiles SET ${sets.join(", ")} WHERE tg_id=?`).bind(...values).run();
       return json(await cycleState(env, user.tg_id, timezone));
     }
     if (request.method === "PATCH" && url.pathname === "/api/cycle/profile") {
@@ -2764,6 +2990,24 @@ async function api(request, env, url, ctx = null) {
       // отличать личную норму от подставленного по умолчанию 28 (аудит 3.1.D).
       await env.DB.prepare("UPDATE cycle_profiles SET avg_cycle_length=?, avg_period_length=?, cycle_length_known=1, updated_at=? WHERE tg_id=?")
         .bind(cycle, period, stamp, user.tg_id).run();
+      return json(await cycleState(env, user.tg_id, timezone));
+    }
+    // Контекст цикла (переработка 5.1): необязательные сведения, влияющие на
+    // применимость календарных прогнозов. Не медицинская анкета: флаги только
+    // ограничивают уверенность прогнозов и добавляют оговорки.
+    if (request.method === "PATCH" && url.pathname === "/api/cycle/context") {
+      if (!body.context || typeof body.context !== "object" || Array.isArray(body.context)) {
+        throw new HttpError(400, "Проверьте контекст цикла", "INVALID_CONTEXT");
+      }
+      const clean = {};
+      for (const key of CYCLE_CONTEXT_KEYS) {
+        const v = body.context[key];
+        if (v === undefined) continue;
+        if (typeof v !== "boolean") throw new HttpError(400, "Контекст — булевы флаги", "INVALID_CONTEXT");
+        if (v) clean[key] = true;
+      }
+      await env.DB.prepare("UPDATE cycle_profiles SET context=?, updated_at=? WHERE tg_id=?")
+        .bind(JSON.stringify(clean), stamp, user.tg_id).run();
       return json(await cycleState(env, user.tg_id, timezone));
     }
     throw new HttpError(404, "Такого раздела Фло нет", "NOT_FOUND");
@@ -4349,10 +4593,13 @@ async function nextNotificationQueue(env, pairs) {
 
 // Партнёру уходят только общие фразы о фазе: без дат, симптомов, заметок и без имени владелицы.
 // Сообщение только при смене фазы и только если владелица включила шеринг и уведомления партнёра.
+// Тексты нейтральные (переработка 11.2): фаза не определяет самочувствие.
+// Уведомление об овуляции шлётся только при достаточном качестве данных —
+// календарная оценка по дефолту не повод для уверенного сообщения (4.2).
 const CYCLE_PARTNER_NOTICES = {
-  menstruation: "Сегодня фаза менструации. Возможны усталость и перепады настроения.",
-  ovulation: "Сегодня фаза овуляции. Обычно энергии больше.",
-  delay: "Сегодня возможна задержка. Спокойная поддержка помогает."
+  menstruation: "У партнёрши начались месячные. Спроси, какая поддержка сейчас нужна.",
+  ovulation: "Календарная оценка дня овуляции — приблизительный расчёт, не подтверждение.",
+  delay: "Месячные не начались к ожидаемой дате. Спокойная поддержка помогает."
 };
 
 async function sendCycleReminders(env) {
@@ -4388,9 +4635,19 @@ async function sendCycleReminders(env) {
       }
       if (Number(owner.share_enabled) === 1 && Number(owner.share_notify) === 1 && !state.forecast.empty) {
         const yesterday = cycleDateStr(cycleDayNum(state.today) - 1);
-        const before = cycleForecast(state.periods, state.profile, yesterday, state.measurements).phase;
+        const before = cycleForecast(state.periods, state.profile, yesterday, state.measurements, state.logs.filter(l => l.sick).map(l => l.date)).phase;
         const phase = state.forecast.phase;
-        const text = CYCLE_PARTNER_NOTICES[phase];
+        const f = state.forecast;
+        // Уверенные уведомления об овуляции — только по реальной истории:
+        // недостаточно данных или устаревшая история — не шлём (переработка 4.2).
+        const ovulationTrustworthy = f.quality !== undefined
+          && f.quality !== "insufficient"
+          && f.data_stale !== true
+          && f.based_on !== undefined
+          && f.based_on !== "default";
+        const text = CYCLE_PARTNER_NOTICES[phase] && (phase !== "ovulation" || ovulationTrustworthy)
+          ? CYCLE_PARTNER_NOTICES[phase]
+          : null;
         if (text && phase !== before) {
           const partners = (await env.DB.prepare(
             "SELECT pm2.tg_id FROM pair_members pm1 JOIN pair_members pm2 ON pm2.pair_id=pm1.pair_id AND pm2.tg_id<>pm1.tg_id WHERE pm1.tg_id=?"
@@ -4457,9 +4714,37 @@ function cycleValidDate(str) {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
+// Уровни шеринга — легаси от старой модели «один уровень». Новая модель:
+// share_enabled (главный выключатель, он же категория «календарь цикла») +
+// отдельные категории {sex, mood, sleep, bbt}. CYCLE_SHARE_CATEGORIES —
+// строгий список того, что вообще может передаваться партнёру; всё, что не
+// входит в него (симптомы, заметки, флоу, препараты, вес, стресс и т.д.),
+// никогда не покидает сервер.
 const CYCLE_LEVELS = ["phases", "periods", "symptoms", "full"];
+const CYCLE_SHARE_CATEGORIES = ["sex", "mood", "sleep", "bbt"];
+// Контекст цикла (необязательные сведения, влияющие на применимость
+// календарных прогнозов). Ключи совпадают с duoplan/cycle.py.
+const CYCLE_CONTEXT_KEYS = ["pregnancy", "postpartum", "breastfeeding", "perimenopause", "hormonal_contraception", "cycle_affecting_meds", "very_irregular", "unusual_bleeding"];
+// Дополнительные сведения о кровотечении (все необязательные):
+// частота смены средства гигиены, степень пропитывания, ночная смена.
+const CYCLE_BLEEDING_SATURATION = ["low", "medium", "high"];
+// Единый предел длительности менструации для всех путей ввода (импорт,
+// мастер, ручная запись и правка): дольше — «необычный период», сервер
+// отклоняет с пояснением, а не молча усекает.
+const CYCLE_PERIOD_MAX_DAYS = 14;
+// Здоровье (вкладка «Дневник → Здоровье»): личный журнал препаратов каждого
+// партнёра. Формы и статусы — как во Фло; напоминание бота задаётся временем
+// HH:MM (крон 15-минутный: срабатывает, когда локальное время достигло).
+const HEALTH_MED_FORMS = ["tablet", "capsule", "injection", "patch", "iud", "other"];
+const HEALTH_MED_STATUS = ["active", "paused", "completed"];
+const HEALTH_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+// Контакты («Дневник → Контакты»): телефонная книга пары, у каждого партнёра
+// своя. Номер всегда в формате «+7 ХХХ ХХХ ХХ ХХ», у контакта до 3 номеров.
+const CONTACT_MAX_PHONES = 3;
 // Имена колонок для настроек напоминаний (только константы, в SQL не попадает пользовательский ввод).
 const NOTIFY_COLUMNS = { enabled: "notify_enabled", period: "notify_period", ovulation: "notify_ovulation", fertile: "notify_fertile", delay: "notify_delay", period_days: "notify_period_days", delay_days: "notify_delay_days", diary: "notify_diary" };
+// Имена колонок категорий шеринга — ключи совпадают с CYCLE_SHARE_CATEGORIES.
+const CYCLE_SHARE_COLUMNS = { sex: "share_sex", mood: "share_mood", sleep: "share_sleep", bbt: "share_bbt" };
 const CYCLE_SEX = ["protected", "unprotected", "none"];
 // Этап 4 (P1): дневник разделён — сгустки не интенсивность (отдельный признак),
 // эмоции не симптомы, энергия не эмоция (своё значение за день).
@@ -4580,28 +4865,33 @@ function cycleDataQuality(usableCount, cycleKnown) {
 // (документированная эвристика, не подтверждение): положительный тест ЛГ
 // предшествует овуляции примерно на 24–36 ч → сдвиг +1 день; устойчивый
 // подъём БТ ≥0.2°C три дня подряд → овуляция примерно за день до подъёма.
-// Наблюдение принимается только в окне цикла и при сдвиге ≤7 дней от
-// календарной оценки — защита от разовых выбросов и опечаток.
-function cycleObservedOvulation(measurements, last, next, todayNum, calendarOv) {
+// sickDays — дни с отметкой «болезнь/температура» в дневнике: повышенная
+// температура тела искажает БТ, такие замеры не участвуют в температурном
+// сдвиге и в ЛГ-оценке (переработка 6).
+// Возвращает ВСЕ независимые оценки внутри цикла [{source, day}] — ЛГ и БТ
+// считаются по отдельности (§4/§6: при расхождении показываются обе),
+// календарная привязка (≤7 дней) проверяется вызывающим кодом. Так же
+// функцией пользуется самообучение по всей истории циклов.
+function cycleOvulationEstimates(measurements, last, next, todayNum, sickDays) {
+  const sick = sickDays instanceof Set ? sickDays : new Set(sickDays || []);
   const inWindow = d => d >= last + 5 && d <= next - 7 && d <= todayNum;
+  const estimates = [];
   const lhDay = (measurements || [])
     .filter(m => m.kind === "lh" && m.result === "positive" && cycleValidDate(m.date))
     .map(m => cycleDayNum(m.date))
-    .filter(inWindow)
+    .filter(d => inWindow(d) && !sick.has(d))
     .sort((a, b) => b - a)[0];
-  if (lhDay !== undefined) {
-    const ov = lhDay + 1;
-    if (Math.abs(ov - calendarOv) <= 7) return { day: ov, source: "lh" };
-  }
+  if (lhDay !== undefined) estimates.push({ source: "lh", day: lhDay + 1 });
   // БТ: средняя температура по дню (несколько замеров — одно значение),
   // F переводим в C. Ищем первый устойчивый подъём от базовой линии.
+  // Дни болезни исключаются целиком: разрыв между ними не соединяется.
   const temps = new Map();
   for (const m of measurements || []) {
     if (m.kind !== "bbt" || !cycleValidDate(m.date)) continue;
     const v = Number(m.value);
     if (!Number.isFinite(v)) continue;
     const d = cycleDayNum(m.date);
-    if (!inWindow(d)) continue;
+    if (!inWindow(d) || sick.has(d)) continue;
     const celsius = m.unit === "F" ? (v - 32) * 5 / 9 : v;
     const arr = temps.get(d) || [];
     arr.push(celsius);
@@ -4617,19 +4907,45 @@ function cycleObservedOvulation(measurements, last, next, todayNum, calendarOv) 
     const baseline = base.reduce((s, t) => s + t, 0) / base.length;
     if (Math.min(a.t, b.t, c.t) >= baseline + 0.2) {
       const ov = a.d - 1;
-      if (ov >= last + 8 && ov <= next - 7 && Math.abs(ov - calendarOv) <= 7) {
-        return { day: ov, source: "bbt" };
+      if (ov >= last + 8 && ov <= next - 7) {
+        estimates.push({ source: "bbt", day: ov });
+        break;
       }
     }
   }
-  return null;
+  return estimates;
+}
+
+// Самообучение прогноза (переработка §4, запрос 2026-11-14): личное смещение
+// овуляции подбирается по накопленной истории наблюдений. Для каждого
+// завершённого цикла LH+/БТ дают оценку дня овуляции → смещение от старта
+// цикла. При ≥2 наблюдениях из ≥2 разных циклов их медиана заменяет
+// фиксированные «−14 дней от ожидаемого старта» в календарной оценке — чем
+// дольше ведётся дневник, тем точнее овуляция и фертильное окно без ручной
+// настройки. Границы 9–17 — санити-диапазон продукта, не клиническая норма;
+// результат всегда остаётся оценкой (ovulation_estimated).
+function cycleLearnedOvulationOffset(periods, measurements, todayNum, sickDays) {
+  const starts = periods.map(p => cycleDayNum(p.start_date)).sort((a, b) => a - b);
+  const offsets = [];
+  for (let i = 0; i + 1 < starts.length; i++) {
+    const ests = cycleOvulationEstimates(measurements, starts[i], starts[i + 1], todayNum, sickDays);
+    if (!ests.length) continue;
+    const offset = ests[0].day - starts[i];
+    if (offset >= 9 && offset <= 17) offsets.push(offset);
+  }
+  if (offsets.length < 2) return null;
+  const sorted = [...offsets].sort((a, b) => a - b);
+  const median = sorted.length % 2
+    ? sorted[(sorted.length - 1) / 2]
+    : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2);
+  return { offset: median, cycles: offsets.length };
 }
 // Прогноз: медиана последних пригодных циклов (робастнее среднего к
 // выбросам 15/60 дней внутри диапазона), длина месячных — по последним
 // закрытым. Овуляция = следующий старт − 14 дней и всегда расчётная
 // (ovulation_estimated), пока пользователь не ведёт наблюдений; LH/БТ
 // уточняют её дату, но не делают «подтверждённой».
-function cycleForecast(periods, profile, today, measurements) {
+function cycleForecast(periods, profile, today, measurements, sickDates) {
   const info = cycleIntervals(periods);
   const starts = info.starts;
   // Длина месячных — по последним закрытым (как usable-интервалы): свежая
@@ -4645,20 +4961,33 @@ function cycleForecast(periods, profile, today, measurements) {
   const irregular = usableCount >= 2 && info.spread > 7;
   const basedOn = usableCount >= 1 ? "history" : (Number(profile.cycle_length_known) === 1 ? "profile" : "default");
   const todayNum = cycleDayNum(today);
+  // Дни болезни из дневника (sick=1) исключаются из температурных наблюдений.
+  const sickDays = new Set((sickDates || []).map(d => cycleDayNum(d)).filter(n => Number.isFinite(n)));
   if (!starts.length) {
     return {
       empty: true, avg_cycle_length: avgCycle, avg_period_length: periodLen, irregular: false,
       based_on: basedOn,
-      quality: "insufficient", ovulation_estimated: true
+      quality: "insufficient", ovulation_estimated: true, ovulation_source: "calendar"
     };
   }
   const last = starts[starts.length - 1];
   const next = last + avgCycle;
-  const calendarOv = next - 14;
-  // LH/БТ могут уточнить день овуляции; next_period_* остаются
-  // интервальными — наблюдения не переписывают длину цикла.
-  const observed = cycleObservedOvulation(measurements, last, next, todayNum, calendarOv);
+  // Календарная оценка овуляции: по умолчанию «ожидаемый старт − 14 дней»,
+  // при накопленных наблюдениях — личное смещение (самообучение, §4).
+  const learned = cycleLearnedOvulationOffset(periods, measurements, todayNum, sickDays);
+  const calendarOv = learned && usableCount >= 1 ? last + learned.offset : next - 14;
+  // LH/БТ уточняют день овуляции; next_period_* остаются интервальными —
+  // наблюдения не переписывают длину цикла. Оценки по каждому признаку
+  // считаются отдельно; расхождение показывается, а не усредняется (§6).
+  const estimates = cycleOvulationEstimates(measurements, last, next, todayNum, sickDays)
+    .filter(e => Math.abs(e.day - calendarOv) <= 7);
+  const lhEst = estimates.find(e => e.source === "lh") || null;
+  const bbtEst = estimates.find(e => e.source === "bbt") || null;
+  const observed = lhEst || bbtEst;
   const ovulation = observed ? observed.day : calendarOv;
+  const ovulationConflict = lhEst && bbtEst && lhEst.day !== bbtEst.day
+    ? { lh: cycleDateStr(lhEst.day), bbt: cycleDateStr(bbtEst.day) }
+    : null;
   // Открытый период — end_date NULL и end_unknown=0. Историческая запись
   // «конец не помним» (end_unknown=1) открытой не считается: она закрыта
   // по факту «следующий цикл начался», просто без точной даты окончания.
@@ -4689,6 +5018,7 @@ function cycleForecast(periods, profile, today, measurements) {
     avg_cycle_length: avgCycle,
     avg_period_length: periodLen,
     irregular,
+    last_period_start: cycleDateStr(last),
     next_period_start: cycleDateStr(next),
     next_period_end: cycleDateStr(next + periodLen - 1),
     next_period_early: cycleDateStr(next - range),
@@ -4699,6 +5029,13 @@ function cycleForecast(periods, profile, today, measurements) {
     ovulation_in: ovulation - todayNum,
     ovulation_estimated: true,
     ovulation_source: observed ? observed.source : "calendar",
+    // Самообучение: личное смещение и число циклов-наблюдений за ним
+    // (null — пока собирается база, работает стандартные −14 дней).
+    ovulation_offset_learned: learned ? learned.offset : null,
+    ovulation_offset_observations: learned ? learned.cycles : 0,
+    // Расхождение независимых признаков показывается по отдельности (§6),
+    // не усредняется и не замалчивается.
+    ovulation_conflict: ovulationConflict,
     fertile_start: cycleDateStr(ovulation - 5),
     fertile_end: cycleDateStr(ovulation + 1),
     based_on: basedOn,
@@ -4708,72 +5045,119 @@ function cycleForecast(periods, profile, today, measurements) {
     data_stale: dataStale
   };
 }
-// Что видит партнёр на каждом уровне шеринга. Чем выше уровень, тем больше полей:
-// phases — фаза и расчётные окна; periods — даты месячных и календарные отметки
-// (секс, настроение, качество сна, БТ); symptoms — флоу и симптомы за сегодня;
-// full — ещё и заметка за сегодня. Флоу/симптомы/заметки истории и препараты
-// не отдаются.
-// Короткие подсказки партнёру по фазе. Без деталей владелицы, только что происходит и как поддержать.
+// Короткие подсказки партнёру по фазе. Нейтральные: без стереотипов «в эту
+// фазу она обязательно уставшая/раздражительная» — самочувствие знает только
+// сама владелица, фаза его не определяет (переработка 11.2).
 function cyclePhaseTip(phase) {
   const tips = {
-    menstruation: "Сейчас месячные: тепло, отдых и тихая поддержка помогают. Спроси, что ей нужно.",
-    follicular: "Фолликулярная фаза: энергии обычно больше, хорошее время для планов и совместных дел.",
-    fertile: "Фертильное окно: если вы планируете или наоборот, стоит заранее обсудить защиту.",
-    ovulation: "День овуляции: у многих энергии больше, но настроение может быть и неровным.",
-    luteal: "Лютеиновая фаза: возможны усталость и перепады настроения. Больше терпения, меньше споров по мелочам.",
-    delay: "Задержка: не всегда тревожно. Спокойно поддержи и не дави."
+    menstruation: "Сейчас месячные. Спроси, какая поддержка сейчас нужна — она знает лучше.",
+    follicular: "Календарная фаза — фолликулярная. Не делай вывод о самочувствии только по фазе.",
+    fertile: "Календарная оценка фертильного окна. Если планируете или наоборот — обсудите это между собой.",
+    ovulation: "Календарная оценка дня овуляции, не подтверждённое наблюдение.",
+    luteal: "Календарная фаза — лютеиновая. Персональных наблюдений о самочувствии недостаточно — просто спроси.",
+    delay: "Месячные не начались к ожидаемой дате. Это не всегда тревожно — спокойно поддержи и не дави."
   };
   return tips[phase] || null;
 }
 
-function cycleViewForPartner(state, level) {
-  const rank = CYCLE_LEVELS.indexOf(level);
-  if (rank < 0) return { shared: false };
+// Категории шеринга из строки/числа БД → строгий объект булевых флагов.
+// Всё, что не в CYCLE_SHARE_CATEGORIES, игнорируется: добавить «поле-паразит»
+// через тело запроса невозможно.
+function cycleShareCategories(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const out = {};
+  for (const key of CYCLE_SHARE_CATEGORIES) {
+    out[key] = src[key] === true || src[key] === 1;
+  }
+  return out;
+}
+
+// Что видит партнёр — строгий allowlist по категориям (переработка P0).
+// Ответ собирается из разрешённых полей, а не копированием женского вида с
+// удалением запрещённого. Календарь (прогноз и даты месячных) — базовая
+// категория: включена самим фактом общего доступа. Остальные категории
+// передаются только при явном согласии и после подтверждения состава
+// (share_confirmed): до подтверждения партнёр получает только календарную
+// оценку, даже если категории числятся включёнными.
+// Никогда не отдаётся: симптомы и «симптомов не было», флоу и сгустки,
+// заметки, слизь, боль, протекание, вес, стресс, болезнь, поездки,
+// препараты и факт приёма, тесты ЛГ, энергия, длительность сна.
+function cycleViewForPartner(state, share) {
+  const shareOn = !!(share && Number(share.enabled) === 1);
+  if (!shareOn) return { shared: false };
+  const confirmed = Number(share?.confirmed) === 1;
+  // До подтверждения нового состава данных — только календарная оценка,
+  // никакой дневниковой информации (защита от молча расширения шеринга).
+  const cats = confirmed ? cycleShareCategories(share.categories) : { sex: false, mood: false, sleep: false, bbt: false };
   const f = state.forecast;
   const view = {
     shared: true,
-    level,
+    confirmed,
+    categories: cats,
     today: state.today,
     disclaimer: state.disclaimer,
+    // Прогнозы — приблизительные расчёты, не подтверждённые факты и не
+    // метод контрацепции. Показывается в мужской версии всегда.
+    forecast_disclaimer: "Прогнозы цикла — приблизительные календарные расчёты, не подтверждённые наблюдения. Это не метод контрацепции.",
     tip: f.empty ? null : cyclePhaseTip(f.phase),
     forecast: f.empty
       ? { empty: true }
       : {
           empty: false, phase: f.phase, cycle_day: f.cycle_day, next_period_in: f.next_period_in,
           delay_days: f.delay_days, ovulation_in: f.ovulation_in, irregular: f.irregular,
-          // Расчётные окна — того же уровня, что фаза: партнёрский календарь
+          // Качество данных прогноза: партнёр должен видеть, насколько
+          // расчёту можно доверять, не раскрывая саму историю дневника.
+          based_on: f.based_on, quality: f.quality, usable_cycles: f.usable_cycles,
+          data_stale: f.data_stale === true,
+          ovulation_estimated: true,
+          ovulation_source: f.ovulation_source || "calendar",
+          // Расчётные окна — той же категории, что фаза: партнёрский календарь
           // красит дни без доступа к дневнику.
           fertile_start: f.fertile_start, fertile_end: f.fertile_end, ovulation_date: f.ovulation_date
         }
   };
-  if (rank >= 1) {
-    view.periods = state.periods.slice(0, 6).map(p => ({ start_date: p.start_date, end_date: p.end_date, end_unknown: !!p.end_unknown }));
+  // Календарь: история месячных + точный прогноз. Открывается после
+  // подтверждения состава (до этого — только фаза и дни до события).
+  if (confirmed) {
+    view.periods = state.periods.slice(0, 6).map(p => ({ start_date: p.start_date, end_date: p.end_date || null, end_unknown: !!p.end_unknown }));
     // Полный список периодов — для календаря партнёра на произвольный месяц
     // (view.periods выше — только короткая история для списка).
-    view.calendar_periods = state.periods.map(p => ({ start_date: p.start_date, end_date: p.end_date, end_unknown: !!p.end_unknown }));
+    view.calendar_periods = state.periods.map(p => ({ start_date: p.start_date, end_date: p.end_date || null, end_unknown: !!p.end_unknown }));
     if (!f.empty) {
       view.forecast.next_period_start = f.next_period_start;
       view.forecast.next_period_end = f.next_period_end;
+      view.forecast.next_period_early = f.next_period_early;
+      view.forecast.next_period_late = f.next_period_late;
+      view.last_period_start = state.periods[0]?.start_date || null;
     }
-    // Партнёрский календарь: только разрешённые поля дневника — секс с
-    // количеством, настроение и качество сна; плюс базальная температура.
-    // Остальные поля (флоу, симптомы, заметки, препараты) не отдаются.
-    view.days = state.logs
-      .filter(l => l.sex || l.mood || l.sleep_quality)
-      .map(l => ({
-        date: l.date,
-        sex: (l.sex === "protected" || l.sex === "unprotected") ? l.sex : null,
-        sex_count: (l.sex === "protected" || l.sex === "unprotected") ? (l.sex_count || 1) : 0,
-        mood: l.mood || null, sleep_quality: l.sleep_quality || null
-      }));
+  }
+  // Дневниковые категории: одна строка на день, ключи появляются только у
+  // включённых категорий. Явная отметка «без секса» (sex="none") — факт,
+  // а не отсутствие записи: передаётся как есть, если категория включена.
+  // Качество сна нормализуется строго к good/ok/poor (иные значения в БД
+  // не попадают, но фильтр страхует от легаси-кодов).
+  if (cats.sex || cats.mood || cats.sleep) {
+    view.days = state.logs.filter(l =>
+      (cats.sex && l.sex)
+      || (cats.mood && l.mood)
+      || (cats.sleep && CYCLE_SLEEP_QUALITY.includes(l.sleep_quality || ""))
+    ).map(l => {
+      const day = { date: l.date };
+      if (cats.sex && l.sex) {
+        day.sex = l.sex;
+        day.sex_count = (l.sex === "protected" || l.sex === "unprotected") ? (l.sex_count || 1) : 0;
+      }
+      if (cats.mood && l.mood) day.mood = l.mood;
+      if (cats.sleep && CYCLE_SLEEP_QUALITY.includes(l.sleep_quality || "")) day.sleep = l.sleep_quality;
+      return day;
+    });
+  }
+  // Температура: только фактические измерения БТ с исходными единицами и
+  // временем. Никаких расчётных значений; интерпретирует их владелица.
+  if (cats.bbt) {
     view.bbt = (state.measurements || [])
       .filter(m => m.kind === "bbt" && m.value !== null && m.value !== undefined)
       .map(m => ({ date: m.date, time: m.time || null, value: m.value, unit: m.unit || null }));
-  }
-  if (rank >= 2) {
-    const log = state.logs.find(l => l.date === state.today);
-    view.today_log = log ? { flow: log.flow, symptoms: log.symptoms } : null;
-    if (rank >= 3 && log) view.today_log.note = log.note || "";
   }
   return view;
 }
@@ -4784,16 +5168,22 @@ async function cyclePartnerView(env, tgId, tz) {
   const ownerId = pair.user_a === tgId ? pair.user_b : pair.user_a;
   if (!ownerId || ownerId === tgId) return { shared: false };
   const row = await env.DB.prepare(
-    "SELECT p.share_enabled, p.share_level, u.gender FROM cycle_profiles p JOIN users u ON u.tg_id=p.tg_id WHERE p.tg_id=?"
+    "SELECT p.share_enabled, p.share_level, p.share_sex, p.share_mood, p.share_sleep, p.share_bbt, p.share_confirmed, u.gender FROM cycle_profiles p JOIN users u ON u.tg_id=p.tg_id WHERE p.tg_id=?"
   ).bind(ownerId).first();
   if (!row || Number(row.share_enabled) !== 1 || row.gender !== "female") return { shared: false };
-  return cycleViewForPartner(await cycleState(env, ownerId, tz), row.share_level);
+  const share = {
+    enabled: true,
+    level: row.share_level || "phases",
+    categories: cycleShareCategories({ sex: row.share_sex, mood: row.share_mood, sleep: row.share_sleep, bbt: row.share_bbt }),
+    confirmed: Number(row.share_confirmed) === 1
+  };
+  return cycleViewForPartner(await cycleState(env, ownerId, tz), share);
 }
 
 // Экспорт владелицы: полный журнал без обрезки истории (в отличие от /api/cycle/state).
 // Этап 6/P2: измерения (BBT/ЛГ), препараты и факт приёма — полным составом,
 // чтобы JSON-восстановление и отчёт видели все наблюдения.
-function cycleExportPayload({ profile, share, periods, logs, meds, med_logs, measurements }, exportedAt) {
+function cycleExportPayload({ profile, share, periods, logs, meds, med_logs, measurements, context }, exportedAt) {
   return {
     format: "duoplan-cycle",
     version: 1,
@@ -4803,13 +5193,16 @@ function cycleExportPayload({ profile, share, periods, logs, meds, med_logs, mea
       avg_period_length: profile.avg_period_length,
       cycle_length_known: !!profile.cycle_length_known,
       share_enabled: !!share.enabled,
-      share_level: share.level
+      share_level: share.level,
+      share_categories: cycleShareCategories(share.categories),
+      share_confirmed: !!share.confirmed
     },
     periods: periods.map(p => ({ start_date: p.start_date, end_date: p.end_date || null, end_unknown: !!p.end_unknown })),
-    logs: logs.map(l => ({ date: l.date, flow: l.flow || null, clots: !!l.clots, energy: l.energy || null, mood: l.mood || null, symptoms: l.symptoms || [], symptoms_clear: !!l.symptoms_clear, note: l.note || "", sex: l.sex || null, sex_count: l.sex_count || 0, leakage: l.leakage || null, pain_score: l.pain_score ?? null, pain_locations: l.pain_locations || [], life_impact: l.life_impact || null, mucus: l.mucus || null, sleep_hours: l.sleep_hours ?? null, sleep_quality: l.sleep_quality || null, stress: l.stress || null, sick: !!l.sick, travel: !!l.travel, weight_kg: l.weight_kg ?? null })),
+    logs: logs.map(l => ({ date: l.date, flow: l.flow || null, clots: !!l.clots, energy: l.energy || null, mood: l.mood || null, symptoms: l.symptoms || [], symptoms_clear: !!l.symptoms_clear, note: l.note || "", sex: l.sex || null, sex_count: l.sex_count || 0, leakage: l.leakage || null, pain_score: l.pain_score ?? null, pain_locations: l.pain_locations || [], life_impact: l.life_impact || null, mucus: l.mucus || null, sleep_hours: l.sleep_hours ?? null, sleep_quality: l.sleep_quality || null, stress: l.stress || null, sick: !!l.sick, travel: !!l.travel, weight_kg: l.weight_kg ?? null, bleeding_details: l.bleeding_details || null })),
     meds: (meds || []).map(m => ({ id: m.id, name: m.name, category: m.category || null, dosage: m.dosage || null, form: m.form || null, schedule: m.schedule || null, start_date: m.start_date, end_date: m.end_date || null, status: m.status, note: m.note || "" })),
     med_logs: (med_logs || []).map(l => ({ med_id: l.med_id, date: l.date, time: l.time || null, status: l.status, dose_taken: l.dose_taken || null, note: l.note || "" })),
-    measurements: (measurements || []).map(m => ({ id: m.id, date: m.date, time: m.time || null, kind: m.kind, value: m.value ?? null, unit: m.unit || null, result: m.result || null, note: m.note || "" }))
+    measurements: (measurements || []).map(m => ({ id: m.id, date: m.date, time: m.time || null, kind: m.kind, value: m.value ?? null, unit: m.unit || null, result: m.result || null, note: m.note || "" })),
+    context: cycleProfileContext(context)
   };
 }
 
@@ -4837,7 +5230,7 @@ function cyclePeriodItemsPlan(items, today, opts) {
     if (end) {
       if (unknown || !cycleValidDate(end) || end < start || end > today) return { error: "INVALID_DATE" };
       const len = cycleDayNum(end) - cycleDayNum(start) + 1;
-      if (len < 1 || len > 14) return { error: "INVALID_PERIOD" };
+      if (len < 1 || len > CYCLE_PERIOD_MAX_DAYS) return { error: "INVALID_PERIOD" };
       out.push({ start, end, end_unknown: 0 });
     } else if (unknown) {
       out.push({ start, end: null, end_unknown: 1 });
@@ -4885,6 +5278,22 @@ function cycleOnboardPlan(body, today) {
   }
   const shareLevel = body.share_level === undefined ? "phases" : String(body.share_level);
   if (!CYCLE_LEVELS.includes(shareLevel)) return { error: "INVALID_SHARE" };
+  // Категории шеринга (новая модель): булевы флаги, только известные ключи.
+  // Включение хотя бы одной категории вместе с шерингом считается
+  // подтверждением состава — иначе согласие было бы пустым жестом.
+  let shareCategories = null;
+  if (body.share_categories !== undefined) {
+    if (!body.share_categories || typeof body.share_categories !== "object" || Array.isArray(body.share_categories)) {
+      return { error: "INVALID_SHARE" };
+    }
+    shareCategories = {};
+    for (const key of CYCLE_SHARE_CATEGORIES) {
+      const v = body.share_categories[key];
+      if (v === undefined || v === false) continue;
+      if (v !== true) return { error: "INVALID_SHARE" };
+      shareCategories[key] = 1;
+    }
+  }
   // Прошлые периоды: без открытых записей, максимум 12, без дублей и
   // пересечений — в том числе с датой последней менструации.
   const previousRaw = body.previous_periods ?? [];
@@ -4901,12 +5310,21 @@ function cycleOnboardPlan(body, today) {
     cycle: cycle ?? 28,
     cycleKnown: cycle !== null,
     shareEnabled: body.share_enabled === true,
-    shareLevel
+    shareLevel,
+    shareCategories,
+    // Состав подтверждается только вместе с включённым шерингом: без
+    // включения категории сохраняются как намерение, передача не начинается.
+    shareConfirmed: body.share_enabled === true && shareCategories !== null && Object.keys(shareCategories).length > 0
   };
 }
 
 // Напоминания владелице (только её личный чат). Тексты нейтральные, без подробностей цикла.
 // prefs: виды включены/выключены (по умолчанию все) и за сколько дней предупреждать.
+// Овуляция и фертильное окно не анонсируются, когда качество данных
+// недостаточное (прогноз по дефолтным 28 дням) или история устарела:
+// уверенное уведомление по календарной оценке вводило бы в заблуждение
+// (переработка 4.2). Напоминание о месячных остаётся: это основа функции,
+// и текст всегда можно уточнить в календаре.
 function cycleReminderKinds(f, prefs = {}) {
   if (!f || f.empty) return [];
   const on = key => prefs[key] !== false;
@@ -4916,31 +5334,51 @@ function cycleReminderKinds(f, prefs = {}) {
   if (on("period") && f.phase !== "menstruation" && f.phase !== "delay" && f.next_period_in === periodDays) {
     out.push({ kind: "cycle_period", text: periodDays === 1 ? "Завтра ожидаются месячные" : `Через ${periodDays} дн. ожидаются месячные` });
   }
-  if (on("ovulation") && f.ovulation_in === 0) out.push({ kind: "cycle_ovulation", text: "Сегодня вероятный день овуляции" });
-  if (on("fertile") && f.ovulation_in === 5) out.push({ kind: "cycle_fertile", text: "Начинается фертильное окно" });
+  // Fail-safe: отсутствие quality/based_on (некалендарный прогноз или
+  // сторонний код) трактуется как недостаточные данные, не как достаточные.
+  const ovulationTrustworthy = f.quality !== undefined
+    && f.quality !== "insufficient"
+    && f.data_stale !== true
+    && f.based_on !== undefined
+    && f.based_on !== "default";
+  if (on("ovulation") && f.ovulation_in === 0 && ovulationTrustworthy) {
+    out.push({ kind: "cycle_ovulation", text: "Сегодня вероятный день овуляции — календарная оценка, не подтверждение" });
+  }
+  if (on("fertile") && f.ovulation_in === 5 && ovulationTrustworthy) {
+    out.push({ kind: "cycle_fertile", text: "Начинается календарное фертильное окно — приблизительная оценка" });
+  }
   if (on("delay") && f.phase === "delay" && f.delay_days === delayDays) out.push({ kind: "cycle_delay", text: "Возможна задержка, загляни в календарь Фло" });
   return out;
 }
 
-// Статистика за 12 месяцев: длины циклов и доля дней с симптомами по фазам.
-// Этап 5/P1: фазовая разметка привязана к каждому конкретному циклу —
-// длина цикла берётся из интервала до следующего старта (для последнего,
-// ещё не завершённого, — оценка avgCycle и пометка estimated), а не из
+// Статистика за выбранный период (3/6/12 месяцев): длины циклов и показатели
+// по фазам. Этап 5/P1: фазовая разметка привязана к каждому конкретному
+// циклу — длина цикла берётся из интервала до следующего старта (для
+// последнего, ещё не завершённого, — оценка и пометка estimated), а не из
 // общей средней. Календарная фаза — расчётная, не подтверждённая
 // физиологическая: овуляция всегда estimated, пока нет наблюдений (P2).
 // Все интервалы сохраняются: нестандартные (вне 15–60) попадают в
 // unusual_intervals и не участвуют в среднем — это правило качества
 // данных, а не медицинский порог.
-function cycleStats(periods, logs, today, defaults) {
+// Переработка 10: у каждого показателя свой знаменатель (дни, где он вообще
+// отмечался), числитель и знаменатель возвращаются явно; «не заполнено» не
+// смешивается с «явно ничего нет» (symptoms_clear); ПМС-паттерны агрегируются
+// по циклам, а не по дням; opts.from ограничивает диапазон выбранным
+// периодом — данные старше границы (догруженные для пересекающих циклов) в
+// статистику не попадают.
+function cycleStats(periods, logs, today, defaults, opts = {}) {
   const todayNum = cycleDayNum(today);
-  const cutoff = cycleDateStr(todayNum - 365);
+  const fromNum = opts.from && cycleValidDate(opts.from) ? cycleDayNum(opts.from) : todayNum - 365;
+  const cutoff = cycleDateStr(fromNum);
   const info = cycleIntervals(periods);
   const starts = info.starts;
   const byStart = new Map(periods.map(p => [cycleDayNum(p.start_date), p]));
   const cycles = [];
   for (let i = 0; i + 1 < starts.length; i++) {
     const len = starts[i + 1] - starts[i];
-    if (len >= CYCLE_INTERVAL_MIN && len <= CYCLE_INTERVAL_MAX && starts[i] >= todayNum - 365) {
+    // Цикл принадлежит выбранному периоду, если его старт внутри периода:
+    // пересекающий границу цикл (старт до from) не дробит статистику.
+    if (len >= CYCLE_INTERVAL_MIN && len <= CYCLE_INTERVAL_MAX && starts[i] >= fromNum) {
       cycles.push({ start: cycleDateStr(starts[i]), length: len, estimated: false });
     }
   }
@@ -4948,7 +5386,7 @@ function cycleStats(periods, logs, today, defaults) {
   // (по пригодным интервалам или профилю), в список завершённых циклов и
   // среднее он не входит.
   let currentCycle = null;
-  if (starts.length && starts[starts.length - 1] >= todayNum - 365) {
+  if (starts.length && starts[starts.length - 1] >= fromNum) {
     const lastStart = starts[starts.length - 1];
     const isComplete = cycles.some(c => c.start === cycleDateStr(lastStart));
     if (!isComplete) {
@@ -4963,8 +5401,15 @@ function cycleStats(periods, logs, today, defaults) {
   const avgCycle = cycles.length
     ? Math.round(cycles.reduce((a, c) => a + c.length, 0) / cycles.length)
     : defaults.avg_cycle_length;
-  // Длительности месячных: по фактическим закрытым периодам, а не только дефолт.
-  const periodDays = info.closedLengths;
+  // Длительности месячных: по фактическим закрытым периодам. Необычно
+  // длинные (> CYCLE_PERIOD_MAX_DAYS) сохраняются и показываются отдельно —
+  // молча отбрасывать их нельзя (переработка 7).
+  const periodDaysAll = periods
+    .filter(p => p.end_date && cycleDayNum(p.start_date) >= fromNum)
+    .map(p => ({ start: p.start_date, len: cycleDayNum(p.end_date) - cycleDayNum(p.start_date) + 1 }))
+    .sort((a, b) => (a.start < b.start ? -1 : 1));
+  const periodDays = periodDaysAll.filter(p => p.len >= 1 && p.len <= CYCLE_PERIOD_MAX_DAYS).map(p => p.len);
+  const longPeriods = periodDaysAll.filter(p => p.len > CYCLE_PERIOD_MAX_DAYS);
   const avgPeriod = periodDays.length
     ? Math.round(periodDays.reduce((a, b) => a + b, 0) / periodDays.length)
     : defaults.avg_period_length;
@@ -4998,10 +5443,23 @@ function cycleStats(periods, logs, today, defaults) {
     return d < ov ? "follicular" : "luteal";
   };
   const phases = {};
-  // ПМС-паттерны (P2): для каждого симптома — за сколько дней до следующего
-  // старта он обычно отмечается и в скольких циклах это повторялось.
-  // Только описательная статистика по заполненным дням, не диагноз.
-  const symptomLeads = {};
+  const newBucket = () => ({
+    days: 0,
+    // Симптомы: знаменатель — дни, где дневник по симптомам заполнен
+    // (отмечен хотя бы один симптом ИЛИ явное «симптомов не было»).
+    symptom_days: 0, clear_days: 0, symptoms: {},
+    mood_days: 0, moods: {},
+    energy_days: 0, energy: {},
+    pain_sum: 0, pain_count: 0,
+    sleep_days: 0, sleep: {}, sleep_hours_sum: 0, sleep_hours_count: 0,
+    stress_days: 0, stress: {},
+    flow_days: 0, flows: {}, clot_days: 0,
+    mucus_days: 0, life_impact: {}
+  });
+  // ПМС-паттерны: агрегация по циклам (переработка 10.2). Для каждого
+  // симптома собираем циклы, в которых предменструальное окно заполнено
+  // дневником, и циклы, где симптом в этом окне отмечался.
+  const pmsCycles = new Map(); // code -> Map(cycleStart -> {leads: Set, present: bool})
   let loggedDays = 0;
   for (const log of logs) {
     if (log.date < cutoff) continue;
@@ -5011,11 +5469,26 @@ function cycleStats(periods, logs, today, defaults) {
     loggedDays += 1;
     // Симптомы (физические), настроение и энергия считаются раздельно —
     // аналитика настроения ведётся отдельно от физической симптоматики.
-    const bucket = phases[phase] || (phases[phase] = { days: 0, symptoms: {}, moods: {}, energy: {}, pain_sum: 0, pain_count: 0 });
+    const bucket = phases[phase] || (phases[phase] = newBucket());
     bucket.days += 1;
+    const hasSymptomInfo = (log.symptoms || []).length > 0 || log.symptoms_clear === true;
+    if (hasSymptomInfo) {
+      bucket.symptom_days += 1;
+      if (log.symptoms_clear) bucket.clear_days += 1;
+    }
     for (const code of log.symptoms || []) bucket.symptoms[code] = (bucket.symptoms[code] || 0) + 1;
-    if (log.mood) bucket.moods[log.mood] = (bucket.moods[log.mood] || 0) + 1;
-    if (log.energy) bucket.energy[log.energy] = (bucket.energy[log.energy] || 0) + 1;
+    if (log.mood) { bucket.mood_days += 1; bucket.moods[log.mood] = (bucket.moods[log.mood] || 0) + 1; }
+    if (log.energy) { bucket.energy_days += 1; bucket.energy[log.energy] = (bucket.energy[log.energy] || 0) + 1; }
+    if (log.sleep_quality) { bucket.sleep_days += 1; bucket.sleep[log.sleep_quality] = (bucket.sleep[log.sleep_quality] || 0) + 1; }
+    if (log.sleep_hours !== null && log.sleep_hours !== undefined) {
+      bucket.sleep_hours_sum += Number(log.sleep_hours);
+      bucket.sleep_hours_count += 1;
+    }
+    if (log.stress) { bucket.stress_days += 1; bucket.stress[log.stress] = (bucket.stress[log.stress] || 0) + 1; }
+    if (log.flow) { bucket.flow_days += 1; bucket.flows[log.flow] = (bucket.flows[log.flow] || 0) + 1; }
+    if (log.clots) bucket.clot_days += 1;
+    if (log.mucus) bucket.mucus_days += 1;
+    if (log.life_impact) bucket.life_impact[log.life_impact] = (bucket.life_impact[log.life_impact] || 0) + 1;
     if (log.pain_score !== null && log.pain_score !== undefined) {
       bucket.pain_sum += log.pain_score;
       bucket.pain_count += 1;
@@ -5023,31 +5496,58 @@ function cycleStats(periods, logs, today, defaults) {
     const c = cycleInfoOf(num);
     if (c && !c.estimated) {
       const lead = c.cycleLen - c.d; // дней до следующего старта (1..cycleLen)
-      for (const code of log.symptoms || []) {
-        const slot = symptomLeads[code] || (symptomLeads[code] = { leads: [], cycles: new Set() });
-        slot.leads.push(lead);
-        slot.cycles.add(c.start);
+      // Предменструальное окно: последняя неделя перед следующим стартом.
+      if (lead >= 1 && lead <= 7 && hasSymptomInfo) {
+        for (const code of log.symptoms || []) {
+          const perCycle = pmsCycles.get(code) || new Map();
+          const slot = perCycle.get(c.start) || { leads: new Set(), present: false };
+          slot.leads.add(lead);
+          slot.present = true;
+          perCycle.set(c.start, slot);
+          pmsCycles.set(code, perCycle);
+        }
       }
     }
   }
-  const pms = Object.entries(symptomLeads)
-    .map(([code, slot]) => ({
+  // Паттерн — повторяемость между циклами, не сумма дневных отметок:
+  // многодневная отметка одного цикла не увеличивает «повторения».
+  // Минимальная база — 2 цикла с заполненным окном; уверенный вывод —
+  // от 3 циклов (продуктовое правило, не клиническая норма).
+  const pms = [];
+  for (const [code, perCycle] of pmsCycles) {
+    const cyclesWithData = [...perCycle.values()].filter(s => s.present).length;
+    const cyclesCovered = perCycle.size;
+    if (cyclesCovered < 2 || cyclesWithData < 2) continue;
+    const leads = [...perCycle.values()].flatMap(s => [...s.leads]).sort((a, b) => a - b);
+    const medianLead = leads.length % 2 ? leads[(leads.length - 1) / 2] : Math.round((leads[leads.length / 2 - 1] + leads[leads.length / 2]) / 2);
+    pms.push({
       code,
-      avg_lead_days: Math.round(slot.leads.reduce((a, b) => a + b, 0) / slot.leads.length),
-      cycles: slot.cycles.size,
-      days: slot.leads.length
-    }))
-    .filter(p => p.cycles >= 2)
-    .sort((a, b) => b.cycles - a.cycles || a.avg_lead_days - b.avg_lead_days)
-    .slice(0, 8);
+      cycles_with_data: cyclesCovered,
+      cycles_with_symptom: cyclesWithData,
+      avg_lead_days: medianLead,
+      days: [...perCycle.values()].reduce((n, s) => n + s.leads.size, 0),
+      confidence: cyclesCovered >= 3 && cyclesWithData >= 2 ? "good" : "low"
+    });
+  }
+  pms.sort((a, b) => b.cycles_with_symptom - a.cycles_with_symptom || a.avg_lead_days - b.avg_lead_days);
+  pms.length = Math.min(pms.length, 8);
   for (const bucket of Object.values(phases)) {
     bucket.avg_pain = bucket.pain_count ? Math.round((bucket.pain_sum / bucket.pain_count) * 10) / 10 : null;
+    bucket.avg_sleep_hours = bucket.sleep_hours_count ? Math.round((bucket.sleep_hours_sum / bucket.sleep_hours_count) * 10) / 10 : null;
     delete bucket.pain_sum;
     delete bucket.pain_count;
+    delete bucket.sleep_hours_sum;
+    delete bucket.sleep_hours_count;
   }
   const realCycles = cycles.filter(c => !c.estimated);
   const cycleLengths = realCycles.map(c => c.length);
+  // Покрытие дневника: сколько календарных дней периода заполнено хотя бы
+  // одной записью. «Не заполнено» ≠ «симптомов не было».
+  const coveredDays = new Set(logs.filter(l => l.date >= cutoff).map(l => l.date));
+  const rangeDays = Math.max(0, todayNum - fromNum + 1);
   return {
+    from: cutoff,
+    to: today,
     cycles,
     current_cycle: currentCycle,
     avg_cycle_length: avgCycle,
@@ -5060,11 +5560,98 @@ function cycleStats(periods, logs, today, defaults) {
     spread: cycleLengths.length >= 2 ? Math.max(...cycleLengths) - Math.min(...cycleLengths) : null,
     unusual_intervals: info.unusual.map(iv => ({ start: iv.start, end: iv.end, length: iv.length })),
     period_lengths: periodDays.length ? { avg: avgPeriod, min: Math.min(...periodDays), max: Math.max(...periodDays), count: periodDays.length } : null,
+    long_periods: longPeriods.map(p => ({ start: p.start, length: p.len })),
     usable_cycles: info.usable.length,
     logged_days: loggedDays,
+    coverage: { from: cutoff, to: today, days_total: rangeDays, diary_days: coveredDays.size },
     phases,
     pms_patterns: pms,
     phase_source: "estimated"
+  };
+}
+
+// Расширенная аналитика (переработка 10.5): кровотечение, самочувствие,
+// репродуктивные наблюдения, образ жизни. Только описательная статистика по
+// фактическим записям; причинно-следственные связи не утверждаются.
+function cycleInsights(logs, measurements) {
+  let heavyDays = 0, clotDays = 0, flowDays = 0;
+  const lifeImpact = {};
+  const sleep = { good: 0, ok: 0, poor: 0 };
+  let sleepHoursSum = 0, sleepHoursCount = 0;
+  const stress = {};
+  let mucusDays = 0, painCount = 0, painSum = 0;
+  const symptomCounts = {};
+  let symptomDenominator = 0;
+  const bbtDays = new Set(), lhDays = new Set();
+  let lhPositiveDays = 0;
+  const sickDates = new Set();
+  const mucusPeakDates = [];
+  for (const l of logs) {
+    if (l.flow) { flowDays += 1; if (l.flow === "heavy") heavyDays += 1; }
+    if (l.clots) clotDays += 1;
+    if (l.life_impact) lifeImpact[l.life_impact] = (lifeImpact[l.life_impact] || 0) + 1;
+    if (l.sleep_quality && CYCLE_SLEEP_QUALITY.includes(l.sleep_quality)) sleep[l.sleep_quality] += 1;
+    if (l.sleep_hours !== null && l.sleep_hours !== undefined) { sleepHoursSum += Number(l.sleep_hours); sleepHoursCount += 1; }
+    if (l.stress) stress[l.stress] = (stress[l.stress] || 0) + 1;
+    if (l.mucus) {
+      mucusDays += 1;
+      // Плодородный тип слизи (тягучая или обильная водянистая) — отдельное
+      // наблюдение о приближении овуляции. Показывается как факт дневника,
+      // в смещение овуляции не подставляется: у слизи свой статус достоверности (§4).
+      if (l.mucus.consistency === "stringy" || (l.mucus.consistency === "watery" && l.mucus.amount === "high")) {
+        mucusPeakDates.push(l.date);
+      }
+    }
+    if (l.sick) sickDates.add(l.date);
+    if (l.pain_score !== null && l.pain_score !== undefined) { painCount += 1; painSum += l.pain_score; }
+    const hasSymptomInfo = (l.symptoms || []).length > 0 || l.symptoms_clear === true;
+    if (hasSymptomInfo) {
+      symptomDenominator += 1;
+      for (const code of l.symptoms || []) symptomCounts[code] = (symptomCounts[code] || 0) + 1;
+    }
+  }
+  for (const m of measurements || []) {
+    if (m.kind === "bbt") bbtDays.add(m.date);
+    if (m.kind === "lh") {
+      lhDays.add(m.date);
+      if (m.result === "positive") lhPositiveDays += 1;
+    }
+  }
+  // Пригодные температурные дни: замеры в дни болезни искажают сдвиг,
+  // поэтому считаются отдельно от всех (переработка 6).
+  const bbtUsableDays = [...bbtDays].filter(d => !sickDates.has(d)).length;
+  const topSymptoms = Object.entries(symptomCounts)
+    .map(([code, count]) => ({ code, count, denominator: symptomDenominator }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+  return {
+    bleeding: {
+      flow_days: flowDays,
+      heavy_days: heavyDays,
+      clot_days: clotDays
+    },
+    wellbeing: {
+      top_symptoms: topSymptoms,
+      symptom_days: symptomDenominator,
+      avg_pain: painCount ? Math.round((painSum / painCount) * 10) / 10 : null,
+      pain_days: painCount,
+      life_impact: lifeImpact
+    },
+    reproductive: {
+      bbt_days: bbtDays.size,
+      bbt_days_usable: bbtUsableDays,
+      lh_days: lhDays.size,
+      lh_positive_days: lhPositiveDays,
+      mucus_days: mucusDays,
+      mucus_peak_dates: mucusPeakDates.slice(0, 12)
+    },
+    lifestyle: {
+      sleep,
+      sleep_hours_avg: sleepHoursCount ? Math.round((sleepHoursSum / sleepHoursCount) * 10) / 10 : null,
+      sleep_hours_days: sleepHoursCount,
+      stress,
+      stress_days: Object.values(stress).reduce((a, b) => a + b, 0)
+    }
   };
 }
 
@@ -5072,6 +5659,19 @@ function cycleStats(periods, logs, today, defaults) {
 // до этапа 4 эмоции и энергия жили кодами внутри симптомов — в каталоге их
 // больше нет, наружу отдаём только известные коды.
 function cycleLogFromRow(l) {
+  let bleedingDetails = null;
+  if (l.bleeding_details) {
+    try {
+      const raw = JSON.parse(l.bleeding_details);
+      if (raw && typeof raw === "object") {
+        bleedingDetails = {};
+        if (raw.changes_per_day !== undefined && raw.changes_per_day !== null) bleedingDetails.changes_per_day = Number(raw.changes_per_day) || null;
+        if (raw.saturation && CYCLE_BLEEDING_SATURATION.includes(raw.saturation)) bleedingDetails.saturation = raw.saturation;
+        if (raw.night_change === true) bleedingDetails.night_change = true;
+        if (!Object.keys(bleedingDetails).length) bleedingDetails = null;
+      }
+    } catch { bleedingDetails = null; }
+  }
   return {
     date: l.date,
     flow: l.flow || null,
@@ -5095,15 +5695,16 @@ function cycleLogFromRow(l) {
     stress: l.stress || null,
     sick: !!l.sick,
     travel: !!l.travel,
-    weight_kg: l.weight_kg === null || l.weight_kg === undefined ? null : Number(l.weight_kg)
+    weight_kg: l.weight_kg === null || l.weight_kg === undefined ? null : Number(l.weight_kg),
+    bleeding_details: bleedingDetails
   };
 }
 
 async function cycleState(env, tgId, tz) {
   const [periodsRes, profile, logsRes, medsRes, medLogsRes, measRes] = await Promise.all([
     env.DB.prepare("SELECT id,start_date,end_date,end_unknown FROM cycle_periods WHERE tg_id=? ORDER BY start_date DESC, id DESC LIMIT 36").bind(tgId).all(),
-    env.DB.prepare("SELECT avg_cycle_length,avg_period_length,cycle_length_known,share_enabled,share_level,onboarded,notify_enabled,notify_period,notify_ovulation,notify_fertile,notify_delay,notify_period_days,notify_delay_days,notify_diary,share_notify FROM cycle_profiles WHERE tg_id=?").bind(tgId).first(),
-    env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg FROM cycle_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 400").bind(tgId).all(),
+    env.DB.prepare("SELECT avg_cycle_length,avg_period_length,cycle_length_known,share_enabled,share_level,share_sex,share_mood,share_sleep,share_bbt,share_confirmed,share_notify,onboarded,notify_enabled,notify_period,notify_ovulation,notify_fertile,notify_delay,notify_period_days,notify_delay_days,notify_diary,context FROM cycle_profiles WHERE tg_id=?").bind(tgId).first(),
+    env.DB.prepare("SELECT date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,bleeding_details FROM cycle_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 400").bind(tgId).all(),
     env.DB.prepare("SELECT id,name,category,dosage,form,schedule,start_date,end_date,status,note FROM cycle_meds WHERE tg_id=? ORDER BY status='completed', start_date DESC, id DESC").bind(tgId).all(),
     env.DB.prepare("SELECT med_id,date,time,status,dose_taken,note FROM cycle_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 600").bind(tgId).all(),
     env.DB.prepare("SELECT id,date,time,kind,value,unit,result,note FROM cycle_measurements WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 800").bind(tgId).all()
@@ -5115,6 +5716,19 @@ async function cycleState(env, tgId, tz) {
   const measurements = measRes.results || [];
   const today = cycleToday(tz);
   const open = periods.find(p => !p.end_date && !Number(p.end_unknown)) || null;
+  // Свежесть и покрытие данных (переработка 15): отдельно по категориям.
+  // null — данных категории нет вообще; это не ноль и не «устарело».
+  const freshness = {
+    last_diary_date: logs[0]?.date || null,
+    last_period_start: periods[0]?.start_date || null,
+    last_measurement_date: measurements[0]?.date || null,
+    last_medication_log_date: medLogs[0]?.date || null
+  };
+  const coverage = {
+    periods_loaded: periods.length,
+    diary_days: logs.length,
+    measurement_days: new Set(measurements.map(m => m.date)).size
+  };
   return {
     today,
     periods,
@@ -5124,7 +5738,18 @@ async function cycleState(env, tgId, tz) {
     measurements,
     open_period_start: open ? open.start_date : null,
     profile: profile || { avg_cycle_length: 28, avg_period_length: 5, cycle_length_known: 0 },
-    share: { enabled: Number(profile?.share_enabled) === 1, level: profile?.share_level || "phases", notify: Number(profile?.share_notify ?? 1) === 1 },
+    data_freshness: freshness,
+    data_coverage: coverage,
+    share: {
+      enabled: Number(profile?.share_enabled) === 1,
+      // Легаси-уровень сохраняется в БД и экспорте, но состав передаваемых
+      // данных отныне определяют категории.
+      level: profile?.share_level || "phases",
+      categories: cycleShareCategories({ sex: profile?.share_sex, mood: profile?.share_mood, sleep: profile?.share_sleep, bbt: profile?.share_bbt }),
+      confirmed: Number(profile?.share_confirmed) === 1,
+      notify: Number(profile?.share_notify ?? 1) === 1
+    },
+    context: cycleProfileContext(profile),
     onboarded: Number(profile?.onboarded) === 1,
     notify: {
       enabled: Number(profile?.notify_enabled) === 1,
@@ -5136,9 +5761,157 @@ async function cycleState(env, tgId, tz) {
       delay_days: Number(profile?.notify_delay_days ?? 3),
       diary: Number(profile?.notify_diary ?? 0) === 1
     },
-    forecast: cycleForecast(periods, profile || { avg_cycle_length: 28, avg_period_length: 5 }, today, measurements),
-    disclaimer: "Прогноз приблизительный и не заменяет консультацию врача"
+    forecast: cycleForecast(
+      periods,
+      profile || { avg_cycle_length: 28, avg_period_length: 5 },
+      today,
+      measurements,
+      logs.filter(l => l.sick).map(l => l.date)
+    ),
+    disclaimer: "Прогноз приблизительный и не заменяет консультацию врача",
+    contraception_disclaimer: "Календарные прогнозы не являются надёжным методом предотвращения беременности"
   };
+}
+
+// Контекст цикла (переработка 5.1): разбор JSON-колонки в строгий объект
+// булевых флагов. Неизвестные ключи игнорируются — старые записи совместимы.
+function cycleProfileContext(profile) {
+  const src = profile?.context;
+  let raw = {};
+  if (typeof src === "string" && src) {
+    try { raw = JSON.parse(src) || {}; } catch { raw = {}; }
+  } else if (src && typeof src === "object") {
+    raw = src;
+  }
+  const out = {};
+  for (const key of CYCLE_CONTEXT_KEYS) out[key] = raw[key] === true || raw[key] === 1;
+  return out;
+}
+
+// Применимость календарных прогнозов при известном контексте (переработка 5.1).
+// Возвращает список ограничений для показа рядом с прогнозом: не диагноз,
+// а честная оговорка о применимости расчёта.
+function cycleContextCaveats(context) {
+  const out = [];
+  if (!context || typeof context !== "object") return out;
+  if (context.pregnancy) out.push("Отмечена беременность: календарные прогнозы месячных и овуляции неприменимы.");
+  if (context.postpartum || context.breastfeeding) out.push("После родов и на грудном вскармливании цикл часто нерегулярный: прогнозы особенно приблизительны.");
+  if (context.perimenopause) out.push("В перименопаузе цикл меняется: прогнозы приблизительны.");
+  if (context.hormonal_contraception) out.push("Гормональная контрацепция управляет циклом сама: календарный прогноз овуляции неприменим.");
+  if (context.cycle_affecting_meds) out.push("Препараты, влияющие на цикл или температуру, могут искажать прогноз и температурные наблюдения.");
+  if (context.very_irregular) out.push("Отмечены выраженно нерегулярные циклы: прогнозы очень приблизительные.");
+  if (context.unusual_bleeding) out.push("Отмечены необычные или межменструальные кровотечения — если это повторяется, обсудите с врачом.");
+  return out;
+}
+
+// ---- Здоровье (вкладка «Дневник → Здоровье»): личный журнал препаратов ----
+
+// Состояние журнала для владельца: препараты + факт приёма (последние 600).
+async function healthState(env, tgId) {
+  const [medsRes, logsRes] = await Promise.all([
+    env.DB.prepare("SELECT id,name,dosage,form,schedule,remind_enabled,remind_time,start_date,end_date,status,note FROM health_meds WHERE tg_id=? ORDER BY status='completed', status='paused', start_date DESC, id DESC").bind(tgId).all(),
+    env.DB.prepare("SELECT med_id,date,time,status,note FROM health_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 600").bind(tgId).all()
+  ]);
+  return {
+    meds: (medsRes.results || []).map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 })),
+    med_logs: logsRes.results || []
+  };
+}
+
+// Чистые правила напоминаний (тестируемо без Worker): препарат напоминает о
+// себе, когда активен, курс идёт, напоминание включено и локальное время
+// достигло remind_time. Дедуп на день — через notification_log в доставке.
+function healthReminderKinds(meds, today, nowHM) {
+  const out = [];
+  for (const m of meds || []) {
+    if (m.status !== "active") continue;
+    if (m.remind_enabled !== true || !HEALTH_TIME_RE.test(String(m.remind_time || ""))) continue;
+    if (m.start_date && m.start_date > today) continue;
+    if (m.end_date && m.end_date < today) continue;
+    if (String(m.remind_time) > nowHM) continue;
+    const meta = [m.dosage, m.schedule].filter(Boolean).join(" · ");
+    out.push({
+      kind: `health_med_${m.id}`,
+      text: `Напоминание о приёме: ${m.name}${meta ? ` (${meta})` : ""}. Отметьте приём в «Дневник → Здоровье».`
+    });
+  }
+  return out;
+}
+
+// Напоминания о приёме препаратов: 15-минутный крон, один тик на пользователя.
+// Тексты нейтральные, препарат не выдаётся за рекомендацию — это личный журнал.
+async function sendHealthReminders(env) {
+  const meds = (await env.DB.prepare(
+    `SELECT m.id, m.tg_id, m.name, m.dosage, m.schedule, m.remind_time, m.start_date, m.end_date, u.timezone
+     FROM health_meds m JOIN users u ON u.tg_id=m.tg_id
+     WHERE m.status='active' AND m.remind_enabled=1`
+  ).all()).results || [];
+  if (!meds.length) return;
+  const byUser = new Map();
+  for (const m of meds) {
+    const list = byUser.get(m.tg_id) || [];
+    list.push(m);
+    byUser.set(m.tg_id, list);
+  }
+  for (const [tgId, userMeds] of byUser) {
+    try {
+      const tz = validTimeZone(userMeds[0].timezone) || DEFAULT_TZ;
+      const today = cycleToday(tz);
+      const nowHM = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
+      for (const { kind, text } of healthReminderKinds(userMeds, today, nowHM)) {
+        await deliverNotification(env, tgId, today, kind, text);
+      }
+    } catch (error) {
+      console.error("health reminder failed", tgId, error);
+    }
+  }
+}
+
+// ---- Контакты («Дневник → Контакты»): телефонная книга пары ----
+
+// Номер приводится к единому виду «+7 ХХХ ХХХ ХХ ХХ»: принимаем 10 цифр;
+// 11 цифр с ведущей 7/8 (легаси-ввод «8 915 …», «+7915…») сворачиваем до 10.
+// Неполный номер не сохраняется никогда — запрет неполных номеров из ТЗ.
+function contactNormalizePhone(raw) {
+  let digits = String(raw || "").replace(/\D/g, "");
+  if (digits.length === 11 && (digits[0] === "7" || digits[0] === "8")) digits = digits.slice(1);
+  if (digits.length !== 10) return null;
+  return `+7 ${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 8)} ${digits.slice(8, 10)}`;
+}
+
+// Состояние книги: свои контакты + контакты партнёра (читаются оба списка,
+// редактировать можно только свой). Номера группируются под контактом.
+async function contactsState(env, tgId) {
+  const pair = await membership(env, tgId);
+  const mine = [];
+  const partner = [];
+  if (pair && pair.user_b) {
+    const otherId = pair.user_a === tgId ? pair.user_b : pair.user_a;
+    const rows = (await env.DB.prepare(
+      "SELECT id, owner_id, name, surname, comment FROM contacts WHERE pair_id=? AND owner_id IN (?, ?) ORDER BY name COLLATE NOCASE ASC, id ASC"
+    ).bind(pair.id, tgId, otherId).all()).results || [];
+    const ids = rows.map(r => r.id);
+    const phones = ids.length
+      ? (await env.DB.prepare(
+        `SELECT contact_id, phone FROM contact_phones WHERE contact_id IN (${ids.map(() => "?").join(",")}) ORDER BY sort ASC, id ASC`
+      ).bind(...ids).all()).results || []
+      : [];
+    const byContact = new Map();
+    for (const p of phones) {
+      const arr = byContact.get(p.contact_id) || [];
+      arr.push(p.phone);
+      byContact.set(p.contact_id, arr);
+    }
+    for (const r of rows) {
+      const entry = {
+        id: r.id, owner_id: r.owner_id, name: r.name,
+        surname: r.surname || "", comment: r.comment || "",
+        phones: byContact.get(r.id) || []
+      };
+      (Number(r.owner_id) === Number(tgId) ? mine : partner).push(entry);
+    }
+  }
+  return { mine, partner };
 }
 
 async function ensureSchema(env) {
@@ -5197,10 +5970,10 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_places_pair ON places(pair_id,visited)`,
     `CREATE INDEX IF NOT EXISTS idx_trips_pair ON trips(pair_id,visited)`,
     `CREATE INDEX IF NOT EXISTS idx_goals_pair ON goals(pair_id,is_private)`,
-    `CREATE TABLE IF NOT EXISTS cycle_profiles (tg_id INTEGER PRIMARY KEY,avg_cycle_length INTEGER NOT NULL DEFAULT 28,avg_period_length INTEGER NOT NULL DEFAULT 5,cycle_length_known INTEGER NOT NULL DEFAULT 0,share_enabled INTEGER NOT NULL DEFAULT 0,share_level TEXT NOT NULL DEFAULT 'phases',onboarded INTEGER NOT NULL DEFAULT 0,notify_enabled INTEGER NOT NULL DEFAULT 0,notify_period INTEGER NOT NULL DEFAULT 1,notify_ovulation INTEGER NOT NULL DEFAULT 1,notify_fertile INTEGER NOT NULL DEFAULT 1,notify_delay INTEGER NOT NULL DEFAULT 1,notify_period_days INTEGER NOT NULL DEFAULT 2,notify_delay_days INTEGER NOT NULL DEFAULT 3,notify_diary INTEGER NOT NULL DEFAULT 0,share_notify INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS cycle_profiles (tg_id INTEGER PRIMARY KEY,avg_cycle_length INTEGER NOT NULL DEFAULT 28,avg_period_length INTEGER NOT NULL DEFAULT 5,cycle_length_known INTEGER NOT NULL DEFAULT 0,share_enabled INTEGER NOT NULL DEFAULT 0,share_level TEXT NOT NULL DEFAULT 'phases',share_sex INTEGER NOT NULL DEFAULT 0,share_mood INTEGER NOT NULL DEFAULT 0,share_sleep INTEGER NOT NULL DEFAULT 0,share_bbt INTEGER NOT NULL DEFAULT 0,share_confirmed INTEGER NOT NULL DEFAULT 0,context TEXT,onboarded INTEGER NOT NULL DEFAULT 0,notify_enabled INTEGER NOT NULL DEFAULT 0,notify_period INTEGER NOT NULL DEFAULT 1,notify_ovulation INTEGER NOT NULL DEFAULT 1,notify_fertile INTEGER NOT NULL DEFAULT 1,notify_delay INTEGER NOT NULL DEFAULT 1,notify_period_days INTEGER NOT NULL DEFAULT 2,notify_delay_days INTEGER NOT NULL DEFAULT 3,notify_diary INTEGER NOT NULL DEFAULT 0,share_notify INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS cycle_periods (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,start_date TEXT NOT NULL,end_date TEXT,end_unknown INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(tg_id,start_date))`,
     `CREATE INDEX IF NOT EXISTS idx_cycle_periods_tg_start ON cycle_periods(tg_id,start_date)`,
-    `CREATE TABLE IF NOT EXISTS cycle_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,date TEXT NOT NULL,flow TEXT,clots INTEGER NOT NULL DEFAULT 0,energy TEXT,mood TEXT,symptoms TEXT,symptoms_clear INTEGER NOT NULL DEFAULT 0,note TEXT,sex TEXT,sex_count INTEGER NOT NULL DEFAULT 1,leakage TEXT,pain_score INTEGER,pain_locations TEXT,life_impact TEXT,mucus TEXT,sleep_hours REAL,sleep_quality TEXT,stress TEXT,sick INTEGER NOT NULL DEFAULT 0,travel INTEGER NOT NULL DEFAULT 0,weight_kg REAL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(tg_id,date))`,
+    `CREATE TABLE IF NOT EXISTS cycle_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,date TEXT NOT NULL,flow TEXT,clots INTEGER NOT NULL DEFAULT 0,energy TEXT,mood TEXT,symptoms TEXT,symptoms_clear INTEGER NOT NULL DEFAULT 0,note TEXT,sex TEXT,sex_count INTEGER NOT NULL DEFAULT 1,leakage TEXT,pain_score INTEGER,pain_locations TEXT,life_impact TEXT,mucus TEXT,sleep_hours REAL,sleep_quality TEXT,stress TEXT,sick INTEGER NOT NULL DEFAULT 0,travel INTEGER NOT NULL DEFAULT 0,weight_kg REAL,bleeding_details TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(tg_id,date))`,
     `CREATE INDEX IF NOT EXISTS idx_cycle_logs_tg_date ON cycle_logs(tg_id,date)`,
     // Этап 6/P2: серия измерений (BBT/ЛГ — несколько в день), справочник
     // препаратов и факт приёма. Паритет с migrations/0038_p2_measurements.sql.
@@ -5210,6 +5983,17 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_cycle_meds_tg ON cycle_meds(tg_id,status)`,
     `CREATE TABLE IF NOT EXISTS cycle_med_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,med_id INTEGER NOT NULL,tg_id INTEGER NOT NULL,date TEXT NOT NULL,time TEXT,status TEXT NOT NULL,dose_taken TEXT,note TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(med_id,date))`,
     `CREATE INDEX IF NOT EXISTS idx_cycle_med_logs_tg_date ON cycle_med_logs(tg_id,date)`,
+    // Здоровье: личные препараты и факт приёма (паритет с migrations/0043).
+    `CREATE TABLE IF NOT EXISTS health_meds (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,name TEXT NOT NULL,dosage TEXT,form TEXT,schedule TEXT,remind_enabled INTEGER NOT NULL DEFAULT 0,remind_time TEXT,start_date TEXT NOT NULL,end_date TEXT,status TEXT NOT NULL DEFAULT 'active',note TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS idx_health_meds_tg ON health_meds(tg_id,status)`,
+    `CREATE TABLE IF NOT EXISTS health_med_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,med_id INTEGER NOT NULL,tg_id INTEGER NOT NULL,date TEXT NOT NULL,time TEXT,status TEXT NOT NULL,note TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(med_id,date))`,
+    `CREATE INDEX IF NOT EXISTS idx_health_med_logs_tg_date ON health_med_logs(tg_id,date)`,
+    // Контакты: телефонная книга пары (паритет с migrations/0044). Номера —
+    // отдельной таблицей: до 3 на контакт, порядок задаёт sort.
+    `CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,name TEXT NOT NULL,surname TEXT,comment TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS idx_contacts_pair_owner ON contacts(pair_id,owner_id)`,
+    `CREATE TABLE IF NOT EXISTS contact_phones (id INTEGER PRIMARY KEY AUTOINCREMENT,contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,phone TEXT NOT NULL,sort INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS idx_contact_phones_contact ON contact_phones(contact_id,sort)`,
     `CREATE INDEX IF NOT EXISTS idx_goal_items_goal ON goal_items(goal_id,done)`,
     `CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id,watched)`,
     `CREATE INDEX IF NOT EXISTS idx_savings_pair ON savings(pair_id,kind)`,
@@ -5279,6 +6063,13 @@ async function ensureSchema(env) {
     ["cycle_logs", "sick", "INTEGER NOT NULL DEFAULT 0"],
     ["cycle_logs", "travel", "INTEGER NOT NULL DEFAULT 0"],
     ["cycle_logs", "weight_kg", "REAL"],
+    ["cycle_logs", "bleeding_details", "TEXT"],
+    ["cycle_profiles", "share_sex", "INTEGER NOT NULL DEFAULT 0"],
+    ["cycle_profiles", "share_mood", "INTEGER NOT NULL DEFAULT 0"],
+    ["cycle_profiles", "share_sleep", "INTEGER NOT NULL DEFAULT 0"],
+    ["cycle_profiles", "share_bbt", "INTEGER NOT NULL DEFAULT 0"],
+    ["cycle_profiles", "share_confirmed", "INTEGER NOT NULL DEFAULT 0"],
+    ["cycle_profiles", "context", "TEXT"],
     ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
@@ -5304,7 +6095,13 @@ async function ensureSchema(env) {
     env.DB.prepare(`INSERT OR IGNORE INTO member_stats(pair_id,tg_id,points,streak,best_streak,last_activity,updated_at)
       SELECT p.id,p.last_partner,u.points,u.streak,u.best_streak,u.last_activity,?
       FROM pairs p JOIN users u ON u.tg_id=p.last_partner
-      WHERE p.awaiting_return=1 AND p.last_partner!=0`).bind(now())
+      WHERE p.awaiting_return=1 AND p.last_partner!=0`).bind(now()),
+    // Бэкфилл категорий шеринга из легаси-уровня (переработка P0): уровни
+    // periods/symptoms/full раньше передавали секс/настроение/сон/БТ вместе с
+    // календарём — переносим это в категории, но share_confirmed=0: состав
+    // деактивируется до подтверждения женщиной (никакого молча расширения).
+    env.DB.prepare(`UPDATE cycle_profiles SET share_sex=1, share_mood=1, share_sleep=1, share_bbt=1, share_confirmed=0
+      WHERE share_enabled=1 AND share_level IN ('periods','symptoms','full')`)
   ]);
   await env.DB.prepare(
     "INSERT INTO app_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
@@ -5410,13 +6207,19 @@ export default {
       return json({ error: "Не получилось выполнить запрос. Попробуйте ещё раз.", code: "INTERNAL_ERROR", requestId }, 500);
     }
   },
-  // Cron (wrangler.jsonc → triggers.crons): сводки и напоминания о планах.
+  // Cron (wrangler.jsonc → triggers.crons): сводки, напоминания о планах,
+  // напоминания Фло и напоминания о приёме препаратов («Дневник → Здоровье»).
   async scheduled(event, env) {
     await sendDigests(env);
     try {
       await sendCycleReminders(env);
     } catch (error) {
       console.error("cycle reminders failed", error);
+    }
+    try {
+      await sendHealthReminders(env);
+    } catch (error) {
+      console.error("health reminders failed", error);
     }
   }
 };
