@@ -2722,8 +2722,8 @@
       </div>`;
     }).join("");
     return `${rows}
-      <p class="settings-hint">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся.</p>
-      <p class="flo-disclaimer">Состав и дозы — в «Моих препаратах» в настройках. Приложение не назначает и не отменяет приём.</p>`;
+      <p class="settings-hint">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся</p>
+      <p class="flo-disclaimer">Состав и дозы — в «Моих препаратах» в настройках. Приложение не назначает и не отменяет приём</p>`;
   }
 
   async function floPostMeasurement(body) {
@@ -3164,7 +3164,7 @@
   function renderFloPartnerView() {
     const v = floPartner;
     if (!v || v.shared !== true) {
-      return `<section class="card"><p class="eyebrow">Фло</p><p>Партнёрша пока не делится календарём. Когда она включит общий доступ, здесь появится её календарь.</p></section>`;
+      return `<section class="card"><p class="eyebrow">Фло</p><h3>Пока не делится</h3><p>Партнёрша пока не делится календарём. Когда она включит общий доступ, здесь появится её календарь</p></section>`;
     }
     const f = v.forecast || {};
     const lines = [];
@@ -3379,7 +3379,7 @@
         <button type="button" class="primary full card-action" data-action="flo-med-save-read">Сохранить</button>
         <button type="button" class="secondary full card-action" data-action="flo-med-cancel">Отмена</button>
         ${del}
-        <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш журнал.</p>
+        <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш журнал</p>
       </div>`;
   }
 
@@ -3403,8 +3403,8 @@
       <section class="card">
         <p class="eyebrow flo-group">Мои препараты</p>
         <h3>Лекарства и курсы</h3>
-        <p class="settings-hint">Это ваш личный журнал: препараты не видны партнёру и не используются для рекомендаций. Фактический приём отмечается в дневнике выбранного дня.</p>
-        ${list || `<p class="flo-disclaimer">Пока нет препаратов.</p>`}
+        <p class="settings-hint">Это ваш личный журнал: препараты не видны партнёру и не используются для рекомендаций. Фактический приём отмечается в дневнике выбранного дня</p>
+        ${list || `<p class="flo-disclaimer">Пока нет препаратов</p>`}
         ${floMedForm ? renderFloMedForm() : `<button type="button" class="secondary full card-action" style="margin-top:8px" data-action="flo-med-new">Добавить препарат</button>`}
       </section>`;
   }
@@ -4947,7 +4947,7 @@
     if (memoriesView === "contacts") {
       // Телефонная книга: живёт в пространстве пары, у каждого партнёра свой список.
       if (partnerMissing()) {
-        return `<section class="card"><p class="eyebrow">Контакты</p><p>Контакты живут в пространстве пары — сначала добавьте партнёра.</p></section>`;
+        return `<section class="card"><p class="eyebrow">Контакты</p><h3>Пока недоступно</h3><p>Контакты живут в пространстве пары — сначала добавьте партнёра.</p></section>`;
       }
       if (!contactsState && !contactsBusy) loadContacts();
       return renderContactsBody();
@@ -5038,7 +5038,7 @@
         <input name="note" data-fmt="none" type="text" maxlength="1000" value="${esc(f.note || "")}">
       </label>
       ${f.id ? `<button type="button" class="secondary is-danger full card-action" data-action="health-med-delete" data-id="${f.id}">Удалить препарат</button>` : ""}
-      <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш личный журнал. Препараты не видны партнёру.</p>`;
+      <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш личный журнал. Препараты не видны партнёру</p>`;
   }
 
   // FormData диалога → тело запроса. Ошибки несут code, чтобы тост показал
@@ -5123,12 +5123,11 @@
     }).join("");
     return `
       <section class="card">
-        <p class="eyebrow">Здоровье</p>
         <h3>Мои препараты</h3>
-        <p class="settings-hint">Личный журнал: препараты и приём не видны партнёру. Бот напомнит о приёме в заданное время, пока курс активен.</p>
-        ${rows || `<p class="flo-disclaimer">Пока нет препаратов.</p>`}
-        <button type="button" class="secondary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>
-        <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение.</p>
+        <p class="settings-hint">Личный журнал: препараты и приём не видны партнёру. Бот напомнит о приёме в заданное время, пока курс активен</p>
+        ${rows || `<p class="flo-disclaimer">Пока нет препаратов</p>`}
+        <button type="button" class="primary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>
+        <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение</p>
       </section>`;
   }
 
@@ -5282,11 +5281,11 @@
 
   function renderContactsBody() {
     if (contactsState?.failed) {
-      return `<section class="card"><p class="eyebrow">Контакты</p><p>Не получилось загрузить книгу.</p>
+      return `<section class="card"><p class="eyebrow">Контакты</p><h3>Ошибка</h3><p>Не получилось загрузить книгу.</p>
         <button type="button" class="secondary full card-action" data-action="contacts-retry">Повторить</button></section>`;
     }
     if (!contactsState) {
-      return `<section class="card"><p class="eyebrow">Контакты</p><p>Загружаем книгу…</p></section>`;
+      return `<section class="card"><p class="eyebrow">Контакты</p><h3>Контакты</h3><p>Загружаем книгу…</p></section>`;
     }
     const isMine = contactsView === "mine";
     const hasAny = (contactsState.mine || []).length || (contactsState.partner || []).length;
@@ -5308,14 +5307,14 @@
             <p>Имена и номера всегда под рукой — и ваши, и партнёрши</p>
             <div style="margin-top:12px;">${addButton}</div>
           </section>`
-        : `<section class="card"><p class="eyebrow">Контакты</p><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
+        : `<section class="card"><p class="eyebrow">Контакты</p><h3>Пока пусто</h3><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
     } else {
       bodyHtml = `
         ${isMine ? addButton : ""}
         ${hasAny ? `<label class="field contacts-search"><span>Поиск</span>
           <input id="contacts-search" type="text" data-fmt="none" placeholder="Имя, фамилия, номер или комментарий" value="${esc(contactsSearch)}">
         </label>` : ""}
-        <div id="contacts-list">${renderContactsList() || (searching ? `<section class="card"><p class="eyebrow">Контакты</p><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>` : "")}</div>`;
+        <div id="contacts-list">${renderContactsList() || (searching ? `<section class="card"><p class="eyebrow">Контакты</p><h3>Пока пусто</h3><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>` : "")}</div>`;
     }
     return `${switchHtml}${bodyHtml}`;
   }

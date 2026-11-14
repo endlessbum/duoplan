@@ -1563,7 +1563,7 @@ async def flo_partner_command(message: Message, service: DuoPlanService) -> None
         if text:
             await message.answer(text)
             return
-    await message.answer("Партнёрша пока не делится календарём.")
+    await message.answer("Партнёрша пока не делится календарём")
 
 
 @router.callback_query(F.data.in_({"flo:start", "flo:end", "flo:share", "flo:notify", "flo:export"}))

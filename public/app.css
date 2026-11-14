@@ -366,30 +366,35 @@ html.dialog-locked {
   color: var(--berry);
 }
 
-/* Внутренний бар «В планах / Просмотрено» — та же капля, но мельче:
-   он живёт внутри вкладки и не должен конкурировать с «Планы/Кино». */
+/* Внутренний бар «Сегодня/Цикл/Статистика/Препараты/Настройки» — та же
+   капля, но мельче: он живёт внутри вкладки. Пять подписей — тот же
+   плотный шаг, что у 4-вкладочных баров, иначе уезжает за экран. */
 .seg-switch.is-sub {
-  padding: 4px;
+  padding: 4px 3px;
   margin: 0 auto 12px;
+  max-width: 100%;
 }
 
 .seg-switch.is-sub .seg-switch-btn {
-  padding: 7px 14px;
-  font-size: 12.5px;
+  padding: 7px 9px;
+  font-size: 12px;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
 }
 
 /* Плотный бар: 4+ вкладки («Записи/Цитаты/Здоровье/Контакты»,
    «Профиль/Желания/Копилка/Фло») — без плотного шага выезжали за экран.
-   Расстояние между вкладками сужено: меньше боковой padding кнопок. */
+   Шаг сужён дважды: сначала 11px, после ручной проверки на узком
+   дисплее — до 9px и 12px шрифта. */
 .seg-switch.is-dense {
-  padding: 5px 4px;
+  padding: 5px 3px;
   max-width: 100%;
 }
 
 .seg-switch.is-dense .seg-switch-btn {
-  padding: 8px 11px;
-  font-size: 12.5px;
-  letter-spacing: -0.1px;
+  padding: 8px 9px;
+  font-size: 12px;
+  letter-spacing: -0.2px;
   white-space: nowrap;
 }
 
