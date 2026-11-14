@@ -59,6 +59,7 @@ async def main() -> int:
 
     bot = Bot(token=settings.bot_token)
     db = None
+    reminder_task: asyncio.Task | None = None
     try:
         db = await connect_database(settings.db_path)
         service = DuoPlanService(db, tz=settings.tz, tz_name=settings.tz_name)
@@ -120,10 +121,16 @@ async def main() -> int:
             settings.db_path,
         )
         # Фоновая задача: напоминания Фло раз в минуту (аналог cron в worker.js).
-        asyncio.create_task(cycle_reminder_loop(db, bot, service))
+        reminder_task = asyncio.create_task(cycle_reminder_loop(db, bot, service))
         await dp.start_polling(bot)
         return 0
     finally:
+        # Сначала останавливаем и дожидаемся фоновой задачи: она не должна
+        # обращаться к БД и Telegram-сессии после их закрытия. gather с
+        # return_exceptions гасит и CancelledError, и ошибки самого тика.
+        if reminder_task is not None:
+            reminder_task.cancel()
+            await asyncio.gather(reminder_task, return_exceptions=True)
         # Сессия и база закрываются всегда: и при ошибке, и при остановке polling.
         await bot.session.close()
         if db is not None:

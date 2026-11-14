@@ -513,3 +513,10 @@ test("карточки role=button активируются с клавиату�
   ok(cssSource.includes('[tabindex]:not([tabindex="-1"]):focus-visible'), "нет фокус-стиля для карточек");
   ok(cssSource.includes('.sheet-dialog:focus-visible'), "нет фокус-стиля для диалога");
 });
+
+test("удержание Enter не повторяет клик по карточке (e.repeat)", () => {
+  // Регресс P3: keydown по Enter стреляет автоповтором при удержании —
+  // без проверки e.repeat один тап превращался в серию кликов по карточке.
+  ok(/if \(e\.key === "Enter"\) \{\s*if \(!e\.repeat\) card\.click\(\)/.test(source),
+    "Enter по карточке не защищён от автоповтора (нет e.repeat)");
+});

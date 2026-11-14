@@ -168,8 +168,8 @@ def cycle_intervals(
     usable = [iv["length"] for iv in intervals if not iv["unusual"]][-CYCLE_INTERVAL_USABLE:]
     closed_lengths = [
         (_d(end.isoformat()) - _d(start.isoformat()) + 1)
-        for start, end, _ in parts
-        if end
+        for start, end, unknown in parts
+        if end and not unknown
     ]
     closed_lengths = [d for d in closed_lengths if 1 <= d <= 14]
     sorted_u = sorted(usable)
@@ -313,6 +313,114 @@ def _learned_ovulation_offset(
     return {"offset": median, "cycles": len(offsets)}
 
 
+CYCLE_PERIOD_MAX_DAYS = 14
+# Длительность месячных — персональная статистика по завершённым периодам
+# (паритет с cyclePeriodStats в worker.js, план улучшения прогнозов P1.2):
+# до 8 самых свежих записей с известным концом, взвешенная медиана по
+# свежести по «ядру» в полосе ±50% от медианы; min/max/spread — по всем
+# наблюдениям; пороги достоверности — продуктовые, не медицинские.
+CYCLE_PERIOD_STATS_USABLE = 8
+# Активный контекст цикла (P1.3) расширяет календарные диапазоны.
+CYCLE_CONTEXT_RANGE_BONUS = 4
+
+
+def cycle_period_durations(periods: Sequence[tuple]) -> list[int]:
+    """Длительности (в днях, включительно) до 8 свежих завершённых периодов.
+
+    Открытые периоды и записи «конец не помним» (end_unknown) не участвуют,
+    длительности вне 1..CYCLE_PERIOD_MAX_DAYS считаются некорректными.
+    Порядок — от самого свежего к старому (нужен для весов свежести).
+    """
+    items = []
+    for p in periods or []:
+        start, end, unknown = _period_parts(p)
+        if end is None or unknown:
+            continue
+        days = (end - start).days + 1
+        if 1 <= days <= CYCLE_PERIOD_MAX_DAYS:
+            items.append((start, days))
+    items.sort(key=lambda x: x[0], reverse=True)
+    return [days for _, days in items[:CYCLE_PERIOD_STATS_USABLE]]
+
+
+def _weighted_median(items: Sequence[tuple[float, float]]) -> float | None:
+    """Взвешенная медиана: items [(value, weight)] (паритет cycleWeightedMedian)."""
+    if not items:
+        return None
+    ordered = sorted(items, key=lambda x: x[0])
+    total = sum(w for _, w in ordered)
+    acc = 0.0
+    for value, weight in ordered:
+        acc += weight
+        if acc * 2 >= total:
+            return value
+    return ordered[-1][0]
+
+
+def cycle_period_stats(periods: Sequence[tuple], fallback_len: int) -> dict[str, Any]:
+    """Статистика длительности месячных (паритет cyclePeriodStats)."""
+    durations = cycle_period_durations(periods)  # свежие первыми
+    n = len(durations)
+    if not n:
+        return {
+            "samples": 0, "expected": fallback_len, "min": None, "max": None,
+            "spread": None, "confidence": "none", "unstable": False, "source": "profile",
+        }
+    sorted_d = sorted(durations)
+    minimum = sorted_d[0]
+    maximum = sorted_d[-1]
+    spread = maximum - minimum if n >= 2 else None
+    median_all = (
+        sorted_d[(n - 1) // 2] if n % 2 else _round_half_up(
+            (sorted_d[n // 2 - 1] + sorted_d[n // 2]) / 2
+        )
+    )
+    # «Ядро» — в полосе ±50% от медианы (2d ∈ [m, 3m]); вес = свежесть
+    # (i-й по свежести период весит n−i). Ожидание — взвешенная медиана.
+    core = [
+        (days, n - i)
+        for i, days in enumerate(durations)
+        if 2 * days >= median_all and 2 * days <= 3 * median_all
+    ]
+    expected = _weighted_median(core)
+    unstable = len(core) < min(n, 3) or (spread is not None and spread >= 4)
+    confidence = (
+        "low" if n < 3 or (spread is not None and spread >= 4)
+        else "high" if n >= 5 and (spread is None or spread <= 2)
+        else "medium"
+    )
+    return {
+        "samples": n,
+        "expected": expected,
+        "min": minimum,
+        "max": maximum,
+        "spread": spread,
+        "confidence": confidence,
+        "unstable": unstable,
+        "source": "history",
+    }
+
+
+def _context_flags(context: Any) -> dict[str, bool]:
+    """Нормализация контекста цикла (паритет cycleProfileContext в worker.js):
+    JSON-строка или dict → строгий объект булевых флагов."""
+    raw: dict[str, Any] = {}
+    if isinstance(context, str) and context:
+        try:
+            parsed = json.loads(context)
+            raw = parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            raw = {}
+    elif isinstance(context, dict):
+        raw = context
+    return {key: raw.get(key) is True or raw.get(key) == 1 for key in CYCLE_CONTEXT_KEYS}
+
+
+def _context_active(context: Any) -> bool:
+    """Активен ли хотя бы один флаг контекста (P1.3)."""
+    return any(_context_flags(context).values())
+
+
 def cycle_forecast(
     periods: Sequence[tuple],
     today: date,
@@ -321,6 +429,7 @@ def cycle_forecast(
     cycle_known: Any = 0,
     measurements: Sequence[dict[str, Any]] | None = None,
     sick_dates: Sequence[str] | None = None,
+    context: Any = None,
 ) -> dict[str, Any] | None:
     """Прогноз по периодам (старт, конец|None). None, если периодов нет.
 
@@ -334,14 +443,17 @@ def cycle_forecast(
         return None
     info = cycle_intervals(periods)
     starts = info["starts"]
-    # Длина месячных — по последним закрытым (паритет с worker.js).
-    closed_all = info["closed_lengths"]
-    closed_recent = closed_all[-CYCLE_INTERVAL_USABLE:] or closed_all
+    # Длительность месячных — медиана до 6 свежих завершённых периодов
+    # (паритет с worker.js cyclePeriodStats).
+    pstats = cycle_period_stats(periods, int(avg_period) or 5)
+    period_len = pstats["expected"]
+    # Контекст цикла (P1.3, паритет с worker.js): активные флаги понижают
+    # качество на ступень и расширяют диапазоны прогноза.
+    ctx_active = _context_active(context)
     cycle_known_flag = bool(cycle_known)
     usable_count = len(info["usable"])
     # Медиана робастнее среднего; один пригодный интервал — тоже evidence.
     cycle = (info["median"] if info["median"] is not None else info["mean"]) if usable_count >= 1 else avg_cycle
-    period_len = _round_half_up(sum(closed_recent) / len(closed_recent)) if closed_recent else avg_period
     irregular = usable_count >= 2 and info["spread"] is not None and info["spread"] > 7
     based_on = "history" if usable_count >= 1 else ("profile" if cycle_known_flag else "default")
     today_num = _d(today.isoformat())
@@ -356,6 +468,10 @@ def cycle_forecast(
             "phase": None, "empty": True, "avg_cycle_length": cycle, "avg_period_length": period_len,
             "irregular": False, "based_on": based_on, "quality": "insufficient",
             "ovulation_estimated": True, "ovulation_source": "calendar",
+            "period_samples": pstats["samples"], "period_confidence": pstats["confidence"],
+            "period_unstable": pstats["unstable"], "period_source": pstats["source"],
+            "period_min": pstats["min"], "period_max": pstats["max"], "current_period": None,
+            "context_adjusted": ctx_active,
         }
     last = starts[-1]
     nxt = last + cycle
@@ -381,12 +497,13 @@ def cycle_forecast(
     # Открытый период — end=None и end_unknown=0; «конец не помним»
     # (end_unknown=1) открытой записью не считается (паритет с worker.js).
     open_start = next((s for s, e, u in (_period_parts(p) for p in periods) if e is None and not u), None)
+    open_num = _d(open_start.isoformat()) if open_start else None
     # «Данные устарели»: нет открытого периода и прошёл ожидаемый цикл + запас.
     data_stale = open_start is None and today_num - last > cycle + CYCLE_STALE_GRACE
 
     # Незакрытый период — факт «менструация идёт» без ограничения по дням
     # (паритет с worker.js, аудит 3.1.E).
-    if open_start and today_num >= _d(open_start.isoformat()):
+    if open_num is not None and today_num >= open_num:
         phase = "menstruation"
     elif data_stale:
         phase = "stale"
@@ -401,7 +518,19 @@ def cycle_forecast(
     else:
         phase = "luteal"
 
-    rng = max(3, info["spread"]) if info["spread"] is not None else 3
+    rng = (max(3, info["spread"]) if info["spread"] is not None else 3) + (
+        CYCLE_CONTEXT_RANGE_BONUS if ctx_active else 0
+    )
+    # Границы окончания: крайняя дата начала ± разброс циклов + крайняя
+    # фактическая длительность (паритет с worker.js). При активном
+    # контексте границы длительности расширяются на день (P1.3).
+    dur_pad = 1 if ctx_active else 0
+    dur_early = max(1, (pstats["min"] if pstats["min"] is not None else period_len) - dur_pad)
+    dur_late = (pstats["max"] if pstats["max"] is not None else period_len) + dur_pad
+    # Контекст понижает качество на ступень: full → few → insufficient.
+    quality = _cycle_data_quality(usable_count, cycle_known)
+    if ctx_active:
+        quality = "few" if quality == "full" else "insufficient" if quality == "few" else quality
     return {
         "phase": phase,
         "empty": False,
@@ -412,6 +541,36 @@ def cycle_forecast(
         "last_period_start": _from_d(last),
         "next_period_start": _from_d(nxt),
         "next_period_end": _from_d(nxt + period_len - 1),
+        "next_period_end_early": _from_d(nxt - rng + dur_early - 1),
+        "next_period_end_late": _from_d(nxt + rng + dur_late - 1),
+        "period_samples": pstats["samples"],
+        "period_confidence": pstats["confidence"],
+        "period_unstable": pstats["unstable"],
+        "period_source": pstats["source"],
+        "period_min": pstats["min"],
+        "period_max": pstats["max"],
+        # Прогноз окончания текущих месячных — только оценка: открытый
+        # период не закрывается расчётом (паритет с worker.js).
+        "current_period": (
+            {
+                "start": _from_d(open_num),
+                "days_elapsed": today_num - open_num + 1,
+                # Алиасы из плана P1.1 — паритет с worker.js.
+                "day_in_period": today_num - open_num + 1,
+                "expected_days": period_len,
+                "expected_end": _from_d(open_num + period_len - 1),
+                "end_early": _from_d(open_num + dur_early - 1),
+                "end_late": _from_d(open_num + dur_late - 1),
+                "expected_end_early": _from_d(open_num + dur_early - 1),
+                "expected_end_late": _from_d(open_num + dur_late - 1),
+                "overdue": today_num > open_num + period_len - 1,
+                "samples": pstats["samples"],
+                "confidence": pstats["confidence"],
+                "source": pstats["source"],
+            }
+            if open_num is not None and today_num >= open_num
+            else None
+        ),
         "next_period_early": _from_d(nxt - rng),
         "next_period_late": _from_d(nxt + rng),
         "next_period_in": nxt - today_num,
@@ -425,10 +584,11 @@ def cycle_forecast(
         "ovulation_offset_observations": learned["cycles"] if learned else 0,
         "ovulation_conflict": ovulation_conflict,
         "based_on": based_on,
-        "quality": _cycle_data_quality(usable_count, cycle_known),
+        "quality": quality,
         "usable_cycles": usable_count,
         "unusual_intervals": len(info["unusual"]),
         "data_stale": data_stale,
+        "context_adjusted": ctx_active,
     }
 
 
@@ -531,13 +691,15 @@ async def load_profile(db: Any, tg_id: int, now_ts: int) -> dict[str, int]:
         (tg_id, now_ts, now_ts),
     )
     rows = await db.query(
-        "SELECT avg_cycle_length, avg_period_length, cycle_length_known FROM cycle_profiles WHERE tg_id=?", (tg_id,)
+        "SELECT avg_cycle_length, avg_period_length, cycle_length_known, context FROM cycle_profiles WHERE tg_id=?", (tg_id,)
     )
     row = rows[0] if rows else {}
     return {
         "avg_cycle_length": int(row.get("avg_cycle_length") or 28),
         "avg_period_length": int(row.get("avg_period_length") or 5),
         "cycle_length_known": int(row.get("cycle_length_known") or 0),
+        # JSON-строка контекста — парсится в cycle_forecast (P1.3).
+        "context": row.get("context"),
     }
 
 
@@ -655,7 +817,7 @@ async def partner_view_text(db: Any, owner_id: int, today: date) -> str | None:
     periods = await load_periods(db, owner_id)
     measurements = await load_measurements(db, owner_id)
     rows = await db.query(
-        "SELECT avg_cycle_length, avg_period_length, cycle_length_known FROM cycle_profiles WHERE tg_id=?", (owner_id,)
+        "SELECT avg_cycle_length, avg_period_length, cycle_length_known, context FROM cycle_profiles WHERE tg_id=?", (owner_id,)
     )
     row = rows[0] if rows else {}
     today_logs = await load_logs(db, owner_id, today, today)
@@ -664,6 +826,7 @@ async def partner_view_text(db: Any, owner_id: int, today: date) -> str | None:
         periods, today,
         int(row.get("avg_cycle_length") or 28), int(row.get("avg_period_length") or 5),
         row.get("cycle_length_known"), measurements, sick_dates,
+        context=row.get("context"),
     )
     if not forecast:
         return "Партнёрша делится календарём, но данных пока мало."
@@ -1032,6 +1195,7 @@ async def send_cycle_reminders(
             periods, today_local,
             profile["avg_cycle_length"], profile["avg_period_length"],
             profile.get("cycle_length_known", 0), measurements, sick_dates,
+            context=profile.get("context"),
         )
 
         # Напоминания владелице.
@@ -1069,6 +1233,7 @@ async def send_cycle_reminders(
                 periods, yesterday,
                 profile["avg_cycle_length"], profile["avg_period_length"],
                 profile.get("cycle_length_known", 0), measurements, sick_dates,
+                context=profile.get("context"),
             )
             before_phase = before.get("phase") if before else None
             phase = forecast.get("phase")

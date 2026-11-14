@@ -1,5 +1,6 @@
 """Паритет Python-прогноза Фло с worker.js: те же фикстуры, что в test_cycle_forecast.test.mjs."""
 
+import json
 from datetime import date
 
 from duoplan.cycle import (
@@ -348,3 +349,158 @@ def test_sick_day_blocks_bbt_shift():
     sick_f = cycle_forecast(periods, date(2026, 9, 14), measurements=meas, sick_dates=["2026-09-11"])
     assert sick_f["ovulation_source"] == "calendar"
     assert sick_f["ovulation_date"] == date(2026, 9, 15)
+
+
+# ---- Улучшения (этапы 3–5): персональный прогноз окончания (паритет worker.js) ----
+
+def _mk_period(start: str, length: int):
+    y, m, d = (int(x) for x in start.split("-"))
+    return (date(y, m, d), date(y, m, d).fromordinal(date(y, m, d).toordinal() + length - 1))
+
+
+def test_period_duration_median_and_confidence():
+    # 7 завершённых: старший 9 дней — выброс за полосой ±50%, остальные 5.
+    # Все 7 в окне (≤8): оценка ядра 5; min/max честно 5–9, разброс ≥4 —
+    # нестабильность и низкая достоверность (P1.2).
+    periods = [
+        _mk_period("2026-01-01", 9), _mk_period("2026-01-30", 5), _mk_period("2026-03-01", 5),
+        _mk_period("2026-03-30", 5), _mk_period("2026-04-28", 5), _mk_period("2026-05-27", 5),
+        _mk_period("2026-06-25", 5),
+    ]
+    periods = [(s, e, False) for s, e in periods]
+    f = cycle_forecast(periods, date(2026, 7, 10), 28, 5, 0)
+    assert f["avg_period_length"] == 5
+    assert f["period_samples"] == 7
+    assert f["period_confidence"] == "low"
+    assert f["period_source"] == "history"
+    assert f["period_min"] == 5 and f["period_max"] == 9
+    assert f["period_unstable"] is True
+    assert f["next_period_end"] == date(2026, 7, 28)
+
+
+def test_period_stats_exclude_unknown_end_and_open():
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 8), False),   # 8 дн.
+        (date(2026, 1, 29), None, True),              # «конец не помним»
+        (date(2026, 2, 26), None, False),             # открытый
+    ]
+    f = cycle_forecast(periods, date(2026, 3, 10), 28, 5, 0)
+    assert f["period_samples"] == 1
+    assert f["avg_period_length"] == 8
+    assert f["period_confidence"] == "low"
+    cp = f["current_period"]
+    assert cp is not None and f["phase"] == "menstruation"
+    assert cp["start"] == date(2026, 2, 26)
+    assert cp["days_elapsed"] == 13
+    assert cp["expected_end"] == date(2026, 3, 5)
+    assert cp["overdue"] is True
+
+
+def test_no_completed_periods_uses_profile_with_warning():
+    f = cycle_forecast([(date(2026, 11, 10), None, False)], date(2026, 11, 12), 28, 5, 0)
+    assert f["period_samples"] == 0
+    assert f["period_confidence"] == "none"
+    assert f["period_source"] == "profile"
+    assert f["avg_period_length"] == 5
+    cp = f["current_period"]
+    assert cp["expected_end"] == date(2026, 11, 14)
+    assert cp["overdue"] is False
+
+
+def test_end_range_uses_cycle_and_duration_spread():
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 3), False),    # 3 дн.
+        (date(2026, 1, 29), date(2026, 2, 4), False),   # 7 дн.
+        (date(2026, 2, 26), date(2026, 3, 2), False),   # 5 дн.
+        (date(2026, 3, 26), None, False),               # открытый
+    ]
+    f = cycle_forecast(periods, date(2026, 4, 10), 28, 5, 0)
+    assert f["avg_period_length"] == 5
+    assert f["period_samples"] == 3
+    assert f["period_confidence"] == "low"
+    assert f["period_unstable"] is True
+    assert f["next_period_end"] == date(2026, 4, 27)
+    assert f["next_period_end_early"] == date(2026, 4, 22)
+    assert f["next_period_end_late"] == date(2026, 5, 2)
+    cp = f["current_period"]
+    assert cp["days_elapsed"] == 16
+    assert cp["expected_end"] == date(2026, 3, 30)
+    assert cp["end_early"] == date(2026, 3, 28)
+    assert cp["end_late"] == date(2026, 4, 1)
+    assert cp["overdue"] is True
+
+
+def test_period_duration_inclusive_across_months_and_leap_year():
+    # 28.02–01.03 високосного 2028 — 3 дня включительно.
+    f = cycle_forecast([(date(2028, 2, 28), date(2028, 3, 1), False)], date(2028, 3, 10), 28, 5, 0)
+    assert f["avg_period_length"] == 3
+    assert f["period_samples"] == 1
+
+
+def test_editing_past_period_recomputes_stats():
+    before = [
+        (date(2026, 1, 1), date(2026, 1, 5), False),
+        (date(2026, 1, 29), date(2026, 2, 2), False),
+    ]
+    f1 = cycle_forecast(before, date(2026, 3, 10), 28, 5, 0)
+    assert f1["avg_period_length"] == 5
+    edited = [before[0], (date(2026, 1, 29), date(2026, 2, 5), False)]
+    f2 = cycle_forecast(edited, date(2026, 3, 10), 28, 5, 0)
+    # Взвешенная медиана по свежести (P1.2): свежая запись 8 дн. весит
+    # больше старой 5 дн. — оценка 8, а не округлённое среднее 7.
+    assert f2["avg_period_length"] == 8
+    f3 = cycle_forecast([before[0]], date(2026, 3, 10), 28, 5, 0)
+    assert f3["period_samples"] == 1
+    assert f3["period_confidence"] == "low"
+
+
+# ---- План улучшения прогнозов (P1): контекст и алиасы — паритет worker.js ----
+
+def test_current_period_spec_aliases_and_source():
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 5), False),
+        (date(2026, 1, 29), date(2026, 2, 2), False),
+        (date(2026, 3, 26), None, False),  # открытый
+    ]
+    f = cycle_forecast(periods, date(2026, 4, 1), 28, 5, 0)
+    cp = f["current_period"]
+    assert cp is not None
+    assert cp["day_in_period"] == cp["days_elapsed"]
+    assert cp["expected_end_early"] == cp["end_early"]
+    assert cp["expected_end_late"] == cp["end_late"]
+    assert cp["source"] == "history"
+    assert cp["confidence"] == "low"
+
+
+def test_context_downgrades_quality_and_widens_ranges():
+    periods = [
+        (date(2026, 1, 1), date(2026, 1, 5), False),
+        (date(2026, 1, 29), date(2026, 2, 2), False),
+        (date(2026, 2, 26), date(2026, 3, 2), False),
+        (date(2026, 3, 26), date(2026, 3, 30), False),
+        (date(2026, 4, 23), None, False),  # открытый
+    ]
+    plain = cycle_forecast(periods, date(2026, 4, 28), 28, 5, 0)
+    ctx = cycle_forecast(periods, date(2026, 4, 28), 28, 5, 0,
+                         context=json.dumps({"very_irregular": True}))
+    assert plain["context_adjusted"] is False
+    assert ctx["context_adjusted"] is True
+    assert ctx["quality"] == "few"  # full → few
+    assert ctx["next_period_early"] < plain["next_period_early"]
+    assert ctx["next_period_late"] > plain["next_period_late"]
+    cp_ctx, cp_plain = ctx["current_period"], plain["current_period"]
+    assert cp_ctx["expected_end_early"] <= cp_plain["expected_end_early"]
+    assert cp_ctx["expected_end_late"] >= cp_plain["expected_end_late"]
+
+
+def test_context_floor_and_empty_flag():
+    one = [(date(2026, 4, 23), None, False)]
+    f = cycle_forecast(one, date(2026, 4, 28), 28, 5, 0,
+                       context={"hormonal_contraception": True})
+    assert f["context_adjusted"] is True
+    assert f["quality"] == "insufficient"  # few → insufficient, ниже не бывает
+    empty = cycle_forecast([], date(2026, 4, 28), 28, 5, 0,
+                           context={"pregnancy": True})
+    # Python возвращает None при пустых периодах — флаг живёт в dict-ответе
+    # только когда periods переданы; для [] прогноз отсутствует вовсе.
+    assert empty is None

@@ -430,3 +430,75 @@ test("сегодня и выбранный день — разные класс�
   equal(cssSource.includes(".cal-day.is-selected"), true);
   equal(cssSource.includes(".cal-day.is-outside"), true);
 });
+
+// ------------------------------------------- капля месячных Фло (улучшения)
+
+const shiftDay = (key, delta) => {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + delta)).toISOString().slice(0, 10);
+};
+
+test("капля месячных: пустой день, день с событием, границы периода", () => {
+  const today = calendarTodayKey();
+  const start = shiftDay(today, -20);
+  const end = shiftDay(today, -16);
+  const periods = [{ start_date: start, end_date: end, end_unknown: 0 }];
+  const hasCycle = (key, bucket) =>
+    calendarCellDots(bucket || null, key, periods).some((d) => d.includes("is-cycle"));
+
+  // Пустая ячейка внутри завершённого периода — капля есть (раньше её
+  // съедал early return по пустому bucket).
+  equal(hasCycle(shiftDay(start, 2)), true, "пустой день периода без капли");
+  // Крайние дни включительно.
+  equal(hasCycle(start), true, "день начала без капли");
+  equal(hasCycle(end), true, "день окончания без капли");
+  // За пределами — нет.
+  equal(hasCycle(shiftDay(start, -1)), false);
+  equal(hasCycle(shiftDay(end, 1)), false);
+  // День с обычным событием — и событие, и капля.
+  const day = shiftDay(start, 1);
+  const dots = calendarCellDots({ tasks: [{ is_private: 0 }], dates: [], birthdays: [], wishes: [] }, day, periods);
+  equal(dots.filter((d) => d.includes("is-task")).length, 1);
+  equal(dots.some((d) => d.includes("is-cycle")), true);
+});
+
+test("капля месячных: открытый период — до сегодня, не в будущее", () => {
+  const today = calendarTodayKey();
+  const periods = [{ start_date: shiftDay(today, -3), end_date: null, end_unknown: 0 }];
+  const hasCycle = (key) => calendarCellDots(null, key, periods).some((d) => d.includes("is-cycle"));
+  equal(hasCycle(shiftDay(today, -1)), true);
+  equal(hasCycle(today), true, "сегодня внутри открытого периода");
+  equal(hasCycle(shiftDay(today, 1)), false, "будущие дни открытого периода не отмечаются");
+});
+
+test("капля месячных: «конец не помним» — только день начала", () => {
+  const today = calendarTodayKey();
+  const start = shiftDay(today, -10);
+  const periods = [{ start_date: start, end_date: null, end_unknown: 1 }];
+  const hasCycle = (key) => calendarCellDots(null, key, periods).some((d) => d.includes("is-cycle"));
+  equal(hasCycle(start), true);
+  equal(hasCycle(shiftDay(start, 1)), false, "выдуманная дата окончания недопустима");
+});
+
+test("капля месячных: прогнозные даты и прочие данные Фло не проецируются", () => {
+  const today = calendarTodayKey();
+  // «Период» из будущего (как если бы прогноз попал в periods) — не рисуется.
+  const periods = [{ start_date: shiftDay(today, 5), end_date: shiftDay(today, 9), end_unknown: 0 }];
+  equal(calendarCellDots(null, shiftDay(today, 6), periods).some((d) => d.includes("is-cycle")), true,
+    "фактическая запись в будущем всё же показывается — фильтрация на входе");
+  // Прогнозные поля (next_period_*, фазы) в periods не существуют —
+  // calendarCellDots читает только start/end/end_unknown.
+  const srcFn = source.slice(source.indexOf("function calendarCellDots"), source.indexOf("function renderPairCalendar"));
+  equal(srcFn.includes("next_period"), false, "прогноз просочился в обычный календарь");
+  equal(srcFn.includes("phase"), false);
+});
+
+test("капля месячных красная: is-cycle использует --flo-period в обеих темах", () => {
+  const rule = cssSource.slice(cssSource.indexOf(".cal-dot.is-cycle"), cssSource.indexOf(".cal-dot.is-cycle") + 120);
+  equal(rule.includes("var(--flo-period)"), true, rule);
+  equal(rule.includes("var(--cal-private)"), false, "остался серый цвет");
+  // Токен определён минимум дважды: светлая и тёмная тема (блоки Фло идут
+  // отдельными :root ниже по файлу, не в главной паре тем).
+  const defs = cssSource.match(/--flo-period:\s*#[0-9a-fA-F]{6}/g) || [];
+  ok(defs.length >= 2, `--flo-period определён ${defs.length} раз(а), нужно ≥2 (светлая+тёмная)`);
+});

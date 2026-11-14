@@ -2888,7 +2888,14 @@ async function api(request, env, url, ctx = null) {
         };
       });
       // Этап 6/P2 + графики: дневной ряд для временных графиков и измерения.
-      stats.daily = logs.map(l => ({ date: l.date, flow: l.flow, pain_score: l.pain_score }));
+      // Поля самочувствия (настроение/энергия/сон/стресс) — для графика
+      // динамики по дням (Новый план графиков §8); только фактические отметки.
+      stats.daily = logs.map(l => ({
+        date: l.date, flow: l.flow, pain_score: l.pain_score,
+        mood: l.mood || null, energy: l.energy || null,
+        sleep_hours: l.sleep_hours ?? null, sleep_quality: l.sleep_quality || null,
+        stress: l.stress || null
+      }));
       stats.measurements = (measRes.results || []).map(m => ({
         date: m.date, time: m.time || null, kind: m.kind,
         value: m.value ?? null, unit: m.unit || null, result: m.result || null
@@ -4865,7 +4872,7 @@ function cycleIntervals(periods) {
   }
   const usable = intervals.filter(iv => !iv.unusual).slice(-CYCLE_INTERVAL_USABLE).map(iv => iv.length);
   const closedLengths = periods
-    .filter(p => p.end_date)
+    .filter(p => p.end_date && !Number(p.end_unknown))
     .map(p => cycleDayNum(p.end_date) - cycleDayNum(p.start_date) + 1)
     .filter(d => d >= 1 && d <= 14);
   const sorted = [...usable].sort((a, b) => a - b);
@@ -4971,6 +4978,80 @@ function cycleLearnedOvulationOffset(periods, measurements, todayNum, sickDays) 
     : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2);
   return { offset: median, cycles: offsets.length };
 }
+// Длительность месячных — персональная статистика по завершённым периодам
+// (план улучшения прогнозов P1.2). Берём до 8 самых свежих записей с
+// известным концом: end_unknown («конец не помним») и открытые периоды не
+// участвуют, длительности вне 1..CYCLE_PERIOD_MAX_DAYS — некорректные,
+// отбрасываются. Оценка — взвешенная медиана по свежести (линейный decay:
+// самый свежий период весит больше всех) по «ядру» наблюдений в полосе
+// ±50% от медианы: одиночный выброс не смещает прогноз, но min/max и
+// spread считаются по всем наблюдениям, а сам отсеив помечается
+// period_unstable. Достоверность — продуктовая: high — ≥5 наблюдений и
+// разброс ≤2; medium — 3–4 без большого разброса; low — меньше или
+// сильный разброс; none — без завершённых периодов.
+const CYCLE_PERIOD_STATS_USABLE = 8;
+// Активный контекст цикла (P1.3) расширяет календарные диапазоны на
+// столько дней — честная ширина вместо ложной точности.
+const CYCLE_CONTEXT_RANGE_BONUS = 4;
+function cycleMedianInt(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const n = sorted.length;
+  if (!n) return null;
+  return n % 2 ? sorted[(n - 1) / 2] : Math.round((sorted[n / 2 - 1] + sorted[n / 2]) / 2);
+}
+function cyclePeriodDurations(periods) {
+  return (periods || [])
+    .filter(p => p.end_date && !Number(p.end_unknown))
+    .map(p => ({ start: p.start_date, days: cycleDayNum(p.end_date) - cycleDayNum(p.start_date) + 1 }))
+    .filter(p => p.days >= 1 && p.days <= CYCLE_PERIOD_MAX_DAYS)
+    .sort((a, b) => (a.start < b.start ? 1 : -1)) // свежие первыми
+    .slice(0, CYCLE_PERIOD_STATS_USABLE)
+    .map(p => p.days);
+}
+// Взвешенная медиана: items [{value, weight}] → value. Меньшее значение
+// при равных весах; при наборе половины суммарного веса возвращается.
+function cycleWeightedMedian(items) {
+  const sorted = [...items].sort((a, b) => a.value - b.value);
+  const total = sorted.reduce((s, x) => s + x.weight, 0);
+  let acc = 0;
+  for (const x of sorted) {
+    acc += x.weight;
+    if (acc * 2 >= total) return x.value;
+  }
+  return sorted.length ? sorted[sorted.length - 1].value : null;
+}
+function cyclePeriodStats(periods, fallbackLen) {
+  const durations = cyclePeriodDurations(periods); // свежие первыми
+  const n = durations.length;
+  if (!n) {
+    return { samples: 0, expected: fallbackLen, min: null, max: null, spread: null,
+      confidence: "none", unstable: false, source: "profile" };
+  }
+  const sorted = [...durations].sort((a, b) => a - b);
+  const min = sorted[0];
+  const max = sorted[n - 1];
+  const spread = n >= 2 ? max - min : null;
+  const medianAll = cycleMedianInt(durations);
+  // «Ядро» — длительности в полосе ±50% от медианы (2d ∈ [m, 3m]);
+  // свежесть как вес: i-й по свежести период весит n−i.
+  const core = durations
+    .map((days, i) => ({ value: days, weight: n - i }))
+    .filter(x => 2 * x.value >= medianAll && 2 * x.value <= 3 * medianAll);
+  const expected = cycleWeightedMedian(core);
+  // Нестабильность: после отсева осталось меньше 3 точек (или все, если их
+  // меньше) либо разброс всех наблюдений ≥4 дней.
+  const unstable = core.length < Math.min(n, 3) || (spread !== null && spread >= 4);
+  const confidence = n < 3 || (spread !== null && spread >= 4) ? "low"
+    : n >= 5 && (spread === null || spread <= 2) ? "high" : "medium";
+  return {
+    samples: n,
+    expected,
+    min, max, spread,
+    confidence,
+    unstable,
+    source: "history"
+  };
+}
 // Прогноз: медиана последних пригодных циклов (робастнее среднего к
 // выбросам 15/60 дней внутри диапазона), длина месячных — по последним
 // закрытым. Овуляция = следующий старт − 14 дней и всегда расчётная
@@ -4979,16 +5060,23 @@ function cycleLearnedOvulationOffset(periods, measurements, todayNum, sickDays) 
 function cycleForecast(periods, profile, today, measurements, sickDates) {
   const info = cycleIntervals(periods);
   const starts = info.starts;
-  // Длина месячных — по последним закрытым (как usable-интервалы): свежая
-  // история релевантнее средней за всю глубину LIMIT 36.
-  const closedRecent = info.closedLengths.slice(-CYCLE_INTERVAL_USABLE);
-  const closed = closedRecent.length ? closedRecent : info.closedLengths;
+  // Длительность месячных — медиана до 6 свежих завершённых периодов
+  // (cyclePeriodStats): устойчиво к единичным необычным записям и честно
+  // показывает число наблюдений и достоверность.
+  const pstats = cyclePeriodStats(periods, Number(profile.avg_period_length) || 5);
+  const periodLen = pstats.expected;
+  // Контекст цикла (план P1.3): активные флаги (беременность, КОК,
+  // послеродовой период, очень нерегулярный цикл и т.п.) понижают
+  // качество прогноза на ступень и расширяют диапазоны — честнее, чем
+  // «уверенный», но неверный прогноз. Функция объявлена ниже по файлу —
+  // hoisting делает её доступной.
+  const ctxFlags = cycleProfileContext(profile);
+  const ctxActive = CYCLE_CONTEXT_KEYS.some(k => ctxFlags[k]);
   // Медиана робастнее среднего: один цикл 15 или 60 дней внутри диапазона
   // не смещает оценку. Один пригодный интервал тоже используется —
   // качество при этом остаётся низким (cycleDataQuality).
   const usableCount = info.usable.length;
   const avgCycle = usableCount >= 1 ? (info.median ?? info.mean) : profile.avg_cycle_length;
-  const periodLen = closed.length ? Math.round(closed.reduce((a, b) => a + b, 0) / closed.length) : profile.avg_period_length;
   const irregular = usableCount >= 2 && info.spread > 7;
   const basedOn = usableCount >= 1 ? "history" : (Number(profile.cycle_length_known) === 1 ? "profile" : "default");
   const todayNum = cycleDayNum(today);
@@ -4998,7 +5086,11 @@ function cycleForecast(periods, profile, today, measurements, sickDates) {
     return {
       empty: true, avg_cycle_length: avgCycle, avg_period_length: periodLen, irregular: false,
       based_on: basedOn,
-      quality: "insufficient", ovulation_estimated: true, ovulation_source: "calendar"
+      quality: "insufficient", ovulation_estimated: true, ovulation_source: "calendar",
+      period_samples: pstats.samples, period_confidence: pstats.confidence,
+      period_unstable: pstats.unstable, period_source: pstats.source,
+      period_min: pstats.min, period_max: pstats.max, current_period: null,
+      context_adjusted: ctxActive
     };
   }
   const last = starts[starts.length - 1];
@@ -5041,7 +5133,21 @@ function cycleForecast(periods, profile, today, measurements, sickDates) {
   else phase = "luteal";
   // Диапазон ожидания: разброс пригодных интервалов, при его отсутствии —
   // ±3 дня как осторожная оценка. Это календарный разброс, не гарантия.
-  const range = info.spread !== null ? Math.max(3, info.spread) : 3;
+  // При активном контексте диапазон расширяется (P1.3).
+  const range = (info.spread !== null ? Math.max(3, info.spread) : 3)
+    + (ctxActive ? CYCLE_CONTEXT_RANGE_BONUS : 0);
+  // Границы окончания месячных: крайний возможный конец = крайняя дата
+  // начала ± разброс циклов + крайняя фактическая длительность. При
+  // недостатке наблюдений min/max подменяются ожидаемой длительностью —
+  // диапазон тогда отражает только разброс начал, без ложной точности.
+  // При активном контексте границы длительности расширяются на день (P1.3).
+  const durPad = ctxActive ? 1 : 0;
+  const durEarly = Math.max(1, (pstats.min ?? periodLen) - durPad);
+  const durLate = (pstats.max ?? periodLen) + durPad;
+  // Контекст цикла понижает качество прогноза на ступень (P1.3):
+  // full → few → insufficient; уже низкое не «улучшается».
+  let quality = cycleDataQuality(usableCount, profile.cycle_length_known);
+  if (ctxActive) quality = quality === "full" ? "few" : quality === "few" ? "insufficient" : quality;
   return {
     empty: false,
     phase,
@@ -5052,6 +5158,34 @@ function cycleForecast(periods, profile, today, measurements, sickDates) {
     last_period_start: cycleDateStr(last),
     next_period_start: cycleDateStr(next),
     next_period_end: cycleDateStr(next + periodLen - 1),
+    next_period_end_early: cycleDateStr(next - range + durEarly - 1),
+    next_period_end_late: cycleDateStr(next + range + durLate - 1),
+    // Персональная статистика длительности и прогноз окончания текущих
+    // месячных. Прогноз никогда не закрывает период: current_period —
+    // только оценка, факт ждёт отметки пользователя.
+    period_samples: pstats.samples,
+    period_confidence: pstats.confidence,
+    period_unstable: pstats.unstable,
+    period_source: pstats.source,
+    period_min: pstats.min,
+    period_max: pstats.max,
+    current_period: openStart !== null && todayNum >= openStart ? {
+      start: cycleDateStr(openStart),
+      days_elapsed: todayNum - openStart + 1,
+      // Алиасы из плана улучшения прогнозов (P1.1): те же значения под
+      // именами спецификации, старые поля сохранены для совместимости.
+      day_in_period: todayNum - openStart + 1,
+      expected_days: periodLen,
+      expected_end: cycleDateStr(openStart + periodLen - 1),
+      end_early: cycleDateStr(openStart + durEarly - 1),
+      end_late: cycleDateStr(openStart + durLate - 1),
+      expected_end_early: cycleDateStr(openStart + durEarly - 1),
+      expected_end_late: cycleDateStr(openStart + durLate - 1),
+      overdue: todayNum > openStart + periodLen - 1,
+      samples: pstats.samples,
+      confidence: pstats.confidence,
+      source: pstats.source
+    } : null,
     next_period_early: cycleDateStr(next - range),
     next_period_late: cycleDateStr(next + range),
     next_period_in: next - todayNum,
@@ -5070,10 +5204,11 @@ function cycleForecast(periods, profile, today, measurements, sickDates) {
     fertile_start: cycleDateStr(ovulation - 5),
     fertile_end: cycleDateStr(ovulation + 1),
     based_on: basedOn,
-    quality: cycleDataQuality(usableCount, profile.cycle_length_known),
+    quality,
     usable_cycles: usableCount,
     unusual_intervals: info.unusual.length,
-    data_stale: dataStale
+    data_stale: dataStale,
+    context_adjusted: ctxActive
   };
 }
 // Короткие подсказки партнёру по фазе. Нейтральные: без стереотипов «в эту
@@ -5157,6 +5292,8 @@ function cycleViewForPartner(state, share) {
     if (!f.empty) {
       view.forecast.next_period_start = f.next_period_start;
       view.forecast.next_period_end = f.next_period_end;
+      view.forecast.next_period_end_early = f.next_period_end_early;
+      view.forecast.next_period_end_late = f.next_period_end_late;
       view.forecast.next_period_early = f.next_period_early;
       view.forecast.next_period_late = f.next_period_late;
       view.last_period_start = state.periods[0]?.start_date || null;
@@ -5404,6 +5541,18 @@ function cycleStats(periods, logs, today, defaults, opts = {}) {
   const info = cycleIntervals(periods);
   const starts = info.starts;
   const byStart = new Map(periods.map(p => [cycleDayNum(p.start_date), p]));
+  // Диапазоны фактических периодов для привязки записей к «дню N
+  // месячных»: открытый период — до сегодня, «конец не помним»
+  // (end_unknown) выдуманный конец не подставляет.
+  const periodRanges = periods
+    .map(p => {
+      const s = cycleDayNum(p.start_date);
+      // «Конец не помним»: известен только день начала — записи после
+      // него нельзя отнести к смещению, поэтому диапазон = один день.
+      const e = p.end_date ? cycleDayNum(p.end_date) : (p.end_unknown ? s : todayNum);
+      return e >= s ? { s, e } : null;
+    })
+    .filter(Boolean);
   const cycles = [];
   for (let i = 0; i + 1 < starts.length; i++) {
     const len = starts[i + 1] - starts[i];
@@ -5491,6 +5640,11 @@ function cycleStats(periods, logs, today, defaults, opts = {}) {
   // симптома собираем циклы, в которых предменструальное окно заполнено
   // дневником, и циклы, где симптом в этом окне отмечался.
   const pmsCycles = new Map(); // code -> Map(cycleStart -> {leads: Set, present: bool})
+  // Дневные паттерны по всему циклу (улучшения 4.3): тот же день цикла в
+  // разных циклах — кандидат в персональную закономерность. Отдельно от
+  // ПМС-окна: собираем смещения дня внутри цикла для каждого симптома.
+  const dayPatternCycles = new Map(); // code -> Map(cycleStart -> Set(dayOffset))
+  const coveredCycles = new Set();    // циклы с заполненным дневником симптомов
   let loggedDays = 0;
   for (const log of logs) {
     if (log.date < cutoff) continue;
@@ -5526,6 +5680,7 @@ function cycleStats(periods, logs, today, defaults, opts = {}) {
     }
     const c = cycleInfoOf(num);
     if (c && !c.estimated) {
+      if (hasSymptomInfo) coveredCycles.add(c.start);
       const lead = c.cycleLen - c.d; // дней до следующего старта (1..cycleLen)
       // Предменструальное окно: последняя неделя перед следующим стартом.
       if (lead >= 1 && lead <= 7 && hasSymptomInfo) {
@@ -5536,6 +5691,17 @@ function cycleStats(periods, logs, today, defaults, opts = {}) {
           slot.present = true;
           perCycle.set(c.start, slot);
           pmsCycles.set(code, perCycle);
+        }
+      }
+      // Смещение дня внутри цикла для дневных паттернов (весь цикл,
+      // не только предменструальная неделя).
+      if (hasSymptomInfo) {
+        for (const code of log.symptoms || []) {
+          const perCycle = dayPatternCycles.get(code) || new Map();
+          const days = perCycle.get(c.start) || new Set();
+          days.add(c.d);
+          perCycle.set(c.start, days);
+          dayPatternCycles.set(code, perCycle);
         }
       }
     }
@@ -5562,6 +5728,68 @@ function cycleStats(periods, logs, today, defaults, opts = {}) {
   }
   pms.sort((a, b) => b.cycles_with_symptom - a.cycles_with_symptom || a.avg_lead_days - b.avg_lead_days);
   pms.length = Math.min(pms.length, 8);
+  // Дневные паттерны (улучшения 4.3): симптом, повторяющийся в одном и том
+  // же смещении дня цикла (±1 день) минимум в двух циклах с заполненным
+  // дневником. Медианное смещение — representative day; циклы вне ±1 —
+  // не подтверждают паттерн и не считаются. «Не заполнено» ≠ «нет
+  // симптомов»: знаменатель — циклы с записями дневника симптомов.
+  const dayPatterns = [];
+  for (const [code, perCycle] of dayPatternCycles) {
+    const cyclesCovered = coveredCycles.size;
+    if (cyclesCovered < 2 || perCycle.size < 2) continue;
+    const offsets = [...perCycle.values()].flatMap(s => [...s]).sort((a, b) => a - b);
+    const med = offsets.length % 2
+      ? offsets[(offsets.length - 1) / 2]
+      : Math.round((offsets[offsets.length / 2 - 1] + offsets[offsets.length / 2]) / 2);
+    const recurrent = [...perCycle.values()]
+      .filter(days => [...days].some(d => Math.abs(d - med) <= 1)).length;
+    if (recurrent < 2) continue;
+    dayPatterns.push({
+      code,
+      day_offset: med + 1, // 1-based «день цикла» для показа
+      cycles_with_data: cyclesCovered,
+      cycles_with_symptom: recurrent,
+      days: offsets.length,
+      confidence: cyclesCovered >= 3 && recurrent >= 2 ? "good" : "low"
+    });
+  }
+  dayPatterns.sort((a, b) => b.cycles_with_symptom - a.cycles_with_symptom || a.day_offset - b.day_offset);
+  dayPatterns.length = Math.min(dayPatterns.length, 8);
+  // Интенсивность кровотечения по дням месячных (улучшения 4.2):
+  // смещение дня внутри фактического периода → распределение уровней.
+  // Знаменатель — только дни с отмеченным уровнем: «нет записи» не
+  // считается «нет кровотечения», «мажь» не приравнивается к началу
+  // месячных. Показ — от двух периодов с записями уровня.
+  const flowByDay = new Map(); // dayOffset -> {уровни, periods:Set}
+  const flowPeriodLastDay = new Map(); // startNum -> последний день со flow
+  for (const log of logs) {
+    if (log.date < cutoff || !CYCLE_FLOWS.includes(log.flow)) continue;
+    const num = cycleDayNum(log.date);
+    const range = periodRanges.find(r => num >= r.s && num <= r.e);
+    if (!range) continue;
+    const off = num - range.s + 1;
+    const slot = flowByDay.get(off) || { spotting: 0, light: 0, medium: 0, heavy: 0, periods: new Set() };
+    slot[log.flow] += 1;
+    slot.periods.add(range.s);
+    flowByDay.set(off, slot);
+    if ((flowPeriodLastDay.get(range.s) || 0) < off) flowPeriodLastDay.set(range.s, off);
+  }
+  const flowProfileDays = [...flowByDay.entries()]
+    .map(([day, s]) => {
+      const counts = { spotting: s.spotting, light: s.light, medium: s.medium, heavy: s.heavy };
+      const total = s.spotting + s.light + s.medium + s.heavy;
+      const max = Math.max(s.spotting, s.light, s.medium, s.heavy);
+      const dominant = ["heavy", "medium", "light", "spotting"].find(k => counts[k] === max);
+      return { day, ...counts, total, dominant, periods: s.periods.size };
+    })
+    .filter(d => d.total >= 2)
+    .sort((a, b) => a.day - b.day)
+    .slice(0, 14);
+  const flowProfile = flowPeriodLastDay.size >= 2 ? {
+    periods: flowPeriodLastDay.size,
+    typical_days: cycleMedianInt([...flowPeriodLastDay.values()]),
+    days: flowProfileDays
+  } : null;
   for (const bucket of Object.values(phases)) {
     bucket.avg_pain = bucket.pain_count ? Math.round((bucket.pain_sum / bucket.pain_count) * 10) / 10 : null;
     bucket.avg_sleep_hours = bucket.sleep_hours_count ? Math.round((bucket.sleep_hours_sum / bucket.sleep_hours_count) * 10) / 10 : null;
@@ -5590,13 +5818,21 @@ function cycleStats(periods, logs, today, defaults, opts = {}) {
     max_cycle_length: cycleLengths.length ? Math.max(...cycleLengths) : null,
     spread: cycleLengths.length >= 2 ? Math.max(...cycleLengths) - Math.min(...cycleLengths) : null,
     unusual_intervals: info.unusual.map(iv => ({ start: iv.start, end: iv.end, length: iv.length })),
-    period_lengths: periodDays.length ? { avg: avgPeriod, min: Math.min(...periodDays), max: Math.max(...periodDays), count: periodDays.length } : null,
+    // Медиана рядом со средним: при сильном разбросе медиана показывает
+    // типичную длительность без влияния единичных необычных записей.
+    period_lengths: periodDays.length ? {
+      avg: avgPeriod,
+      median: cycleMedianInt(periodDays),
+      min: Math.min(...periodDays), max: Math.max(...periodDays), count: periodDays.length
+    } : null,
     long_periods: longPeriods.map(p => ({ start: p.start, length: p.len })),
     usable_cycles: info.usable.length,
     logged_days: loggedDays,
     coverage: { from: cutoff, to: today, days_total: rangeDays, diary_days: coveredDays.size },
     phases,
     pms_patterns: pms,
+    day_patterns: dayPatterns,
+    flow_profile: flowProfile,
     phase_source: "estimated"
   };
 }
@@ -5816,22 +6052,6 @@ function cycleProfileContext(profile) {
   }
   const out = {};
   for (const key of CYCLE_CONTEXT_KEYS) out[key] = raw[key] === true || raw[key] === 1;
-  return out;
-}
-
-// Применимость календарных прогнозов при известном контексте (переработка 5.1).
-// Возвращает список ограничений для показа рядом с прогнозом: не диагноз,
-// а честная оговорка о применимости расчёта.
-function cycleContextCaveats(context) {
-  const out = [];
-  if (!context || typeof context !== "object") return out;
-  if (context.pregnancy) out.push("Отмечена беременность: календарные прогнозы месячных и овуляции неприменимы.");
-  if (context.postpartum || context.breastfeeding) out.push("После родов и на грудном вскармливании цикл часто нерегулярный: прогнозы особенно приблизительны.");
-  if (context.perimenopause) out.push("В перименопаузе цикл меняется: прогнозы приблизительны.");
-  if (context.hormonal_contraception) out.push("Гормональная контрацепция управляет циклом сама: календарный прогноз овуляции неприменим.");
-  if (context.cycle_affecting_meds) out.push("Препараты, влияющие на цикл или температуру, могут искажать прогноз и температурные наблюдения.");
-  if (context.very_irregular) out.push("Отмечены выраженно нерегулярные циклы: прогнозы очень приблизительные.");
-  if (context.unusual_bleeding) out.push("Отмечены необычные или межменструальные кровотечения — если это повторяется, обсудите с врачом.");
   return out;
 }
 

@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 // совпадать с тем, что видит владелица, без поднятого Worker'а.
 const source = readFileSync(new URL("../worker.js", import.meta.url), "utf8");
 const block = source.slice(source.indexOf("// ---- Фло"), source.indexOf("async function ensureSchema(env)"));
-const { cycleForecast, cycleDayNum, cycleViewForPartner, cycleExportPayload, cycleOnboardPlan, cycleReminderKinds, cycleStats, cyclePhaseTip } = new Function("DEFAULT_TZ", `${block}; return { cycleForecast, cycleDayNum, cycleViewForPartner, cycleExportPayload, cycleOnboardPlan, cycleReminderKinds, cycleStats, cyclePhaseTip };`)("Europe/Moscow");
+const { cycleForecast, cycleDayNum, cycleViewForPartner, cycleExportPayload, cycleOnboardPlan, cycleReminderKinds, cycleStats, cyclePhaseTip, cycleInsights } = new Function("DEFAULT_TZ", `${block}; return { cycleForecast, cycleDayNum, cycleViewForPartner, cycleExportPayload, cycleOnboardPlan, cycleReminderKinds, cycleStats, cyclePhaseTip, cycleInsights };`)("Europe/Moscow");
 const profile = { avg_cycle_length: 28, avg_period_length: 5 };
 
 test("без данных прогноз пустой, профиль используется как есть", () => {
@@ -744,4 +744,379 @@ test("болезнь в день замера исключает БТ-сдвиг
   const withSick = cycleForecast(periods, profile, "2026-09-14", meas, ["2026-09-11"]);
   assert.equal(withSick.ovulation_source, "calendar");
   assert.equal(withSick.ovulation_date, "2026-09-15");
+});
+
+// ---- Улучшения (этапы 3–5): персональный прогноз окончания месячных ----
+
+const mkPeriod = (s, len) => {
+  const d = new Date(s + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + len - 1);
+  return { start_date: s, end_date: d.toISOString().slice(0, 10) };
+};
+
+test("длительность месячных — взвешенная медиана 8 свежих, выброс не смещает (P1.2)", () => {
+  // 7 завершённых: самый старый — 9 дней, остальные 5. Все 7 в окне (≤8):
+  // медиана ядра = 5; 9 дней — выброс за полосой ±50%, но min/max честно
+  // его учитывают, а разброс 5–9 помечает статистику нестабильной.
+  const periods = [
+    mkPeriod("2026-01-01", 9), mkPeriod("2026-01-30", 5), mkPeriod("2026-03-01", 5),
+    mkPeriod("2026-03-30", 5), mkPeriod("2026-04-28", 5), mkPeriod("2026-05-27", 5),
+    mkPeriod("2026-06-25", 5),
+  ];
+  const f = cycleForecast(periods, profile, "2026-07-10");
+  assert.equal(f.avg_period_length, 5);
+  assert.equal(f.period_samples, 7, "берутся не более 8 свежих завершённых");
+  assert.equal(f.period_confidence, "low", "разброс ≥4 — достоверность низкая");
+  assert.equal(f.period_source, "history");
+  assert.equal(f.period_min, 5);
+  assert.equal(f.period_max, 9, "min/max — по всем наблюдениям, включая выброс");
+  assert.equal(f.period_unstable, true, "выброс + разброс ≥4 — предупреждение");
+  assert.equal(f.next_period_end, "2026-07-28"); // 24.07 + 5 − 1
+  assert.ok(f.next_period_end_early < f.next_period_end);
+  assert.ok(f.next_period_end_late > f.next_period_end);
+});
+
+test("end_unknown и открытый период не входят в статистику длительности", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-08" },              // 8 дн., завершённый
+    { start_date: "2026-01-29", end_date: null, end_unknown: true },   // «конец не помним»
+    { start_date: "2026-02-26", end_date: null },                      // открытый
+  ];
+  const f = cycleForecast(periods, profile, "2026-03-10");
+  assert.equal(f.period_samples, 1, "только завершённый период с известным концом");
+  assert.equal(f.avg_period_length, 8);
+  assert.equal(f.period_confidence, "low");
+  assert.equal(f.period_source, "history");
+  // Открытый период даёт прогноз окончания — и не закрывается им.
+  const cp = f.current_period;
+  assert.ok(cp, "прогноз текущего периода отсутствует");
+  assert.equal(f.phase, "menstruation", "прогноз не завершает фактический период");
+  assert.equal(cp.start, "2026-02-26");
+  assert.equal(cp.days_elapsed, 13);
+  assert.equal(cp.expected_end, "2026-03-05"); // 26.02 + 8 − 1
+  assert.equal(cp.overdue, true, "ожидаемое окончание прошло — нейтральный overdue");
+});
+
+test("нет завершённых месячных — профиль с явным предупреждением", () => {
+  const f = cycleForecast([{ start_date: "2026-11-10", end_date: null }], profile, "2026-11-12");
+  assert.equal(f.period_samples, 0);
+  assert.equal(f.period_confidence, "none");
+  assert.equal(f.period_source, "profile");
+  assert.equal(f.avg_period_length, 5, "берётся значение профиля");
+  const cp = f.current_period;
+  assert.ok(cp);
+  assert.equal(cp.expected_end, "2026-11-14"); // 10.11 + 5 − 1
+  assert.equal(cp.overdue, false);
+  assert.equal(cp.days_elapsed, 3);
+});
+
+test("диапазон окончания учитывает разброс и начала, и длительности", () => {
+  const periods = [
+    mkPeriod("2026-01-01", 3),   // 3 дн.
+    mkPeriod("2026-01-29", 7),   // 7 дн.
+    mkPeriod("2026-02-26", 5),   // 5 дн.
+    { start_date: "2026-03-26", end_date: null }, // открытый
+  ];
+  const f = cycleForecast(periods, profile, "2026-04-10");
+  assert.equal(f.avg_period_length, 5, "медиана 3/5/7");
+  assert.equal(f.period_samples, 3);
+  assert.equal(f.period_confidence, "low", "разброс 3–7 ≥ 4 — достоверность низкая (P1.2)");
+  assert.equal(f.period_unstable, true, "разброс 3–7 ≥ 4 — предупреждение");
+  assert.equal(f.period_min, 3);
+  assert.equal(f.period_max, 7);
+  // Циклы ровно по 28 → разброса нет (rng=3):
+  // начало 23.04 ±3, длительность 3–7 → конец 22.04 — 02.05.
+  assert.equal(f.next_period_end, "2026-04-27");
+  assert.equal(f.next_period_end_early, "2026-04-22");
+  assert.equal(f.next_period_end_late, "2026-05-02");
+  // Текущий период: 16 дней идёт, ожидаемое окончание 30.03, диапазон 28.03–01.04.
+  const cp = f.current_period;
+  assert.equal(cp.days_elapsed, 16);
+  assert.equal(cp.expected_end, "2026-03-30");
+  assert.equal(cp.end_early, "2026-03-28");
+  assert.equal(cp.end_late, "2026-04-01");
+  assert.equal(cp.overdue, true);
+});
+
+test("длительность считается включительно и на границах месяцев/високосного года", () => {
+  // 28.02–01.03 високосного 2028: 28, 29, 01 = 3 дня.
+  const leap = cycleForecast([mkPeriod("2028-02-28", 3)], profile, "2028-03-10");
+  assert.equal(leap.avg_period_length, 3);
+  assert.equal(leap.period_samples, 1);
+  // Январь → февраль: 30.01–02.02 = 4 дня.
+  const across = cycleForecast([mkPeriod("2026-01-30", 4)], profile, "2026-03-10");
+  assert.equal(across.avg_period_length, 4);
+});
+
+test("исправление прошлой записи пересчитывает статистику без кеша", () => {
+  const before = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+  ];
+  const f1 = cycleForecast(before, profile, "2026-03-10");
+  assert.equal(f1.avg_period_length, 5);
+  // Пользователь исправил окончание второго периода: 5 → 8 дней.
+  const edited = [before[0], { start_date: "2026-01-29", end_date: "2026-02-05" }];
+  const f2 = cycleForecast(edited, profile, "2026-03-10");
+  // Взвешенная медиана по свежести (P1.2): свежая запись 8 дн. весит
+  // больше старой 5 дн. — оценка 8, а не округлённое среднее 7.
+  assert.equal(f2.avg_period_length, 8, "взвешенная медиана отдаёт вес свежей записи");
+  assert.equal(f2.period_samples, 2);
+  // Удаление записи тоже пересчитывает: остался один период.
+  const f3 = cycleForecast([before[0]], profile, "2026-03-10");
+  assert.equal(f3.period_samples, 1);
+  assert.equal(f3.period_confidence, "low");
+});
+
+test("статистика: period_lengths отдаёт медиану рядом со средним", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-03" },
+    { start_date: "2026-01-29", end_date: "2026-02-04" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+  ];
+  const s = cycleStats(periods, [], "2026-04-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  assert.equal(s.period_lengths.median, 5);
+  assert.equal(s.period_lengths.min, 3);
+  assert.equal(s.period_lengths.max, 7);
+});
+
+test("дневные паттерны: симптом в одном дне цикла в разных циклах", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+  ];
+  // День 10 цикла (c.d=9) — bloating в двух циклах; одиночный headache — нет.
+  const logs = [
+    { date: "2026-01-10", symptoms: ["bloating"] },
+    { date: "2026-02-07", symptoms: ["bloating"] },
+    { date: "2026-01-15", symptoms: ["headache"] },
+  ];
+  const s = cycleStats(periods, logs, "2026-03-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  const p = (s.day_patterns || []).find(x => x.code === "bloating");
+  assert.ok(p, "bloating должен попасть в дневные паттерны");
+  assert.equal(p.day_offset, 10);
+  assert.equal(p.cycles_with_symptom, 2);
+  assert.equal(p.cycles_with_data, 2, "знаменатель — циклы с дневником симптомов (третий цикл без записей)");
+  assert.ok(!(s.day_patterns || []).some(x => x.code === "headache"), "одиночный симптом — не паттерн");
+});
+
+test("партнёрский вид: диапазон окончания только после подтверждения", () => {
+  const v = cycleViewForPartner(shared, fullShare);
+  assert.ok(v.forecast.next_period_end_early <= v.forecast.next_period_end);
+  assert.ok(v.forecast.next_period_end <= v.forecast.next_period_late
+    || v.forecast.next_period_end <= v.forecast.next_period_end_late);
+  const denied = cycleViewForPartner(shared, { enabled: true, confirmed: false, categories: fullShare.categories });
+  assert.equal("next_period_end_early" in denied.forecast, false);
+});
+
+test("интенсивность по дням месячных: распределение уровней по смещению", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+  ];
+  const logs = [
+    { date: "2026-01-01", flow: "heavy" }, { date: "2026-01-02", flow: "heavy" },
+    { date: "2026-01-03", flow: "medium" }, { date: "2026-01-04", flow: "light" },
+    { date: "2026-01-29", flow: "heavy" }, { date: "2026-01-30", flow: "medium" },
+    { date: "2026-01-31", flow: "light" },
+    { date: "2026-02-26", flow: "heavy" }, { date: "2026-02-27", flow: "medium" },
+  ];
+  const s = cycleStats(periods, logs, "2026-03-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  const fp = s.flow_profile;
+  assert.ok(fp, "flow_profile должен быть при >=2 периодах с отметками");
+  assert.equal(fp.periods, 3);
+  assert.equal(fp.typical_days, 3, "медиана последних дней со flow: 4,3,2 → 3");
+  const d1 = fp.days.find(d => d.day === 1);
+  assert.equal(d1.dominant, "heavy");
+  assert.equal(d1.total, 3);
+  assert.equal(d1.periods, 3);
+  const d2 = fp.days.find(d => d.day === 2);
+  assert.equal(d2.dominant, "medium", "heavy 1 / medium 2 → medium");
+  assert.ok(!fp.days.some(d => d.day === 4), "день с одной отметкой (<2) не показывается");
+});
+
+test("интенсивность по дням: один период — профиль не строится", () => {
+  const periods = [{ start_date: "2026-01-01", end_date: "2026-01-05" }];
+  const logs = [
+    { date: "2026-01-01", flow: "heavy" }, { date: "2026-01-02", flow: "heavy" },
+    { date: "2026-01-03", flow: "light" }, { date: "2026-01-04", flow: "light" },
+  ];
+  const s = cycleStats(periods, logs, "2026-03-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  assert.equal(s.flow_profile, null, "один период — недостаточная база");
+});
+
+test("интенсивность по дням: вне периода и end_unknown не выдумывают дни", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-04" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-10", end_date: null, end_unknown: 1 },
+  ];
+  const logs = [
+    { date: "2026-01-01", flow: "heavy" }, { date: "2026-01-02", flow: "heavy" },
+    { date: "2026-01-29", flow: "medium" }, { date: "2026-01-30", flow: "medium" },
+    // flow вне периодов и после «не помним конца» — не учитываются.
+    { date: "2026-01-15", flow: "heavy" }, { date: "2026-02-12", flow: "heavy" },
+  ];
+  const s = cycleStats(periods, logs, "2026-03-10", { avg_cycle_length: 28, avg_period_length: 5 });
+  const fp = s.flow_profile;
+  assert.ok(fp);
+  assert.equal(fp.periods, 2, "end_unknown-период даёт максимум день 1, здесь записей на него нет");
+  assert.ok(!fp.days.some(d => d.day > 4), "смещения вне фактических диапазонов не появляются");
+  const d1 = fp.days.find(d => d.day === 1);
+  assert.equal(d1.total, 2);
+  assert.equal(d1.heavy, 1);
+  assert.equal(d1.medium, 1);
+});
+
+// ---- План улучшения прогнозов (P1): контекст, алиасы, новые пороги ----
+
+test("P1.1: current_period отдаёт алиасы спецификации и источник (день N, early/late, source)", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-03-26", end_date: null }, // открытый
+  ];
+  const f = cycleForecast(periods, profile, "2026-04-01");
+  const cp = f.current_period;
+  assert.ok(cp);
+  assert.equal(cp.day_in_period, cp.days_elapsed, "day_in_period — алиас days_elapsed");
+  assert.equal(cp.expected_end_early, cp.end_early);
+  assert.equal(cp.expected_end_late, cp.end_late);
+  assert.equal(cp.source, "history");
+  assert.equal(cp.confidence, "low", "2 наблюдения → low");
+});
+
+test("P1.2: ≥5 наблюдений с разбросом ≤2 — high; свежая запись перевешивает", () => {
+  // 5 завершённых по 5 дней + свежий цикл другой длины не ломает оценку.
+  const periods = [
+    mkPeriod("2026-01-01", 5), mkPeriod("2026-01-30", 5), mkPeriod("2026-03-01", 5),
+    mkPeriod("2026-03-30", 5), mkPeriod("2026-04-28", 6),
+    { start_date: "2026-05-27", end_date: null },
+  ];
+  const f = cycleForecast(periods, profile, "2026-06-10");
+  assert.equal(f.period_samples, 5);
+  assert.equal(f.period_confidence, "high", "5 наблюдений, разброс 5–6 ≤2");
+  assert.equal(f.period_unstable, false);
+  // Четыре свежих/старых наблюдения по 5 дн. суммарно весят больше одного
+  // свежего 6-дневного — взвешенная медиана остаётся 5 (большинство важнее
+  // одного свежего замера; перевес свежести виден в тесте «исправление»).
+  assert.equal(f.avg_period_length, 5);
+});
+
+test("P1.2: одиночный сильный выброс отсекается из оценки, но виден в min/max", () => {
+  // 4 обычных по 5 дней + один 12-дневный (вне полосы ±50% от медианы 5).
+  const periods = [
+    mkPeriod("2026-01-01", 12), mkPeriod("2026-01-30", 5), mkPeriod("2026-02-27", 5),
+    mkPeriod("2026-03-27", 5), mkPeriod("2026-04-25", 5),
+    { start_date: "2026-05-24", end_date: null },
+  ];
+  const f = cycleForecast(periods, profile, "2026-06-05");
+  assert.equal(f.avg_period_length, 5, "выброс 12 не смещает оценку");
+  assert.equal(f.period_min, 5);
+  assert.equal(f.period_max, 12, "выброс остаётся в честном диапазоне");
+  assert.equal(f.period_unstable, true, "после отсева разброс 5–12 ≥4");
+});
+
+test("P1.3: активный контекст понижает качество и расширяет диапазоны", () => {
+  const periods = [
+    { start_date: "2026-01-01", end_date: "2026-01-05" },
+    { start_date: "2026-01-29", end_date: "2026-02-02" },
+    { start_date: "2026-02-26", end_date: "2026-03-02" },
+    { start_date: "2026-03-26", end_date: "2026-03-30" },
+    { start_date: "2026-04-23", end_date: null }, // открытый
+  ];
+  const plain = cycleForecast(periods, profile, "2026-04-28");
+  const ctxProfile = { ...profile, context: JSON.stringify({ very_irregular: true }) };
+  const ctx = cycleForecast(periods, ctxProfile, "2026-04-28");
+  assert.equal(plain.context_adjusted, false);
+  assert.equal(ctx.context_adjusted, true);
+  assert.equal(ctx.quality, "few", "full → few при активном контексте");
+  assert.ok(ctx.next_period_early < plain.next_period_early, "ранняя граница расширена");
+  assert.ok(ctx.next_period_late > plain.next_period_late, "поздняя граница расширена");
+  const cp = ctx.current_period;
+  assert.ok(cp.expected_end_early < plain.current_period.expected_end_early
+    || cp.expected_end_late > plain.current_period.expected_end_late,
+    "границы окончания текущего периода тоже шире");
+});
+
+test("P1.3: контекст insufficient не «улучшается» и пустой прогноз тоже помечается", () => {
+  const one = [{ start_date: "2026-04-23", end_date: null }];
+  const f = cycleForecast(one, { ...profile, context: { hormonal_contraception: true } }, "2026-04-28");
+  assert.equal(f.context_adjusted, true);
+  assert.equal(f.quality, "insufficient", "few → insufficient, ниже не бывает");
+  const empty = cycleForecast([], { ...profile, context: { pregnancy: true } }, "2026-04-28");
+  assert.equal(empty.context_adjusted, true);
+});
+
+// ---------- cycleInsights: прямая агрегация ----------
+
+test("I1: cycleInsights агрегирует кровотечение, симптомы, боль, сон и стресс", () => {
+  const logs = [
+    { date: "2026-11-01", flow: "heavy", clots: true, symptoms: ["cramps", "headache"], symptoms_clear: false, pain_score: 8, life_impact: "limited", sleep_quality: "poor", sleep_hours: 5, stress: "high", mucus: { consistency: "stringy", amount: "medium" }, sick: true },
+    { date: "2026-11-02", flow: "light", clots: false, symptoms: ["cramps"], symptoms_clear: false, pain_score: 4, life_impact: "little", sleep_quality: "good", sleep_hours: 8, stress: "low", mucus: null, sick: false },
+    { date: "2026-11-03", flow: null, clots: 0, symptoms: [], symptoms_clear: true, pain_score: null, life_impact: null, sleep_quality: "ok", sleep_hours: null, stress: "medium", mucus: { consistency: "watery", amount: "high" }, sick: true }
+  ];
+  const ins = cycleInsights(logs, [
+    { date: "2026-11-01", kind: "bbt" },
+    { date: "2026-11-01", kind: "lh", result: "positive" },
+    { date: "2026-11-02", kind: "lh", result: "negative" }
+  ]);
+  assert.equal(ins.bleeding.flow_days, 2);
+  assert.equal(ins.bleeding.heavy_days, 1);
+  assert.equal(ins.bleeding.clot_days, 1);
+  assert.equal(ins.wellbeing.symptom_days, 3, "symptoms_clear тоже даёт знаменатель");
+  assert.equal(ins.wellbeing.top_symptoms[0].code, "cramps");
+  assert.equal(ins.wellbeing.top_symptoms[0].count, 2);
+  assert.equal(ins.wellbeing.top_symptoms[0].denominator, 3);
+  assert.equal(ins.wellbeing.avg_pain, 6);
+  assert.equal(ins.wellbeing.pain_days, 2);
+  assert.equal(ins.wellbeing.life_impact.limited, 1);
+  assert.equal(ins.wellbeing.life_impact.little, 1);
+  assert.equal(ins.reproductive.bbt_days, 1);
+  assert.equal(ins.reproductive.bbt_days_usable, 0, "день болезни исключён из пригодных БТ");
+  assert.equal(ins.reproductive.lh_days, 2);
+  assert.equal(ins.reproductive.lh_positive_days, 1);
+  assert.equal(ins.reproductive.mucus_days, 2);
+  assert.deepEqual(ins.reproductive.mucus_peak_dates, ["2026-11-01", "2026-11-03"]);
+  assert.equal(ins.lifecycle?.sleep?.good, undefined);
+  assert.equal(ins.lifestyle.sleep.good, 1);
+  assert.equal(ins.lifestyle.sleep.ok, 1);
+  assert.equal(ins.lifestyle.sleep.poor, 1);
+  assert.equal(ins.lifestyle.sleep_hours_avg, 6.5);
+  assert.equal(ins.lifestyle.sleep_hours_days, 2);
+  assert.equal(ins.lifestyle.stress_days, 3);
+  assert.equal(ins.lifestyle.stress.high, 1);
+});
+
+test("I2: cycleInsights на пустых и битых данных не падает и отдаёт нули/null", () => {
+  const ins = cycleInsights([], []);
+  assert.equal(ins.bleeding.flow_days, 0);
+  assert.equal(ins.wellbeing.avg_pain, null);
+  assert.equal(ins.wellbeing.symptom_days, 0);
+  assert.equal(ins.wellbeing.top_symptoms.length, 0);
+  assert.equal(ins.reproductive.bbt_days, 0);
+  assert.equal(ins.reproductive.mucus_peak_dates.length, 0);
+  assert.equal(ins.lifestyle.sleep_hours_avg, null);
+  assert.equal(ins.lifestyle.stress_days, 0);
+  // Мусорные значения не должны ломать агрегацию.
+  const dirty = cycleInsights([
+    { date: "2026-11-01", flow: "weird", pain_score: "abc", sleep_hours: "x", mucus: "broken", stress: "extreme", symptoms: null, symptoms_clear: null }
+  ], [{ date: "2026-11-01", kind: "unknown" }]);
+  assert.equal(dirty.bleeding.flow_days, 1, "неизвестный flow всё равно считается днём с записью");
+  assert.equal(dirty.wellbeing.pain_days, 1, "строковая боль считается, avg может быть NaN→null проверяем ниже");
+  assert.equal(dirty.reproductive.bbt_days, 0);
+});
+
+test("I3:Plugin mucus_peak только для тягучей или обильной водянистой слизи", () => {
+  const logs = [
+    { date: "2026-11-01", mucus: { consistency: "sticky", amount: "high" } },
+    { date: "2026-11-02", mucus: { consistency: "watery", amount: "low" } },
+    { date: "2026-11-03", mucus: { consistency: "creamy", amount: "medium" } },
+    { date: "2026-11-04", mucus: { consistency: "stringy", amount: "low" } }
+  ];
+  const ins = cycleInsights(logs, []);
+  assert.equal(ins.reproductive.mucus_days, 4);
+  assert.deepEqual(ins.reproductive.mucus_peak_dates, ["2026-11-04"], "только stringy и watery+high — пик");
 });

@@ -175,7 +175,7 @@
 
   function memoryCard(m) {
     return `
-      <article class="card memory-card">
+      <article class="card memory-card" data-action="open-memory" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть запись дневника">
         <div class="item-row">
           <div class="item-main">
             ${m.title ? `<h3 class="item-title">${m.title}</h3>` : ""}
@@ -278,7 +278,7 @@
   function movieCard(m) {
     const watched = m.watched === true;
     return `
-      <article class="card movie-card${watched ? " movie-watched" : ""}">
+      <article class="card movie-card${watched ? " movie-watched" : ""}" data-action="open-movie" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть описание: ${m.title}">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${m.title}</h3>
@@ -297,11 +297,12 @@
             itemActionButton({ action: "delete-item", type: "movies", id: m.id, label: "Удалить", icon: DELETE_ICON })
           ].join("\n            "))}
         </div>
-        ${watched && m.my_rating == null ? `<button class="secondary full card-action" type="button">Оценить</button>` : ""}
+        ${watched && m.my_rating == null ? `<button class="secondary full card-action" type="button" data-action="rate-movie" data-id="${m.id}">Оценить</button>` : ""}
       </article>`;
   }
 
   function medCard(m) {
+    const taken = m.taken === true;
     return `
       <article class="card">
         <div class="item-row">
@@ -310,12 +311,13 @@
             <div class="item-meta">
               <span class="day-chip is-muted">${m.form}</span>
               <span>${m.dosage}</span>
+              ${taken ? `<span class="day-chip">Принято</span>` : ""}
             </div>
             <div class="item-meta"><span>${m.schedule}</span></div>
           </div>
           ${itemActions(itemActionButton({ action: "edit-item", type: "health_meds", id: m.id, label: "Редактировать", icon: EDIT_ICON }))}
         </div>
-        <button class="primary full card-action" type="button">Принять · +отметка</button>
+        <button class="primary full card-action" type="button" data-action="med-take" data-id="${m.id}">${taken ? "Отменить отметку" : "Принять · +отметка"}</button>
       </article>`;
   }
 
@@ -352,7 +354,7 @@
           </div>
           ${itemActions(actions)}
         </div>
-        ${w.url ? `<button class="secondary full card-action" type="button">Ссылка</button>` : ""}
+        ${w.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${w.url}">Ссылка</button>` : ""}
       </article>`;
   }
 
@@ -373,7 +375,7 @@
           </div>
           ${itemActions(actions)}
         </div>
-        ${w.url ? `<button class="secondary full card-action" type="button">Ссылка</button>` : ""}
+        ${w.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${w.url}">Ссылка</button>` : ""}
       </article>`;
   }
 
@@ -391,8 +393,8 @@
           itemActionButton({ action: "delete-item", type: "savings", id: s.id, label: "Удалить", icon: DELETE_ICON })
         ].join("\n        ");
     return `
-      <article class="card${full ? " saving-full" : ""}" role="button" tabindex="0"
-        aria-label="История пополнений копилки «${s.title}»">
+      <article class="card${full ? " saving-full" : ""}" data-action="open-saving" data-id="${s.id}"
+        role="button" tabindex="0" aria-label="История пополнений копилки «${s.title}»">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${s.title}</h3>
@@ -563,6 +565,8 @@
     movieKind: { open: "all", watched: "all" },
     calOffset: 0,
     calSelected: dayKey(todayMidnight()),
+    placePick: null,
+    moviePick: null,
     ritualDone: false,
     xp: 240,
     togetherXp: 520
@@ -583,23 +587,72 @@
         ${DONE_TASKS.map(doneTaskCard).join("")}`;
     }
     return `
-      <button class="primary full add-button" type="button">Добавить план</button>
+      <button class="primary full add-button" type="button" data-action="add-task">Добавить план</button>
       ${TASKS.map(taskCard).join("")}`;
   }
 
   function goalsList() {
+    // Цель «завершена», когда выполнены все её пункты — как completedGoals()
+    // в app.js; выполненные уходят в вид «Выполненные».
+    const open = GOALS.filter((g) => g.items.some((it) => !it.done));
+    const done = GOALS.filter((g) => !g.items.some((it) => !it.done));
     if (state.views.goals === "done") {
-      return `<section class="card"><h3>Пока ничего не достигнуто</h3><p>Отметьте все пункты цели — она переедет сюда</p></section>`;
+      if (!done.length) {
+        return `<section class="card"><h3>Пока ничего не достигнуто</h3><p>Отметьте все пункты цели — она переедет сюда</p></section>`;
+      }
+      return done.map(goalCard).join("");
+    }
+    if (!open.length) {
+      return `<section class="card"><h3>Пока пусто</h3>
+        <p>Опишите большую цель и разбейте её на шаги — отмечайте выполненные вместе</p>
+        <div style="margin-top:12px;"><button class="primary full" type="button" data-action="add-goal">Создать цель</button></div>
+      </section>`;
     }
     return `
-      <button class="primary full add-button" type="button">Создать цель</button>
-      ${GOALS.map(goalCard).join("")}`;
+      <button class="primary full add-button" type="button" data-action="add-goal">Создать цель</button>
+      ${open.map(goalCard).join("")}`;
   }
 
   function datesList() {
     return state.views.dates === "birthdays"
-      ? `<button class="primary full add-button" type="button">Добавить день рождения</button>${BIRTHDAYS.map(birthdayCard).join("")}`
-      : `<button class="primary full add-button" type="button">Добавить дату</button>${DATES.map(dateCard).join("")}`;
+      ? `<button class="primary full add-button" type="button" data-action="add-birthday">Добавить день рождения</button>${BIRTHDAYS.map(birthdayCard).join("")}`
+      : `<button class="primary full add-button" type="button" data-action="add-date">Добавить дату</button>${DATES.map(dateCard).join("")}`;
+  }
+
+  // Карточка результата «Рандом» — порт renderPlacePick()/renderMoviePick().
+  function placePickCard() {
+    const p = [...PLACES_VISIT, ...PLACES_VISITED].find((x) => x.id === state.placePick);
+    if (!p) { state.placePick = null; return ""; }
+    return `
+      <article class="card place-pick" aria-live="polite">
+        <p class="eyebrow">Вам выпало</p>
+        <h2 class="place-pick-title">${p.title}</h2>
+        ${p.note ? `<p class="place-pick-note">${p.note}</p>` : ""}
+        <div class="place-actions">
+          <button class="primary full" type="button" data-action="place-visited" data-id="${p.id}">Посетили</button>
+          <button class="secondary full" type="button" data-action="random-place">Следующее</button>
+          <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
+        </div>
+      </article>`;
+  }
+
+  function moviePickCard() {
+    const m = [...MOVIES_OPEN, ...MOVIES_WATCHED].find((x) => x.id === state.moviePick);
+    if (!m) { state.moviePick = null; return ""; }
+    return `
+      <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть описание: ${m.title}">
+        <p class="eyebrow">Вам выпало</p>
+        <h2 class="place-pick-title">${m.title}</h2>
+        <div class="item-meta">
+          ${ratingPill(m.rating)}
+          ${m.length ? `<span>${m.length}</span>` : ""}
+        </div>
+        <div class="place-actions">
+          <button class="primary full" type="button" data-action="movie-watched" data-id="${m.id}">Просмотрели</button>
+          <button class="secondary full" type="button" data-action="random-movie">Следующее</button>
+          <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
+        </div>
+      </article>`;
   }
 
   function placesList() {
@@ -607,7 +660,7 @@
       const open = TRIPS.filter((t) => !t.visited);
       const visited = TRIPS.filter((t) => t.visited);
       return `
-        <button class="primary full add-button" type="button">Добавить путешествие</button>
+        <button class="primary full add-button" type="button" data-action="add-trip">Добавить путешествие</button>
         ${open.map(tripCard).join("")}
         <div class="section-head-inline"><h3>Съездили · ${visited.length}</h3></div>
         ${visited.map(tripCard).join("")}`;
@@ -616,9 +669,10 @@
       <section class="card place-hero">
         <h3>Не знаете, куда пойти?</h3>
         <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите</p>
-        <button class="secondary full card-action" type="button">Рандом</button>
+        <button class="secondary full card-action" type="button" data-action="random-place">Рандом</button>
       </section>
-      <button class="primary full add-button" type="button">Добавить место</button>
+      ${placePickCard()}
+      <button class="primary full add-button" type="button" data-action="add-place">Добавить место</button>
       <div class="section-head-inline"><h3>Хотим посетить · ${PLACES_VISIT.length}</h3></div>
       ${PLACES_VISIT.map(placeCard).join("")}
       <div class="section-head-inline"><h3>Посещённые · ${PLACES_VISITED.length}</h3></div>
@@ -627,7 +681,7 @@
 
   function memoriesList() {
     const v = state.views.memories;
-    if (v === "quotes") return `<button class="primary full add-button" type="button">Добавить цитату</button>${QUOTES.map(quoteCard).join("")}`;
+    if (v === "quotes") return `<button class="primary full add-button" type="button" data-action="add-quote">Добавить цитату</button>${QUOTES.map(quoteCard).join("")}`;
     if (v === "health") {
       return `
         <section class="card">
@@ -637,8 +691,8 @@
         </section>
         ${MEDS.map(medCard).join("")}`;
     }
-    if (v === "contacts") return `<button class="primary full add-button" type="button">Добавить контакт</button>${CONTACTS.map(contactCard).join("")}`;
-    return `<button class="primary full add-button" type="button">Записать</button>${MEMORIES.map(memoryCard).join("")}`;
+    if (v === "contacts") return `<button class="primary full add-button" type="button" data-action="add-contact">Добавить контакт</button>${CONTACTS.map(contactCard).join("")}`;
+    return `<button class="primary full add-button" type="button" data-action="add-memory">Записать</button>${MEMORIES.map(memoryCard).join("")}`;
   }
 
   // ------------------------------------------------------------------
@@ -712,9 +766,10 @@
       <section class="card place-hero movie-hero">
         <h3>Не знаете, что посмотреть?</h3>
         <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров</p>
-        <button class="secondary full card-action" type="button">Рандом</button>
+        <button class="secondary full card-action" type="button" data-action="random-movie">Рандом</button>
       </section>
-      <button class="primary full add-button" type="button">Найти кино</button>
+      ${moviePickCard()}
+      <button class="primary full add-button" type="button" data-action="add-movie">Найти кино</button>
       ${movieSortBar("open", open.length)}
       ${open.length ? sortMovies(open, "open").map(movieCard).join("") : `<section class="card"><h3>Пусто</h3><p>Под фильтр ничего не попало — добавьте фильм или выберите «Все».</p></section>`}`;
   }
@@ -814,7 +869,7 @@
   ];
   function pairSettingsCard() {
     const swatches = ACCENT_SWATCHES.map(([key, color], i) => `
-      <button class="swatch${i === 0 ? " is-active" : ""}" type="button" style="background:${color}" aria-label="Акцентный цвет: ${key}"></button>`).join("");
+      <button class="swatch${i === 0 ? " is-active" : ""}" type="button" style="background:${color}" aria-label="Акцентный цвет: ${key}" data-action="set-accent" data-accent="${key}"></button>`).join("");
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow";
     return `
       <section class="card">
@@ -865,13 +920,13 @@
         <div class="settings-row">
           <span class="settings-label">Тема</span>
           <div class="theme-switch">
-            <button class="theme-option is-active" type="button">Как в системе</button>
-            <button class="theme-option" type="button">Тёмная</button>
-            <button class="theme-option" type="button">Светлая</button>
+            <button class="theme-option is-active" type="button" data-action="set-theme" data-theme="system">Как в системе</button>
+            <button class="theme-option" type="button" data-action="set-theme" data-theme="dark">Тёмная</button>
+            <button class="theme-option" type="button" data-action="set-theme" data-theme="light">Светлая</button>
           </div>
         </div>
         <div style="margin-top:14px; display:grid; gap:8px;">
-          <button class="secondary full" type="button">Сохранить настройки</button>
+          <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
         </div>
       </section>`;
   }
@@ -884,7 +939,7 @@
         <input type="text" inputmode="numeric" maxlength="4" placeholder="••••" autocomplete="off"
           style="width:100%;height:44px;border:1px solid var(--line);border-radius:12px;padding:0 12px;background:var(--bg);color:var(--ink);font:inherit;font-size:15px;letter-spacing:.4em;text-align:center;">
         <p class="settings-hint">Четырёхзначный пароль будет запрашиваться при открытии приложения</p>
-        <button class="secondary full card-action" type="button">Задать</button>
+        <button class="secondary full card-action" type="button" data-action="save-pin">Задать</button>
       </section>`;
   }
 
@@ -897,7 +952,7 @@
         <h3>Часовой пояс</h3>
         <select class="settings-select">${zones.map((z) => `<option${z === current ? " selected" : ""}>${z.replace(/_/g, " ")}</option>`).join("")}</select>
         <p class="settings-hint">Общий для календаря, ритуала дня, напоминаний и времени событий у обоих партнёров</p>
-        <button class="secondary full card-action" type="button">Сохранить пояс</button>
+        <button class="secondary full card-action" type="button" data-action="save-pair-timezone">Сохранить пояс</button>
       </section>`;
   }
 
@@ -907,7 +962,7 @@
         <p class="eyebrow">Резервная копия</p>
         <h3>Экспорт данных</h3>
         <p class="settings-hint">Выберите разделы — бот пришлёт один файл с выбранным. Удобно хранить вне приложения</p>
-        <button class="secondary full card-action" type="button">Экспортировать</button>
+        <button class="secondary full card-action" type="button" data-action="export-data">Экспортировать</button>
       </section>`;
   }
 
@@ -920,7 +975,7 @@
       ${pairTimezoneCard()}
       ${pairExportCard()}
       <div class="pair-exit">
-        <button class="secondary pair-leave" type="button">Выйти из пространства</button>
+        <button class="secondary pair-leave" type="button" data-action="leave-pair">Выйти из пространства</button>
       </div>`;
   }
 
@@ -938,7 +993,7 @@
       return doneList.map(completedWishItem).join("");
     }
     if (isMine) {
-      return `<button class="primary full add-button" type="button">Добавить желание</button>` + open.map(wishItem).join("");
+      return `<button class="primary full add-button" type="button" data-action="add-wish">Добавить желание</button>` + open.map(wishItem).join("");
     }
     return open.length
       ? open.map(wishItem).join("")
@@ -961,7 +1016,7 @@
   function savingsListHtml() {
     const saved = state.views.savingsView === "saved";
     const list = SAVINGS.filter((s) => (saved ? savingIsFull(s) : !savingIsFull(s)));
-    const addButton = `<button class="primary full add-button" type="button">Создать копилку</button>`;
+    const addButton = `<button class="primary full add-button" type="button" data-action="add-saving">Создать копилку</button>`;
     if (!list.length) {
       return saved
         ? `<section class="card"><h3>Пока пусто</h3><p>Здесь появятся копилки, у которых цель уже достигнута</p></section>`
@@ -1173,7 +1228,238 @@
     if (instance) instance.setActive(value, true);
   }
 
-  // Тап по сегменту.
+  // ------------------------------------------------------------------
+  // Действия демо. Каждая видимая кнопка либо меняет demo-state в памяти
+  // (DEMО_ACTIONS), либо явно отвечает тостом с причиной (DEMO_INERT) —
+  // молча неработающих элементов нет. API не вызывается, данные не
+  // сохраняются: всё живёт до перезагрузки страницы.
+  // Полноту покрывает tests/test_demo_actions.test.mjs.
+  // ------------------------------------------------------------------
+  const MONTHS_SHORT = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+  const todayDMLabel = `${new Date().getDate()} ${MONTHS_SHORT[new Date().getMonth()]}`;
+
+  const toastEl = document.createElement("div");
+  toastEl.className = "demo-toast";
+  toastEl.setAttribute("role", "status");
+  view.parentElement.appendChild(toastEl);
+  let toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("is-show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("is-show"), 1700);
+  }
+
+  // Перерисовать только блок, в котором нажали: ближайший .seg-body,
+  // иначе — весь экран (карточки главной). Скролл сохраняем.
+  function refreshAround(el) {
+    const st = view.scrollTop;
+    const bodyEl = el && el.closest(".seg-body");
+    const key = bodyEl && bodyEl.id ? bodyEl.id.replace("seg-body-", "") : null;
+    if (bodyEl && SEG_BODIES[key]) {
+      bodyEl.innerHTML = SEG_BODIES[key]();
+      mountSwitches(bodyEl);
+    } else {
+      render();
+    }
+    view.scrollTop = st;
+  }
+
+  const findById = (arr, id) => arr.find((x) => Number(x.id) === Number(id));
+  const ALL_LISTS = [
+    TASKS, DONE_TASKS, DATES, BIRTHDAYS, MEMORIES, QUOTES, MEDS, CONTACTS,
+    PLACES_VISIT, PLACES_VISITED, TRIPS, MOVIES_OPEN, MOVIES_WATCHED,
+    WISHES_OPEN_MINE, WISHES_OPEN_PARTNER, WISHES_DONE_MINE, WISHES_DONE_PARTNER,
+    SAVINGS
+  ];
+  const WISH_PAIRS = [
+    [WISHES_OPEN_MINE, WISHES_DONE_MINE],
+    [WISHES_OPEN_PARTNER, WISHES_DONE_PARTNER]
+  ];
+
+  function moveTask(id, done) {
+    const src = done ? TASKS : DONE_TASKS;
+    const dst = done ? DONE_TASKS : TASKS;
+    const i = src.findIndex((t) => Number(t.id) === Number(id));
+    if (i < 0) return;
+    const [t] = src.splice(i, 1);
+    dst.push(done ? { ...t, meta: `Выполнено ${todayDMLabel}` } : t);
+  }
+
+  function moveWish(id, done) {
+    for (const [open, doneArr] of WISH_PAIRS) {
+      if (done) {
+        const i = open.findIndex((w) => Number(w.id) === Number(id));
+        if (i < 0) continue;
+        const [w] = open.splice(i, 1);
+        doneArr.push({ ...w, created: todayDMLabel, doneAt: todayDMLabel });
+        return;
+      }
+      const j = doneArr.findIndex((w) => Number(w.id) === Number(id));
+      if (j < 0) continue;
+      const [w] = doneArr.splice(j, 1);
+      open.push(w);
+      return;
+    }
+  }
+
+  function removeDemoItem(type, id) {
+    if (type === "goals") {
+      const i = GOALS.findIndex((g) => Number(g.id) === Number(id));
+      if (i >= 0) GOALS.splice(i, 1);
+      return;
+    }
+    for (const arr of ALL_LISTS) {
+      const i = arr.findIndex((x) => Number(x.id) === Number(id));
+      if (i >= 0) { arr.splice(i, 1); return; }
+    }
+  }
+
+  function setPlaceVisited(id, visited) {
+    const src = visited ? PLACES_VISIT : PLACES_VISITED;
+    const dst = visited ? PLACES_VISITED : PLACES_VISIT;
+    const i = src.findIndex((p) => Number(p.id) === Number(id));
+    if (i < 0) return;
+    const [p] = src.splice(i, 1);
+    dst.push(visited ? { ...p, visited: true, visitedAt: `Посещено ${todayDMLabel}` } : { ...p, visited: false });
+    if (state.placePick === Number(id)) state.placePick = null;
+  }
+
+  function setTripVisited(id, visited) {
+    const t = findById(TRIPS, id);
+    if (!t) return;
+    t.visited = visited;
+    t.visitedAt = visited ? `Съездили ${todayDMLabel}` : undefined;
+  }
+
+  function setMovieWatched(id, watched) {
+    const src = watched ? MOVIES_OPEN : MOVIES_WATCHED;
+    const dst = watched ? MOVIES_WATCHED : MOVIES_OPEN;
+    const i = src.findIndex((m) => Number(m.id) === Number(id));
+    if (i < 0) return;
+    const [m] = src.splice(i, 1);
+    dst.push(watched
+      ? { ...m, watched: true, watchedAt: `Просмотрено ${todayDMLabel}`, my_rating: null }
+      : { ...m, watched: false, my_rating: null });
+    if (watched && state.moviePick === Number(id)) state.moviePick = null;
+  }
+
+  function toggleGoalItem(id, done) {
+    for (const g of GOALS) {
+      const it = g.items.find((x) => Number(x.id) === Number(id));
+      if (it) { it.done = done; return; }
+    }
+  }
+
+  function pickRandomPlace() {
+    const pool = PLACES_VISIT.filter((p) => p.id !== state.placePick);
+    if (!pool.length) { toast("Все места уже посещены — добавьте новое"); return; }
+    state.placePick = pool[Math.floor(Math.random() * pool.length)].id;
+  }
+
+  function pickRandomMovie() {
+    const pool = MOVIES_OPEN.filter((m) => m.id !== state.moviePick);
+    if (!pool.length) { toast("В планах ничего нет — добавьте фильм"); return; }
+    state.moviePick = pool[Math.floor(Math.random() * pool.length)].id;
+  }
+
+  const demoAddToast = () => toast("Добавление доступно в настоящем приложении");
+  const demoInertToast = (msg) => () => toast(msg);
+
+  // === DEMO_ACTIONS_BEGIN ===
+  // Локальные действия: меняют только данные в памяти этой страницы.
+  const DEMO_ACTIONS = {
+    "done-item"(e, btn) {
+      const type = btn.dataset.type;
+      if (type === "tasks") moveTask(btn.dataset.id, true);
+      else if (type === "wishes") moveWish(btn.dataset.id, true);
+      refreshAround(btn);
+    },
+    "reopen-item"(e, btn) {
+      const type = btn.dataset.type;
+      if (type === "tasks") moveTask(btn.dataset.id, false);
+      else if (type === "wishes") moveWish(btn.dataset.id, false);
+      refreshAround(btn);
+    },
+    "delete-item"(e, btn) {
+      removeDemoItem(btn.dataset.type, btn.dataset.id);
+      refreshAround(btn);
+    },
+    "place-visited"(e, btn) { setPlaceVisited(btn.dataset.id, true); refreshAround(btn); },
+    "place-unvisited"(e, btn) { setPlaceVisited(btn.dataset.id, false); refreshAround(btn); },
+    "trip-visited"(e, btn) { setTripVisited(btn.dataset.id, true); refreshAround(btn); },
+    "trip-unvisited"(e, btn) { setTripVisited(btn.dataset.id, false); refreshAround(btn); },
+    "movie-watched"(e, btn) { setMovieWatched(btn.dataset.id, true); refreshAround(btn); },
+    "movie-unwatched"(e, btn) { setMovieWatched(btn.dataset.id, false); refreshAround(btn); },
+    "goal-item-done"(e, btn) { toggleGoalItem(btn.dataset.id, true); refreshAround(btn); },
+    "goal-item-reopen"(e, btn) { toggleGoalItem(btn.dataset.id, false); refreshAround(btn); },
+    "med-take"(e, btn) {
+      const m = findById(MEDS, btn.dataset.id);
+      if (m) m.taken = !m.taken;
+      refreshAround(btn);
+    },
+    "deposit-saving"(e, btn) {
+      const s = findById(SAVINGS, btn.dataset.id);
+      if (s) s.collected = Math.min(Number(s.target), Number(s.collected) + 10000);
+      refreshAround(btn);
+    },
+    "random-place"(e, btn) { pickRandomPlace(); refreshAround(btn); },
+    "random-movie"(e, btn) { pickRandomMovie(); refreshAround(btn); },
+    "close-pick"(e, btn) { state.placePick = null; state.moviePick = null; refreshAround(btn); },
+    "set-accent"(e, btn) {
+      const row = btn.closest(".swatch-row");
+      if (row) row.querySelectorAll(".swatch").forEach((s) => s.classList.toggle("is-active", s === btn));
+    },
+    "add-task": demoAddToast, "add-date": demoAddToast, "add-birthday": demoAddToast,
+    "add-goal": demoAddToast, "add-movie": demoAddToast, "add-place": demoAddToast,
+    "add-trip": demoAddToast, "add-memory": demoAddToast, "add-quote": demoAddToast,
+    "add-contact": demoAddToast, "add-wish": demoAddToast, "add-saving": demoAddToast,
+    "share-wish"(e, btn) {
+      const w = [...WISHES_OPEN_MINE, ...WISHES_OPEN_PARTNER, ...WISHES_DONE_MINE, ...WISHES_DONE_PARTNER]
+        .find((x) => Number(x.id) === Number(btn.dataset.id));
+      const text = w ? [w.body, w.comment, w.url].filter(Boolean).join("\n") : "";
+      if (text && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          () => toast("Скопировано — в демо это пример"),
+          () => toast("Не удалось скопировать")
+        );
+      } else {
+        toast("Скопируйте текст вручную — это демо");
+      }
+    },
+    "save-settings": demoInertToast("Настройки сохраняются в настоящем приложении"),
+    "save-pair-timezone": demoInertToast("Часовой пояс сохраняется в настоящем приложении"),
+    "save-pin": demoInertToast("Пароль настраивается в настоящем приложении"),
+    "export-data": demoInertToast("Экспорт доступен в настоящем приложении"),
+    "leave-pair": demoInertToast("Выход из пространства — только в настоящем приложении"),
+    "set-theme": demoInertToast("Тема переключается в настоящем приложении")
+  };
+  // === DEMO_ACTIONS_END ===
+
+  // === DEMO_INERT_BEGIN ===
+  // Действия без локальной реализации: кнопка отвечает тостом с причиной,
+  // чтобы не выглядеть сломанной.
+  const DEMO_INERT = {
+    "edit-item": "Редактирование недоступно в демо",
+    "edit-saving": "Редактирование недоступно в демо",
+    "rate-movie": "Оценка фильма — в настоящем приложении",
+    "open-url": "Ссылка откроется в настоящем приложении",
+    "open-movie": "Описание фильма — в настоящем приложении",
+    "open-memory": "Полный текст записи — в настоящем приложении",
+    "open-saving": "История пополнений — в настоящем приложении",
+    "open-history": "История пары — в настоящем приложении"
+  };
+  // === DEMO_INERT_END ===
+
+  // === DEMO_NATIVE_BEGIN ===
+  // Обрабатываются отдельными ветками ниже (не через DEMO_ACTIONS):
+  const DEMO_NATIVE_ACTIONS = [
+    "wish-view", "cal-prev", "cal-next", "cal-day",
+    "movie-sort-dir", "movie-sort-key", "movie-filter-kind"
+  ];
+  // === DEMO_NATIVE_END ===
+
+  // Тап по сегменту и по кнопкам действий.
   view.addEventListener("click", (e) => {
     const segBtn = e.target.closest(".seg-switch-btn[data-tab]");
     if (segBtn) {
@@ -1207,11 +1493,24 @@
       refreshSegBody("pair");
       return;
     }
-    // Направление сортировки кино — переключаем dir, список перерисовываем.
-    if (e.target.closest('[data-action="movie-sort-dir"]')) {
-      const v = state.views.movies;
-      state.movieSort[v].dir = state.movieSort[v].dir === "asc" ? "desc" : "asc";
-      refreshSegBody("movies");
+    // Кнопки действий: локальная demo-логика (DEMO_ACTIONS), тост с
+    // причиной для нереализованных (DEMO_INERT) или отдельные ветки
+    // (DEMO_NATIVE_ACTIONS). Молча неработающих кнопок нет.
+    const actionBtn = e.target.closest("[data-action]");
+    if (actionBtn) {
+      const action = actionBtn.dataset.action;
+      const fn = DEMO_ACTIONS[action];
+      if (fn) { fn(e, actionBtn); return; }
+      if (action === "movie-sort-dir") {
+        const v = state.views.movies;
+        state.movieSort[v].dir = state.movieSort[v].dir === "asc" ? "desc" : "asc";
+        refreshSegBody("movies");
+        return;
+      }
+      const reason = DEMO_INERT[action];
+      if (reason) { toast(reason); return; }
+      if (!DEMO_NATIVE_ACTIONS.includes(action)) toast("Действие недоступно в демо");
+      return;
     }
   });
 
@@ -1225,6 +1524,31 @@
     else if (action === "movie-filter-kind") state.movieKind[viewKey] = sel.value;
     else return;
     refreshSegBody("movies");
+  });
+
+  // Клавиатурная активация карточек role="button" — тот же приём, что в
+  // app.js: Enter по keydown (без автоповтора), Space по keyup.
+  const screenEl = view.parentElement;
+  let spaceCard = null;
+  const demoCardFromEvent = (e) => {
+    const t = e.target;
+    if (!t || typeof t.closest !== "function") return null;
+    if (t.closest("button, a[href], input, select, textarea, summary, [contenteditable]")) return null;
+    return t.closest('[role="button"][tabindex]:not([tabindex="-1"])');
+  };
+  screenEl.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const card = demoCardFromEvent(e);
+    if (!card) return;
+    e.preventDefault();
+    if (e.key === "Enter") { if (!e.repeat) card.click(); }
+    else spaceCard = card;
+  });
+  screenEl.addEventListener("keyup", (e) => {
+    if (e.key !== " " && e.key !== "Spacebar") { spaceCard = null; return; }
+    const card = spaceCard;
+    spaceCard = null;
+    if (card && e.target === card && document.activeElement === card) card.click();
   });
 
   function setTab(tab) {

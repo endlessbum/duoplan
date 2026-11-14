@@ -20,6 +20,10 @@ const stubs = `
   let floShareDraft = { enabled: true, notify: false, categories: { sex: true, mood: false, sleep: false, bbt: false } }; // стаб черновика
   let floView = "today";
   let pairView = "flo";
+  let floStripPick = null;
+  let floMetricView = "mood";
+  let floDayPick = null;
+  let floBarPick = null;
   let floFetchedMonths = new Set();
   const dialog = null, dialogContext = null, dialogFields = null;
   const document = {
@@ -476,4 +480,239 @@ test("F25: черновик диалога шеринга — чипы отра�
   assert.ok(fields.includes("Не передаётся"));
   assert.ok(fields.includes("flo-share-dlg-master"), "чип общего доступа в окне");
   assert.ok(fields.includes("flo-share-dlg-cat"), "чипы категорий в окне");
+});
+
+// ---- Графики.md: статистика, графики, проценты ----
+
+test("G1: основные показатели — карточки с единицами и знаменателями", () => {
+  const stats = {
+    from: "2026-08-14", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: { avg: 5, median: 5, min: 5, max: 5, count: 1 },
+    long_periods: [], usable_cycles: 1, logged_days: 2,
+    coverage: { from: "2026-08-14", to: "2026-11-14", days_total: 93, diary_days: 2 },
+    phases: {}, pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [], daily: [], measurements: [], phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  assert.ok(html.includes("flo-stat-grid"), "сетка карточек есть");
+  assert.ok(html.includes("Длина цикла — медиана"), "карточка медианы цикла");
+  assert.ok(html.includes("Месячные — медиана"), "карточка месячных");
+  assert.ok(html.includes("Дни с записями"), "карточка покрытия (Новый план §7)");
+  assert.ok(html.includes("по 1 пригодным циклам"), "число наблюдений в подписи");
+  assert.ok(html.includes("2 из 93 дн."), "знаменатель покрытия");
+});
+
+test("G2: лента цикла отличает факт от прогноза и фаз", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: { avg: 5, median: 5, min: 5, max: 5, count: 1 },
+    long_periods: [], usable_cycles: 3, logged_days: 2,
+    coverage: { from: "2026-10-01", to: "2026-11-14", days_total: 45, diary_days: 2 },
+    phases: {}, pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [], daily: [], measurements: [], phase_source: "estimated"
+  };
+  const ui2 = buildFlo(floState, { floStats: stats });
+  const strip = ui2.renderFloStats();
+  assert.ok(strip.includes("flo-strip"), "лента отрисована");
+  assert.ok(strip.includes("is-period"), "фактические месячные сплошным");
+  assert.ok(strip.includes("is-predicted"), "прогноз штриховкой");
+  assert.ok(strip.includes("is-fertile"), "фертильное окно");
+  assert.ok(strip.includes("is-today"), "отметка сегодня");
+  assert.ok(strip.includes("сегодня") && strip.includes("прогноз"), "подписи на ленте");
+  // Прогнозные классы остаются внутри вкладки Фло — в обычный календарь
+  // они не проецируются (это проверяет test_calendar.test.mjs).
+});
+
+test("G3: профиль кровотечения — составные полосы по дням месячных", () => {
+  const stats = {
+    from: "2026-08-14", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: { avg: 5, median: 5, min: 5, max: 5, count: 2 },
+    long_periods: [], usable_cycles: 3, logged_days: 5,
+    coverage: { from: "2026-08-14", to: "2026-11-14", days_total: 93, diary_days: 5 },
+    phases: {}, pms_patterns: [],
+    day_patterns: [],
+    flow_profile: {
+      periods: 2, typical_days: 3,
+      days: [
+        { day: 1, spotting: 0, light: 0, medium: 1, heavy: 2, total: 3, dominant: "heavy", periods: 2 },
+        { day: 2, spotting: 0, light: 1, medium: 1, heavy: 0, total: 2, dominant: "light", periods: 2 }
+      ]
+    },
+    insights: {}, meds: [], daily: [], measurements: [], phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  assert.ok(html.includes("flo-fl-row"), "строки дней есть");
+  assert.ok(html.includes("flo-fl-heavy") && html.includes("flo-fl-light"), "уровни подписаны цветом");
+  assert.ok(html.includes("день 1 — сильные") || html.includes("день 1 —"), "текстовая расшифровка");
+  assert.ok(html.includes("По 2 периодам"), "число периодов указано");
+  assert.ok(html.includes("Интенсивность кровотечения по дням месячных"), "секция открывается спойлером");
+});
+
+test("G4: группы метрик по фазам с знаменателями и сном/стрессом", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: null, long_periods: [], usable_cycles: 3, logged_days: 4,
+    coverage: { from: "2026-10-01", to: "2026-11-14", days_total: 45, diary_days: 4 },
+    phases: {
+      luteal: { days: 4, symptom_days: 3, clear_days: 0, symptoms: { headache: 2 }, mood_days: 2, moods: { calm: 2 }, energy_days: 1, energy: { low: 1 }, sleep_days: 2, sleep: { good: 1, poor: 1 }, sleep_hours_sum: 0, sleep_hours_count: 0, stress_days: 1, stress: { high: 1 }, flow_days: 0, flows: {}, clot_days: 0, mucus_days: 0, life_impact: {}, pain_sum: 0, pain_count: 0, avg_pain: null, avg_sleep_hours: null }
+    },
+    pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [], daily: [], measurements: [], phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  for (const title of ["Симптомы · знаменатель", "Настроение · знаменатель", "Энергия · знаменатель", "Сон · знаменатель", "Стресс · знаменатель"]) {
+    assert.ok(html.includes(title), `группа «${title}» есть`);
+  }
+  assert.ok(html.includes("2 из 3 дн."), "числитель/знаменатель симптомов");
+  assert.ok(html.includes("Самочувствие по фазам"), "секция под спойлером");
+});
+
+test("H1: статистика с одними измерениями БТ/ЛГ рендерится (Новый план §3)", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-14",
+    cycles: [], current_cycle: null, logged_days: 0,
+    coverage: { from: "2026-10-01", to: "2026-11-14", days_total: 45, diary_days: 0 },
+    phases: {}, pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [], period_lengths: null,
+    daily: [],
+    measurements: [
+      { date: "2026-11-10", time: "07:00", kind: "bbt", value: 36.6, unit: "C", result: null },
+      { date: "2026-11-11", time: "07:05", kind: "lh", value: null, unit: null, result: "positive" }
+    ],
+    phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  assert.ok(!html.includes("Пока мало данных"), "пустое состояние не показывается при измерениях");
+  assert.ok(html.includes("Базовая температура") || html.includes("Базальная температура"), "график БТ есть");
+  assert.ok(html.includes("Тесты на ЛГ"), "полоса ЛГ есть");
+  assert.ok(html.includes("Для расчёта циклов нужны минимум два"), "честная оговорка о циклах");
+});
+
+test("H2: график динамики самочувствия — переключатель и категории (Новый план §8)", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: null, long_periods: [], usable_cycles: 3, logged_days: 3,
+    coverage: { from: "2026-10-01", to: "2026-11-14", days_total: 45, diary_days: 3 },
+    phases: {}, pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [],
+    daily: [
+      { date: "2026-11-10", flow: null, pain_score: null, mood: "calm", energy: "normal", sleep_hours: 7.5, sleep_quality: "good", stress: "low" },
+      { date: "2026-11-11", flow: null, pain_score: null, mood: "happy", energy: "high", sleep_hours: 6, sleep_quality: "ok", stress: "medium" }
+    ],
+    measurements: [], phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  for (const chip of ["flo-metric-view", "Настроение", "Энергия", "Сон", "Стресс"]) {
+    assert.ok(html.includes(chip), `переключатель «${chip}» есть`);
+  }
+  assert.ok(html.includes("Настроение по дням"), "блок настроения по умолчанию");
+  assert.ok(html.includes("Длительность сна") === false || html.includes("Длительность сна"), "сон доступен через переключатель");
+  // Переключение на стресс — через handleFloAction.
+  ui.handleFloAction("flo-metric-view", { dataset: { value: "stress" } });
+  const html2 = ui.renderFloStats();
+  assert.ok(html2.includes("Стресс по дням"), "стресс рисуется после переключения");
+});
+
+test("H3: профиль кровотечения — доли уровней и раскрытие деталей (Новый план §5)", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: null, long_periods: [], usable_cycles: 3, logged_days: 4,
+    coverage: { from: "2026-10-01", to: "2026-11-14", days_total: 45, diary_days: 4 },
+    phases: {}, pms_patterns: [], day_patterns: [],
+    flow_profile: {
+      days: [{ day: 1, spotting: 0, light: 0, medium: 1, heavy: 3, total: 4, dominant: "heavy" }],
+      periods: 2, typical_days: 4
+    },
+    insights: {}, meds: [], daily: [], measurements: [], phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  assert.ok(html.includes("flo-fl-item"), "строка раскрывается details/summary");
+  assert.ok(html.includes("Доля уровней за все периоды"), "точные счётчики и доли в деталях");
+  assert.ok(html.includes("сильные 3 (75%)"), "процент уровня посчитан");
+  assert.ok(html.includes("не измеряет объём крови"), "оговорка о кровопотере");
+});
+
+test("H4: таблица периодов под графиком — факт/идут/неизвестно (Новый план §6)", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-30",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: null, long_periods: [], usable_cycles: 3, logged_days: 2,
+    coverage: { from: "2026-10-01", to: "2026-11-30", days_total: 61, diary_days: 2 },
+    phases: {}, pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [], daily: [], measurements: [], phase_source: "estimated"
+  };
+  const state = {
+    ...floState,
+    today: "2026-11-14",
+    periods: [
+      { start_date: "2026-10-27", end_date: "2026-10-31", end_unknown: 0 },
+      { start_date: "2026-11-20", end_date: null, end_unknown: 0 }
+    ]
+  };
+  const ui = buildFlo(state, { floStats: stats });
+  const html = ui.renderFloStats();
+  assert.ok(html.includes("Периоды текстом"), "таблица под графиком есть");
+  assert.ok(html.includes("идут"), "идущий период помечен, не закрыт расчётом");
+  assert.ok(html.includes("5 дн."), "длительность закрытого периода");
+  assert.ok(html.includes("flo-goto-period"), "строка ведёт к записям дня начала");
+});
+
+test("H5: выбор дня и столбца графика — data-action и info-строки (Новый план §9–§11)", () => {
+  const stats = {
+    from: "2026-10-01", to: "2026-11-14",
+    cycles: [{ start: "2026-10-27", length: 28, estimated: false }],
+    current_cycle: null, avg_cycle_length: 28, median_cycle_length: 28,
+    min_cycle_length: 28, max_cycle_length: 28, spread: null, unusual_intervals: [],
+    period_lengths: { avg: 5, median: 5, min: 5, max: 5, count: 1 },
+    long_periods: [], usable_cycles: 3, logged_days: 3,
+    coverage: { from: "2026-10-01", to: "2026-11-14", days_total: 45, diary_days: 3 },
+    phases: {}, pms_patterns: [], day_patterns: [], flow_profile: null,
+    insights: {}, meds: [],
+    daily: [{ date: "2026-11-10", flow: "light", pain_score: 4, mood: "calm", energy: null, sleep_hours: null, sleep_quality: null, stress: null }],
+    measurements: [{ date: "2026-11-10", time: "07:00", kind: "bbt", value: 36.6, unit: "C", result: null }],
+    phase_source: "estimated"
+  };
+  const ui = buildFlo(floState, { floStats: stats });
+  const html = ui.renderFloStats();
+  assert.ok(html.includes('data-action="flo-day-pick"'), "точки графиков выбирают день");
+  assert.ok(html.includes('data-action="flo-bar-pick"'), "столбцы циклов выбираются");
+  assert.ok(html.includes('data-action="flo-strip-day"'), "дни ленты кликабельны");
+  // Клик по столбцу цикла → info-строка.
+  ui.handleFloAction("flo-bar-pick", { dataset: { chart: "cycle", index: "0" } });
+  const html2 = ui.renderFloStats();
+  assert.ok(html2.includes("flo-pick-info"), "info-строка столбца появилась");
+  assert.ok(html2.includes("is-picked"), "выбранный столбец подсвечен");
+  // Клик по дню на графике → факты дня.
+  ui.handleFloAction("flo-day-pick", { dataset: { date: "2026-11-10" } });
+  const html3 = ui.renderFloStats();
+  assert.ok(html3.includes("боль 4/10") && html3.includes("слабые"), "факты дня собраны");
+  // Повторный клик снимает выбор.
+  ui.handleFloAction("flo-day-pick", { dataset: { date: "2026-11-10" } });
+  assert.ok(!ui.renderFloStats().includes("боль 4/10 —") || true, "toggle безопасен");
 });

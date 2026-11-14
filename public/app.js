@@ -77,6 +77,10 @@
   // P2: отчёт (печать/CSV/JSON), препараты и черновики форм.
   let floReport = null; // { months, loading, failed, data }
   let floStatsMonths = 12;
+  let floStripPick = null;   // выбранный день на ленте текущего цикла
+  let floMetricView = "mood"; // переключатель динамики: mood/energy/sleep/stress
+  let floDayPick = null;      // выбранный день на графиках «по дням»
+  let floBarPick = null;      // "chart:index" — выбранный столбец графика
   let floMedDetail = null; // "medId:date" — раскрытые поля факта приёма
   // Здоровье («Дневник → Здоровье»): личный журнал препаратов каждого
   // партнёра + напоминания бота о приёме. Данные персональные (tg_id).
@@ -1987,18 +1991,29 @@
   }
 
   // Все события дня: по точке на каждое, звезда — вручённое желание.
-  function calendarCellDots(bucket, cyclePeriods) {
+  // dayKey — календарный ключ ячейки: bucket может отсутствовать (пустой
+  // день), но капля месячных обязана показаться и там (улучшения, этап 5.4).
+  function calendarCellDots(bucket, dayKey, cyclePeriods) {
     const dots = [];
-    if (!bucket) return dots;
-    if (bucket.wishes?.length) dots.push(`<span class="cal-star">${STAR_ICON}</span>`);
-    for (const task of bucket.tasks || []) dots.push(calendarEventDot(task, "is-task"));
-    for (const date of bucket.dates || []) dots.push(calendarEventDot(date, "is-date"));
-    for (const birthday of bucket.birthdays || []) dots.push(calendarEventDot(birthday, "is-birthday"));
-    // Фло: месячные для владелицы или партнёра (при шеринге)
+    if (bucket) {
+      if (bucket.wishes?.length) dots.push(`<span class="cal-star">${STAR_ICON}</span>`);
+      for (const task of bucket.tasks || []) dots.push(calendarEventDot(task, "is-task"));
+      for (const date of bucket.dates || []) dots.push(calendarEventDot(date, "is-date"));
+      for (const birthday of bucket.birthdays || []) dots.push(calendarEventDot(birthday, "is-birthday"));
+    }
+    // Фло: только фактические месячные — от подтверждённого начала до
+    // подтверждённого конца. Открытый период тянется до сегодня (не в
+    // будущее); «конец не помним» — только день начала. Прогнозные даты,
+    // фазы, симптомы и прочее в обычный календарь не проецируются.
+    const todayKey = calendarTodayKey();
     for (const period of cyclePeriods || []) {
       const start = period.start_date;
-      const end = period.end_date || start;
-      if (bucket.key >= start && bucket.key <= end) {
+      if (!start || !dayKey || dayKey < start) continue;
+      let end = period.end_date || null;
+      if (!end) {
+        end = Number(period.end_unknown) === 1 ? start : todayKey;
+      }
+      if (dayKey <= end) {
         dots.push(`<i class="cal-dot is-cycle" aria-hidden="true"></i>`);
         break;
       }
@@ -2036,7 +2051,7 @@
 
     const cellsHtml = calendarGrid(year, month).map((cell) => {
       const bucket = index.get(cell.key);
-      const dots = calendarCellDots(bucket, cyclePeriods);
+      const dots = calendarCellDots(bucket, cell.key, cyclePeriods);
       const classes = ["cal-day"];
       if (!cell.inMonth) classes.push("is-outside");
       // «Сегодня» подсвечиваем только в своём месяце: в сетке соседнего
@@ -3771,53 +3786,89 @@
       </div>`;
   }
 
-  // P2/графики: временные ряды по дням — боль, кровотечение, БТ и ЛГ.
-  // Только фактические отметки; пропуски — отсутствие точек и разрыв линии,
-  // не ноль (переработка 13). Ось подписана датами периода; БТ в один день
-  // агрегируется средним для линии, отдельные замеры видны точками.
+  // Шкала по реальным календарным датам: расстояние между точками
+  // соответствует дням, редкие отметки не «растягиваются» (Графики.md §7).
+  function floDateScale(from, to, W, padL) {
+    const a = Date.parse(`${from}T00:00:00Z`);
+    const b = Date.parse(`${to}T00:00:00Z`);
+    const span = Math.max(86400000, b - a);
+    return d => padL + (Date.parse(`${d}T00:00:00Z`) - a) / span * (W - padL - 8);
+  }
+
+  // Подписи оси X: границы диапазона + первые числа месяцев внутри.
+  // Длинный диапазон прореживается равномерно, границы сохраняются.
+  function floAxisDates(from, to) {
+    const pts = [from];
+    const d = new Date(Date.parse(`${from.slice(0, 7)}-01T00:00:00Z`));
+    d.setUTCMonth(d.getUTCMonth() + 1);
+    while (d.toISOString().slice(0, 10) <= to) {
+      const key = d.toISOString().slice(0, 10);
+      if (key > from) pts.push(key);
+      d.setUTCMonth(d.getUTCMonth() + 1);
+    }
+    if (to > from) pts.push(to);
+    const uniq = [...new Set(pts)];
+    if (uniq.length <= 7) return uniq;
+    const step = Math.ceil((uniq.length - 1) / 6);
+    return uniq.filter((_, i) => i % step === 0 || i === uniq.length - 1);
+  }
+
+  // Столбчатый график с сеткой по значениям, подписями столбцов и линиями
+  // среднего/медианы. items: {xlabel, value, title}; lines: {value, cls, name}.
+  function floBarsChart(items, opts = {}) {
+    if (!items.length) return "";
+    const W = 320, H = opts.height || 140, padL = 26, padR = 8, padT = 12, padB = 18;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const vals = items.map(i => i.value);
+    let lo = opts.lo !== undefined ? opts.lo : Math.min(...vals);
+    let hi = opts.hi !== undefined ? opts.hi : Math.max(...vals);
+    if (hi <= lo) hi = lo + 1;
+    const yFor = v => padT + plotH - ((Math.min(Math.max(v, lo), hi) - lo) / (hi - lo)) * plotH;
+    const slot = plotW / items.length;
+    const barW = Math.max(4, Math.min(26, slot * 0.62));
+    const grid = [lo, Math.round((lo + hi) / 2), hi].map(v => {
+      const y = yFor(v).toFixed(1);
+      return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" class="flo-grid"/>` +
+        `<text x="${padL - 5}" y="${(yFor(v) + 3).toFixed(1)}" class="flo-axis" text-anchor="end">${v}</text>`;
+    }).join("");
+    const bars = items.map((it, i) => {
+      const cx = padL + i * slot + slot / 2;
+      const y = yFor(it.value);
+      const h = Math.max(2, H - padB - y);
+      const valLabel = slot >= 30
+        ? `<text x="${cx.toFixed(1)}" y="${(y - 4).toFixed(1)}" class="flo-chart-val" text-anchor="middle">${it.value}</text>` : "";
+      const xLabel = (items.length <= 8 || i === 0 || i === items.length - 1)
+        ? `<text x="${cx.toFixed(1)}" y="${H - 4}" class="flo-axis" text-anchor="middle">${esc(it.xlabel || "")}</text>` : "";
+      const picked = opts.chart && floBarPick === `${opts.chart}:${i}`;
+      const pickAttrs = opts.chart
+        ? ` data-action="flo-bar-pick" data-chart="${opts.chart}" data-index="${i}"` : "";
+      return `<rect x="${(cx - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="3" class="flo-bar${picked ? " is-picked" : ""}"${pickAttrs}><title>${esc(it.title || `${it.xlabel}: ${it.value}`)}</title></rect>${valLabel}${xLabel}`;
+    }).join("");
+    const lines = (opts.lines || []).map(l => {
+      const y = yFor(Math.min(Math.max(l.value, lo), hi)).toFixed(1);
+      return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" class="${l.cls}"/>`;
+    }).join("");
+    const legend = (opts.lines || []).length
+      ? `<p class="flo-legend">${opts.lines.map(l => `<span class="flo-legend-line ${l.cls === "flo-median" ? "is-median" : "is-avg"}"></span>${esc(l.name)}`).join(" · ")}</p>` : "";
+    return `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="${esc(opts.aria || "График")}">${grid}${bars}${lines}</svg>${legend}`;
+  }
+
+  // Временные ряды по дням — боль, кровотечение, БТ и ЛГ (Графики.md §7).
+  // Ось X — реальные календарные даты диапазона статистики: редкие отметки
+  // не «растягиваются» на равные промежутки. Пропуски — отсутствие точек
+  // и разрыв линии, не ноль. Возвращает { daily, meas, text } — части
+  // раскладываются по разным секциям renderFloStats.
   function floStatsDayCharts(s) {
     const daily = s.daily || [];
     const meas = s.measurements || [];
-    if (!daily.length && !meas.length) return "";
-    const W = 320, H = 96, pad = 16;
+    const none = { daily: "", meas: "", text: "" };
+    if (!daily.length && !meas.length) return none;
+    const W = 320;
+    const from = s.from || daily[0]?.date || meas[0]?.date;
+    const to = s.to || from;
     const dates = [...new Set([...daily.map(d => d.date), ...meas.map(m => m.date)])].sort();
     const idx = new Map(dates.map((d, i) => [d, i]));
-    const X = i => dates.length === 1 ? W / 2 : pad + i * (W - 2 * pad) / (dates.length - 1);
-    // Подписи оси: первая и последняя даты + месяц на серединах.
-    const axisLabels = [];
-    if (dates.length) {
-      axisLabels.push(`<text x="${X(0).toFixed(1)}" y="${H - 2}" class="flo-axis" text-anchor="start">${esc(dates[0].slice(5))}</text>`);
-      if (dates.length > 4) {
-        const mid = Math.floor((dates.length - 1) / 2);
-        axisLabels.push(`<text x="${X(mid).toFixed(1)}" y="${H - 2}" class="flo-axis" text-anchor="middle">${esc(dates[mid].slice(5))}</text>`);
-      }
-      if (dates.length > 1) {
-        axisLabels.push(`<text x="${X(dates.length - 1).toFixed(1)}" y="${H - 2}" class="flo-axis" text-anchor="end">${esc(dates[dates.length - 1].slice(5))}</text>`);
-      }
-    }
-    const axisSvg = axisLabels.join("");
-    const flowLvl = { spotting: 1, light: 2, medium: 3, heavy: 4 };
-    const painPts = daily.filter(d => d.pain_score !== null && d.pain_score !== undefined)
-      .map(d => ({ x: X(idx.get(d.date)), y: H - pad - 6 - (d.pain_score / 10) * (H - 2 * pad), label: `${d.date}: боль ${d.pain_score}/10` }));
-    const painSvg = painPts.length
-      ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Боль по дням">${painPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" class="flo-dot"><title>${esc(p.label)}</title></circle>`).join("")}${axisSvg}</svg>
-        <p class="flo-legend">Боль 0–10: каждая точка — день с отметкой (${painPts.length}). Пропуски не считаются нулём</p>`
-      : `<p class="flo-disclaimer">Боль не отмечали за период.</p>`;
-    const flowBars = daily.filter(d => d.flow)
-      .map(d => {
-        const lvl = flowLvl[d.flow] || 0;
-        const bw = Math.max(3, (W - 2 * pad) / dates.length - 2);
-        const h = (lvl / 4) * (H - 2 * pad - 6);
-        return `<rect x="${(X(idx.get(d.date)) - bw / 2).toFixed(1)}" y="${(H - pad - 4 - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" class="flo-bar"><title>${esc(d.date)}: ${esc(FLO_FLOWS.find(([c]) => c === d.flow)?.[1] || d.flow)}</title></rect>`;
-      }).join("");
-    const flowSvg = flowBars
-      ? `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Кровотечение по дням">${flowBars}${axisSvg}</svg>
-        <p class="flo-legend">Высота столбца — интенсивность: ${esc(FLO_FLOWS.map(([, l]) => l).join(" / "))}</p>`
-      : `<p class="flo-disclaimer">Кровотечение не отмечали за период.</p>`;
-    // БТ (°F → °C) + маркеры ЛГ в верхней полосе. Несколько замеров в день
-    // агрегируются средним для линии — документированное правило; отдельные
-    // замеры остаются видимыми точками. Линия соединяет только соседние дни:
-    // пропуски разрывают её, а не соединяются «непрерывным наблюдением».
+    // БТ (°F → °C), агрегированная по дням для линии; точка — у каждого замера.
     const byDay = new Map();
     for (const m of meas) {
       if (m.kind !== "bbt" || m.value === null || m.value === undefined) continue;
@@ -3830,18 +3881,80 @@
       .map(d => {
         const arr = byDay.get(d);
         const mean = arr.reduce((sum, x) => sum + x.v, 0) / arr.length;
-        return { d, mean, first: arr[0], all: arr, x: X(idx.get(d)) };
+        return { d, mean, first: arr[0], all: arr };
       });
     const lhPts = meas.filter(m => m.kind === "lh" && m.result)
-      .map(m => ({ x: X(idx.get(m.date)), result: m.result, m }));
-    let measSvg = `<p class="flo-disclaimer">Измерений (БТ, ЛГ) за период нет</p>`;
-    if (bbtDays.length || lhPts.length) {
+      .map(m => ({ date: m.date, result: m.result, m }));
+    // Подписи оси X общие для всех графиков блока: первые числа месяцев
+    // внутри диапазона + границы (Графики.md §7 — реальные интервалы).
+    const axisDates = floAxisDates(from, to);
+    const axisFor = (H, padL) => {
+      const X = floDateScale(from, to, W, padL);
+      const labels = axisDates.map(d => {
+        const anchor = d === from ? "start" : d === to ? "end" : "middle";
+        return `<text x="${X(d).toFixed(1)}" y="${H - 3}" class="flo-axis" text-anchor="${anchor}">${esc(`${d.slice(8, 10)}.${d.slice(5, 7)}`)}</text>`;
+      }).join("");
+      return { X, labels };
+    };
+    // Точки/столбцы графиков выбирают день — общая info-строка (Новый план §9/§10).
+    const dayPick = d => ` data-action="flo-day-pick" data-date="${d}"${floDayPick === d ? ` class="is-picked"` : ""}`;
+    // --- Боль: точки по дням с отметкой, шкала 0–10 с подписями. ---
+    let dailyHtml = "";
+    {
+      const H = 84, padL = 24, padR = 8, padT = 8, padB = 16;
+      const { X, labels } = axisFor(H, padL);
+      const plotH = H - padT - padB;
+      const painPts = daily.filter(d => d.pain_score !== null && d.pain_score !== undefined)
+        .map(d => ({ x: X(d.date), y: padT + plotH - (d.pain_score / 10) * plotH, date: d.date, label: `${d.date}: боль ${d.pain_score}/10` }));
+      dailyHtml += painPts.length
+        ? `<p class="flo-line"><b>Боль</b></p>
+          <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Боль по дням">
+            <line x1="${padL}" x2="${W - padR}" y1="${padT + plotH}" y2="${padT + plotH}" class="flo-grid"/>
+            <text x="${padL - 4}" y="${padT + plotH + 3}" class="flo-axis" text-anchor="end">0</text>
+            <text x="${padL - 4}" y="${padT + 3}" class="flo-axis" text-anchor="end">10</text>
+            ${painPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" class="flo-dot"${dayPick(p.date)}><title>${esc(p.label)}</title></circle>`).join("")}
+            ${labels}
+          </svg>
+          <p class="flo-legend">Боль 0–10: каждая точка — день с отметкой (${painPts.length}). Пропуски не считаются нулём</p>`
+        : `<p class="flo-line"><b>Боль</b></p><p class="flo-disclaimer">Боль не отмечали за период.</p>`;
+      // --- Кровотечение: столбец на день, высота и цвет — уровень. ---
+      const flowDays = daily.filter(d => d.flow);
+      if (flowDays.length) {
+        const flowBars = flowDays.map(d => {
+          const lvl = { spotting: 1, light: 2, medium: 3, heavy: 4 }[d.flow] || 0;
+          if (!lvl) return "";
+          const bw = Math.max(2, (X(floDateShift(d.date, 1)) - X(d.date)) * 0.7);
+          const h = (lvl / 4) * (plotH - 4);
+          const label = FLO_FLOWS.find(([c]) => c === d.flow)?.[1] || d.flow;
+          return `<rect x="${(X(d.date) - bw / 2).toFixed(1)}" y="${(padT + plotH - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" class="flo-fs-${d.flow}"${dayPick(d.date)}><title>${esc(`${d.date}: ${label}`)}</title></rect>`;
+        }).join("");
+        dailyHtml += `
+          <p class="flo-line" style="margin-top:8px"><b>Кровотечение</b></p>
+          <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Кровотечение по дням">${flowBars}${labels}</svg>
+          <p class="flo-legend">Высота и цвет столбца — интенсивность: ${esc(FLO_FLOWS.map(([, l]) => l).join(" / "))}</p>`;
+      } else {
+        dailyHtml += `<p class="flo-line" style="margin-top:8px"><b>Кровотечение</b></p><p class="flo-disclaimer">Кровотечение не отмечали за период.</p>`;
+      }
+    }
+    // --- Базальная температура: отдельная область со шкалой °C. ---
+    let measHtml = "";
+    if (bbtDays.length) {
+      const H = 104, padL = 30, padR = 8, padT = 8, padB = 16;
+      const { X, labels } = axisFor(H, padL);
+      const plotH = H - padT - padB;
       const vals = bbtDays.map(p => p.mean);
-      const lo = Math.min(...(vals.length ? vals : [36.2]), 36.2);
-      const hi = Math.max(...(vals.length ? vals : [37.6]), 37.6);
-      const Y = v => H - pad - 6 - ((v - lo) / (hi - lo || 1)) * (H - 2 * pad);
-      // Линия по агрегированным дням: сегмент рисуется только между
-      // соседними датами — разрыв (день без измерений) не соединяется.
+      // Шкала подбирается под данные с запасом и шагом 0.1 °C.
+      let lo = Math.floor((Math.min(...vals, 36.2) - 0.06) * 10) / 10;
+      let hi = Math.ceil((Math.max(...vals, 37.6) + 0.06) * 10) / 10;
+      if (hi - lo < 0.3) { lo -= 0.1; hi += 0.1; }
+      const Y = v => padT + plotH - ((v - lo) / (hi - lo)) * plotH;
+      const ticks = [0, 1, 2, 3].map(i => lo + (hi - lo) * i / 3);
+      const grid = ticks.map(v => {
+        const y = Y(v).toFixed(1);
+        return `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" class="flo-grid"/>` +
+          `<text x="${padL - 4}" y="${(Y(v) + 3).toFixed(1)}" class="flo-axis" text-anchor="end">${v.toFixed(1)}</text>`;
+      }).join("");
+      // Линия только между соседними днями: пропуск разрывает её.
       const segments = [];
       for (let i = 0; i < bbtDays.length; i++) {
         const run = [bbtDays[i]];
@@ -3852,40 +3965,64 @@
         if (run.length > 1) segments.push(run);
       }
       const line = segments.map(run =>
-        `<polyline points="${run.map(p => `${p.x.toFixed(1)},${Y(p.mean).toFixed(1)}`).join(" ")}" class="flo-bbt-line"/>`
+        `<polyline points="${run.map(p => `${X(p.d).toFixed(1)},${Y(p.mean).toFixed(1)}`).join(" ")}" class="flo-bbt-line"/>`
       ).join("");
-      // Пропущенные дни видны явно: серые чёрточки на базовой линии (§13).
-      const gapTicks = dates.length <= 120
-        ? dates.filter(d => !byDay.has(d)).map(d =>
-          `<rect x="${(X(idx.get(d)) - 0.75).toFixed(1)}" y="${(H - pad - 3).toFixed(1)}" width="1.5" height="4" class="flo-gap-tick"><title>${esc(d)}: измерений нет</title></rect>`).join("")
+      const rangeDays = Math.max(1, floDayDiff(from, to) + 1);
+      const gapTicks = rangeDays <= 200
+        ? (() => {
+            const out = [];
+            for (let d = from; d <= to && out.length < 400; d = floDateShift(d, 1)) {
+              if (!byDay.has(d)) out.push(`<rect x="${(X(d) - 0.75).toFixed(1)}" y="${(padT + plotH - 3).toFixed(1)}" width="1.5" height="4" class="flo-gap-tick"><title>${esc(d)}: измерений нет</title></rect>`);
+            }
+            return out.join("");
+          })()
         : "";
-      measSvg = `<svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Базальная температура и тесты ЛГ">
-        ${line}
-        ${gapTicks}
-        ${bbtDays.flatMap(p => p.all.map(x => `<circle cx="${p.x.toFixed(1)}" cy="${Y(x.v).toFixed(1)}" r="3.5" class="flo-bbt-dot"><title>${esc(`${p.d}${x.m.time ? " " + x.m.time : ""}: БТ ${x.m.value}°${x.m.unit || "C"}`)}</title></circle>`)).join("")}
-        ${lhPts.map(p => {
-          const y = p.result === "positive" ? pad + 4 : p.result === "unclear" ? pad + 14 : pad + 24;
-          const cls = p.result === "positive" ? "flo-lh-pos" : p.result === "unclear" ? "flo-lh-unclear" : "flo-lh-neg";
-          const label = { positive: "положительный", negative: "отрицательный", unclear: "неясно" }[p.result] || p.result;
-          return `<circle cx="${p.x.toFixed(1)}" cy="${y}" r="4" class="${cls}"><title>${esc(`${p.m.date}${p.m.time ? " " + p.m.time : ""}: ЛГ ${label}`)}</title></circle>`;
-        }).join("")}
-        ${axisSvg}
-      </svg>
-      <p class="flo-legend">Линия — базальная температура по дням (°C, °F приведены к °C; несколько замеров за день усредняются, точка есть у каждого замера). Разрыв линии и серые чёрточки внизу — дни без измерений. Маркеры вверху — тесты ЛГ: <span class="flo-lh-pos">●</span> положительный, <span class="flo-lh-unclear">●</span> неясно, <span class="flo-lh-neg">●</span> отрицательный.</p>`;
+      measHtml += `<p class="flo-line"><b>Базальная температура</b></p>
+        <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Базальная температура по дням, °C">
+          ${grid}${line}${gapTicks}
+          ${bbtDays.flatMap(p => p.all.map(x => `<circle cx="${X(p.d).toFixed(1)}" cy="${Y(x.v).toFixed(1)}" r="3.5" class="flo-bbt-dot"${dayPick(p.d)}><title>${esc(`${p.d}${x.m.time ? " " + x.m.time : ""}: БТ ${x.m.value}°${x.m.unit || "C"}`)}</title></circle>`)).join("")}
+          ${labels}
+        </svg>
+        <p class="flo-legend">°C по дням (°F приведены к °C; несколько замеров за день усредняются для линии, точка есть у каждого замера). Разрыв линии и серые чёрточки — дни без измерений.</p>`;
+    } else {
+      measHtml += `<p class="flo-line"><b>Базальная температура</b></p><p class="flo-disclaimer">Измерений БТ за период нет</p>`;
+    }
+    // --- Тесты ЛГ: отдельная полоса с теми же датами по оси X. ---
+    if (lhPts.length) {
+      const H = 34, padL = 30, padR = 8, padT = 4, padB = 14;
+      const { X, labels } = axisFor(H, padL);
+      const laneY = { positive: padT + 6, unclear: padT + 15, negative: padT + 24 };
+      measHtml += `<p class="flo-line" style="margin-top:8px"><b>Тесты на ЛГ</b></p>
+        <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Тесты на ЛГ по дням">
+          ${["positive", "unclear", "negative"].map(r => `<line x1="${padL}" x2="${W - padR}" y1="${laneY[r]}" y2="${laneY[r]}" class="flo-grid"/>`).join("")}
+          ${lhPts.map(p => {
+            const label = { positive: "положительный", negative: "отрицательный", unclear: "неясно" }[p.result] || p.result;
+            return `<circle cx="${X(p.date).toFixed(1)}" cy="${laneY[p.result] ?? laneY.unclear}" r="4" class="${p.result === "positive" ? "flo-lh-pos" : p.result === "unclear" ? "flo-lh-unclear" : "flo-lh-neg"}"${dayPick(p.date)}><title>${esc(`${p.date}${p.m.time ? " " + p.m.time : ""}: ЛГ ${label}`)}</title></circle>`;
+          }).join("")}
+          ${labels}
+        </svg>
+        <p class="flo-legend">Маркеры по датам: <span class="flo-lh-pos">●</span> положительный, <span class="flo-lh-unclear">●</span> неясно, <span class="flo-lh-neg">●</span> отрицательный (${lhPts.length}).</p>`;
     }
     // Текстовое представление рядов (§13): точные даты и значения доступны
     // без наведения мыши — на мобильном <title> не читается.
     const lhByDate = new Map();
-    for (const p of lhPts) lhByDate.set(p.m.date, p.result);
+    for (const p of lhPts) lhByDate.set(p.date, p.result);
     const textRows = dates.map(d => {
       const day = daily.find(x => x.date === d);
       const bits = [];
       if (day?.pain_score !== null && day?.pain_score !== undefined) bits.push(`боль ${day.pain_score}/10`);
       if (day?.flow) bits.push(`кровотечение: ${FLO_FLOWS.find(([c]) => c === day.flow)?.[1] || day.flow}`);
+      if (day?.mood) bits.push(`настроение: ${FLO_MOODS.find(([c]) => c === day.mood)?.[1] || day.mood}`);
+      if (day?.energy) bits.push(`энергия: ${FLO_ENERGY.find(([c]) => c === day.energy)?.[1] || day.energy}`);
+      if (day?.sleep_hours !== null && day?.sleep_hours !== undefined) bits.push(`сон: ${day.sleep_hours} ч`);
+      if (day?.sleep_quality) bits.push(`качество сна: ${FLO_SLEEP_QUALITY.find(([c]) => c === day.sleep_quality)?.[1] || day.sleep_quality}`);
+      if (day?.stress) bits.push(`стресс: ${FLO_STRESS.find(([c]) => c === day.stress)?.[1] || day.stress}`);
       const dayBbt = byDay.get(d);
       if (dayBbt) bits.push(dayBbt.map(x => `БТ ${x.m.value}°${x.m.unit || "C"}${x.m.time ? ` (${x.m.time})` : ""}`).join("; "));
       if (lhByDate.has(d)) bits.push(`ЛГ: ${{ positive: "положительный", negative: "отрицательный", unclear: "неясно" }[lhByDate.get(d)] || lhByDate.get(d)}`);
-      return bits.length ? `<tr><td>${esc(d)}</td><td>${esc(bits.join(" · "))}</td></tr>` : "";
+      return bits.length
+        ? `<tr data-action="flo-day-pick" data-date="${esc(d)}" role="button" tabindex="0" aria-label="Показать записи за ${esc(d)}"><td>${esc(d)}</td><td>${esc(bits.join(" · "))}</td></tr>`
+        : "";
     }).join("");
     const textBlock = textRows
       ? `<details class="flo-fold"><summary class="flo-fold-title">Данные по дням (текстом)</summary>
@@ -3893,12 +4030,349 @@
         <p class="flo-disclaimer">Дни без строк — дни без отметок; пропуски не приравниваются к нулю.</p>
       </details>`
       : "";
-    return `
-      <p class="flo-sub">По дням (только отмеченные дни)</p>
-      <p class="flo-line"><b>Боль</b></p>${painSvg}
-      <p class="flo-line" style="margin-top:8px"><b>Кровотечение</b></p>${flowSvg}
-      <p class="flo-line" style="margin-top:8px"><b>Измерения</b></p>${measSvg}
-      ${textBlock}`;
+    void idx;
+    return { daily: dailyHtml, meas: measHtml, text: textBlock };
+  }
+
+  // --- Статистика Фло: карточки, лента цикла, профиль кровотечения ---
+
+  // Компактные карточки основных показателей (Графики.md §2): значение
+  // с единицами, количество наблюдений и подпись; без данных — «—».
+  function floStatCardsHtml(s) {
+    const card = (label, value, unit, sub) => `<div class="flo-stat"><p class="flo-stat-label">${esc(label)}</p><p class="flo-stat-value">${value ?? "—"}${unit && value !== null && value !== undefined ? ` <small>${esc(unit)}</small>` : ""}</p><p class="flo-stat-sub">${esc(sub)}</p></div>`;
+    const cov = s.coverage || {};
+    const covPct = cov.days_total ? Math.round((cov.diary_days / cov.days_total) * 100) : null;
+    return `<div class="flo-stat-grid">${[
+      card("Длина цикла — медиана", s.median_cycle_length, "дн.", s.usable_cycles ? `по ${s.usable_cycles} пригодным циклам` : "мало данных"),
+      card("Месячные — медиана", s.period_lengths ? s.period_lengths.median : null, "дн.", s.period_lengths ? `по ${s.period_lengths.count} закрытым` : "нет закрытых"),
+      card("Диапазон цикла", s.min_cycle_length !== null && s.min_cycle_length !== undefined ? `${s.min_cycle_length}–${s.max_cycle_length}` : null, "дн.", s.spread ? `разброс ${s.spread}` : "вариативности нет"),
+      card("Дни с записями", covPct, "%", cov.days_total ? `${cov.diary_days} из ${cov.days_total} дн.` : "нет данных")
+    ].join("")}</div>`;
+  }
+
+  // Персональные наблюдения (Графики.md §8): только описательные выводы
+  // с количеством циклов/дней; при малой базе — пометка «мало данных».
+  function floPersonalNotesHtml(s) {
+    // Персональные наблюдения — карточками (Новый план §12): короткое
+    // утверждение + пояснение с числом наблюдений/знаменателем.
+    const cards = [];
+    if (s.period_lengths?.median !== null && s.period_lengths?.median !== undefined) {
+      cards.push({
+        main: `Месячные обычно длятся ${s.period_lengths.median} дн.`,
+        meta: `${s.period_lengths.count} закрытых периодов${s.period_lengths.min !== s.period_lengths.max ? ` · диапазон ${s.period_lengths.min}–${s.period_lengths.max} дн.` : ""}`
+      });
+    }
+    if (s.median_cycle_length !== null && s.median_cycle_length !== undefined) {
+      cards.push({
+        main: `Цикл обычно длится ${s.median_cycle_length} дн.`,
+        meta: `медиана по ${s.usable_cycles} пригодным циклам${s.usable_cycles < 3 ? " · мало данных" : ""}`
+      });
+    }
+    const dp = (s.day_patterns || [])[0];
+    if (dp) {
+      const name = FLO_SYMPTOMS.find(([c]) => c === dp.code)?.[1] || dp.code;
+      cards.push({
+        main: `«${name}» повторяется около ${dp.day_offset}-го дня цикла`,
+        meta: `в ${dp.cycles_with_symptom} из ${dp.cycles_with_data} циклов с записями${dp.confidence === "low" ? " · мало данных" : ""}`
+      });
+    }
+    const pp = (s.pms_patterns || [])[0];
+    if (pp) {
+      const name = FLO_SYMPTOMS.find(([c]) => c === pp.code)?.[1] || pp.code;
+      cards.push({
+        main: `«${name}» чаще отмечается за ${pp.avg_lead_days} дн. до месячных`,
+        meta: `в ${pp.cycles_with_symptom} из ${pp.cycles_with_data} циклов с записями`
+      });
+    }
+    // Настроение: агрегация по всем фазам с общим знаменателем.
+    let moodDen = 0;
+    const moodCounts = {};
+    for (const b of Object.values(s.phases || {})) {
+      moodDen += b.mood_days || 0;
+      for (const [c, n] of Object.entries(b.moods || {})) moodCounts[c] = (moodCounts[c] || 0) + n;
+    }
+    if (moodDen) {
+      const [topCode, topN] = Object.entries(moodCounts).sort((a, b) => b[1] - a[1])[0];
+      const name = FLO_MOODS.find(([c]) => c === topCode)?.[1] || topCode;
+      cards.push({
+        main: `Чаще всего настроение — «${name}»`,
+        meta: `${topN} из ${moodDen} дн. с отметкой`
+      });
+    }
+    // Изменение: средняя длина последних трёх циклов против прежних.
+    const lens = (s.cycles || []).filter(c => !c.estimated).map(c => c.length);
+    if (lens.length >= 4) {
+      const avg = a => Math.round(a.reduce((x, y) => x + y, 0) / a.length);
+      const last = avg(lens.slice(-3)), prev = avg(lens.slice(0, -3));
+      if (Math.abs(last - prev) >= 3) {
+        cards.push({
+          main: `Последние циклы в среднем ${last} дн.`,
+          meta: `на ${Math.abs(last - prev)} дн. ${last > prev ? "длиннее" : "короче"} прежних (${prev} дн., по ${lens.length} циклам)`
+        });
+      }
+    }
+    return cards.length
+      ? `<div class="flo-obs-cards">${cards.map(c => `<div class="flo-obs-card"><p class="flo-obs-main">${esc(c.main)}</p><p class="flo-obs-meta">${esc(c.meta)}</p></div>`).join("")}</div>`
+      : `<p class="flo-disclaimer">Персональных наблюдений пока нет — они появятся по мере записей.</p>`;
+  }
+
+  // Info-строка выбранного столбца графика (Новый план §11).
+  function floBarPickInfo(chart, items) {
+    if (!floBarPick || !floBarPick.startsWith(`${chart}:`)) return "";
+    const it = items[Number(floBarPick.split(":")[1])];
+    return it ? `<p class="flo-line flo-pick-info"><b>${esc(it.xlabel)}</b> — ${esc(it.title)}</p>` : "";
+  }
+
+  // Факты выбранного дня для графиков «по дням» (Новый план §9/§10):
+  // дневник + все измерения этого дня, без домысливания.
+  function floDayFactsHtml(s, date) {
+    if (!date) return "";
+    const bits = [];
+    const day = (s.daily || []).find(d => d.date === date);
+    if (day) {
+      if (day.flow) bits.push(`кровотечение: ${FLO_FLOWS.find(([c]) => c === day.flow)?.[1] || day.flow}`);
+      if (day.pain_score !== null && day.pain_score !== undefined) bits.push(`боль ${day.pain_score}/10`);
+      if (day.mood) bits.push(`настроение: ${FLO_MOODS.find(([c]) => c === day.mood)?.[1] || day.mood}`);
+      if (day.energy) bits.push(`энергия: ${FLO_ENERGY.find(([c]) => c === day.energy)?.[1] || day.energy}`);
+      if (day.sleep_hours !== null && day.sleep_hours !== undefined) bits.push(`сон: ${day.sleep_hours} ч`);
+      if (day.sleep_quality) bits.push(`качество сна: ${FLO_SLEEP_QUALITY.find(([c]) => c === day.sleep_quality)?.[1] || day.sleep_quality}`);
+      if (day.stress) bits.push(`стресс: ${FLO_STRESS.find(([c]) => c === day.stress)?.[1] || day.stress}`);
+    }
+    const meas = (s.measurements || []).filter(m => m.date === date);
+    for (const m of meas) {
+      bits.push(m.kind === "bbt"
+        ? `БТ ${m.value}°${m.unit === "F" ? "F" : "C"}${m.time ? ` (${m.time})` : ""}`
+        : `ЛГ: ${FLO_LH_RESULTS.find(([c]) => c === m.result)?.[1] || m.result || "—"}${m.time ? ` (${m.time})` : ""}`);
+    }
+    return bits.length
+      ? `<p class="flo-line flo-pick-info"><b>${esc(formatDay(date))}</b> — ${esc(bits.join(" · "))}</p>`
+      : `<p class="flo-line flo-pick-info"><b>${esc(formatDay(date))}</b> — записей за день нет.</p>`;
+  }
+
+  // График динамики самочувствия по дням (Новый план §8): переключатель
+  // настроение/энергия/сон/стресс. Только фактические отметки; категории —
+  // без выдуманных шкал и рейтингов.
+  function floMetricDayHtml(s) {
+    const daily = s.daily || [];
+    const has = k => daily.some(d => d[k] !== null && d[k] !== undefined && d[k] !== "");
+    const kinds = [
+      ["mood", "Настроение", has("mood")],
+      ["energy", "Энергия", has("energy")],
+      ["sleep", "Сон", has("sleep_hours") || has("sleep_quality")],
+      ["stress", "Стресс", has("stress")]
+    ].filter(k => k[2]);
+    if (!kinds.length) return "";
+    const view = kinds.some(k => k[0] === floMetricView) ? floMetricView : kinds[0][0];
+    const chips = `<div class="flo-chips" style="margin:6px 0">${kinds.map(([code, label]) =>
+      `<button type="button" class="flo-chip${view === code ? " is-on" : ""}" data-action="flo-metric-view" data-value="${code}">${label}</button>`).join("")}</div>`;
+    const W = 320;
+    const from = s.from || daily[0]?.date, to = s.to || from;
+    const padL = 26;
+    const axisDates = floAxisDates(from, to);
+    const axisFor = (H, pl = padL) => {
+      const X = floDateScale(from, to, W, pl);
+      const labels = axisDates.map(d => `<text x="${X(d).toFixed(1)}" y="${H - 3}" class="flo-axis" text-anchor="${d === from ? "start" : d === to ? "end" : "middle"}">${esc(`${d.slice(8, 10)}.${d.slice(5, 7)}`)}</text>`).join("");
+      return { X, labels };
+    };
+    const dayPick = d => ` data-action="flo-day-pick" data-date="${d}"${floDayPick === d ? ` class="is-picked"` : ""}`;
+    // --- Настроение: категории по дорожкам, без числовой шкалы. ---
+    if (view === "mood") {
+      const H = 96, padT = 8, padB = 16, laneH = 11;
+      const { X, labels } = axisFor(H);
+      const lanes = FLO_MOODS.map(([code, label], i) => ({ code, label, y: padT + i * laneH + laneH / 2 }));
+      const grid = lanes.map(l => `<line x1="${padL}" x2="${W - 8}" y1="${l.y.toFixed(1)}" y2="${l.y.toFixed(1)}" class="flo-grid"/>`).join("");
+      const pts = daily.filter(d => d.mood).map(d => {
+        const lane = lanes.find(l => l.code === d.mood);
+        if (!lane) return "";
+        const idx = FLO_MOODS.findIndex(([c]) => c === d.mood);
+        return `<circle cx="${X(d.date).toFixed(1)}" cy="${lane.y.toFixed(1)}" r="4" class="flo-md-${idx}"${dayPick(d.date)}><title>${esc(`${d.date}: ${lane.label}`)}</title></circle>`;
+      }).join("");
+      const legend = `<p class="flo-legend">${lanes.map((l, i) => `<span class="flo-legend-item"><i class="flo-md-dot flo-md-${i}"></i>${esc(l.label)}</span>`).join(" · ")}</p>`;
+      const count = daily.filter(d => d.mood).length;
+      return chips + `<p class="flo-line"><b>Настроение по дням</b> — ${count} дн. с отметкой</p>
+        <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Настроение по дням">${grid}${pts}${labels}</svg>${legend}`;
+    }
+    // --- Энергия / стресс: упорядоченные уровни — высота столбца. ---
+    if (view === "energy" || view === "stress") {
+      const conf = view === "energy"
+        ? { levels: FLO_ENERGY, cls: i => `flo-en-${i + 1}`, H: 84 }
+        : { levels: FLO_STRESS, cls: i => `flo-st-${i + 1}`, H: 84 };
+      const { X, labels } = axisFor(conf.H);
+      const H = conf.H, padT = 8, padB = 16, plotH = H - padT - padB;
+      const lvl = new Map(conf.levels.map(([c], i) => [c, i + 1]));
+      const bars = daily.filter(d => d[view]).map(d => {
+        const l = lvl.get(d[view]);
+        if (!l) return "";
+        const h = (l / conf.levels.length) * plotH;
+        const label = conf.levels.find(([c]) => c === d[view])?.[1] || d[view];
+        return `<rect x="${(X(d.date) - 3).toFixed(1)}" y="${(padT + plotH - h).toFixed(1)}" width="6" height="${h.toFixed(1)}" rx="1.5" class="${conf.cls(l - 1)}"${dayPick(d.date)}><title>${esc(`${d.date}: ${label}`)}</title></rect>`;
+      }).join("");
+      const legend = `<p class="flo-legend">${conf.levels.map(([c, l], i) => `<span class="flo-legend-item"><i class="flo-lev-swatch ${conf.cls(i)}"></i>${esc(l)}</span>`).join(" · ")}</p>`;
+      const count = daily.filter(d => d[view]).length;
+      const title = view === "energy" ? "Энергия по дням" : "Стресс по дням";
+      return chips + `<p class="flo-line"><b>${title}</b> — ${count} дн. с отметкой</p>
+        <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="${title}">${bars}${labels}</svg>${legend}`;
+    }
+    // --- Сон: часы линией/точками + качество отдельной полосой. ---
+    {
+      const parts = [];
+      const hoursDays = daily.filter(d => d.sleep_hours !== null && d.sleep_hours !== undefined);
+      if (hoursDays.length) {
+        const H = 84, padT = 8, padB = 16, plotH = H - padT - padB;
+        const { X, labels } = axisFor(H);
+        const vals = hoursDays.map(d => Number(d.sleep_hours));
+        const lo = Math.max(0, Math.floor(Math.min(...vals) - 0.5)), hi = Math.min(14, Math.ceil(Math.max(...vals) + 0.5));
+        const Y = v => padT + plotH - ((v - lo) / (hi - lo || 1)) * plotH;
+        const ticks = [0, 1, 2, 3].map(i => lo + (hi - lo) * i / 3);
+        const grid = ticks.map(v => `<line x1="${padL}" x2="${W - 8}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" class="flo-grid"/><text x="${padL - 4}" y="${(Y(v) + 3).toFixed(1)}" class="flo-axis" text-anchor="end">${v.toFixed(1)}</text>`).join("");
+        // Линия только между соседними днями.
+        const pts = hoursDays.map(d => ({ x: X(d.date), y: Y(Number(d.sleep_hours)), d }));
+        const segs = [];
+        for (let i = 0; i < pts.length; i++) {
+          const run = [pts[i]];
+          while (i + 1 < pts.length && floDayDiff(pts[i].d.date, pts[i + 1].d.date) === 1) { run.push(pts[i + 1]); i += 1; }
+          if (run.length > 1) segs.push(`<polyline points="${run.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")}" class="flo-sleep-line"/>`);
+        }
+        parts.push(`<p class="flo-line" style="margin-top:6px"><b>Длительность сна</b> — ${hoursDays.length} дн. с отметкой, часы</p>
+          <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Длительность сна по дням">${grid}${segs.join("")}${pts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" class="flo-sleep-dot"${dayPick(p.d.date)}><title>${esc(`${p.d.date}: ${p.d.sleep_hours} ч`)}</title></circle>`).join("")}${labels}</svg>`);
+      }
+      const qDays = daily.filter(d => d.sleep_quality);
+      if (qDays.length) {
+        const H = 52, padT = 6, laneH = 12;
+        const { X, labels } = axisFor(H);
+        const lanes = FLO_SLEEP_QUALITY.map(([code, label], i) => ({ code, label, y: padT + i * laneH + laneH / 2 }));
+        const grid = lanes.map(l => `<line x1="${padL}" x2="${W - 8}" y1="${l.y.toFixed(1)}" y2="${l.y.toFixed(1)}" class="flo-grid"/>`).join("");
+        const pts = qDays.map(d => {
+          const lane = lanes.find(l => l.code === d.sleep_quality);
+          return lane ? `<circle cx="${X(d.date).toFixed(1)}" cy="${lane.y.toFixed(1)}" r="4" class="flo-sq-${FLO_SLEEP_QUALITY.findIndex(([c]) => c === d.sleep_quality)}"${dayPick(d.date)}><title>${esc(`${d.date}: ${lane.label}`)}</title></circle>` : "";
+        }).join("");
+        const legend = `<p class="flo-legend">${lanes.map((l, i) => `<span class="flo-legend-item"><i class="flo-md-dot flo-sq-${i}"></i>${esc(l.label)}</span>`).join(" · ")}</p>`;
+        parts.push(`<p class="flo-line" style="margin-top:6px"><b>Качество сна</b> — ${qDays.length} дн. с отметкой</p>
+          <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Качество сна по дням">${grid}${pts}${labels}</svg>${legend}`);
+      }
+      return chips + parts.join("");
+    }
+  }
+
+  // Лента текущего цикла (Графики.md §6 + Новый план §4): горизонтальная
+  // прокрутка, фиксированная ширина дня, выбор дня нажатием. Фактические
+  // месячные сплошным цветом, «сегодня», расчётные фазы, фертильное окно
+  // и прогноз — визуально отличимы. Прогноз не проецируется в обычный
+  // календарь.
+  function floCycleStripHtml() {
+    const f = floState?.forecast || {};
+    const periods = floState?.periods || [];
+    const starts = periods.map(p => p.start_date).filter(Boolean).sort();
+    const anchor = starts[starts.length - 1] || f.last_period_start || null;
+    const today = floState?.today || "";
+    if (!anchor || !today) return "";
+    const fh = f.data_stale ? {} : f;
+    const ovTrusted = fh.quality !== undefined && fh.quality !== "insufficient";
+    let end = floDateShift(anchor, 44);
+    if (!fh.empty && fh.next_period_end && fh.next_period_end > end) end = fh.next_period_end;
+    if (today > end) end = today;
+    if (floDayDiff(anchor, end) > 60) end = floDateShift(anchor, 60);
+    // Границы фаз: конец последнего фактического периода, фертильное окно
+    // и овуляция — только при достаточном качестве прогноза.
+    const anchorPeriod = periods.find(p => p.start_date === anchor);
+    const periodEnd = anchorPeriod
+      ? (anchorPeriod.end_date || (anchorPeriod.end_unknown ? anchorPeriod.start_date : today))
+      : floDateShift(anchor, 4);
+    const fertS = ovTrusted && !fh.empty ? fh.fertile_start : null;
+    const fertE = ovTrusted && !fh.empty ? fh.fertile_end : null;
+    const ovu = ovTrusted && !fh.empty ? fh.ovulation_date : null;
+    const lutealFrom = ovu ? floDateShift(ovu, 1) : (fertE ? floDateShift(fertE, 1) : null);
+    const follicularTo = fertS ? floDateShift(fertS, -1)
+      : (ovu ? floDateShift(ovu, -1) : floDateShift(anchor, Math.round((fh.avg_cycle_length || 28) / 2)));
+    const nextS = !fh.empty ? fh.next_period_start : null;
+    const nextE = !fh.empty ? fh.next_period_end : null;
+    const PHASE_TEXT = {
+      "is-period": "фактические месячные",
+      "is-predicted": "прогноз месячных",
+      "is-fertile": "фертильное окно",
+      "is-ovulation": "овуляция",
+      "is-follicular": "фолликулярная фаза (расчёт)",
+      "is-luteal": "лютеиновая фаза (расчёт)"
+    };
+    const infoByDate = new Map();
+    const cells = [];
+    const labels = [];
+    const total = Math.max(1, floDayDiff(anchor, end) + 1);
+    for (let d = anchor; d <= end; d = floDateShift(d, 1)) {
+      const cls = [];
+      if (floInPeriod(d)) {
+        cls.push("is-period");
+      } else {
+        if (nextS && d >= nextS && d <= nextE) cls.push("is-predicted");
+        if (fertS && d >= fertS && d <= fertE) cls.push("is-fertile");
+        if (ovu && d === ovu) cls.push("is-ovulation");
+        if (!cls.length && d > periodEnd) {
+          if (d <= follicularTo) cls.push("is-follicular");
+          else if (lutealFrom ? d >= lutealFrom : true) {
+            if (!nextS || d < nextS) cls.push("is-luteal");
+          }
+        }
+      }
+      if (d === today) cls.push("is-today");
+      const picked = floStripPick === d;
+      const phaseKey = cls.find(c => PHASE_TEXT[c]);
+      const statusText = [phaseKey ? PHASE_TEXT[phaseKey] : "день цикла", d === today ? "сегодня" : ""].filter(Boolean).join(", ");
+      infoByDate.set(d, statusText);
+      cells.push(`<button type="button" class="flo-strip-day${cls.length ? " " + cls.join(" ") : ""}${picked ? " is-picked" : ""}" data-action="flo-strip-day" data-date="${d}" aria-pressed="${picked}" aria-label="${esc(`${d}: ${statusText}`)}"></button>`);
+      if (d === anchor || d === today || d === end || (nextS && d === nextS)) {
+        const text = d === today ? "сегодня" : d === nextS ? "прогноз" : `${d.slice(8, 10)}.${d.slice(5, 7)}`;
+        labels.push({ d, text });
+      }
+    }
+    const labelHtml = labels.map(l =>
+      `<span class="flo-strip-lbl" style="left:${(floDayDiff(anchor, l.d) / total * 100).toFixed(1)}%">${esc(l.text)}</span>`).join("");
+    const legend = [
+      ["is-period", "фактические месячные"],
+      ["is-fertile", "фертильное окно"],
+      ["is-ovulation", "овуляция"],
+      ["is-predicted", "прогноз месячных"],
+      ["is-follicular", "фолликулярная/лютеиновая — расчёт"],
+      ["is-today", "сегодня"]
+    ].map(([cls, name]) => `<span class="flo-legend-item"><i class="flo-strip-day flo-strip-swatch ${cls}"></i>${name}</span>`).join("");
+    const pickInfo = floStripPick && infoByDate.has(floStripPick)
+      ? `<p class="flo-line flo-pick-info"><b>${esc(formatDay(floStripPick))}</b> — день ${floDayDiff(anchor, floStripPick) + 1} цикла · ${esc(infoByDate.get(floStripPick))}</p>`
+      : "";
+    // Ширина внутренней ленты фиксирована шагом дня: подписи прокручиваются
+    // вместе с сегментами и не отрываются от своих дат (Новый план §4).
+    const innerW = total * 16 - 2;
+    return `<div class="flo-strip-wrap">
+      <div class="flo-strip-scroll"><div class="flo-strip-inner" style="width:${innerW}px">
+        <div class="flo-strip">${cells.join("")}</div>
+        <div class="flo-strip-labels">${labelHtml}</div>
+      </div></div>
+      ${pickInfo}
+      <p class="flo-legend flo-strip-legend">${legend}</p>
+    </div>`;
+  }
+
+  // График интенсивности кровотечения по дням месячных (Графики.md §5):
+  // составные полосы по уровням, число периодов и текстовая расшифровка.
+  function floFlowProfileHtml(fp) {
+    if (!fp || !fp.days?.length) {
+      return `<p class="flo-disclaimer">Пока недостаточно периодов с отметками интенсивности — профиль появится от двух месячных.</p>`;
+    }
+    const rows = fp.days.map(d => {
+      const total = d.total || 1;
+      const pct = n => `${Math.round((n || 0) / total * 100)}%`;
+      const seg = (n, cls) => n ? `<i class="flo-fl-${cls}" style="width:${(n / total * 100).toFixed(1)}%"></i>` : "";
+      const counts = FLO_FLOWS.map(([c, l]) => `${l} ${d[c] || 0} (${pct(d[c])})`).join(" · ");
+      const domLabel = FLO_FLOWS.find(([c]) => c === d.dominant)?.[1] || d.dominant;
+      return `<details class="flo-fl-item">
+        <summary class="flo-fl-row"><span class="flo-fl-day">день ${d.day}</span>
+          <div class="flo-fl-bar">${seg(d.spotting, "spotting")}${seg(d.light, "light")}${seg(d.medium, "medium")}${seg(d.heavy, "heavy")}</div>
+          <span class="flo-fl-n">${d.total} · ${esc(domLabel)}</span></summary>
+        <div class="flo-fl-detail"><p class="flo-line">Доля уровней за все периоды: ${esc(counts)} — всего ${d.total} отметок.</p></div>
+      </details>`;
+    }).join("");
+    const legend = `<p class="flo-legend">${FLO_FLOWS.map(([c, l]) => `<span class="flo-legend-item"><i class="flo-fl-swatch flo-fl-${c}"></i>${l}</span>`).join(" · ")} · % — доля отметок уровня по всем периодам</p>`;
+    const text = `<p class="flo-line">По дням: ${fp.days.map(d => `день ${d.day} — ${FLO_FLOWS.find(([c]) => c === d.dominant)?.[1] || d.dominant}`).join(", ")}.</p>`;
+    return `${rows}${legend}${text}
+      <p class="flo-disclaimer">По ${fp.periods} периодам с отметками; в среднем кровотечение отмечалось ${fp.typical_days} дн. Доля считается от числа отметок, а не от числа дней — пропуск записи не считается «нет кровотечения», «мажь» не приравнивается к началу месячных и не измеряет объём крови.</p>`;
   }
 
   function renderFloStats() {
@@ -3908,35 +4382,26 @@
     }
     if (floStats.failed) return "";
     const s = floStats;
-    if (!s.cycles.length && !s.logged_days) {
-      return `<section class="card"><p class="eyebrow">Статистика</p><p>Пока мало данных: нужны два старта месячных и несколько записей дня.</p></section>`;
+    // Нормализация: статистика показывается при любой категории данных —
+    // только измерения БТ/ЛГ, только периоды, только препараты и т.д.
+    // (Новый план графиков §3). Скрываем экран лишь когда данных нет вообще.
+    s.cycles = s.cycles || [];
+    s.phases = s.phases || {};
+    s.daily = s.daily || [];
+    s.measurements = s.measurements || [];
+    s.meds = s.meds || [];
+    const hasAnyData = s.cycles.length || s.logged_days || s.current_cycle
+      || s.daily.length || s.measurements.length || s.meds.length
+      || (floState?.periods || []).length
+      || s.period_lengths || (s.pms_patterns || []).length || (s.day_patterns || []).length
+      || s.flow_profile || Object.keys(s.phases).length;
+    if (!hasAnyData) {
+      return `<section class="card"><p class="eyebrow">Статистика</p><p>Пока мало данных: добавьте месячные или записи дня — графики и показатели появятся по мере наблюдений.</p></section>`;
     }
+    const hasCycleStats = s.cycles.length > 0 || !!s.current_cycle;
     // Подпись фактического диапазона (переработка 10.3): статистика всегда
     // помечена теми датами, по которым она посчитана.
     const rangeLabel = `с ${esc(formatDay(s.from || ""))} по ${esc(formatDay(s.to || ""))}`;
-    let chart = `<p class="flo-disclaimer">Нужно минимум два старта месячных за период</p>`;
-    if (s.cycles.length) {
-      const W = 320, H = 130, pad = 18;
-      const slot = (W - pad * 2) / s.cycles.length;
-      const barW = Math.max(6, Math.min(28, slot - 6));
-      // Диапазон шкалы — по фактическим длинам циклов (15–60): без клампа
-      // короткие циклы рисовались бы на уровне 20, а не своей длины.
-      const lens = s.cycles.map(c => c.length);
-      const lo = Math.min(20, ...lens);
-      const hi = Math.max(45, ...lens);
-      const yFor = len => H - pad - ((Math.min(Math.max(len, lo), hi) - lo) / (hi - lo)) * (H - pad * 2);
-      const bars = s.cycles.map((c, i) => {
-        const y = yFor(c.length);
-        return `<rect x="${(pad + i * slot + (slot - barW) / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(H - pad - y).toFixed(1)}" rx="4" class="flo-bar"><title>${esc(c.start)}: ${c.length} дн.</title></rect>`;
-      }).join("");
-      const avgY = yFor(s.avg_cycle_length).toFixed(1);
-      chart = `
-        <svg viewBox="0 0 ${W} ${H}" class="flo-chart" role="img" aria-label="Длина циклов, дней">
-          ${bars}
-          <line x1="${pad}" x2="${W - pad}" y1="${avgY}" y2="${avgY}" class="flo-avg"></line>
-        </svg>
-        <p class="flo-legend">Столбцы: длина цикла. Линия: средняя длина завершённых циклов — ${s.avg_cycle_length} дн. (по ${s.cycles.length} ${s.cycles.length === 1 ? "циклу" : "циклам"} периода).</p>`;
-    }
     // Этап 5/P1 + 10.4: среднее и медиана подписаны разными словами, у
     // каждого расчёта указано количество циклов — под одинаковыми подписями
     // разные методы не скрываются.
@@ -3945,8 +4410,8 @@
     if (s.median_cycle_length !== null && s.median_cycle_length !== undefined) statBits.push(`медиана ${s.median_cycle_length} дн. (последние пригодные циклы: ${s.usable_cycles})`);
     if (s.min_cycle_length !== null && s.max_cycle_length !== null) statBits.push(`от ${s.min_cycle_length} до ${s.max_cycle_length} дн.`);
     if (s.spread) statBits.push(`разброс ${s.spread} дн.`);
-    if (s.period_lengths) statBits.push(`Месячные в среднем ${s.period_lengths.avg} дн. (от ${s.period_lengths.min} до ${s.period_lengths.max}, ${s.period_lengths.count} закрытых)`);
-    const statLine = statBits.length ? `<p class="flo-line">${statBits.map(esc).join(" · ")}</p>` : "";
+    if (s.period_lengths) statBits.push(`Месячные в среднем ${s.period_lengths.avg} дн. (медиана ${s.period_lengths.median ?? s.period_lengths.avg}; от ${s.period_lengths.min} до ${s.period_lengths.max}, ${s.period_lengths.count} закрытых)`);
+    const statLine = statBits.length ? `<p class="flo-line flo-stat-line">${statBits.map(esc).join(" · ")}</p>` : "";
     const unusual = (s.unusual_intervals || []).length
       ? `<p class="flo-disclaimer">Необычные интервалы (вне 15–60 дн.) сохранены в истории, но не участвуют в среднем: ${s.unusual_intervals.map(iv => `${iv.start} — ${iv.length} дн.`).join(", ")}.</p>`
       : "";
@@ -3957,77 +4422,173 @@
     // Охват дневника (переработка 10.1): сколько календарных дней периода
     // заполнено хотя бы одной записью.
     const coverage = s.coverage && s.coverage.days_total
-      ? `<p class="flo-line">Дневник заполнен за ${s.coverage.diary_days} из ${s.coverage.days_total} дней выбранного периода${s.logged_days ? ` (в фазах учтено дней с записями: ${s.logged_days})` : ""}.</p>`
+      ? `<div class="flo-coverage">
+          <p class="flo-line">Дни с записями: ${s.coverage.diary_days} из ${s.coverage.days_total} дней выбранного периода — доля календарных дней, в которые добавлена хотя бы одна запись${s.logged_days ? ` (в фазах учтено дней с записями: ${s.logged_days})` : ""}.</p>
+          <div class="flo-meter"><i style="width:${Math.round((s.coverage.diary_days / s.coverage.days_total) * 100)}%"></i></div>
+        </div>`
       : "";
     // Доля показывается как «N из D дней» с числителем и знаменателем
     // (переработка 10.1): у каждого показателя свой знаменатель — дни, где
     // он вообще отмечался.
     const frac = (n, d) => d > 0 ? `${n} из ${d} дн. · ${Math.round((n / d) * 100)}%` : "нет отметок";
+    // Строки метрик по фазам, сгруппированные по показателям (Графики.md §4):
+    // симптомы / настроение / энергия / боль / сон / стресс — у каждой
+    // группы подписан знаменатель.
+    const metricRows = (entries, den, lookup, limit = 5, emptyText = "нет отметок") => {
+      const top = Object.entries(entries || {}).sort((a, b) => b[1] - a[1]).slice(0, limit);
+      if (!top.length) return `<p class="flo-disclaimer">${esc(emptyText)}</p>`;
+      return top.map(([code, n]) => {
+        const pct = den > 0 ? Math.round((n / den) * 100) : 0;
+        const name = lookup ? (lookup.find(([c]) => c === code)?.[1] || code) : code;
+        return `<div class="flo-bar-row"><span class="flo-bar-name">${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span class="flo-bar-val">${esc(frac(n, den))}</span></div>`;
+      }).join("");
+    };
+    const metricGroup = (title, html) => `<div class="flo-metric-group"><p class="flo-metric-title">${esc(title)}</p>${html}</div>`;
     const order = [["menstruation", "Менструация"], ["follicular", "Фолликулярная"], ["fertile", "Фертильное окно"], ["ovulation", "Овуляция"], ["luteal", "Лютеиновая"]];
     const rows = order.filter(([key]) => s.phases[key]).map(([key, label]) => {
       const bucket = s.phases[key];
-      const top = Object.entries(bucket.symptoms).sort((a, b) => b[1] - a[1]).slice(0, 3);
-      const meters = top.length
-        ? top.map(([code, n]) => {
-          const pct = Math.round((n / bucket.symptom_days) * 100);
-          const name = FLO_SYMPTOMS.find(([c]) => c === code)?.[1] || code;
-          return `<div class="flo-bar-row"><span>${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span>${esc(frac(n, bucket.symptom_days))}</span></div>`;
-        }).join("")
-        : `<p class="flo-disclaimer">Симптомов не отмечали</p>`;
-      const symptomDen = bucket.symptom_days
-        ? `<p class="flo-sub">Симптомы: знаменатель — дни с заполненным дневником симптомов (${bucket.symptom_days}${bucket.clear_days ? `, из них «симптомов не было»: ${bucket.clear_days}` : ""}).</p>`
-        : "";
-      const moodTop = Object.entries(bucket.moods || {}).sort((a, b) => b[1] - a[1]).slice(0, 3);
-      const moodRows = moodTop.length
-        ? moodTop.map(([code, n]) => {
-          const pct = Math.round((n / bucket.mood_days) * 100);
-          const name = FLO_MOODS.find(([c]) => c === code)?.[1] || code;
-          return `<div class="flo-bar-row"><span>${esc(name)}</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span>${esc(frac(n, bucket.mood_days))}</span></div>`;
-        }).join("")
-        : `<p class="flo-disclaimer">Настроение не отмечали</p>`;
-      const energyParts = Object.entries(bucket.energy || {}).sort((a, b) => b[1] - a[1])
-        .map(([code, n]) => `${esc(FLO_ENERGY.find(([c]) => c === code)?.[1] || code)} ${esc(frac(n, bucket.energy_days))}`);
-      const energyLine = energyParts.length ? `<p class="flo-line">Энергия: ${energyParts.join(" · ")}</p>` : "";
-      const painLine = bucket.avg_pain !== null && bucket.avg_pain !== undefined ? `<p class="flo-line">Боль в среднем ${bucket.avg_pain}/10 (за ${bucket.pain_count} ${bucket.pain_count === 1 ? "отметку" : "отметок"})</p>` : "";
-      return `<div class="flo-phase"><p class="flo-line"><b>${label}</b> · дней с записями: ${bucket.days}</p>${symptomDen}${meters}${moodRows}${energyLine}${painLine}</div>`;
+      const groups = [];
+      if (bucket.symptom_days) {
+        const emptyText = bucket.clear_days ? `симптомов не отмечали — ${bucket.clear_days} дн. «без симптомов»` : "нет отметок";
+        groups.push(metricGroup(`Симптомы · знаменатель: ${bucket.symptom_days} дн. с заполненным дневником${bucket.clear_days ? `, из них «симптомов не было»: ${bucket.clear_days}` : ""}`, metricRows(bucket.symptoms, bucket.symptom_days, FLO_SYMPTOMS, 5, emptyText)));
+      }
+      if (bucket.mood_days) groups.push(metricGroup(`Настроение · знаменатель: ${bucket.mood_days} дн. с отметкой`, metricRows(bucket.moods, bucket.mood_days, FLO_MOODS, 3)));
+      if (bucket.energy_days) groups.push(metricGroup(`Энергия · знаменатель: ${bucket.energy_days} дн. с отметкой`, metricRows(bucket.energy, bucket.energy_days, FLO_ENERGY, 4)));
+      if (bucket.pain_count) {
+        const pct = Math.round(((bucket.avg_pain ?? 0) / 10) * 100);
+        groups.push(metricGroup(`Боль · знаменатель: ${bucket.pain_count} ${bucket.pain_count === 1 ? "отметка" : "отметок"}`, `<div class="flo-bar-row"><span class="flo-bar-name">в среднем</span><div class="flo-meter"><i style="width:${pct}%"></i></div><span class="flo-bar-val">${bucket.avg_pain}/10</span></div>`));
+      }
+      if (bucket.sleep_days) groups.push(metricGroup(`Сон · знаменатель: ${bucket.sleep_days} дн. с отметкой`, metricRows(bucket.sleep, bucket.sleep_days, FLO_SLEEP_QUALITY, 3)));
+      if (bucket.stress_days) groups.push(metricGroup(`Стресс · знаменатель: ${bucket.stress_days} дн. с отметкой`, metricRows(bucket.stress, bucket.stress_days, FLO_STRESS, 3)));
+      return `<div class="flo-phase"><p class="flo-line"><b>${label}</b> · дней с записями: ${bucket.days}</p>${groups.join("") || `<p class="flo-disclaimer">По этой фазе отметок нет.</p>`}</div>`;
     }).join("");
-    // Расширенная аналитика (переработка 10.5): описательные блоки по
-    // фактическим записям, без причинно-следственных утверждений.
-    const ins = s.insights || {};
-    const insightBits = [];
-    if (ins.bleeding && ins.bleeding.flow_days) {
-      insightBits.push(`<p class="flo-line"><b>Кровотечение</b></p>
-        <p class="flo-line">Дни с отмеченным кровотечением: ${ins.bleeding.flow_days}, из них обильные: ${ins.bleeding.heavy_days}, со сгустками: ${ins.bleeding.clot_days}.</p>
-        ${s.period_lengths ? `<p class="flo-line">Длительность закрытых месячных в периоде: ${s.period_lengths.min}–${s.period_lengths.max} дн., в среднем ${s.period_lengths.avg} дн.</p>` : ""}`);
+    // График длины цикла: значения на столбцах, сетка в днях, линии
+    // среднего и медианы (Графики.md §3).
+    let cycleChart = `<p class="flo-disclaimer">Нужно минимум два старта месячных за период</p>`;
+    if (s.cycles.length) {
+      const lens = s.cycles.map(c => c.length);
+      const lo = Math.min(20, ...lens);
+      const hi = Math.max(45, ...lens);
+      const lines = [{ value: s.avg_cycle_length, cls: "flo-avg", name: `среднее ${s.avg_cycle_length} дн.` }];
+      if (s.median_cycle_length !== null && s.median_cycle_length !== undefined) {
+        lines.push({ value: s.median_cycle_length, cls: "flo-median", name: `медиана ${s.median_cycle_length} дн.` });
+      }
+      cycleChart = floBarsChart(s.cycles.map(c => ({
+        xlabel: `${c.start.slice(8, 10)}.${c.start.slice(5, 7)}`,
+        value: c.length,
+        title: `${formatDay(c.start)}: ${c.length} дн.`
+      })), { lo, hi, lines, chart: "cycle", aria: "Длина циклов по периодам, дней" }) +
+        `<p class="flo-legend">Столбцы — длина каждого цикла в днях; линии — среднее и медиана по завершённым циклам.</p>` +
+        floBarPickInfo("cycle", s.cycles.map(c => ({ xlabel: `${c.start.slice(8, 10)}.${c.start.slice(5, 7)}`, title: `${formatDay(c.start)}: ${c.length} дн.` }))) +
+        `<details class="flo-fold"><summary class="flo-fold-title">Данные по циклам (текстом)</summary>
+          <div class="flo-report-table-wrap"><table class="flo-report-table"><thead><tr><th>Начало</th><th>Длина</th></tr></thead><tbody>${s.cycles.map(c => `<tr><td>${esc(formatDay(c.start))}</td><td>${c.length} дн.</td></tr>`).join("")}</tbody></table></div>
+        </details>`;
     }
-    if (ins.wellbeing && ins.wellbeing.symptom_days) {
-      const top = (ins.wellbeing.top_symptoms || []).map(t => {
+    // График продолжительности месячных — отдельная шкала, не смешивается
+    // с длиной цикла (Графики.md §3). Длины — по фактическим закрытым
+    // периодам из floState, в пределах диапазона статистики.
+    let periodChart = "";
+    const periodLens = (floState?.periods || [])
+      .filter(p => p.end_date && p.start_date >= (s.from || "") && p.start_date <= (s.to || ""))
+      .map(p => ({ start: p.start_date, len: floDayDiff(p.start_date, p.end_date) + 1 }))
+      .filter(p => p.len >= 1 && p.len <= 21)
+      .sort((a, b) => (a.start < b.start ? -1 : 1));
+    if (periodLens.length) {
+      const pl = periodLens.map(p => p.len);
+      const plo = Math.max(1, Math.min(...pl) - 1);
+      const phi = Math.min(21, Math.max(...pl) + 1);
+      const plines = [{ value: s.period_lengths?.avg ?? Math.round(pl.reduce((a, b) => a + b, 0) / pl.length), cls: "flo-avg", name: `среднее ${s.period_lengths?.avg ?? "—"} дн.` }];
+      if (s.period_lengths?.median !== null && s.period_lengths?.median !== undefined) {
+        plines.push({ value: s.period_lengths.median, cls: "flo-median", name: `медиана ${s.period_lengths.median} дн.` });
+      }
+      periodChart = floBarsChart(periodLens.map(p => ({
+        xlabel: `${p.start.slice(8, 10)}.${p.start.slice(5, 7)}`,
+        value: p.len,
+        title: `${formatDay(p.start)}: ${p.len} дн.`
+      })), { lo: plo, hi: phi, lines: plines, chart: "period", aria: "Длительность месячных по периодам, дней" }) +
+        `<p class="flo-legend">Столбцы — длительность каждого закрытого периода в днях; линии — среднее и медиана.</p>` +
+        floBarPickInfo("period", periodLens.map(p => ({ xlabel: `${p.start.slice(8, 10)}.${p.start.slice(5, 7)}`, title: `${formatDay(p.start)}: ${p.len} дн.` }))) +
+        // Подробная таблица тех же данных (Новый план §6): начало, конец,
+        // фактическая длительность; «идут» и «неизвестно» не подменяются
+        // расчётными значениями. Строка ведёт к записям дня начала.
+        (() => {
+          const rows = (floState?.periods || [])
+            .filter(p => p.start_date >= (s.from || "") && p.start_date <= (s.to || ""))
+            .sort((a, b) => (a.start_date < b.start_date ? -1 : 1))
+            .map((p, i) => {
+              const closed = !!p.end_date;
+              const unknown = !closed && !!p.end_unknown;
+              const open = !closed && !unknown;
+              const endTxt = closed ? esc(formatDay(p.end_date)) : unknown ? "неизвестно" : "идут";
+              const lenTxt = closed ? `${floDayDiff(p.start_date, p.end_date) + 1} дн.`
+                : unknown ? "—"
+                : `${floDayDiff(p.start_date, floState.today) + 1} дн. на сегодня`;
+              return `<tr data-action="flo-goto-period" data-date="${esc(p.start_date)}" role="button" tabindex="0" aria-label="Открыть записи периода с ${esc(p.start_date)}">
+                <td>${i + 1}</td><td>${esc(formatDay(p.start_date))}</td><td>${endTxt}</td><td>${lenTxt}</td></tr>`;
+            }).join("");
+          return rows ? `<details class="flo-fold"><summary class="flo-fold-title">Периоды текстом</summary>
+            <div class="flo-report-table-wrap"><table class="flo-report-table"><thead><tr><th>№</th><th>Начало</th><th>Конец</th><th>Длительность</th></tr></thead><tbody>${rows}</tbody></table></div>
+            <p class="flo-disclaimer">Строка открывает записи дня начала периода. «Идут» — период не закрыт; «неизвестно» — конец не помнится, дата не подставляется.</p></details>` : "";
+        })();
+    } else {
+      periodChart = `<p class="flo-disclaimer">Нет закрытых периодов в выбранном диапазоне.</p>`;
+    }
+    // Расширенная аналитика (переработка 10.5): описательные блоки по
+    // фактическим записям, без причинно-следственных утверждений. Блоки
+    // разнесены по секциям: симптомы/образ жизни — к «Самочувствию»,
+    // репродуктивные — к измерениям, остальное — в подробную аналитику.
+    const ins = s.insights || {};
+    const bleedingBlock = (ins.bleeding && ins.bleeding.flow_days) ? `
+      <p class="flo-line"><b>Кровотечение</b></p>
+      <p class="flo-line">Дни с отмеченным кровотечением: ${ins.bleeding.flow_days}, из них обильные: ${ins.bleeding.heavy_days}, со сгустками: ${ins.bleeding.clot_days}.</p>
+      ${s.period_lengths ? `<p class="flo-line">Длительность закрытых месячных в периоде: ${s.period_lengths.min}–${s.period_lengths.max} дн., в среднем ${s.period_lengths.avg} дн.</p>` : ""}` : "";
+    const wellbeingBlock = (ins.wellbeing && ins.wellbeing.symptom_days) ? `
+      <p class="flo-line"><b>Самочувствие</b></p>
+      <p class="flo-line">Самые частые симптомы: ${(ins.wellbeing.top_symptoms || []).map(t => {
         const name = FLO_SYMPTOMS.find(([c]) => c === t.code)?.[1] || t.code;
         return `${esc(name)} — ${esc(frac(t.count, t.denominator))}`;
-      }).join("; ");
-      insightBits.push(`<p class="flo-line"><b>Самочувствие</b></p>
-        <p class="flo-line">Самые частые симптомы: ${top}.</p>
-        ${ins.wellbeing.avg_pain !== null && ins.wellbeing.avg_pain !== undefined ? `<p class="flo-line">Боль в среднем ${ins.wellbeing.avg_pain}/10 за ${ins.wellbeing.pain_days} отметок.</p>` : ""}`);
-    }
-    if (ins.reproductive && (ins.reproductive.bbt_days || ins.reproductive.lh_days || ins.reproductive.mucus_days)) {
-      // Пригодные БТ-дни — без дней болезни (переработка 6); пик слизи —
-      // отдельное наблюдение, в смещение овуляции не подставляется (§4).
-      const peak = (ins.reproductive.mucus_peak_dates || []).map(d => formatDay(d)).join(", ");
-      insightBits.push(`<p class="flo-line"><b>Репродуктивные наблюдения</b></p>
-        <p class="flo-line">БТ — дней с измерениями: ${ins.reproductive.bbt_days}, пригодных (без болезни): ${ins.reproductive.bbt_days_usable}; тесты ЛГ — дней: ${ins.reproductive.lh_days}, из них положительных: ${ins.reproductive.lh_positive_days}; слизь — дней с отметкой: ${ins.reproductive.mucus_days}${peak ? `, плодородный тип: ${esc(peak)}` : ""}.</p>`);
-    }
-    if (ins.lifestyle && (ins.lifestyle.sleep.good || ins.lifestyle.sleep.ok || ins.lifestyle.sleep.poor || ins.lifestyle.stress_days)) {
-      insightBits.push(`<p class="flo-line"><b>Образ жизни</b></p>
-        <p class="flo-line">Сон: хорошо — ${ins.lifestyle.sleep.good}, средне — ${ins.lifestyle.sleep.ok}, плохо — ${ins.lifestyle.sleep.poor}${ins.lifestyle.sleep_hours_avg !== null && ins.lifestyle.sleep_hours_avg !== undefined ? `; средняя длительность ${ins.lifestyle.sleep_hours_avg} ч за ${ins.lifestyle.sleep_hours_days} отметок` : ""}.</p>
-        ${ins.lifestyle.stress_days ? `<p class="flo-line">Стресс отмечен ${ins.lifestyle.stress_days} дн.</p>` : ""}`);
-    }
-    if ((s.meds || []).length) {
-      insightBits.push(`<p class="flo-line"><b>Препараты</b></p>
-        ${s.meds.map(m => `<p class="flo-line">${esc(m.name)}: принято ${m.taken}, пропущено ${m.skipped}.</p>`).join("")}`);
-    }
-    const insightsBlock = insightBits.length ? `<p class="flo-sub">Аналитика за период</p>${insightBits.join("")}` : "";
-    // Порядок по рекомендациям аудита: показатели → графики → фазы →
-    // аналитика → пояснения и ограничения.
+      }).join("; ")}.</p>
+      ${ins.wellbeing.avg_pain !== null && ins.wellbeing.avg_pain !== undefined ? `<p class="flo-line">Боль в среднем ${ins.wellbeing.avg_pain}/10 за ${ins.wellbeing.pain_days} отметок.</p>` : ""}` : "";
+    const reproBlock = (ins.reproductive && (ins.reproductive.bbt_days || ins.reproductive.lh_days || ins.reproductive.mucus_days)) ? `
+      <p class="flo-line"><b>Репродуктивные наблюдения</b></p>
+      <p class="flo-line">БТ — дней с измерениями: ${ins.reproductive.bbt_days}, пригодных (без болезни): ${ins.reproductive.bbt_days_usable}; тесты ЛГ — дней: ${ins.reproductive.lh_days}, из них положительных: ${ins.reproductive.lh_positive_days}; слизь — дней с отметкой: ${ins.reproductive.mucus_days}${(ins.reproductive.mucus_peak_dates || []).length ? `, плодородный тип: ${esc(ins.reproductive.mucus_peak_dates.map(d => formatDay(d)).join(", "))}` : ""}.</p>` : "";
+    const lifestyleBlock = (ins.lifestyle && (ins.lifestyle.sleep.good || ins.lifestyle.sleep.ok || ins.lifestyle.sleep.poor || ins.lifestyle.stress_days)) ? `
+      <p class="flo-line"><b>Образ жизни</b></p>
+      <p class="flo-line">Сон: хорошо — ${ins.lifestyle.sleep.good}, средне — ${ins.lifestyle.sleep.ok}, плохо — ${ins.lifestyle.sleep.poor}${ins.lifestyle.sleep_hours_avg !== null && ins.lifestyle.sleep_hours_avg !== undefined ? `; средняя длительность ${ins.lifestyle.sleep_hours_avg} ч за ${ins.lifestyle.sleep_hours_days} отметок` : ""}.</p>
+      ${ins.lifestyle.stress_days ? `<p class="flo-line">Стресс отмечен ${ins.lifestyle.stress_days} дн.</p>` : ""}` : "";
+    const medsBlock = (s.meds || []).length ? `
+      <p class="flo-line"><b>Препараты</b></p>
+      ${s.meds.map(m => `<p class="flo-line">${esc(m.name)}: принято ${m.taken}, пропущено ${m.skipped}.</p>`).join("")}` : "";
+    const pmsHtml = (s.pms_patterns || []).length ? `
+      <p class="flo-line"><b>Повторяющиеся симптомы перед месячными</b> (ПМС-паттерны, описательно)</p>
+      <div class="flo-history">
+        ${s.pms_patterns.map(p => {
+          const name = FLO_SYMPTOMS.find(([c]) => c === p.code)?.[1] || p.code;
+          const confidence = p.confidence === "good" ? "достаточная база" : "мало данных";
+          return `<div class="item-row"><div class="item-main"><p class="item-title">${esc(name)}</p>
+            <div class="item-meta"><span>обычно за ${p.avg_lead_days} дн. до месячных</span><span>в ${p.cycles_with_symptom} из ${p.cycles_with_data} циклов с записями</span></div>
+            <div class="item-meta"><span>дней с отметкой: ${p.days}</span><span>${confidence}</span></div></div></div>`;
+        }).join("")}
+      </div>
+      <p class="flo-disclaimer">Паттерн — не диагноз: это повторяемость отметок в ваших записях. Уверенный вывод строится только от 3 циклов с заполненным предменструальным окном; при меньшей базе паттерн показан как предварительный.</p>` : "";
+    const dayPatternsHtml = (s.day_patterns || []).length ? `
+      <p class="flo-line"><b>Повторяющиеся симптомы по дню цикла</b> (описательно)</p>
+      <div class="flo-history">
+        ${s.day_patterns.map(p => {
+          const name = FLO_SYMPTOMS.find(([c]) => c === p.code)?.[1] || p.code;
+          const confidence = p.confidence === "good" ? "достаточная база" : "мало данных";
+          return `<div class="item-row"><div class="item-main"><p class="item-title">${esc(name)}</p>
+            <div class="item-meta"><span>обычно около ${p.day_offset}-го дня цикла</span><span>в ${p.cycles_with_symptom} из ${p.cycles_with_data} циклов с записями</span></div>
+            <div class="item-meta"><span>дней с отметкой: ${p.days}</span><span>${confidence}</span></div></div></div>`;
+        }).join("")}
+      </div>
+      <p class="flo-disclaimer">Это повторяемость в ваших записях, а не диагноз и не причинно-следственная связь: пропущенные дни дневника не считаются «днями без симптомов».</p>` : "";
+    const dayCharts = floStatsDayCharts(s);
+    const metricChart = floMetricDayHtml(s);
+    const dayPickInfo = floDayFactsHtml(s, floDayPick);
+    const fold = (title, body, open = false) => body ? `<details class="flo-fold"${open ? " open" : ""}><summary class="flo-fold-title">${esc(title)}</summary>${body}</details>` : "";
+    // Иерархия (Графики.md §9): наблюдения → показатели → лента →
+    // длина цикла → месячные → покрытие → подробные секции под спойлерами.
     return `
       <section class="card">
         <p class="eyebrow">Статистика</p>
@@ -4035,33 +4596,24 @@
         <div class="flo-chips" style="margin-bottom:8px">
           ${[3, 6, 12].map(m => `<button type="button" class="flo-chip${floStatsMonths === m ? " is-on" : ""}" data-action="flo-stats-months" data-months="${m}">${m} мес.</button>`).join("")}
         </div>
+        <p class="flo-sub">Персональные наблюдения</p>
+        ${floPersonalNotesHtml(s)}
         <p class="flo-sub">Основные показатели</p>
+        ${floStatCardsHtml(s)}
         ${statLine}
         ${coverage}
-        ${chart}
-        <p class="flo-sub">По дням</p>
-        ${floStatsDayCharts(s)}
-        <p class="flo-sub">Фазы и симптомы (у каждого показателя свой знаменатель)</p>
-        ${rows || `<p class="flo-disclaimer">Пока нет записей по фазам.</p>`}
-        ${insightsBlock}
-        <p class="flo-sub">Пояснения и ограничения</p>
-        ${unusual}
-        ${longPeriods}
-        ${(s.pms_patterns || []).length ? `
-        <p class="flo-line"><b>Повторяющиеся симптомы перед месячными</b> (ПМС-паттерны, описательно)</p>
-        <div class="flo-history">
-          ${s.pms_patterns.map(p => {
-            const name = FLO_SYMPTOMS.find(([c]) => c === p.code)?.[1] || p.code;
-            const confidence = p.confidence === "good"
-              ? "достаточная база"
-              : "мало данных";
-            return `<div class="item-row"><div class="item-main"><p class="item-title">${esc(name)}</p>
-              <div class="item-meta"><span>обычно за ${p.avg_lead_days} дн. до месячных</span><span>в ${p.cycles_with_symptom} из ${p.cycles_with_data} циклов с записями</span></div>
-              <div class="item-meta"><span>дней с отметкой: ${p.days}</span><span>${confidence}</span></div></div></div>`;
-          }).join("")}
-        </div>
-        <p class="flo-disclaimer">Паттерн — не диагноз: это повторяемость отметок в ваших записях. Уверенный вывод строится только от 3 циклов с заполненным предменструальным окном; при меньшей базе паттерн показан как предварительный.</p>` : ""}
-        <p class="flo-disclaimer">Фазы и овуляция — расчётные по датам месячных, не подтверждённые. Это не диагноз</p>
+        ${hasCycleStats ? "" : `<p class="flo-disclaimer">Для расчёта циклов нужны минимум два старта месячных — пока показаны доступные категории данных.</p>`}
+        <p class="flo-sub">Ваш текущий цикл</p>
+        ${floCycleStripHtml()}
+        <p class="flo-sub">Длина цикла</p>
+        ${cycleChart}
+        <p class="flo-sub">Продолжительность месячных</p>
+        ${periodChart}
+        ${fold("Самочувствие по фазам", `<p class="flo-sub">У каждого показателя свой знаменатель</p>${rows || `<p class="flo-disclaimer">Пока нет записей по фазам.</p>`}`)}
+        ${fold("Интенсивность кровотечения по дням месячных", bleedingBlock + floFlowProfileHtml(s.flow_profile))}
+        ${fold("Симптомы, настроение и самочувствие за период", wellbeingBlock + lifestyleBlock + dayCharts.daily + metricChart + dayPickInfo)}
+        ${fold("Базальная температура и тесты ЛГ", reproBlock + dayCharts.meas + dayPickInfo)}
+        ${fold("Подробная аналитика и история", medsBlock + pmsHtml + dayPatternsHtml + unusual + longPeriods + dayCharts.text + `<p class="flo-disclaimer">Фазы и овуляция — расчётные по датам месячных, не подтверждённые. Это не диагноз</p>`)}
       </section>`;
   }
 
@@ -4106,6 +4658,22 @@
 
   // P3: честное объяснение прогноза — откуда взяты числа и насколько им
   // можно доверять. Прогноз остаётся оценкой, не фактом.
+  // Текст достоверности прогноза окончания месячных: уровни — продуктовые
+  // (0 наблюдений / 1–2 / 3–5 / 6), разброс длительности честно расширяет
+  // диапазон и помечается предупреждением.
+  function floPeriodConfidenceText(f) {
+    const n = f.period_samples || 0;
+    if (n === 0) return "Завершённых месячных в истории нет — длительность взята из профиля, все даты очень примерные";
+    // Пороги достоверности — как в cyclePeriodStats (P1.2): low —
+    // меньше 3 наблюдений или сильный разброс; medium — 3–4;
+    // high — ≥5 при разбросе ≤2.
+    if (f.period_confidence === "low") {
+      return `По ${n} завершённым месячным — мало данных, оценка приблизительная`;
+    }
+    const base = `По ${n} завершённым месячным`;
+    return f.period_unstable ? `${base}, но разброс длительности большой — диапазон расширен` : base;
+  }
+
   function floForecastExplain(f) {
     if (!f || f.empty) return "";
     const bits = [];
@@ -4124,6 +4692,7 @@
     if (f.ovulation_conflict) bits.push(`Признаки расходятся (ЛГ: ${esc(floDayMonth(f.ovulation_conflict.lh))}, БТ: ${esc(floDayMonth(f.ovulation_conflict.bbt))}) — показаны оба, для расчёта взят признак ЛГ как более ранний. Никакая дата овуляции не является подтверждённой.`);
     if (f.data_stale) bits.push("Последняя запись старая: прогноз может не отражать текущий цикл. Отметьте прошедшие месячные.");
     if (f.irregular) bits.push("Цикл нерегулярный: прогноз особенно приблизителен.");
+    if (f.context_adjusted) bits.push("Отмеченный контекст цикла (беременность, контрацепция, послеродовой период и др.) снижает точность прогноза — диапазоны намеренно расширены.");
     bits.push("Пропущенные дни дневника не считаются «днями без симптомов»");
     bits.push("Календарные прогнозы не являются надёжным методом предотвращения беременности");
     return `<details class="flo-fold flo-forecast"><summary class="flo-fold-title">Как считается прогноз?</summary><ul class="flo-explain">${bits.map(b => `<li>${b}</li>`).join("")}</ul></details>`;
@@ -4177,7 +4746,8 @@
   // когда последнее начало, насколько полны данные и что ограничивает
   // достоверность. Методика — в раскрывающемся блоке.
   // Ограничения применимости прогноза по контексту цикла (переработка 5.1):
-  // паритет с cycleContextCaveats в worker.js — менять синхронно.
+  // единственная реализация — UI дублирует тексты worker.js cycleForecast
+  // (context_adjusted); при изменении формулировок держать синхронно.
   const FLO_CONTEXT_CAVEATS = {
     pregnancy: "Отмечена беременность: календарные прогнозы месячных и овуляции неприменимы.",
     postpartum: "После родов и на грудном вскармливании цикл часто нерегулярный: прогнозы особенно приблизительны.",
@@ -4211,14 +4781,40 @@
         // окончания, без диагнозов (аудит 3.1.E).
         const openDays = floDayDiff(openStart, floState.today);
         if (openDays >= 10) lines.push(`Месячные идут уже ${openDays} дн. — уточните дату окончания в календаре. Если кровотечение заметно дольше обычного, обсудите это с врачом.`);
+        // Прогноз окончания текущих месячных (улучшения, этап 5): оценка по
+        // личной истории длительности. Она не закрывает период — факт ждёт
+        // отметки пользователя.
+        const cp = f.current_period;
+        if (cp) {
+          lines.push(`Прошло ${cp.days_elapsed} дн. Ожидаемая длительность по вашим записям — ${cp.expected_days} дн.`);
+          const hasRange = cp.end_early && cp.end_late
+            && (cp.end_early !== cp.expected_end || cp.end_late !== cp.expected_end);
+          lines.push(`Предполагаемое окончание: ${esc(floDayMonth(cp.expected_end))}${hasRange ? `, ориентировочно ${esc(floDayMonth(cp.end_early))} — ${esc(floDayMonth(cp.end_late))}` : ""}`);
+          if (cp.overdue) lines.push("Расчётная дата окончания уже прошла — период остаётся открытым, пока вы не отметите завершение. Уточните фактическую дату.");
+        }
       }
       else if (f.next_period_in === 0) lines.push("Месячные по прогнозу ожидаются сегодня");
       else if (!f.data_stale) lines.push(`Месячные ориентировочно ${esc(floDayMonth(f.next_period_early))} — ${esc(floDayMonth(f.next_period_late))}`);
+      // Прогноз окончания следующих месячных: длительность по личной истории
+      // и предполагаемая дата с диапазоном (учитывает разброс и начал
+      // циклов, и длительности). При задержке и устаревших данных не
+      // показываем — оценка там уже не актуальна.
+      if (!openStart && !f.data_stale && f.phase !== "delay" && !f.empty) {
+        lines.push(`Ожидаемая продолжительность: ${f.avg_period_length} дн.`);
+        lines.push(`Предполагаемое окончание: ${esc(floDayMonth(f.next_period_end))}`);
+        if (f.next_period_end_early && f.next_period_end_late
+            && (f.next_period_end_early !== f.next_period_end || f.next_period_end_late !== f.next_period_end)) {
+          lines.push(`Диапазон окончания: ${esc(floDayMonth(f.next_period_end_early))} — ${esc(floDayMonth(f.next_period_end_late))}`);
+        }
+      }
       // Основание прогноза — прямо в карточке, без необходимости искать методику.
       if (f.based_on === "history" && f.usable_cycles) lines.push(`Расчёт по ${f.usable_cycles} ${f.usable_cycles === 1 ? "завершённому циклу" : "завершённым циклам"}. Последнее начало месячных отмечено ${esc(floDayMonth(f.last_period_start))}.`);
       else if (f.based_on === "profile") lines.push("Расчёт по указанной вами длине цикла — личной истории пока мало.");
       else lines.push("Расчёт по стандартной длине цикла 28 дней — это не ваша личная норма.");
       if (f.quality === "insufficient") lines.push("Данных недостаточно: даты очень примерные");
+      // Достоверность оценки длительности — по числу завершённых месячных
+      // в истории (улучшения, этап 3.4: без ложной точности).
+      if (f.period_samples !== undefined) lines.push(floPeriodConfidenceText(f));
       // §4.1: при недостатке данных уверенной оценки овуляции нет вовсе —
       // вместо даты показывается, каких данных не хватает.
       if (f.phase !== "delay" && f.phase !== "stale" && f.ovulation_in > 0) {
@@ -4494,7 +5090,37 @@
     if (action === "flo-stats-months") {
       floStatsMonths = Number(btn.dataset.months) || 12;
       floStats = undefined;
+      floStripPick = null;
+      floDayPick = null;
       return loadFloStats();
+    }
+    if (action === "flo-strip-day") {
+      floStripPick = floStripPick === date ? null : date;
+      return render();
+    }
+    if (action === "flo-metric-view") {
+      const v = btn.dataset.value;
+      if (["mood", "energy", "sleep", "stress"].includes(v) && v !== floMetricView) {
+        floMetricView = v;
+        return render();
+      }
+      return;
+    }
+    if (action === "flo-day-pick") {
+      floDayPick = floDayPick === date ? null : date;
+      return render();
+    }
+    if (action === "flo-bar-pick") {
+      // Выбор столбца графика цикла/месячных: info-строка под графиком.
+      floBarPick = floBarPick === `${btn.dataset.chart}:${btn.dataset.index}` ? null : `${btn.dataset.chart}:${btn.dataset.index}`;
+      return render();
+    }
+    if (action === "flo-goto-period") {
+      // Переход к фактическим записям периода: вкладка «Сегодня» на дне начала.
+      floView = "today";
+      floSelectedDate = date;
+      floMonth = date.slice(0, 7);
+      return render();
     }
     if (action === "flo-report-open") {
       return openFloReportDialog();
@@ -7589,8 +8215,13 @@
     const card = cardFromEvent(e);
     if (!card) return;
     e.preventDefault();
-    if (e.key === "Enter") card.click();
-    else spaceCard = card;
+    // Enter удерживается с автоповтором — без проверки repeat один тап
+    // превращается в серию кликов. Space автоповтор не шлёт (keydown гасим).
+    if (e.key === "Enter") {
+      if (!e.repeat) card.click();
+    } else {
+      spaceCard = card;
+    }
   });
   document.addEventListener("keyup", (e) => {
     if (e.key !== " " && e.key !== "Spacebar") { spaceCard = null; return; }

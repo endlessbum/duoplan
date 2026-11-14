@@ -178,11 +178,17 @@
       background: radial-gradient(circle at 35% 35%, #33404e, #05070a 72%);
     }
     .iphone-statusbar {
+      position: relative;
       display: flex; align-items: center; justify-content: space-between;
       padding: 15px 28px 2px; color: var(--ink);
       font-size: 12px; font-weight: 650; letter-spacing: .01em;
     }
     .iphone-statusbar-icons { display: inline-flex; align-items: center; gap: 5px; }
+    .iphone-demo-tag {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      font-size: 8.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+      color: var(--muted); opacity: .6; pointer-events: none;
+    }
     .iphone-btn {
       position: absolute; width: 4px; border-radius: 3px;
       background: linear-gradient(90deg, #b7b2aa, #ece9e4 45%, #a8a397);
@@ -578,6 +584,24 @@
     .demo-screen .movie-sort-dir.is-asc svg { transform: rotate(180deg); }
     .demo-screen .movie-sort-count { margin-left: 2px; flex: none; }
 
+    /* Карточка результата «Рандом» (порт .place-pick/.place-actions) и
+       тост демо — ответ на действия, у которых нет экрана. */
+    .demo-screen .place-pick { border-color: var(--berry); box-shadow: 0 10px 30px var(--berry-soft); }
+    .demo-screen .place-pick-title { margin: 2px 0 6px; font-size: 18px; line-height: 1.25; }
+    .demo-screen .place-pick-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .demo-screen .place-actions { display: grid; gap: 8px; margin-top: 14px; }
+    .demo-toast {
+      position: absolute; left: 50%; bottom: 78px; transform: translateX(-50%) translateY(8px);
+      max-width: calc(100% - 48px); padding: 9px 14px; border-radius: 999px;
+      background: var(--glass-bg); border: 1px solid var(--glass-border);
+      backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
+      box-shadow: var(--glass-shadow); color: var(--ink);
+      font-size: 11.5px; font-weight: 500; text-align: center; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; pointer-events: none; z-index: 7;
+      opacity: 0; transition: opacity .2s ease, transform .2s ease;
+    }
+    .demo-toast.is-show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
     /* Возможности — карточки повторяют радиус, фон и тени реальных .card. */
     .features { padding: 76px 0 84px; background: rgba(255,253,249,.46); border-block: 1px solid rgba(120,102,88,.07); }
     .section-head { max-width: 650px; margin-bottom: 34px; }
@@ -747,6 +771,7 @@
               <div class="iphone-island" aria-hidden="true"></div>
               <div class="iphone-statusbar">
                 <span id="demo-clock">--:--</span>
+                <span class="iphone-demo-tag">демо</span>
                 <span class="iphone-statusbar-icons" aria-hidden="true">
                   <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
                   <svg width="16" height="11" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 4.2a10 10 0 0 1 13 0M4 6.8a6.5 6.5 0 0 1 8 0M6.6 9.3a3 3 0 0 1 2.8 0"/><circle cx="8" cy="11" r="0.9" fill="currentColor" stroke="none"/></svg>

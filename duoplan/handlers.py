@@ -1283,6 +1283,7 @@ async def fallback(message: Message) -> None:
 # Дневник симптомов и секс-логи здесь не ведутся: они только в Mini App.
 # ---------------------------------------------------------------------------
 from datetime import datetime as _flo_datetime  # noqa: E402
+from datetime import datetime  # noqa: E402
 
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup  # noqa: E402
 
@@ -1316,6 +1317,7 @@ async def _flo_view(service: DuoPlanService, tg_id: int) -> tuple[str, InlineKey
         periods, today,
         profile["avg_cycle_length"], profile["avg_period_length"],
         profile.get("cycle_length_known", 0), measurements,
+        context=profile.get("context"),
     )
     open_start = next((s for s, e, u in (flo._period_parts(p) for p in periods) if e is None and not u), None)
     share = await flo.share_state(service.db, tg_id)
