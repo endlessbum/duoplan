@@ -84,6 +84,8 @@
   let contactsBusy = false;
   let contactsView = "mine";
   let contactsSearch = "";
+  let floShareDraft = null; // черновик шеринга в диалоге настройки
+  let pendingShareApply = null; // состав, ожидающий применения после окна изменений
   let contactsSwitch = null; // экземпляр капли бара «Мои/Её(Его)»
   let contactsSwitchPrevView = null;
   let datesView = "dates";
@@ -2877,7 +2879,11 @@
 
   function renderFloHistory() {
     const periods = [...floAllPeriods()].sort((a, b) => (a.start_date < b.start_date ? -1 : 1));
-    if (!periods.length) return "";
+    if (!periods.length) {
+      return `<section class="card"><p class="eyebrow">История циклов</p><h3>Пока пусто</h3>
+        <p>Отметьте первые месячные на вкладке «Сегодня» — здесь появится история циклов, длины и добавление прошлых периодов.</p>
+        <button type="button" class="secondary full card-action" data-action="flo-hist-prev-toggle">Добавить прошлые периоды</button></section>`;
+    }
     const day = str => Date.parse(`${str}T00:00:00Z`) / 86400000;
     const rows = periods.map((p, i) => {
       const len = p.end_date ? day(p.end_date) - day(p.start_date) + 1 : null;
@@ -2959,33 +2965,131 @@
     ["sleep", "Качество сна", "Только «хорошо», «средне» или «плохо». Часы сна и другие подробности не передаются."],
     ["bbt", "Базальная температура", "Фактические измерения с датой, временем и единицами. Без интерпретации."]
   ];
-  function renderFloShareControls() {
-    const share = floState.share || { enabled: false, categories: {}, confirmed: false, notify: false };
+  // Конфиденциальность и общий доступ: карточка показывает только актуальное
+  // состояние; сами настройки — в диалоге по кнопке «Настроить».
+  function renderFloShareSummary() {
+    const share = floState.share || { enabled: false, categories: {}, notify: false };
     const cats = share.categories || {};
-    const consentNeeded = share.enabled && !share.confirmed;
+    const sharedCats = FLO_SHARE_CATEGORIES.filter(([key]) => cats[key]).map(([, title]) => title.toLowerCase());
+    const sharedText = share.enabled
+      ? `календарь (прогноз и даты месячных)${sharedCats.length ? `, ${sharedCats.join(", ")}` : ""}`
+      : "ничего — доступ закрыт";
     return `
-        <p class="flo-sub">Шеринг с партнёром: ${share.enabled ? "включён" : "выключен"}</p>
-        <div class="flo-chips">
-          <button type="button" class="flo-chip${share.enabled ? " is-on" : ""}" data-action="flo-share-toggle" data-enabled="${!share.enabled}">${share.enabled ? "Выключить шеринг" : "Включить шеринг"}</button>
-        </div>
-        <p class="settings-hint">Главный выключатель закрывает доступ сразу. Календарь (прогноз и даты месячных) — базовая часть общего доступа.</p>
-        <p class="flo-sub">Категории данных для партнёра</p>
-        ${FLO_SHARE_CATEGORIES.map(([key, title, hint]) => `
-          <div class="flo-share-cat">
-            <div class="flo-share-cat-head">
-              <span>${esc(title)}</span>
-              <button type="button" class="flo-chip${cats[key] ? " is-on" : ""}" data-action="flo-share-cat" data-cat="${key}" data-enabled="${!cats[key]}" aria-pressed="${!!cats[key]}">${cats[key] ? "Передаётся" : "Не передаётся"}</button>
-            </div>
-            <p class="settings-hint">${esc(hint)}</p>
-          </div>`).join("")}
-        ${consentNeeded ? `
-        <div class="flo-consent">
-          <p class="flo-line">Партнёру сейчас передаётся только календарная оценка — новый состав данных нужно подтвердить. После подтверждения партнёр увидит: календарь (прогноз, даты месячных)${FLO_SHARE_CATEGORIES.filter(([key]) => cats[key]).map(([, title]) => `, ${title.toLowerCase()}`).join("") || ""}.</p>
-          <p class="settings-hint">Симптомы, заметки, препараты, боль, вес и стресс не передаются никогда.</p>
-          <button type="button" class="primary full card-action" data-action="flo-share-confirm">Подтвердить состав данных</button>
-        </div>` : ""}
-        <div class="flo-chips"><button type="button" class="flo-chip${share.notify ? " is-on" : ""}" data-action="flo-share-notify" data-enabled="${!share.notify}">${share.notify ? "Уведомлять партнёра: да" : "Уведомлять партнёра: нет"}</button></div>
-        <p class="flo-disclaimer">Партнёру не передаются симптомы, заметки, флоу и сгустки, боль, слизь, препараты, вес и стресс. Выключение категории прекращает передачу именно её сразу.</p>`;
+      <p class="flo-line">Общий доступ: ${share.enabled ? "включён" : "выключен"}.</p>
+      <p class="flo-line">Партнёру передаются: ${esc(sharedText)}.</p>
+      <p class="flo-line">Уведомлять партнёра: ${share.notify ? "да" : "нет"}.</p>
+      <button type="button" class="secondary full card-action" data-action="flo-share-open">Настроить</button>
+      <p class="flo-disclaimer">Симптомы, заметки, препараты, боль, вес и стресс не передаются никогда.</p>`;
+  }
+
+  // Диалог настройки: черновик состояния живёт в floShareDraft, чипы
+  // перерисовывают содержимое окна; «Сохранить» показывает окно изменений.
+  function floShareDialogFields() {
+    const d = floShareDraft;
+    return `
+      <p class="flo-sub">Общий доступ</p>
+      <div class="flo-chips">
+        <button type="button" class="flo-chip${d.enabled ? " is-on" : ""}" data-action="flo-share-dlg-master">${d.enabled ? "Включён" : "Выключен"}</button>
+      </div>
+      <p class="flo-sub">Категории данных для партнёра</p>
+      ${FLO_SHARE_CATEGORIES.map(([key, title, hint]) => `
+        <div class="flo-share-cat">
+          <div class="flo-share-cat-head">
+            <span>${esc(title)}</span>
+            <button type="button" class="flo-chip${d.categories[key] ? " is-on" : ""}" data-action="flo-share-dlg-cat" data-cat="${key}">${d.categories[key] ? "Передаётся" : "Не передаётся"}</button>
+          </div>
+          <p class="settings-hint">${esc(hint)}</p>
+        </div>`).join("")}
+      <p class="flo-sub">Уведомления партнёра</p>
+      <div class="flo-chips">
+        <button type="button" class="flo-chip${d.notify ? " is-on" : ""}" data-action="flo-share-dlg-notify">${d.notify ? "Уведомлять: да" : "Уведомлять: нет"}</button>
+      </div>
+      <p class="flo-disclaimer">Симптомы, заметки, препараты, боль, вес и стресс не передаются никогда. Изменение состава потребует повторного подтверждения.</p>`;
+  }
+
+  function syncFloShareDialog() {
+    if (dialog?.open && dialogContext?.floShare) {
+      dialogFields.innerHTML = floShareDialogFields();
+    }
+  }
+
+  function openFloShareDialog() {
+    const share = floState.share || { enabled: false, categories: {}, notify: false };
+    floShareDraft = {
+      enabled: share.enabled === true,
+      notify: share.notify === true,
+      categories: { sex: false, mood: false, sleep: false, bbt: false, ...(share.categories || {}) }
+    };
+    const config = {
+      title: "Конфиденциальность и общий доступ",
+      submitLabel: "Сохранить",
+      cancelLabel: "Отмена",
+      floShare: true,
+      fields: floShareDialogFields(),
+      onSubmit: async () => {
+        const before = {
+          enabled: share.enabled === true,
+          categories: { sex: false, mood: false, sleep: false, bbt: false, ...(share.categories || {}) }
+        };
+        const after = { enabled: floShareDraft.enabled, categories: { ...floShareDraft.categories } };
+        const items = [
+          { label: "Календарь — прогноз и даты месячных", before: before.enabled, after: after.enabled },
+          ...FLO_SHARE_CATEGORIES.map(([key, title]) => ({
+            label: title, before: before.categories[key] === true, after: after.categories[key] === true
+          }))
+        ];
+        const added = items.filter(i => !i.before && i.after);
+        const removed = items.filter(i => i.before && !i.after);
+        // Окно изменений показывается всегда: оно же — путь подтверждения
+        // для унаследованных неотправленных составов.
+        pendingShareApply = { after, notify: floShareDraft.notify };
+        config.chain = () => openFloShareDiffDialog(added, removed, items.filter(i => i.before === i.after));
+        return appState;
+      }
+    };
+    openDialog(config);
+  }
+
+  // Окно изменений: без изменений — первыми обычным цветом; добавленное —
+  // акцентом; убранное — обычным цветом, перечеркнутым акцентной линией.
+  function openFloShareDiffDialog(added, removed, unchanged) {
+    // Без изменений — построчно (передаётся / не передаётся); добавленное
+    // и убраное — простым перечислением без хвоста «— передаётся».
+    const unchangedOn = unchanged.filter(i => i.after);
+    const unchangedOff = unchanged.filter(i => !i.after);
+    openDialog({
+      title: "Изменения общего доступа",
+      submitLabel: "Применить",
+      cancelLabel: "Отмена",
+      fields: `
+        ${unchanged.length ? `<p class="flo-line">Без изменений:</p>
+        ${unchangedOn.length ? `<p class="flo-line">Передаётся: ${unchangedOn.map(i => esc(i.label)).join(", ")}.</p>` : ""}
+        ${unchangedOff.length ? `<p class="flo-line">Не передаётся: ${unchangedOff.map(i => esc(i.label)).join(", ")}.</p>` : ""}` : ""}
+        ${added.length ? `<p class="flo-share-added">Добавлено в шеринг: ${added.map(i => esc(i.label)).join(", ")}.</p>` : ""}
+        ${removed.length ? `<p class="flo-line flo-share-removed">Убрано из шеринга: ${removed.map(i => `<span class="flo-share-cut">${esc(i.label)}</span>`).join(", ")}.</p>` : ""}
+        <p class="flo-disclaimer">После применения партнёр увидит новый состав; при изменении категорий потребуется повторное подтверждение.</p>
+      `,
+      onSubmit: async () => {
+        // «Применить» = подтверждение состава: пользователь видел ровно то,
+        // что применяет; повторное окно согласия не требуется.
+        floState = await request("/api/cycle/share", {
+          method: "PATCH",
+          body: {
+            enabled: pendingShareApply.after.enabled,
+            categories: pendingShareApply.after.categories,
+            confirmed: true
+          }
+        });
+        if (pendingShareApply.notify !== (floState.share?.notify === true)) {
+          floState = await request("/api/cycle/share-notify", {
+            method: "PATCH", body: { enabled: pendingShareApply.notify }
+          });
+        }
+        pendingShareApply = null;
+        showToast("Состав общего доступа применён");
+        return appState;
+      }
+    });
   }
 
   function renderFloNotifyControl() {
@@ -3033,11 +3137,16 @@
     ];
     return `
       <section class="card">
-        <p class="eyebrow">Настройки Фло</p>
-        <h3>Шеринг и напоминания</h3>
-        ${renderFloShareControls()}
+        <h3>Конфиденциальность и общий доступ</h3>
+        ${renderFloShareSummary()}
+      </section>
+      <section class="card">
+        <h3>Напоминания</h3>
         ${renderFloNotifyControl()}
-        <label class="field flo-group"><span>Средняя длина цикла, дней</span>
+      </section>
+      <section class="card">
+        <h3>Параметры цикла</h3>
+        <label class="field"><span>Средняя длина цикла, дней</span>
           <input id="flo-avg-cycle" type="number" inputmode="numeric" min="20" max="45" value="${Number(p.avg_cycle_length) || 28}">
         </label>
         <label class="field"><span>Длительность месячных, дней</span>
@@ -3047,12 +3156,17 @@
         ${Number(p.cycle_length_known) === 1
           ? `<p class="flo-disclaimer">Пока накоплено меньше двух циклов, прогноз считается по этим значениям.</p>`
           : `<p class="flo-disclaimer">Сейчас используется стандартная длина цикла 28 дней — это не ваша личная норма. Сохраните своё значение или отметьте два цикла, и прогноз уточнится.</p>`}
-        <p class="eyebrow flo-group">Контекст цикла</p>
+      </section>
+      <section class="card">
+        <h3>Контекст цикла</h3>
         <p class="settings-hint">Необязательные сведения: они ограничивают применимость календарных прогнозов, чтобы не показывать уверенные даты там, где расчёт неприменим. Это не медицинская анкета.</p>
         <div class="flo-chips">
           ${contextOptions.map(([key, title]) =>
             `<button type="button" class="flo-chip${context[key] ? " is-on" : ""}" data-action="flo-context-toggle" data-key="${key}" data-enabled="${!context[key]}" aria-pressed="${!!context[key]}">${esc(title)}</button>`).join("")}
         </div>
+      </section>
+      <section class="card">
+        <h3>Данные и экспорт</h3>
         ${renderFloDataControls()}
       </section>
       <div class="pair-exit">
@@ -3877,6 +3991,8 @@
         ${s.meds.map(m => `<p class="flo-line">${esc(m.name)}: принято ${m.taken}, пропущено ${m.skipped}.</p>`).join("")}`);
     }
     const insightsBlock = insightBits.length ? `<p class="flo-sub">Аналитика за период</p>${insightBits.join("")}` : "";
+    // Порядок по рекомендациям аудита: показатели → графики → фазы →
+    // аналитика → пояснения и ограничения.
     return `
       <section class="card">
         <p class="eyebrow">Статистика</p>
@@ -3884,17 +4000,20 @@
         <div class="flo-chips" style="margin-bottom:8px">
           ${[3, 6, 12].map(m => `<button type="button" class="flo-chip${floStatsMonths === m ? " is-on" : ""}" data-action="flo-stats-months" data-months="${m}">${m} мес.</button>`).join("")}
         </div>
-        ${chart}
+        <p class="flo-sub">Основные показатели</p>
         ${statLine}
-        ${unusual}
-        ${longPeriods}
         ${coverage}
-        <p class="flo-sub">Симптомы по фазам (у каждого показателя свой знаменатель)</p>
+        ${chart}
+        <p class="flo-sub">По дням</p>
+        ${floStatsDayCharts(s)}
+        <p class="flo-sub">Фазы и симптомы (у каждого показателя свой знаменатель)</p>
         ${rows || `<p class="flo-disclaimer">Пока нет записей по фазам.</p>`}
         ${insightsBlock}
-        ${floStatsDayCharts(s)}
+        <p class="flo-sub">Пояснения и ограничения</p>
+        ${unusual}
+        ${longPeriods}
         ${(s.pms_patterns || []).length ? `
-        <p class="flo-sub">Повторяющиеся симптомы перед месячными (ПМС-паттерны, описательно)</p>
+        <p class="flo-line"><b>Повторяющиеся симптомы перед месячными</b> (ПМС-паттерны, описательно)</p>
         <div class="flo-history">
           ${s.pms_patterns.map(p => {
             const name = FLO_SYMPTOMS.find(([c]) => c === p.code)?.[1] || p.code;
@@ -4393,43 +4512,23 @@
       });
       return;
     }
-    if (action === "flo-share-toggle") {
-      const enabled = btn.dataset.enabled === "true";
-      try {
-        floState = await request("/api/cycle/share", { method: "PATCH", body: { enabled } });
-        showToast(enabled
-          ? "Шеринг включён: партнёр видит календарную оценку. Подтвердите состав данных, чтобы открыть категории."
-          : "Шеринг выключен — передача данных прекращена сразу");
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
+    if (action === "flo-share-open") {
+      openFloShareDialog();
+      return;
     }
-    if (action === "flo-share-cat") {
+    if (action === "flo-share-dlg-master") {
+      floShareDraft = { ...floShareDraft, enabled: !floShareDraft.enabled };
+      return syncFloShareDialog();
+    }
+    if (action === "flo-share-dlg-cat") {
       const key = btn.dataset.cat;
-      const current = floState.share || { enabled: false, categories: {} };
-      const categories = { ...(current.categories || {}), [key]: btn.dataset.enabled === "true" };
-      try {
-        // Категории можно менять при выключенном шеринге: сохраняются как
-        // намерение и начнут передаваться только после включения и подтверждения.
-        floState = await request("/api/cycle/share", { method: "PATCH", body: { enabled: current.enabled === true, categories } });
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
+      const cats = { ...floShareDraft.categories, [key]: !floShareDraft.categories[key] };
+      floShareDraft = { ...floShareDraft, categories: cats };
+      return syncFloShareDialog();
     }
-    if (action === "flo-share-confirm") {
-      const current = floState.share || { enabled: false, categories: {} };
-      try {
-        floState = await request("/api/cycle/share", {
-          method: "PATCH",
-          body: { enabled: true, categories: current.categories || {}, confirmed: true }
-        });
-        showToast("Состав данных подтверждён — партнёр видит выбранные категории");
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
+    if (action === "flo-share-dlg-notify") {
+      floShareDraft = { ...floShareDraft, notify: !floShareDraft.notify };
+      return syncFloShareDialog();
     }
     if (action === "flo-export") {
       try {
@@ -4577,14 +4676,6 @@
     if (action === "flo-hist-prev-toggle") {
       openFloPrevDialog();
       return;
-    }
-    if (action === "flo-share-notify") {
-      try {
-        floState = await request("/api/cycle/share-notify", { method: "PATCH", body: { enabled: btn.dataset.enabled === "true" } });
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
     }
     if (action === "flo-notify-toggle") {
       try {

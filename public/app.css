@@ -2476,6 +2476,16 @@ input[type="checkbox"]:active {
   font-size: 14px;
   font-weight: 600;
 }
+/* Окно изменений общего доступа: добавленное — акцентом, убранное —
+   обычным цветом текста, перечеркнутым акцентной линией. */
+.flo-share-added { color: var(--berry); font-weight: 600; }
+.flo-share-removed { color: var(--ink); }
+.flo-share-cut {
+  text-decoration: line-through;
+  text-decoration-color: var(--berry);
+  text-decoration-thickness: 1.5px;
+}
+
 /* Подтверждение состава передаваемых данных — выделенный блок согласия. */
 .flo-consent {
   margin: 10px 0;

@@ -1071,3 +1071,39 @@ test("GET /api/cycle/partner: неподтверждённый шеринг не
   equal(json.includes("секрет"), false);
   equal(json.includes("2026-10-27"), false);
 });
+
+test("PATCH /api/cycle/share: изменение состава сбрасывает подтверждение", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { enabled: true, categories: { sex: true, mood: false } }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/share"));
+  const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET"));
+  ok(update.sql.includes("share_confirmed=?"), "confirmed сбрасывается в 0 без явного подтверждения");
+  const idx = update.args.findIndex(a => a === 0);
+  ok(idx !== -1, "значение 0 в аргументах");
+});
+
+test("PATCH /api/cycle/share: явное подтверждение не сбрасывается", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "PATCH",
+    body: { enabled: true, categories: { sex: true }, confirmed: true }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/share"));
+  const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET"));
+  const i = update.sql.indexOf("share_confirmed=?");
+  ok(i !== -1);
+  // confirmed=? идёт после share_confirmed reset — тут оба варианта: reset не
+  // добавляется (confirmed определён), а подтверждение = 1.
+  const argAfter = update.args.filter(a => a === 1).length;
+  ok(argAfter >= 2, "enabled=1 и confirmed=1 в аргументах");
+});
+
+test("PATCH /api/cycle/share: главный выключатель без категорий не трогает подтверждение", async () => {
+  const { api, env, request, writes } = makeEnv({
+    gender: "female", method: "PATCH", body: { enabled: false }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/share"));
+  const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET"));
+  ok(!update.sql.includes("share_confirmed=?"), "выключение не сбрасывает подтверждение");
+});

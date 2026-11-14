@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.14.39";
+const APP_VERSION = "2026.11.14.45";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.14.39";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.14.39";
+const DB_SCHEMA_VERSION = "2026.11.14.45";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -2957,8 +2957,11 @@ async function api(request, env, url, ctx = null) {
     // (confirmed), до подтверждения партнёру передаётся только календарь.
     if (request.method === "PATCH" && url.pathname === "/api/cycle/share") {
       if (typeof body.enabled !== "boolean") throw new HttpError(400, "Проверьте настройку шеринга", "INVALID_SHARE");
+      // Порядок значений обязан совпадать с порядком «?»: updated_at идёт
+      // вторым в SQL, поэтому stamp кладётся вторым сразу (иначе все
+      // последующие значения съезжают и share_confirmed получает timestamp).
       const sets = ["share_enabled=?", "updated_at=?"];
-      const values = [body.enabled ? 1 : 0];
+      const values = [body.enabled ? 1 : 0, stamp];
       if (body.categories !== undefined) {
         if (!body.categories || typeof body.categories !== "object" || Array.isArray(body.categories)) {
           throw new HttpError(400, "Проверьте категории общего доступа", "INVALID_SHARE");
@@ -2970,13 +2973,20 @@ async function api(request, env, url, ctx = null) {
           sets.push(`${CYCLE_SHARE_COLUMNS[key]}=?`);
           values.push(v ? 1 : 0);
         }
+        // Изменение состава сбрасывает подтверждение: партнёр не получает
+        // новые категории без явного повторного согласия. Явное
+        // confirmed=true в том же запросе (кнопка подтверждения) — выше силой.
+        if (body.confirmed === undefined) {
+          sets.push("share_confirmed=?");
+          values.push(0);
+        }
       }
       if (body.confirmed !== undefined) {
         if (typeof body.confirmed !== "boolean") throw new HttpError(400, "Подтверждение — булево", "INVALID_SHARE");
         sets.push("share_confirmed=?");
         values.push(body.confirmed ? 1 : 0);
       }
-      values.push(stamp, user.tg_id);
+      values.push(user.tg_id);
       await env.DB.prepare(`UPDATE cycle_profiles SET ${sets.join(", ")} WHERE tg_id=?`).bind(...values).run();
       return json(await cycleState(env, user.tg_id, timezone));
     }
