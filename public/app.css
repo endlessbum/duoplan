@@ -316,7 +316,8 @@ html.dialog-locked {
    Переключатель вишлиста «Мои / Её(Его)» — стекло как у нижнего бара
 ------------------------------------------------------------------- */
 .wish-switch,
-.seg-switch {
+.seg-switch,
+.contacts-switch {
   display: grid;
   /* Колонка на каждую кнопку: сегментов может быть два («Планы/Кино»)
      и три («Профиль/Желания/Копилка») — фиксированные 1fr 1fr заворачивали
@@ -341,7 +342,8 @@ html.dialog-locked {
 }
 
 .wish-switch-btn,
-.seg-switch-btn {
+.seg-switch-btn,
+.contacts-switch-btn {
   position: relative;
   z-index: 1;
   touch-action: none;
@@ -362,7 +364,8 @@ html.dialog-locked {
 /* Подсветку даёт капля; фон активной кнопки убран, иначе он просвечивал бы
    сквозь стекло вторым прямоугольником. */
 .wish-switch-btn.is-active,
-.seg-switch-btn.is-active {
+.seg-switch-btn.is-active,
+.contacts-switch-btn.is-active {
   color: var(--berry);
 }
 
@@ -2411,8 +2414,10 @@ input[type="checkbox"]:active {
 
 .cal-day.is-delay { opacity: 0.5; }
 
+/* Рамка актуального дня — акцент приложения и у дней в периоде:
+   раньше здесь был --ink (белый в тёмной теме). */
 .cal-day.is-period.is-today {
-  box-shadow: inset 0 0 0 1.5px var(--ink);
+  box-shadow: inset 0 0 0 1.5px var(--berry);
 }
 
 /* Точки цикла в легендах обеих календарей. «Месячные» — красный квадратик
@@ -2616,18 +2621,25 @@ input[type="checkbox"]:active {
 }
 .flo-report-table--wide { min-width: 720px; }
 @media print {
+  /* Нулевые поля страницы: Chromium при margin:0 не рисует колонтитулы
+     печати (дата/время, заголовок документа, URL) — поля даёт сам отчёт. */
+  @page { margin: 0; }
   .no-print { display: none !important; }
+  /* Страница отдаётся потоку целиком: высота/скролл приложения сброшены,
+     иначе фиксированный диалог ломал пагинацию. */
+  html, body { height: auto !important; overflow: visible !important; background: #fff; }
   body * { visibility: hidden; }
   .flo-report-doc, .flo-report-doc * { visibility: visible; }
-  /* Отчёт теперь в общем диалоге: при печати разворачиваем его на весь
-     лист, прячем шапку/кнопки диалога и снимаем ограничение ширины таблиц. */
+  /* Отчёт в общем диалоге: при печати позиционируем absolute (не fixed —
+     fixed дублировал содержимое на каждый лист в Chromium) и даём контенту
+     течь естественно через страницы. */
   #item-dialog {
-    position: fixed;
+    position: absolute;
     inset: 0;
     width: 100%;
     max-width: 100%;
     max-height: none;
-    height: 100%;
+    height: auto;
     margin: 0;
     border: 0;
     border-radius: 0;
@@ -2642,13 +2654,15 @@ input[type="checkbox"]:active {
   #item-dialog .sheet-actions { display: none !important; }
   #flo-report { width: 100%; }
   .flo-report-doc {
-    padding: 16px;
+    padding: 12mm 10mm;
     max-height: none;
     overflow: visible;
   }
   .flo-report-table-wrap { overflow: visible; }
   .flo-report-table--wide { min-width: 0; }
-  .flo-report-table { font-size: 10pt; width: 100%; }
+  /* Таблицы не выходят за лист: фиксированная раскладка + перенос слов. */
+  .flo-report-table { font-size: 9.5pt; width: 100%; table-layout: fixed; word-break: break-word; }
+  .flo-report-table th, .flo-report-table td { padding: 3px 4px; }
   .flo-report-table th, .flo-report-table td { border-color: #999; }
   .flo-report-doc h2, .flo-report-doc h3 { color: #111; }
   .flo-report-doc .flo-disclaimer { color: #333; }

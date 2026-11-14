@@ -61,7 +61,6 @@
   let floWizardDismissed = false;
   // Импорт прошлых периодов из карточки истории (bulk /api/cycle/periods).
   let floHistPrev = [];
-  let floHistPrevOpen = false;
   let floStats = undefined;
   let floStatsBusy = false;
   // Пагинация истории (P1): помесячная догрузка через /api/cycle/history
@@ -71,12 +70,9 @@
   // приёмы пропадают из карточки дня при листании календаря назад.
   let floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
   let floFetchedMonths = new Set();
-  let floEditing = null;
   // P2: отчёт (печать/CSV/JSON), препараты и черновики форм.
   let floReport = null; // { months, loading, failed, data }
   let floStatsMonths = 12;
-  let floMedForm = null; // { id?, ...поля } — открытая форма препарата
-  let floMedDeleteArmed = null;
   let floMedDetail = null; // "medId:date" — раскрытые поля факта приёма
   // Здоровье («Дневник → Здоровье»): личный журнал препаратов каждого
   // партнёра + напоминания бота о приёме. Данные персональные (tg_id).
@@ -88,6 +84,8 @@
   let contactsBusy = false;
   let contactsView = "mine";
   let contactsSearch = "";
+  let contactsSwitch = null; // экземпляр капли бара «Мои/Её(Его)»
+  let contactsSwitchPrevView = null;
   let datesView = "dates";
   let memoriesView = "memories";
   // «Планы / Цели / Кино» — виды вкладки «Планы».
@@ -2275,6 +2273,14 @@
     render();
   }
 
+  // Диалог «Запись дня» открыт: перерисовываем его карточку после каждой
+  // записи, иначе внутри окна оставались бы устаревшие чипы.
+  function syncFloDayDialog() {
+    if (dialog?.open && dialogContext?.floDay) {
+      dialogFields.innerHTML = renderFloDayCard();
+    }
+  }
+
   async function floSave(body) {
     try {
       floState = await request("/api/cycle/period", { method: "POST", body });
@@ -2285,6 +2291,7 @@
       handleRequestError(error);
     }
     render();
+    syncFloDayDialog();
   }
 
   // Объединённые периоды/логи: state (свежие 36/400) поверх догруженных
@@ -2446,14 +2453,14 @@
   function floDayDots(date) {
     const log = floDayLog(date);
     // Секс — отдельный маркер: красные сердечки по числу отметок. Явная
-    // отметка «без секса» — тоже факт, показывает её другим маркером (9.4).
+    // отметка «без секса» видна в сводке дня, не в сетке календаря.
     const sexCount = (log.sex === "protected" || log.sex === "unprotected") ? (log.sex_count || 1) : 0;
-    const noSex = log.sex === "none";
+    const noSexMarker = false; // «без секса» не рисуется в сетке (9.4 → сводка дня)
     // Любая запись дня даёт индикатор: флоу, сгустки, настроение, энергия,
     // симптомы (включая «симптомов не было»), заметка, протечки, боль,
     // сон, стресс, слизь, факторы, вес, сведения о кровотечении.
     const hasLog = log.flow || log.clots || log.mood || log.energy || log.symptoms?.length || log.symptoms_clear || log.note || log.leakage || log.pain_score !== null && log.pain_score !== undefined || log.life_impact || log.pain_locations?.length || log.sleep_hours !== null && log.sleep_hours !== undefined || log.sleep_quality || log.stress || log.sick || log.travel || log.weight_kg !== null && log.weight_kg !== undefined || log.mucus || log.bleeding_details;
-    return `${hasLog ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}${noSex ? `<i class="cal-dot is-no-sex" aria-hidden="true"></i>` : ""}`;
+    return `${hasLog ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}`;
   }
 
   // Сводка записей выбранного дня под календарём — как cal-events в общем
@@ -2539,7 +2546,7 @@
           <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция (расчёт)</span>
           <span><i class="cal-dot is-log" aria-hidden="true"></i>Запись</span>
           <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
-          <span><i class="cal-dot is-no-sex" aria-hidden="true"></i>Без секса</span>
+          
         </div>
         ${(() => {
           if (!floSelectedDate) return "";
@@ -2622,6 +2629,7 @@
       handleRequestError(error);
     }
     render();
+    syncFloDayDialog();
   }
 
   // --- P2: измерения (БТ/ЛГ) и факт приёма препаратов за выбранный день ---
@@ -2734,6 +2742,7 @@
       handleRequestError(error);
     }
     render();
+    syncFloDayDialog();
   }
   async function floPostMedLog(body) {
     try {
@@ -2747,6 +2756,7 @@
       handleRequestError(error);
     }
     render();
+    syncFloDayDialog();
   }
 
   // Карточка дня (переработка 12): три уровня ввода — быстрая отметка
@@ -2893,11 +2903,7 @@
         </div>
         <button class="icon-btn" type="button" data-action="flo-edit-period" data-start="${esc(r.start)}" aria-label="Изменить">${EDIT_ICON}</button>
       </div>`).join("");
-    const prevBlock = floHistPrevOpen
-      ? `${floPrevEditorHtml("hist", floHistPrev)}
-         <button type="button" class="primary full card-action" data-action="flo-hist-prev-save"${floHistPrev.length ? "" : " disabled"}>Сохранить историю</button>
-         <button type="button" class="secondary full card-action" data-action="flo-hist-prev-toggle">Отмена</button>`
-      : `<button type="button" class="secondary full card-action" data-action="flo-hist-prev-toggle">Добавить прошлые периоды</button>`;
+    const prevBlock = `<button type="button" class="secondary full card-action" data-action="flo-hist-prev-toggle">Добавить прошлые периоды</button>`;
     return `
       <section class="card">
         <p class="eyebrow">История циклов</p>
@@ -2908,13 +2914,47 @@
       </section>`;
   }
 
+  // Прошлые периоды — отдельным окном поверх (как все правки). Строки
+  // редактора собираются тем же floPrevEditorHtml; «+»/крестик внутри
+  // диалога меняют floHistPrev и перерисовывают содержимое окна.
+  function syncFloPrevDialog() {
+    if (dialog?.open && dialogContext?.floPrev) {
+      dialogFields.innerHTML = floPrevEditorHtml("dlg", floHistPrev);
+    }
+  }
+
+  function openFloPrevDialog() {
+    floHistPrev = [];
+    openDialog({
+      title: "Прошлые периоды",
+      submitLabel: "Сохранить историю",
+      cancelLabel: "Отмена",
+      floPrev: true,
+      fields: floPrevEditorHtml("dlg", floHistPrev),
+      onSubmit: async () => {
+        if (!floHistPrev.length) {
+          const err = new Error("Добавьте хотя бы один прошлый период");
+          err.code = "INVALID_PERIODS";
+          throw err;
+        }
+        const sent = floHistPrev.length;
+        floState = await request("/api/cycle/periods", { method: "POST", body: { periods: floHistPrev } });
+        floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
+        floHistPrev = [];
+        floStats = undefined;
+        showToast(`Добавлено периодов: ${floState.periods_imported ?? sent}, пропущено: ${floState.periods_skipped ?? 0}`);
+        return appState;
+      }
+    });
+  }
+
   // Настройки общего доступа (переработка P0): категории вместо уровней.
   // Календарь — базовая часть: прогноз и даты месячных передаются самим
   // фактом включённого шеринга. Остальные категории — по явному выбору, и
   // состав подтверждается отдельно (share_confirmed): до подтверждения
   // партнёру передаётся только календарная оценка.
   const FLO_SHARE_CATEGORIES = [
-    ["sex", "Секс", "Факты активности: «с защитой», «без защиты» и явная отметка «без секса», с числом отметок за день. Подробностей в записях нет."],
+    ["sex", "Секс", "Факты активности: «с защитой», «без защиты» с числом отметок за день. Подробностей в записях нет."],
     ["mood", "Настроение", "Только настроение, которое вы отметили сами. Никаких прогнозов настроения."],
     ["sleep", "Качество сна", "Только «хорошо», «средне» или «плохо». Часы сна и другие подробности не передаются."],
     ["bbt", "Базальная температура", "Фактические измерения с датой, временем и единицами. Без интерпретации."]
@@ -2970,15 +3010,12 @@
   function renderFloDataControls() {
     if (floDeleteArmed) {
       return `
-        <p class="eyebrow flo-group">Данные</p>
         <p class="flo-line">Удалить все данные Фло? Периоды, симптомы и заметки пропадут без возврата, шеринг выключится.</p>
         <button type="button" class="primary is-danger full card-action" data-action="flo-delete-confirm">Да, удалить</button>
         <button type="button" class="secondary full card-action" data-action="flo-delete-cancel">Не удалять</button>`;
     }
     return `
-      <p class="eyebrow flo-group">Данные</p>
-      <button type="button" class="secondary full card-action" data-action="flo-export">Выгрузить в чат</button>
-      <button type="button" class="secondary is-danger full card-action" data-action="flo-delete-start">Удалить все данные</button>`;
+      <button type="button" class="secondary full card-action" data-action="flo-export">Выгрузить в чат</button>`;
   }
 
   function renderFloSettings() {
@@ -3017,7 +3054,13 @@
             `<button type="button" class="flo-chip${context[key] ? " is-on" : ""}" data-action="flo-context-toggle" data-key="${key}" data-enabled="${!context[key]}" aria-pressed="${!!context[key]}">${esc(title)}</button>`).join("")}
         </div>
         ${renderFloDataControls()}
-      </section>`;
+      </section>
+      <div class="pair-exit">
+        ${floDeleteArmed
+          ? `<button type="button" class="secondary pair-leave" data-action="flo-delete-cancel">Не удалять</button>
+             <button type="button" class="primary is-danger pair-leave" data-action="flo-delete-confirm">Да, удалить</button>`
+          : `<button type="button" class="secondary pair-leave" data-action="flo-delete-start">Удалить все данные</button>`}
+      </div>`;
   }
 
   function floIsOwner() {
@@ -3078,9 +3121,10 @@
   function floPartnerDayDots(date) {
     const log = floPartnerDayLog(date);
     const sexCount = (log?.sex === "protected" || log?.sex === "unprotected") ? (log.sex_count || 1) : 0;
-    const noSex = log?.sex === "none";
+
     const hasOther = log?.mood || log?.sleep || floPartnerBbt(date).length;
-    return `${hasOther ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}${noSex ? `<i class="cal-dot is-no-sex" aria-hidden="true"></i>` : ""}`;
+    // «Без секса» в сетке календаря не отмечается — факт виден в карточке дня.
+    return `${hasOther ? `<i class="cal-dot is-log"></i>` : ""}${sexCount ? floSexHearts(sexCount) : ""}`;
   }
   function renderFloPartnerCalendar() {
     const v = floPartner;
@@ -3116,7 +3160,7 @@
           <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция (расчёт)</span>
           <span><i class="cal-dot is-log" aria-hidden="true"></i>Отметки</span>
           <span><svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>Секс</span>
-          <span><i class="cal-dot is-no-sex" aria-hidden="true"></i>Без секса</span>
+          
         </div>
       </section>`;
   }
@@ -3164,7 +3208,7 @@
   function renderFloPartnerView() {
     const v = floPartner;
     if (!v || v.shared !== true) {
-      return `<section class="card"><p class="eyebrow">Фло</p><h3>Пока не делится</h3><p>Партнёрша пока не делится календарём. Когда она включит общий доступ, здесь появится её календарь</p></section>`;
+      return `<section class="card"><h3>Пока не делится</h3><p>Партнёрша пока не делится календарём. Когда она включит общий доступ, здесь появится её календарь</p></section>`;
     }
     const f = v.forecast || {};
     const lines = [];
@@ -3323,64 +3367,79 @@
   }
 
   // --- P2: препараты (справочник) ---
-  async function floSaveMed(body) {
-    try {
-      floState = await request("/api/cycle/med", { method: "POST", body });
-      floMedForm = null;
-      floMedDeleteArmed = null;
-      showToast("Препарат сохранён");
-    } catch (error) {
-      handleRequestError(error);
-    }
-    render();
-  }
-
-  function renderFloMedForm() {
-    const f = floMedForm;
-    if (!f) return "";
-    const del = floMedDeleteArmed === f.id
-      ? `<button type="button" class="primary is-danger full card-action" data-action="flo-med-delete" data-id="${f.id}">Точно удалить</button>`
-      : f.id ? `<button type="button" class="secondary is-danger full card-action" data-action="flo-med-delete-arm" data-id="${f.id}">Удалить</button>` : "";
-    return `
-      <div class="flo-med-form">
+  // Препараты Фло: добавление/правка — отдельным окном поверх (как во всех
+  // вкладках). Удаление — через подтверждающее окно.
+  function openFloMedDialog(m = null) {
+    const f = m || {};
+    openDialog({
+      title: m ? "Изменить препарат" : "Новый препарат",
+      submitLabel: m ? "Сохранить" : "Добавить",
+      cancelLabel: "Отмена",
+      fields: `
         <label class="field"><span>Название</span>
-          <input id="flo-med-name" type="text" maxlength="120" value="${esc(f.name || "")}" placeholder="Например, КОК">
+          <input name="name" data-fmt="none" type="text" maxlength="120" required value="${esc(f.name || "")}" placeholder="Например, КОК">
         </label>
         <div class="flo-actions" style="margin-top:6px">
           <label class="field" style="flex:1"><span>Категория</span>
-            <select id="flo-med-category"><option value="">—</option>${FLO_MED_CATEGORIES.map(([c, l]) => `<option value="${c}"${f.category === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+            <select name="category"><option value="">—</option>${FLO_MED_CATEGORIES.map(([c, l]) => `<option value="${c}"${f.category === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
           </label>
         </div>
         <label class="field"><span>Назначенная доза (справочно)</span>
-          <input id="flo-med-dosage" type="text" maxlength="120" value="${esc(f.dosage || "")}" placeholder="Например, 1 таблетка">
+          <input name="dosage" data-fmt="none" type="text" maxlength="120" value="${esc(f.dosage || "")}" placeholder="Например, 1 таблетка">
         </label>
         <div class="flo-actions" style="margin-top:6px">
           <label class="field" style="flex:1"><span>Форма</span>
-            <select id="flo-med-form"><option value="">—</option>${FLO_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+            <select name="form"><option value="">—</option>${FLO_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
           </label>
           <label class="field" style="flex:1"><span>Статус</span>
-            <select id="flo-med-status">${FLO_MED_STATUS.map(([c, l]) => `<option value="${c}"${(f.status || "active") === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+            <select name="status">${FLO_MED_STATUS.map(([c, l]) => `<option value="${c}"${(f.status || "active") === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
           </label>
         </div>
         <label class="field"><span>Схема приёма</span>
-          <input id="flo-med-schedule" type="text" maxlength="200" value="${esc(f.schedule || "")}" placeholder="Например, 1 раз в день утром">
+          <input name="schedule" data-fmt="none" type="text" maxlength="200" value="${esc(f.schedule || "")}" placeholder="Например, 1 раз в день утром">
         </label>
         <div class="flo-actions" style="margin-top:6px">
           <label class="field" style="flex:1"><span>Начало курса</span>
-            <input id="flo-med-start" type="date" max="${esc(floState.today)}" value="${esc(f.start_date || floState.today)}">
+            <input name="start_date" type="date" required max="${esc(floState.today)}" value="${esc(f.start_date || floState.today)}">
           </label>
           <label class="field" style="flex:1"><span>Конец курса</span>
-            <input id="flo-med-end" type="date" max="${esc(floState.today)}" value="${esc(f.end_date || "")}">
+            <input name="end_date" type="date" max="${esc(floState.today)}" value="${esc(f.end_date || "")}">
           </label>
         </div>
         <label class="field"><span>Комментарий</span>
-          <input id="flo-med-note" type="text" maxlength="1000" value="${esc(f.note || "")}">
+          <input name="note" data-fmt="none" type="text" maxlength="1000" value="${esc(f.note || "")}">
         </label>
-        <button type="button" class="primary full card-action" data-action="flo-med-save-read">Сохранить</button>
-        <button type="button" class="secondary full card-action" data-action="flo-med-cancel">Отмена</button>
-        ${del}
+        ${m ? `<button type="button" class="secondary is-danger full card-action" data-action="flo-med-delete" data-id="${m.id}">Удалить препарат</button>` : ""}
         <p class="flo-disclaimer">Приложение не назначает и не отменяет приём препаратов — здесь только ваш журнал</p>
-      </div>`;
+      `,
+      onSubmit: async (fd) => {
+        const body = {
+          name: String(fd.get("name") || "").trim(),
+          category: String(fd.get("category") || "") || null,
+          dosage: String(fd.get("dosage") || "").trim() || null,
+          form: String(fd.get("form") || "") || null,
+          status: String(fd.get("status") || "active"),
+          schedule: String(fd.get("schedule") || "").trim() || null,
+          start_date: String(fd.get("start_date") || ""),
+          end_date: String(fd.get("end_date") || "") || null,
+          note: String(fd.get("note") || "").trim() || null,
+          ...(m ? { id: m.id } : {})
+        };
+        if (!body.name) {
+          const err = new Error("Укажите название препарата");
+          err.code = "INVALID_NAME";
+          throw err;
+        }
+        if (!body.start_date) {
+          const err = new Error("Укажите дату начала курса");
+          err.code = "INVALID_DATE";
+          throw err;
+        }
+        floState = await request("/api/cycle/med", { method: "POST", body });
+        showToast("Препарат сохранён");
+        return appState;
+      }
+    });
   }
 
   function renderFloMeds() {
@@ -3401,11 +3460,10 @@
     }).join("");
     return `
       <section class="card">
-        <p class="eyebrow flo-group">Мои препараты</p>
         <h3>Лекарства и курсы</h3>
         <p class="settings-hint">Это ваш личный журнал: препараты не видны партнёру и не используются для рекомендаций. Фактический приём отмечается в дневнике выбранного дня</p>
         ${list || `<p class="flo-disclaimer">Пока нет препаратов</p>`}
-        ${floMedForm ? renderFloMedForm() : `<button type="button" class="secondary full card-action" style="margin-top:8px" data-action="flo-med-new">Добавить препарат</button>`}
+        <button type="button" class="primary full card-action" style="margin-top:8px" data-action="flo-med-new">Добавить препарат</button>
       </section>`;
   }
 
@@ -3447,68 +3505,6 @@
       fields: renderFloReportDialog()
     });
     if (!floReport?.data && !floReport?.loading) loadFloReport();
-  }
-
-  function floReportDownload(data, kind) {
-    let text, name, type;
-    if (kind === "csv") {
-      text = floReportCsv(data);
-      name = `flo-report-${data.to}.csv`;
-      type = "text/csv;charset=utf-8";
-    } else {
-      text = JSON.stringify({ format: "duoplan-cycle-report", generated_at: new Date().toISOString(), from: data.from, to: data.to, ...data }, null, 2);
-      name = `flo-report-${data.to}.json`;
-      type = "application/json";
-    }
-    // BOM нужен Excel для кириллицы в CSV.
-    const blob = new Blob(["\uFEFF" + text], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function floCsvCell(v) {
-    const s = v === null || v === undefined ? "" : String(v);
-    return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  }
-  function floReportCsv(data) {
-    const header = ["date", "type", "flow", "clots", "energy", "mood", "symptoms", "symptoms_clear", "leakage", "pain_score", "pain_locations", "life_impact", "mucus", "sleep_hours", "sleep_quality", "stress", "sick", "travel", "weight_kg", "sex", "note", "med_name", "med_status", "dose_taken", "med_time", "med_note", "measurement_kind", "measurement_value", "measurement_unit", "measurement_result", "measurement_time", "measurement_note", "period_end", "period_end_unknown"];
-    const lines = [header.join(";")];
-    const push = row => {
-      while (row.length < header.length) row.push("");
-      lines.push(row.map(floCsvCell).join(";"));
-    };
-    const medName = id => (data.meds || []).find(m => m.id === id)?.name || "";
-    // Периоды — тоже данные: start в date, конец и флаг «неизвестен» в
-    // хвостовых колонках. Открытый период: period_end пуст, флаг 0.
-    for (const p of data.periods || []) {
-      push([p.start_date, "period", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-        p.end_date || "", p.end_unknown ? 1 : 0]);
-    }
-    for (const l of data.logs || []) {
-      const mucus = l.mucus ? [l.mucus.amount, l.mucus.consistency, l.mucus.color, l.mucus.discomfort ? "discomfort" : "", l.mucus.note].filter(Boolean).join(", ") : "";
-      push([l.date, "log", l.flow, l.clots ? 1 : 0, l.energy, l.mood,
-        (l.symptoms || []).join(","), l.symptoms_clear ? 1 : 0, l.leakage, l.pain_score ?? "",
-        (l.pain_locations || []).join(","), l.life_impact, mucus,
-        l.sleep_hours ?? "", l.sleep_quality, l.stress, l.sick ? 1 : 0, l.travel ? 1 : 0,
-        l.weight_kg ?? "", l.sex ? `${l.sex}${(l.sex_count || 0) > 1 ? ` ×${l.sex_count}` : ""}` : "", l.note]);
-    }
-    for (const ml of data.med_logs || []) {
-      push([ml.date, "med_log", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-        medName(ml.med_id), ml.status, ml.dose_taken || "", ml.time || "", ml.note || ""]);
-    }
-    for (const m of data.meds || []) {
-      push([m.start_date, "med_course", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-        m.name, m.status, "", "", [m.category, m.dosage, m.form, m.schedule, m.end_date, m.note].filter(Boolean).join(" | ")]);
-    }
-    for (const m of data.measurements || []) {
-      push([m.date, "measurement", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", m.note || "",
-        "", "", "", "", "", m.kind, m.value ?? "", m.unit || "", m.result || "", m.time || ""]);
-    }
-    return lines.join("\n");
   }
 
   // «Сегодня минус N месяцев» с клампом дня: 31 марта −1 мес = 28/29 февраля,
@@ -3591,8 +3587,15 @@
     const periodRows = (data.periods || []).map(p => {
       // «Конец не помним» не превращаем ни в «идут», ни в придуманную дату.
       const endLabel = p.end_date ? fmtDate(p.end_date) : (p.end_unknown ? "неизвестно" : "идут");
-      const len = p.end_date ? Math.round((Date.parse(p.end_date) - Date.parse(p.start_date)) / 86400000) + 1 : null;
-      return `<tr><td>${esc(fmtDate(p.start_date))}</td><td>${esc(endLabel)}</td><td>${len === null ? dash : `${len} дн.`}</td></tr>`;
+      let lenLabel = dash;
+      if (p.end_date) {
+        lenLabel = `${Math.round((Date.parse(p.end_date) - Date.parse(p.start_date)) / 86400000) + 1} дн.`;
+      } else if (!p.end_unknown && p.start_date <= to) {
+        // Месячные идут на момент отчёта: длительность на сегодня + пометка.
+        const days = floDayDiff(p.start_date, to) + 1;
+        lenLabel = `${days} дн. (продолжаются)`;
+      }
+      return `<tr><td>${esc(fmtDate(p.start_date))}</td><td>${esc(endLabel)}</td><td>${esc(lenLabel)}</td></tr>`;
     }).join("");
     const medRows = (data.meds || []).map(m => {
       const taken = (data.med_logs || []).filter(l => l.med_id === m.id && l.status === "taken").length;
@@ -3603,9 +3606,7 @@
       `<tr><td>${esc(fmtDate(m.date))}</td><td>${m.kind === "bbt" ? "Базальная температура" : "Тест на ЛГ"}</td><td>${m.kind === "bbt" ? `${m.value}°${m.unit === "F" ? "F" : "C"}` : (FLO_LH_RESULTS.find(([x]) => x === m.result)?.[1] || m.result || dash)}</td><td>${esc(m.time || "") || dash}</td><td>${esc(m.note || "") || dash}</td></tr>`).join("");
     const generated = new Date().toLocaleString("ru-RU", { dateStyle: "long", timeStyle: "short" });
     return `
-      <button type="button" class="primary full card-action no-print" data-action="flo-report-print">Печать / PDF</button>
-      <button type="button" class="secondary full card-action no-print" data-action="flo-report-csv">Скачать CSV</button>
-      <button type="button" class="secondary full card-action no-print" data-action="flo-report-json">Скачать JSON</button>
+      <button type="button" class="primary full card-action no-print" data-action="flo-report-print">Скачать PDF</button>
       <div class="flo-report-doc">
         <h2>Медицинский отчёт — Фло</h2>
         <p>Период: ${esc(fmtDate(from))} — ${esc(fmtDate(to))} · Сформирован: ${esc(generated)}</p>
@@ -3910,27 +3911,43 @@
       </section>`;
   }
 
-  function renderFloPeriodEditor() {
-    if (!floEditing) return "";
-    const p = floAllPeriods().find(x => x.start_date === floEditing.start);
-    if (!p) return "";
-    const del = floEditing.armDelete
-      ? `<button type="button" class="primary is-danger full card-action" data-action="flo-delete-period" data-start="${esc(p.start_date)}">Точно удалить</button>`
-      : `<button type="button" class="secondary is-danger full card-action" data-action="flo-delete-period-arm">Удалить</button>`;
-    return `
-      <section class="card">
-        <p class="eyebrow">Месячные ${esc(p.start_date)}</p>
+  // Редактирование периода — отдельным окном поверх (как все правки),
+  // не разворачивающимся блоком под историей. Удаление — через
+  // подтверждающее окно.
+  function openFloPeriodDialog(p) {
+    openDialog({
+      title: `Месячные ${esc(p.start_date)}`,
+      submitLabel: "Сохранить",
+      cancelLabel: "Отмена",
+      fields: `
         <label class="field"><span>Начало</span>
-          <input type="date" id="flo-edit-start" max="${esc(floState.today)}" value="${esc(p.start_date)}">
+          <input name="start" type="date" required max="${esc(floState.today)}" value="${esc(p.start_date)}">
         </label>
         <label class="field"><span>Конец</span>
-          <input type="date" id="flo-edit-end" max="${esc(floState.today)}" value="${esc(p.end_date || "")}">
+          <input name="end" type="date" max="${esc(floState.today)}" value="${esc(p.end_date || "")}">
         </label>
         ${p.end_unknown ? `<p class="flo-sub">Дата окончания не была указана — это не «идут», а неизвестный конец. Впишите факт или оставьте пустым.</p>` : ""}
-        <button type="button" class="primary full card-action" data-action="flo-save-period" data-start="${esc(p.start_date)}">Сохранить</button>
-        <button type="button" class="secondary full card-action" data-action="flo-edit-cancel">Отмена</button>
-        ${del}
-      </section>`;
+        <button type="button" class="secondary is-danger full card-action" data-action="flo-delete-period" data-start="${esc(p.start_date)}">Удалить период</button>
+      `,
+      onSubmit: async (fd) => {
+        const start = String(fd.get("start") || "");
+        const end = String(fd.get("end") || "") || null;
+        if (!start) {
+          const err = new Error("Укажите дату начала");
+          err.code = "INVALID_DATE";
+          throw err;
+        }
+        floState = await request("/api/cycle/period", {
+          method: "PATCH",
+          body: { original_start: p.start_date, start, end }
+        });
+        floExtraDelPeriod(p.start_date);
+        floExtraPutPeriod({ start_date: start, end_date: end || null });
+        floStats = undefined;
+        showToast("Период сохранён");
+        return appState;
+      }
+    });
   }
 
   // P3: честное объяснение прогноза — откуда взяты числа и насколько им
@@ -3978,14 +3995,14 @@
   // просто разнесены по группам. Партнёрский вид (renderFloPartnerView) под-бар
   // не получает — у него короткий экран без дневника и настроек.
   function renderFloSection() {
-    if (floView === "cycle") return `${renderFloHistory()}${renderFloPeriodEditor()}`;
+    if (floView === "cycle") return renderFloHistory();
     if (floView === "stats") return renderFloStats();
     if (floView === "meds") return renderFloMeds();
     if (floView === "settings") return `
       <section class="card">
         <p class="eyebrow flo-group">Отчёт и экспорт</p>
         <button type="button" class="secondary full card-action" data-action="flo-report-open">Медицинский отчёт</button>
-        <p class="flo-disclaimer">Печать в PDF — через диалог печати браузера. CSV и JSON скачиваются файлом.</p>
+        <p class="flo-disclaimer">Сохранение/Печать в PDF — через диалог печати браузера</p>
       </section>
       ${renderFloSettings()}`;
     return renderFloToday();
@@ -4074,7 +4091,6 @@
     }
     return `
       <section class="card flo-today">
-        <p class="eyebrow">Фло · сегодня</p>
         ${todayBody}
         ${actionBtn}<button type="button" class="secondary full card-action" data-action="flo-record-today">Записать сегодня</button>
         ${floFreshnessLine()}
@@ -4113,10 +4129,18 @@
     if (action === "flo-retry") { floState = null; return render(); }
     if (action === "flo-select-day") { floSelectedDate = date; return render(); }
     if (action === "flo-record-today") {
+      // Дневник дня — отдельным окном поверх. Чипы внутри работают через
+      // общий делегат, содержимое синхронизируется после каждой записи
+      // (syncFloDayDialog в floPostLog/floSave/floPost*).
       floSelectedDate = floState.today;
-      render();
-      // Плавный переход к карточке дня после перерисовки.
-      setTimeout(() => document.getElementById("flo-day-card")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+      openDialog({
+        title: `Запись дня · ${esc(formatDay(floState.today))}`,
+        submitLabel: null,
+        readOnly: true,
+        cancelLabel: "Закрыть",
+        floDay: true,
+        fields: renderFloDayCard()
+      });
       return;
     }
     if (action === "flo-period-start") return floSave({ start: floState.today });
@@ -4330,75 +4354,44 @@
       return loadFloReport();
     }
     if (action === "flo-report-print") {
+      // Заголовок страницы попадает в колонтитул печати: на время печати
+      // подставляем название отчёта, после — возвращаем.
+      const prevTitle = document.title;
+      document.title = "Фло — медицинский отчёт";
+      const restoreTitle = () => {
+        document.title = prevTitle;
+        window.removeEventListener("afterprint", restoreTitle);
+      };
+      window.addEventListener("afterprint", restoreTitle);
       window.print();
-      return;
-    }
-    if (action === "flo-report-csv" || action === "flo-report-json") {
-      if (!floReport?.data) return;
-      floReportDownload(floReport.data, action === "flo-report-csv" ? "csv" : "json");
       return;
     }
     // --- P2: «Мои препараты» ---
     if (action === "flo-med-new") {
-      floMedForm = { name: "", category: "", dosage: "", form: "", schedule: "", start_date: floState.today, end_date: "", status: "active", note: "" };
-      return render();
+      openFloMedDialog(null);
+      return;
     }
     if (action === "flo-med-edit") {
       const m = floMeds().find(x => x.id === Number(btn.dataset.id));
-      if (!m) return;
-      floMedForm = { ...m, end_date: m.end_date || "" };
-      floMedDeleteArmed = null;
-      return render();
-    }
-    if (action === "flo-med-cancel") {
-      floMedForm = null;
-      floMedDeleteArmed = null;
-      return render();
-    }
-    if (action === "flo-med-save-read") {
-      const f = { ...(floMedForm || {}) };
-      f.name = document.getElementById("flo-med-name")?.value || "";
-      f.category = document.getElementById("flo-med-category")?.value || "";
-      f.dosage = document.getElementById("flo-med-dosage")?.value || "";
-      f.form = document.getElementById("flo-med-form")?.value || "";
-      f.status = document.getElementById("flo-med-status")?.value || "active";
-      f.schedule = document.getElementById("flo-med-schedule")?.value || "";
-      f.start_date = document.getElementById("flo-med-start")?.value || "";
-      f.end_date = document.getElementById("flo-med-end")?.value || "";
-      f.note = document.getElementById("flo-med-note")?.value || "";
-      floMedForm = f;
-      if (!f.name.trim()) { showToast("Укажите название препарата"); return; }
-      if (!f.start_date) { showToast("Укажите дату начала курса"); return; }
-      return floSaveMed({
-        name: f.name, category: f.category || null, dosage: f.dosage || null,
-        form: f.form || null, schedule: f.schedule || null,
-        start_date: f.start_date, end_date: f.end_date || null,
-        status: f.status || "active", note: f.note || null, ...(f.id ? { id: f.id } : {})
-      });
-    }
-    if (action === "flo-med-save") {
-      const f = floMedForm || {};
-      const body = {
-        name: f.name, category: f.category || null, dosage: f.dosage || null,
-        form: f.form || null, schedule: f.schedule || null,
-        start_date: f.start_date, end_date: f.end_date || null,
-        status: f.status || "active", note: f.note || null
-      };
-      if (f.id) body.id = f.id;
-      return floSaveMed(body);
-    }
-    if (action === "flo-med-delete-arm") {
-      floMedDeleteArmed = Number(btn.dataset.id);
-      return render();
+      if (m) openFloMedDialog(m);
+      return;
     }
     if (action === "flo-med-delete") {
-      try {
-        floState = await request("/api/cycle/med/delete", { method: "POST", body: { id: Number(btn.dataset.id) } });
-        floMedForm = null;
-        floMedDeleteArmed = null;
-        showToast("Препарат и история приёма удалены");
-      } catch (error) { handleRequestError(error); }
-      return render();
+      const m = floMeds().find(x => x.id === Number(btn.dataset.id));
+      if (!m) return;
+      dialog.close();
+      openDialog({
+        title: "Удалить препарат?",
+        fields: `<p>«${esc(m.name)}» и история приёма будут удалены.</p>`,
+        submitLabel: "Удалить",
+        cancelLabel: "Оставить",
+        onSubmit: async () => {
+          floState = await request("/api/cycle/med/delete", { method: "POST", body: { id: m.id } });
+          showToast("Препарат и история приёма удалены");
+          return appState;
+        }
+      });
+      return;
     }
     if (action === "flo-share-toggle") {
       const enabled = btn.dataset.enabled === "true";
@@ -4524,9 +4517,10 @@
       floWizard = { ...floWizard, shareCategories: { ...current, [key]: !current[key] } };
       return render();
     }
-    // Импорт прошлых периодов: общий редактор для мастера (wiz) и истории (hist).
+    // Импорт прошлых периодов: редактор в мастере (wiz), в диалоге истории
+    // (dlg — капля/кнопки перерисовывают содержимое окна) и старый hist.
     if (action === "flo-prev-add") {
-      const prefix = btn.dataset.prefix === "hist" ? "hist" : "wiz";
+      const prefix = btn.dataset.prefix === "hist" ? "hist" : btn.dataset.prefix === "dlg" ? "dlg" : "wiz";
       const start = document.getElementById(`flo-${prefix}-prev-start`)?.value || "";
       if (!start || start > floState.today) {
         showToast("Укажите дату не позже сегодня");
@@ -4552,7 +4546,7 @@
         return;
       }
       // Прошлый период обязан быть раньше текущей (открытой) менструации:
-      // в мастере это lastStart, в истории — open_period_start. «Конец не
+      // в мастере это lastStart, в истории/диалоге — open_period_start. «Конец не
       // помним» всегда заканчивается до следующего старта, так что для
       // unknown-end достаточно проверки start < anchor.
       const anchor = prefix === "wiz" ? floWizard?.lastStart : floState?.open_period_start;
@@ -4565,36 +4559,24 @@
         return;
       }
       floPrevSetItems(prefix, [...items, item]);
+      if (prefix === "dlg") {
+        // Перерисовываем содержимое окна: строка уехала в список, поле даты
+        // очищено — можно добавлять следующий период.
+        syncFloPrevDialog();
+        return;
+      }
       return render();
     }
     if (action === "flo-prev-del") {
-      const prefix = btn.dataset.prefix === "hist" ? "hist" : "wiz";
+      const prefix = btn.dataset.prefix === "hist" ? "hist" : btn.dataset.prefix === "dlg" ? "dlg" : "wiz";
       const items = floPrevItems(prefix).filter((_, i) => i !== Number(btn.dataset.index));
       floPrevSetItems(prefix, items);
+      if (prefix === "dlg") return syncFloPrevDialog();
       return render();
     }
     if (action === "flo-hist-prev-toggle") {
-      floHistPrevOpen = !floHistPrevOpen;
-      if (!floHistPrevOpen) floHistPrev = [];
-      return render();
-    }
-    if (action === "flo-hist-prev-save") {
-      if (!floHistPrev.length) {
-        showToast("Добавьте хотя бы один прошлый период");
-        return;
-      }
-      try {
-        const sent = floHistPrev.length;
-        floState = await request("/api/cycle/periods", { method: "POST", body: { periods: floHistPrev } });
-        floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
-        floHistPrev = [];
-        floHistPrevOpen = false;
-        floStats = undefined;
-        showToast(`Добавлено периодов: ${floState.periods_imported ?? sent}, пропущено: ${floState.periods_skipped ?? 0}`);
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
+      openFloPrevDialog();
+      return;
     }
     if (action === "flo-share-notify") {
       try {
@@ -4613,46 +4595,27 @@
       return render();
     }
     if (action === "flo-edit-period") {
-      floEditing = { start: btn.dataset.start, armDelete: false };
-      return render();
-    }
-    if (action === "flo-edit-cancel") {
-      floEditing = null;
-      return render();
-    }
-    if (action === "flo-delete-period-arm") {
-      floEditing = { ...floEditing, armDelete: true };
-      return render();
-    }
-    if (action === "flo-save-period") {
-      const start = document.getElementById("flo-edit-start")?.value || "";
-      const end = document.getElementById("flo-edit-end")?.value || null;
-      if (!start) {
-        showToast("Укажите дату начала");
-        return;
-      }
-      try {
-        floState = await request("/api/cycle/period", { method: "PATCH", body: { original_start: btn.dataset.start, start, end } });
-        floExtraDelPeriod(btn.dataset.start);
-        floExtraPutPeriod({ start_date: start, end_date: end || null });
-        floEditing = null;
-        floStats = undefined;
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
+      const p = floAllPeriods().find(x => x.start_date === btn.dataset.start);
+      if (p) openFloPeriodDialog(p);
+      return;
     }
     if (action === "flo-delete-period") {
-      try {
-        floState = await request("/api/cycle/period/delete", { method: "POST", body: { start: btn.dataset.start } });
-        floExtraDelPeriod(btn.dataset.start);
-        floEditing = null;
-        floStats = undefined;
-        showToast("Месячные удалены");
-      } catch (error) {
-        handleRequestError(error);
-      }
-      return render();
+      const start = btn.dataset.start;
+      dialog.close();
+      openDialog({
+        title: "Удалить период?",
+        fields: `<p>Месячные с ${esc(start)} и запись о них будут удалены.</p>`,
+        submitLabel: "Удалить",
+        cancelLabel: "Оставить",
+        onSubmit: async () => {
+          floState = await request("/api/cycle/period/delete", { method: "POST", body: { start } });
+          floExtraDelPeriod(start);
+          floStats = undefined;
+          showToast("Месячные удалены");
+          return appState;
+        }
+      });
+      return;
     }
     if (action === "flo-notify-kind") {
       try {
@@ -5279,6 +5242,29 @@
       </section>`).join("");
   }
 
+  // Контент после переключателя «Мои/Её(Его)»: кнопка добавления, поиск,
+  // список. Перерисовывается отдельно — капля бара не трогается.
+  function renderContactsContent() {
+    const isMine = contactsView === "mine";
+    const hasAny = (contactsState.mine || []).length || (contactsState.partner || []).length;
+    const searching = Boolean(contactsSearch.trim());
+    const addButton = `<button class="primary full card-action" type="button" data-action="add-contact">Добавить контакт</button>`;
+    if (!(contactsView === "mine" ? contactsState.mine : contactsState.partner).length) {
+      return isMine && !searching
+        ? `<section class="card"><h3>Пока пусто</h3>
+            <p>Имена и номера всегда под рукой — и ваши, и партнёрши</p>
+            <div style="margin-top:12px;">${addButton}</div>
+          </section>`
+        : `<section class="card"><h3>Пока пусто</h3><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
+    }
+    return `
+      ${isMine ? addButton : ""}
+      ${hasAny ? `<label class="field contacts-search"><span>Поиск</span>
+        <input id="contacts-search" type="text" data-fmt="none" placeholder="Имя, фамилия, номер или комментарий" value="${esc(contactsSearch)}">
+      </label>` : ""}
+      <div id="contacts-list">${renderContactsList() || (searching ? `<section class="card"><h3>Пока пусто</h3><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>` : "")}</div>`;
+  }
+
   function renderContactsBody() {
     if (contactsState?.failed) {
       return `<section class="card"><p class="eyebrow">Контакты</p><h3>Ошибка</h3><p>Не получилось загрузить книгу.</p>
@@ -5288,35 +5274,14 @@
       return `<section class="card"><p class="eyebrow">Контакты</p><h3>Контакты</h3><p>Загружаем книгу…</p></section>`;
     }
     const isMine = contactsView === "mine";
-    const hasAny = (contactsState.mine || []).length || (contactsState.partner || []).length;
-    const searching = Boolean(contactsSearch.trim());
-    const list = contactsCurrentList();
     // Переключатель — сразу под баром «Записи/Цитаты/Здоровье/Контакты».
-    const switchHtml = `
-      <div class="wish-switch" role="tablist" aria-label="Чьи контакты показывать">
-        <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="contacts-view" data-view="mine" data-tab="mine">Мои</button>
-        <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="contacts-view" data-view="partner" data-tab="partner">${esc(contactPartnerLabel())}</button>
-      </div>`;
-    // Кнопка добавления: пока контактов нет — внутри карточки-приглашения
-    // (как в других вкладках); после первого контакта — под переключателем.
-    const addButton = `<button class="primary full card-action" type="button" data-action="add-contact">Добавить контакт</button>`;
-    let bodyHtml;
-    if (!(contactsView === "mine" ? contactsState.mine : contactsState.partner).length) {
-      bodyHtml = isMine && !searching
-        ? `<section class="card"><p class="eyebrow">Контакты</p><h3>Контакт</h3>
-            <p>Имена и номера всегда под рукой — и ваши, и партнёрши</p>
-            <div style="margin-top:12px;">${addButton}</div>
-          </section>`
-        : `<section class="card"><p class="eyebrow">Контакты</p><h3>Пока пусто</h3><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
-    } else {
-      bodyHtml = `
-        ${isMine ? addButton : ""}
-        ${hasAny ? `<label class="field contacts-search"><span>Поиск</span>
-          <input id="contacts-search" type="text" data-fmt="none" placeholder="Имя, фамилия, номер или комментарий" value="${esc(contactsSearch)}">
-        </label>` : ""}
-        <div id="contacts-list">${renderContactsList() || (searching ? `<section class="card"><p class="eyebrow">Контакты</p><h3>Пока пусто</h3><p>По запросу «${esc(contactsSearch.trim())}» никого не нашлось.</p></section>` : "")}</div>`;
-    }
-    return `${switchHtml}${bodyHtml}`;
+    // Кнопки без data-action: коммитит liquid-nav (капля), как у желаний.
+    return `
+      <div class="contacts-switch" role="tablist" aria-label="Чьи контакты показывать">
+        <button class="contacts-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="contacts-view" data-view="mine" data-tab="mine">Мои</button>
+        <button class="contacts-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="contacts-view" data-view="partner" data-tab="partner">${esc(contactPartnerLabel())}</button>
+      </div>
+      <div id="contacts-content">${renderContactsContent()}</div>`;
   }
 
   // Строка номера в диалоге: префикс «+7» уже стоит, вводятся только 10 цифр.
@@ -6415,6 +6380,7 @@
     }
     mountTabSwitch();
     mountWishSwitch();
+    mountContactsSwitch();
     mountMovieSwitch();
     mountGoalsSwitch();
     mountPlansSwitch();
@@ -6477,6 +6443,7 @@
     if (key === "places") return placesView;
     if (key === "goals") return goalsView;
     if (key === "plans") return plansView;
+    if (key === "contacts") return contactsView;
     return wishView;
   }
 
@@ -6488,12 +6455,14 @@
     else if (key === "places") placesView = value;
     else if (key === "goals") goalsView = value;
     else if (key === "plans") plansView = value;
+    else if (key === "contacts") contactsView = value;
     else wishView = value;
   }
 
   function destroySwitches() {
     if (segSwitch) { segSwitch.destroy(); segSwitch = null; }
     if (wishSwitch) { wishSwitch.destroy(); wishSwitch = null; }
+    if (contactsSwitch) { contactsSwitch.destroy(); contactsSwitch = null; }
     if (movieSwitch) { movieSwitch.destroy(); movieSwitch = null; }
     if (goalsSwitch) { goalsSwitch.destroy(); goalsSwitch = null; }
     if (plansSwitch) { plansSwitch.destroy(); plansSwitch = null; }
@@ -6540,6 +6509,23 @@
 
   // Внутренний бар «В планах / Просмотрено»: отдельный экземпляр капли,
   // потому что он живёт внутри тела «Кино», а не на уровне вкладки.
+  // Капля бара «Мои / Её(Его)» в контактах: та же механика, что у желаний.
+  function mountContactsSwitch() {
+    const container = document.querySelector(".contacts-switch");
+    if (!container) {
+      contactsSwitchPrevView = null;
+      return;
+    }
+    const instance = createSwitch(container, "contacts");
+    if (!instance) return;
+    if (contactsSwitchPrevView && contactsSwitchPrevView !== contactsView) {
+      instance.setActive(contactsSwitchPrevView, false);
+      instance.setActive(contactsView, true);
+    }
+    contactsSwitch = instance;
+    contactsSwitchPrevView = contactsView;
+  }
+
   function mountMovieSwitch() {
     if (movieSwitch) {
       movieSwitch.destroy();
@@ -6791,6 +6777,19 @@
       });
       return;
     }
+    if (key === "contacts") {
+      // Внутренний бар контактов: капля и бар остаются живыми, меняется
+      // только содержимое после переключателя (кнопка/поиск/список).
+      const content = document.getElementById("contacts-content");
+      if (!content) { render(); return; }
+      contactsSearch = "";
+      content.innerHTML = renderContactsContent();
+      instance?.setActive(value, true);
+      document.querySelectorAll(".contacts-switch-btn[data-tab]").forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
     if (key === "wishes") {
       const lists = document.getElementById("wish-lists");
       if (!lists) { render(); return; }
@@ -6825,6 +6824,11 @@
       plansSwitch.destroy();
       plansSwitch = null;
     }
+    // Капля контактов живёт в теле «Дневника» — снимаем до замены разметки.
+    if (key === "memories" && contactsSwitch) {
+      contactsSwitch.destroy();
+      contactsSwitch = null;
+    }
     // Под-бар «Фло» живёт в теле «Наша пара» — снимаем до замены разметки.
     if (key === "pair" && floSwitch) {
       floSwitch.destroy();
@@ -6848,6 +6852,7 @@
     if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
     if (key === "tasks" && tasksView === "goals") mountGoalsSwitch();
     if (key === "tasks" && tasksView === "plans") mountPlansSwitch();
+    if (key === "memories") mountContactsSwitch();
   }
 
   // ------------------------------------------------------------------
@@ -7381,12 +7386,14 @@
         if (view !== contactsView) {
           contactsView = view;
           contactsSearch = "";
-          // Капля анимируется на живом экземпляре: перерисовываем только список.
-          const body = document.getElementById("tab-body");
-          if (body) {
-            body.innerHTML = renderContactsBody();
-            document.querySelectorAll(".wish-switch-btn[data-tab]").forEach((b) => {
-              b.setAttribute("aria-selected", String(b.dataset.tab === contactsView));
+          // Тап: капля едет на живом экземпляре, содержимое после бара
+          // перерисовывается отдельно — бар не разрушается.
+          const content = document.getElementById("contacts-content");
+          if (content) {
+            contactsSwitch?.setActive(view, true);
+            content.innerHTML = renderContactsContent();
+            document.querySelectorAll(".contacts-switch-btn[data-tab]").forEach((b) => {
+              b.setAttribute("aria-selected", String(b.dataset.tab === view));
             });
           } else {
             render();

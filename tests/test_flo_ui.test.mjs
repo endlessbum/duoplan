@@ -78,7 +78,7 @@ function buildFlo(floState, extra = {}, reqImpl = null) {
   const requestSrc = reqImpl
     ? `const request = (${reqImpl.toString()});`
     : `const request = () => Promise.reject(new Error("network off"));`;
-  const src = `${stubs}\n${requestSrc}\n${setters.join("\n")}\n${section}\nreturn { renderFloDayCard, renderFloCalendar, renderFloStats, renderFloShareControls, renderFloPartnerView, renderFloView, renderFloToday, floDayEventRows, floDayDots, floAllMeasurements, floAllMedLogs, floMeds, floForecastExplain, renderFloWizard, renderFloSection, floDayHasRecord, floFreshnessLine, handleFloAction, floEnsureMonth, getStats: () => floStats, getExtra: () => floExtra, setStats: (v) => { floStats = v; } };`;
+  const src = `${stubs}\n${requestSrc}\n${setters.join("\n")}\n${section}\nreturn { renderFloDayCard, renderFloCalendar, renderFloStats, renderFloShareControls, renderFloPartnerView, renderFloView, renderFloToday, floDayEventRows, floDayDots, floAllMeasurements, floAllMedLogs, floMeds, floForecastExplain, renderFloWizard, renderFloSection, floDayHasRecord, floFreshnessLine, handleFloAction, floEnsureMonth, floReportBody, getStats: () => floStats, getExtra: () => floExtra, setStats: (v) => { floStats = v; } };`;
   return new Function(src)();
 }
 
@@ -119,9 +119,12 @@ const floState = {
 test("F1: легенда календаря объясняет все маркеры, включая задержку и «без секса»", () => {
   const ui = buildFlo(floState);
   const legend = ui.renderFloCalendar();
-  for (const label of ["Месячные", "Прогноз", "Задержка", "Фертильно", "Овуляция", "Запись", "Секс", "Без секса"]) {
+  // «Без секса» из легенды убрано: в сетке календаря этот факт не рисуется,
+  // он виден в сводке дня.
+  for (const label of ["Месячные", "Прогноз", "Задержка", "Фертильно", "Овуляция", "Запись", "Секс"]) {
     assert.ok(legend.includes(label), `в легенде нет «${label}»`);
   }
+  assert.ok(!legend.includes("Без секса"), "маркер «Без секса» удалён из легенды");
 });
 
 test("F2: будущий день — read-only: все чипы и кнопки ввода дизейблятся (9.1)", () => {
@@ -409,4 +412,16 @@ test("F20: самообучение объясняется в методике �
   const html = ui.renderFloToday();
   assert.ok(html.includes("Смещение подобрано по вашим наблюдениям"), "основание — в карточке");
   assert.ok(html.includes("Как считается прогноз?"));
+});
+
+test("F21: идущие месячные в отчёте — длительность с «(продолжаются)»", () => {
+  const ui = buildFlo(floState);
+  const base = { logs: [], meds: [], med_logs: [], measurements: [] };
+  const open = ui.floReportBody({ from: "2026-11-01", to: "2026-11-14", periods: [{ start_date: "2026-11-01", end_date: null, end_unknown: false }], ...base });
+  assert.ok(open.includes("(продолжаются)"), "идущие месячные помечены");
+  assert.ok(open.includes("14 дн."), "длительность на день отчёта");
+  const closed = ui.floReportBody({ from: "2026-11-01", to: "2026-11-14", periods: [{ start_date: "2026-11-01", end_date: "2026-11-05", end_unknown: false }], ...base });
+  assert.ok(!closed.includes("продолжаются"), "закрытый период — без пометки");
+  const unknown = ui.floReportBody({ from: "2026-11-01", to: "2026-11-14", periods: [{ start_date: "2026-11-01", end_date: null, end_unknown: true }], ...base });
+  assert.ok(!unknown.includes("продолжаются"), "«конец не помним» — не «идут»");
 });

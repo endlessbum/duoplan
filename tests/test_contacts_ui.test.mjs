@@ -111,7 +111,11 @@ test("C6: вид «Его» — список партнёра без кнопк�
   const body = ui.renderContactsBody();
   assert.ok(body.includes("Сергей"));
   assert.ok(!body.includes("add-contact"), "партнёрский список read-only");
-  assert.ok(body.includes('data-view="partner"') && body.includes('data-view="mine"'), "переключатель Мои/Его");
+  // Переключатель — свой contacts-switch с каплей (liquid-nav): драг
+  // коммитит onCommit, тап — data-action через делегата (как в желаниях).
+  assert.ok(body.includes('data-tab="partner"') && body.includes('data-tab="mine"'), "переключатель Мои/Его");
+  assert.ok(body.includes('class="contacts-switch"'), "свой класс бара — не wish-switch");
+  assert.ok(body.includes('data-action="contacts-view" data-view="partner"'), "тап коммитит делегат");
 });
 
 test("C7: формат номера на вводе — группы ХХХ ХХХ ХХ ХХ", () => {
