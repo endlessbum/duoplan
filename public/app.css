@@ -14,7 +14,9 @@
      Эти цвета не зависят от акцентной палитры пользователя. */
   --cal-task: #4f8a5f;
   --cal-date: #c25550;
-  --cal-wish: #d9a520;
+  /* Звезда желаний: #a16207 даёт контраст ≥3:1 к --surface/--bg и к
+     подложке выбранной ячейки (WCAG 1.4.11); #d9a520 давал ~2.2:1. */
+  --cal-wish: #a16207;
   --cal-birthday: #8a6bb8;
   --cal-private: #948d86;
   /* Отсчёт: янтарный — событие ближе суток, cherry — уже просрочено.
@@ -2720,6 +2722,16 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
+  outline: 2px solid var(--accent, #4a7dff);
+  outline-offset: 2px;
+}
+
+/* Клавиатурный фокус на кастомных элементах (role="button" tabindex="0")
+   и на самом диалоге: глобальный reset выше обнулял outline без замены
+   (WCAG 2.2 SC 2.4.7). tabindex="-1" — программный фокус, не Tab-стоп,
+   кольца не получает. */
+[tabindex]:not([tabindex="-1"]):focus-visible,
+.sheet-dialog:focus-visible {
   outline: 2px solid var(--accent, #4a7dff);
   outline-offset: 2px;
 }

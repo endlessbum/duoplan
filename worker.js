@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.14.45";
+const APP_VERSION = "2026.11.14.53";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.14.45";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.14.45";
+const DB_SCHEMA_VERSION = "2026.11.14.53";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -1487,7 +1487,7 @@ async function state(env, userId) {
   // Порядок имён строго совпадает с порядком запросов ниже: цели и копилки
   // когда-то поменялись местами, и state.goals отдавал копилки, а
   // state.savings — пункты целей (замечено 2026-11-11 на сиде архива).
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, daily, partnerUser] = await Promise.all([
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, daily, partnerUser, stats] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     // monthly/yearly — как в ARCHIVE_QUERIES.done_tasks: редактирование
@@ -1533,7 +1533,19 @@ async function state(env, userId) {
     // Пол партнёра — для обращений «Его/Её желания» в вишлисте; очки — для
     // «Вместе XP»; accent_color — чтобы аватар партнёра в кнопке пары был
     // его выбранным акцентом (смена видна партнёру после обновления state).
-    partnerId ? env.DB.prepare("SELECT gender, points, accent_color FROM users WHERE tg_id=?").bind(partnerId).first() : null
+    partnerId ? env.DB.prepare("SELECT gender, points, accent_color FROM users WHERE tg_id=?").bind(partnerId).first() : null,
+    // Итоги пары для окна «Ваша история»: считаем по всей базе, а не по
+    // обрезанному state (там недавних записей — 10, активных — 200).
+    // Личные планы партнёра не считаем — те же фильтры, что и в списках;
+    // копилки — только общие (kind='shared'), личные не в паре.
+    env.DB.prepare(`SELECT
+        (SELECT COUNT(*) FROM memories WHERE pair_id=?) AS memories,
+        (SELECT COUNT(*) FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?)) AS done_tasks,
+        (SELECT COUNT(*) FROM trips WHERE pair_id=?) AS trips,
+        (SELECT COALESCE(SUM(collected),0) FROM savings WHERE pair_id=? AND kind='shared') AS saved,
+        (SELECT COALESCE(SUM(runtime * (CASE WHEN kind='series' AND episodes>0 THEN episodes ELSE 1 END)),0)
+          FROM movies WHERE pair_id=? AND watched=1 AND runtime>0) AS watched_minutes
+      `).bind(pair.id, pair.id, user.tg_id, pair.id, pair.id, pair.id).first()
   ]);
   attachMovieRatings(movies.results || [], movieRatings?.results, user.tg_id);
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
@@ -1601,6 +1613,15 @@ async function state(env, userId) {
     })),
     movies: movies.results,
     savings: savings.results,
+    // Итоги пары (окно «Ваша история»): нули означают «пусто» — клиент такие
+    // строки не показывает.
+    stats: {
+      memories: Number(stats?.memories || 0),
+      doneTasks: Number(stats?.done_tasks || 0),
+      trips: Number(stats?.trips || 0),
+      saved: Number(stats?.saved || 0),
+      watchedMinutes: Number(stats?.watched_minutes || 0)
+    },
     daily,
     cycle: cycleFlag
   };
@@ -2375,7 +2396,7 @@ async function api(request, env, url, ctx = null) {
       if (!["taken", "skipped"].includes(status)) throw new HttpError(400, "Неизвестный статус приёма", "INVALID_STATUS");
       const med = await env.DB.prepare("SELECT id FROM health_meds WHERE id=? AND tg_id=?").bind(medId, user.tg_id).first();
       if (!med) throw new HttpError(404, "Препарат не найден", "NOT_FOUND");
-      const time = body.time ? String(body.time).slice(0, 5) : null;
+      const time = optionalTime(body.time);
       const note = body.note ? String(body.note).slice(0, 500) : null;
       await env.DB.prepare(`INSERT INTO health_med_logs(med_id,tg_id,date,time,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
         ON CONFLICT(med_id,date) DO UPDATE SET time=excluded.time, status=excluded.status, note=excluded.note, updated_at=excluded.updated_at`)
@@ -2624,7 +2645,7 @@ async function api(request, env, url, ctx = null) {
       if (!cycleValidDate(date) || date > cycleToday(timezone)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
       const kind = String(body.kind || "");
       if (!CYCLE_MEASUREMENT_KINDS.includes(kind)) throw new HttpError(400, "Неизвестный тип измерения", "INVALID_KIND");
-      const time = body.time ? String(body.time).slice(0, 5) : null;
+      const time = optionalTime(body.time);
       const note = body.note ? String(body.note).slice(0, 500) : null;
       let value = null, unit = null, result = null;
       if (kind === "bbt") {
@@ -2703,7 +2724,7 @@ async function api(request, env, url, ctx = null) {
       if (!["taken", "skipped"].includes(status)) throw new HttpError(400, "Неизвестный статус приёма", "INVALID_STATUS");
       const med = await env.DB.prepare("SELECT id FROM cycle_meds WHERE id=? AND tg_id=?").bind(medId, user.tg_id).first();
       if (!med) throw new HttpError(404, "Препарат не найден", "NOT_FOUND");
-      const time = body.time ? String(body.time).slice(0, 5) : null;
+      const time = optionalTime(body.time);
       const dose = body.dose_taken ? String(body.dose_taken).slice(0, 120) : null;
       const note = body.note ? String(body.note).slice(0, 500) : null;
       await env.DB.prepare(`INSERT INTO cycle_med_logs(med_id,tg_id,date,time,status,dose_taken,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
@@ -5852,7 +5873,7 @@ function healthReminderKinds(meds, today, nowHM) {
 // Тексты нейтральные, препарат не выдаётся за рекомендацию — это личный журнал.
 async function sendHealthReminders(env) {
   const meds = (await env.DB.prepare(
-    `SELECT m.id, m.tg_id, m.name, m.dosage, m.schedule, m.remind_time, m.start_date, m.end_date, u.timezone
+    `SELECT m.id, m.tg_id, m.name, m.dosage, m.schedule, m.remind_enabled, m.remind_time, m.start_date, m.end_date, u.timezone
      FROM health_meds m JOIN users u ON u.tg_id=m.tg_id
      WHERE m.status='active' AND m.remind_enabled=1`
   ).all()).results || [];
@@ -5868,7 +5889,9 @@ async function sendHealthReminders(env) {
       const tz = validTimeZone(userMeds[0].timezone) || DEFAULT_TZ;
       const today = cycleToday(tz);
       const nowHM = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
-      for (const { kind, text } of healthReminderKinds(userMeds, today, nowHM)) {
+      // D1 отдаёт BOOLEAN как 0/1: healthReminderKinds ждёт строго true.
+      const normalized = userMeds.map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 }));
+      for (const { kind, text } of healthReminderKinds(normalized, today, nowHM)) {
         await deliverNotification(env, tgId, today, kind, text);
       }
     } catch (error) {

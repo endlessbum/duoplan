@@ -36,7 +36,9 @@ def _split_columns(body: str) -> list[tuple[str, bool]]:
         part = part.strip()
         if not part:
             continue
-        head = part.split()[0].upper()
+        # UNIQUE(tg_id,date) без пробела — табличное ограничение, а не колонка:
+        # отсекаем по первому слову до скобки (регресс: cycle_* таблицы).
+        head = part.split()[0].split("(")[0].strip('"`[]').upper()
         if head in {"PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT"}:
             continue
         name = part.split()[0].strip('"`[]')

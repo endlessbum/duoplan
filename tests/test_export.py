@@ -219,6 +219,107 @@ def test_export_covers_every_column_of_current_schema():
     assert not problems, "\n".join(problems)
 
 
+# Таблицы локальной схемы, которые осознанно НЕ переносятся в D1. Любая новая
+# таблица с пользовательскими данными обязана либо попасть в TABLES, либо
+# получить здесь документированное исключение — иначе тест упадёт (P1-03).
+EXPORT_EXCLUDED_TABLES = {
+    # FSM-состояния локального Python-бота: в D1 их нет по замыслу
+    # (LOCAL_ONLY_TABLES в test_schema_parity).
+    "fsm_states",
+    # Служебные ключ-значение локального бота (версия схемы и т.п.).
+    "meta",
+    # Member-ship в D1 пересоздаётся дампером из pairs.user_a/user_b —
+    # отдельный экспорт дал бы дубли.
+    "pair_members",
+    # Счётчики защиты от перебора: к пользовательским данным не относятся.
+    "rate_limits",
+}
+
+
+def test_export_covers_every_local_business_table():
+    """Каждая таблица локальной схемы — в экспорте или в исключениях.
+
+    Регресс P1-03: шесть таблиц Фло отсутствовали в TABLES, и перенос
+    локальной базы в D1 молча терял настройки цикла, периоды, дневник,
+    измерения, препараты и журнал приёма.
+    """
+    from test_schema_parity import _python_schema
+
+    local = set(_python_schema())
+    missing = local - set(TABLES) - EXPORT_EXCLUDED_TABLES
+    assert not missing, f"таблицы без решения об экспорте: {sorted(missing)}"
+    # И наоборот: запись в TABLES для несуществующей локально таблицы —
+    # мёртвая строка, которая будет молча пропускаться с warning.
+    unknown = set(TABLES) - local
+    assert not unknown, f"в TABLES есть таблицы вне локальной схемы: {sorted(unknown)}"
+
+
+def test_export_cycle_tracker_tables_end_to_end(tmp_path):
+    """Все шесть таблиц Фло попадают в дамп и переживают импорт в SQLite.
+
+    Проверяется реальный путь: INSERT'ы в локальной схеме → dump() →
+    executescript в чистую базу с той же схемой → строки на месте.
+    """
+    source = tmp_path / "source.db"
+    _make_current_db(source)
+    con = sqlite3.connect(source)
+    con.execute(
+        "INSERT INTO cycle_profiles(tg_id, avg_cycle_length, avg_period_length, "
+        "share_enabled, onboarded, notify_enabled, created_at, updated_at) "
+        "VALUES(10,30,5,1,1,1,1,1)"
+    )
+    con.execute(
+        "INSERT INTO cycle_periods(tg_id,start_date,end_date,end_unknown,created_at,updated_at) "
+        "VALUES(10,'2026-11-01','2026-11-05',0,1,1)"
+    )
+    con.execute(
+        "INSERT INTO cycle_logs(tg_id,date,flow,mood,note,created_at,updated_at) "
+        "VALUES(10,'2026-11-10','medium','ok','тестовая запись',1,1)"
+    )
+    con.execute(
+        "INSERT INTO cycle_measurements(tg_id,date,kind,value,unit,created_at,updated_at) "
+        "VALUES(10,'2026-11-10','bbt',36.6,'C',1,1)"
+    )
+    con.execute(
+        "INSERT INTO cycle_meds(tg_id,name,start_date,status,created_at,updated_at) "
+        "VALUES(10,'Магний','2026-11-01','active',1,1)"
+    )
+    con.execute(
+        "INSERT INTO cycle_med_logs(med_id,tg_id,date,status,dose_taken,created_at,updated_at) "
+        "VALUES(1,10,'2026-11-10','taken','1 таблетка',1,1)"
+    )
+    con.commit()
+    con.close()
+
+    sql = dump(source)
+    for table in (
+        "cycle_profiles", "cycle_periods", "cycle_logs",
+        "cycle_measurements", "cycle_meds", "cycle_med_logs",
+    ):
+        assert f"INSERT OR REPLACE INTO {table}(" in sql, f"{table} не экспортирована"
+    assert "'Магний'" in sql and "'bbt'" in sql and "'taken'" in sql
+    assert "'2026-11-10'" in sql and "36.6" in sql
+
+    # Импорт в чистую базу с боевой локальной схемой.
+    target = tmp_path / "target.db"
+    _make_current_db(target)
+    con = sqlite3.connect(target)
+    con.executescript(sql)
+    for table in (
+        "cycle_profiles", "cycle_periods", "cycle_logs",
+        "cycle_measurements", "cycle_meds", "cycle_med_logs",
+    ):
+        count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        assert count == 1, f"{table}: после импорта {count} строк, ожидалась 1"
+    med_log = con.execute(
+        "SELECT dose_taken FROM cycle_med_logs WHERE tg_id=10 AND date='2026-11-10'"
+    ).fetchone()
+    assert med_log == ("1 таблетка",)
+    profile = con.execute("SELECT avg_cycle_length, share_enabled FROM cycle_profiles WHERE tg_id=10").fetchone()
+    assert profile == (30, 1)
+    con.close()
+
+
 def test_export_refuses_duplicate_pair_codes(tmp_path):
     """Дубли code в источнике — признак повреждённой базы.
 

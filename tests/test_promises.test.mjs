@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { match, ok } from "node:assert/strict";
+import { equal, match, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -16,6 +16,41 @@ const readme = readFileSync(join(root, "README.md"), "utf8");
 
 test("лендинг обещает приглашение по коду или ссылке", () => {
   match(indexHtml, /по личному коду или ссылке/);
+});
+
+test("лендинг ведёт на одного бота и содержит якоря разделов", () => {
+  const telegramLinks = [...indexHtml.matchAll(/href="(https:\/\/t\.me\/[^"]+)"/g)].map((m) => m[1]);
+  ok(telegramLinks.length > 0, "на лендинге должна быть ссылка на Telegram");
+  for (const link of telegramLinks) {
+    equal(link, "https://t.me/duoplanbot", "все ссылки ведут на одного бота");
+  }
+  match(indexHtml, /id="possibilities"/);
+  match(indexHtml, /href="#possibilities"/);
+  match(indexHtml, /id="main"/);
+});
+
+test("лендинг обещает ключевые разделы приложения", () => {
+  for (const feature of [
+    "Общие планы",
+    "Значимые даты",
+    "Общий дневник",
+    "Вишлист",
+    "Ритуал дня",
+    "Места",
+    "Кино на вечер",
+    "Путешествия",
+    "Цели",
+    "Копилка",
+    "Фло",
+  ]) {
+    match(indexHtml, new RegExp(feature), `лендинг должен обещать раздел «${feature}»`);
+  }
+});
+
+test("лендинг доступен: язык, вьюпорт и skip-link", () => {
+  match(indexHtml, /<html lang="ru">/);
+  match(indexHtml, /<meta name="viewport" content="width=device-width, initial-scale=1">/);
+  match(indexHtml, /class="skip-link" href="#main"/);
 });
 
 test("приложение умеет копировать ссылку для партнёра", () => {

@@ -14,6 +14,7 @@ import { test } from "node:test";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const source = readFileSync(join(root, "public/app.js"), "utf8");
+const cssSource = readFileSync(join(root, "public/app.css"), "utf8");
 
 function extractBraced(declaration) {
   const start = source.indexOf(declaration);
@@ -494,4 +495,21 @@ test("карточка «Ваша история»: тап открывает о
   ok(source.includes("Начало истории</span><span>"), "нет строки «Начало истории» в окне");
   // Карточка «Ожидание партнёра» осталась нетапабельной с подсказкой про код.
   ok(source.includes("Отправьте код партнёру, чтобы открыть ритуалы дня"), "потеряна подсказка ожидания партнёра");
+});
+
+test("карточки role=button активируются с клавиатуры (Enter/Space)", () => {
+  // Регресс P2-03: у role="button" tabindex="0" не было ни видимого фокуса,
+  // ни клавиатурной активации — Tab-стоп без действия.
+  ok(source.includes('addEventListener("keydown"'), "нет keydown-обработчика активации");
+  ok(source.includes('addEventListener("keyup"'), "Space активируется по keyup (анти-автоповтор)");
+  ok(source.includes('card.click()'), "нет синтеза click для карточки");
+  // Нативные контролы исключены — иначе Enter на кнопке внутри карточки
+  // сработал бы дважды (нативно + через карточку).
+  ok(source.includes('closest("button, a[href], input, select, textarea, summary, [contenteditable]")'),
+    "нет защиты от дабл-активации на нативных контролах");
+  ok(source.includes('preventDefault()'), "Space не глушит прокрутку страницы");
+  // Видимый фокус: глобальный reset обнулял outline у [tabindex] и диалога —
+  // возвращаем :focus-visible-стиль, но не для программного tabindex="-1".
+  ok(cssSource.includes('[tabindex]:not([tabindex="-1"]):focus-visible'), "нет фокус-стиля для карточек");
+  ok(cssSource.includes('.sheet-dialog:focus-visible'), "нет фокус-стиля для диалога");
 });

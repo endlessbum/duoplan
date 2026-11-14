@@ -37,17 +37,21 @@
     tasks: { title: "Наши планы", sub: "Общие дела, свидания и идеи" },
     dates: { title: "Даты", sub: "Значимые дни и дни рождения" },
     places: { title: "Места", sub: "Куда сходить вместе" },
-    memories: { title: "Дневник", sub: "Записи, цитаты, здоровье и контакты" },
+    memories: { title: "Дневник", sub: "Воспоминания и личное" },
     pair: { title: "Наша пара", sub: "Профиль, желания и настройки" }
   };
 
   let appState = null;
   let currentTab = "home";
   let wishView = "mine"; // "mine" | "partner" — переключатель вишлиста
+  // «Загадано / Исполнено» — вид списка желаний (под баром «Наша пара»).
+  let wishesView = "open";
   // Виды внутри вкладок: «Наша пара» (профиль/желания), «Даты»
   // (наши/дни рождения), «Дневник» (записи/цитаты). Живут вне рендера, чтобы
   // минутный refresh и возврат на вкладку не сбрасывали выбранный вид.
   let pairView = "profile";
+  // «Копилка»: вид «Копим / Накоплено» (цель достигнута или ещё нет).
+  let savingsView = "saving";
   let floState = null;
   // Под-вкладки внутри «Фло»: Сегодня / Цикл / Статистика / Препараты / Настройки.
   let floView = "today";
@@ -1180,6 +1184,37 @@
     if (mod10 === 1 && mod100 !== 11) return one;
     if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
     return many;
+  }
+
+  // Итоги пары для окна «Ваша история». Считает сервер (/api/state → stats):
+  // в самом state только 10 недавних записей, счёт оттуда врал бы.
+  // Нулевые строки не показываем — «Путешествий: 0» только мозолит глаза.
+  function historyStatsRows() {
+    const stats = appState?.stats || {};
+    const rows = [];
+    const memories = Number(stats.memories || 0);
+    if (memories > 0) rows.push(["Записей в дневнике", String(memories)]);
+    const doneTasks = Number(stats.doneTasks || 0);
+    if (doneTasks > 0) rows.push(["Планов выполнено", String(doneTasks)]);
+    const minutes = Number(stats.watchedMinutes || 0);
+    if (minutes > 0) rows.push(["Просмотрено кино", formatWatchedTime(minutes)]);
+    const saved = Number(stats.saved || 0);
+    if (saved > 0) rows.push(["Накоплено", `${formatAmount(saved)} ₽`]);
+    const trips = Number(stats.trips || 0);
+    if (trips > 0) rows.push(["Путешествий", String(trips)]);
+    return rows.map(([name, value]) => `
+              <div class="saving-history-row"><span class="saving-history-name">${esc(name)}</span><span>${esc(value)}</span></div>`).join("");
+  }
+
+  // Минуты просмотра → «12 ч 30 мин» (как в карточке фильма).
+  function formatWatchedTime(minutes) {
+    const total = Math.max(0, Math.round(Number(minutes) || 0));
+    if (!total) return "";
+    const hours = Math.floor(total / 60);
+    const rest = total % 60;
+    if (hours && rest) return `${hours} ч ${rest} мин`;
+    if (hours) return `${hours} ч`;
+    return `${rest} мин`;
   }
 
   // Календарные сутки до цели в поясе пары (как в dateItem): «Через N дн.»
@@ -4782,13 +4817,14 @@
     `;
   }
 
-  // Желания внутри «Нашей пары»: свой переключатель «Мои / Её» и списки.
+  // Желания внутри «Нашей пары»: бар «Загадано / Исполнено», переключатель
+  // «Мои / Её» и списки.
   function renderWishBlock() {
     const hasPartner = Boolean(appState.pair?.user_b);
     if (wishView === "partner" && !hasPartner) wishView = "mine";
     const isMine = wishView === "mine";
     const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
-    let html = "";
+    let html = renderSegment("wishesView", wishesView, [["open", "Загадано"], ["done", "Исполнено"]], "is-sub");
     if (hasPartner) {
       html += `
         <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
@@ -4843,7 +4879,7 @@
           <div class="item-main">
             <h3 class="item-title">${esc(saving.title)}</h3>
             <div class="item-meta">
-              <span class="day-chip ${saving.kind === "shared" ? "" : "is-muted"}">${saving.kind === "shared" ? "Общая" : "Личная"}</span>
+              ${saving.kind === "shared" ? "" : `<span class="day-chip is-muted">Личная</span>`}
               <span>${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))}</span>
             </div>
             <div class="saving-progress" aria-hidden="true"><i style="width:${percent}%"></i></div>
@@ -4854,32 +4890,33 @@
     `;
   }
 
-  function renderSavingsBody() {
-    const list = savingsList();
-    const open = list.filter((saving) => !savingIsFull(saving));
-    const full = list.filter(savingIsFull);
-    // Наполнение пространства — только после воссоединения партнёров:
-    // гейт как у всех add-кнопок приложения. Пустой список: кнопка
-    // «Создать копилку» живёт в карточке «Пока пусто» (как в кино).
+  function renderSavingsList() {
+    // Общие и личные копилки живут в одном списке: личные помечены пилюлей
+    // «Личная», общие — без пилюли.
+    const scope = savingsList();
+    const list = savingsView === "saved"
+      ? scope.filter(savingIsFull)
+      : scope.filter(s => !savingIsFull(s));
     const disabledClass = partnerMissing() ? " is-disabled" : "";
-    let html = "";
-    if (!open.length && !full.length) {
-      html += `
-        <section class="card">
-          <h3>Пока пусто</h3>
-          <p>Создайте копилку на общую мечту или личную цель — пополняйте и следите за прогрессом</p>
-          <button class="primary full card-action${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>
-        </section>
-      `;
-    } else {
-      html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>`;
-      html += open.map(savingItem).join("");
+    const addButton = `<button class="primary full add-button${disabledClass}" type="button" data-action="add-saving">Создать копилку</button>`;
+    if (!list.length) {
+      return savingsView === "saved"
+        ? `<section class="card"><h3>Пока пусто</h3><p>Здесь появятся копилки, у которых цель уже достигнута</p></section>`
+        : `<section class="card"><h3>Пока пусто</h3>
+            <p>Создайте копилку на общую мечту или личную цель — пополняйте и следите за прогрессом</p>
+            <div style="margin-top:12px;">${addButton}</div>
+          </section>`;
     }
-    if (full.length) {
-      html += `<div class="section-head-inline"><h3>Накопленные · ${full.length}</h3></div>`;
-      html += full.map(savingItem).join("");
-    }
-    return html + archiveMoreHtml("savings", (appState.savings || []).length);
+    // В «Накоплено» копить уже нечего — кнопка создания только в «Копим».
+    return (savingsView === "saved" ? "" : addButton) + list.map(savingItem).join("");
+  }
+
+  function renderSavingsBody() {
+    return `
+      ${renderSegment("savings", savingsView, [["saving", "Копим"], ["saved", "Накоплено"]], "is-sub")}
+      <div id="savings-body">${renderSavingsList()}</div>
+      ${archiveMoreHtml("savings", (appState.savings || []).length)}
+    `;
   }
 
   // Сегмент-переключатель вида: те же кнопки, что в доке, но внутри вкладки.
@@ -5179,7 +5216,7 @@
       <section class="card">
         <h3>Мои препараты</h3>
         <p class="settings-hint">Личный журнал: препараты и приём не видны партнёру. Бот напомнит о приёме в заданное время, пока курс активен</p>
-        ${rows || `<p class="flo-disclaimer">Пока нет препаратов</p>`}
+        ${rows}
         <button type="button" class="primary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>
         <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение</p>
       </section>`;
@@ -5329,7 +5366,6 @@
           ${(c.phones || []).map(phone => `
             <button class="contact-phone" type="button" data-action="contacts-copy" data-phone="${esc(phone)}">${esc(phone)}</button>`).join("")}
         </div>
-        ${c.comment ? `<p class="contact-comment">${esc(c.comment)}</p>` : ""}
       </section>`).join("");
   }
 
@@ -5509,7 +5545,7 @@
       cancelLabel: "Закрыть",
       fields: `
         <p class="contact-info-name">${esc(contact.name)}${contact.surname ? ` <span class="contact-surname">${esc(contact.surname)}</span>` : ""}</p>
-        <div class="field"><span>Номера — тап копирует</span>
+        <div class="field">
           <div class="contact-phones">${rows || `<p class="flo-disclaimer">Номеров нет.</p>`}</div>
         </div>
         ${contact.comment ? `<div class="field"><span>Комментарий</span><p class="contact-comment">${esc(contact.comment)}</p></div>` : ""}
@@ -6357,7 +6393,7 @@
   }
 
   // Списки вкладки «Вишлист» отдельно от переключателя: при смене вида
-  // перерисовывается только этот блок — экземпляр капли не пересоздаётся.
+  // перерисовывается только этот блок — экземпляры капель не пересоздаются.
   function renderWishLists() {
     const wishDisabledClass = partnerMissing() ? " is-disabled" : "";
     const myId = appState.user?.tg_id;
@@ -6371,9 +6407,17 @@
     const openWishes = isMine ? ownOpen : partnerOpen;
     const doneWishes = isMine ? ownDone : partnerDone;
     const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
+    // Вид «Исполненно»: только исполненные желания — свои или партнёра.
+    if (wishesView === "done") {
+      if (!doneWishes.length) {
+        return `<section class="card"><h3>Пока пусто</h3><p>${isMine ? "Исполненных желаний пока нет" : `У ${partnerLabel === "Её" ? "неё" : "него"} исполненных желаний пока нет`}</p></section>`;
+      }
+      return doneWishes.map((item) => completedWishItem(item, isMine)).join("")
+        + archiveMoreHtml("done_wishes", (appState.completedWishes || []).length);
+    }
     let html = "";
     if (isMine) {
-      if (openWishes.length || doneWishes.length) {
+      if (openWishes.length) {
         html += `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish">Добавить желание</button>`;
         html += openWishes.map((item) => wishItem(item, true)).join("");
       } else {
@@ -6397,11 +6441,6 @@
         </section>
       `;
     }
-    if (doneWishes.length) {
-      html += `<div class="section-head-inline"><h3>Исполненные · ${doneWishes.length}</h3></div>`;
-      html += doneWishes.map((item) => completedWishItem(item, isMine)).join("");
-    }
-    html += archiveMoreHtml("done_wishes", (appState.completedWishes || []).length);
     html += archiveMoreHtml("wishes", (appState.wishes || []).length);
     return html;
   }
@@ -6476,6 +6515,8 @@
     mountGoalsSwitch();
     mountPlansSwitch();
     mountFloSwitch();
+    mountSavingsSwitch();
+    mountWishesViewSwitch();
     mountPinFields();
   }
 
@@ -6525,6 +6566,8 @@
   let goalsSwitch = null;    // внутренний «Предстоящие / Выполненные» в целях
   let plansSwitch = null;    // внутренний «Предстоящие / Выполненные» в планах
   let floSwitch = null;      // внутренний бар под-вкладок внутри «Фло»
+  let savingsSwitch = null;  // внутренний бар «Копим / Накоплено» в копилке
+  let wishesViewSwitch = null; // внутренний бар «Загадано / Исполнено» в желаниях
 
   function switchValue(key) {
     if (key === "pair") return pairView;
@@ -6535,6 +6578,8 @@
     if (key === "goals") return goalsView;
     if (key === "plans") return plansView;
     if (key === "contacts") return contactsView;
+    if (key === "savings") return savingsView;
+    if (key === "wishesView") return wishesView;
     return wishView;
   }
 
@@ -6547,6 +6592,8 @@
     else if (key === "goals") goalsView = value;
     else if (key === "plans") plansView = value;
     else if (key === "contacts") contactsView = value;
+    else if (key === "savings") savingsView = value;
+    else if (key === "wishesView") wishesView = value;
     else wishView = value;
   }
 
@@ -6558,6 +6605,8 @@
     if (goalsSwitch) { goalsSwitch.destroy(); goalsSwitch = null; }
     if (plansSwitch) { plansSwitch.destroy(); plansSwitch = null; }
     if (floSwitch) { floSwitch.destroy(); floSwitch = null; }
+    if (savingsSwitch) { savingsSwitch.destroy(); savingsSwitch = null; }
+    if (wishesViewSwitch) { wishesViewSwitch.destroy(); wishesViewSwitch = null; }
   }
 
   function createSwitch(container, key) {
@@ -6657,6 +6706,46 @@
     if (!instance) return;
     instance.setActive(floView, false);
     floSwitch = instance;
+  }
+
+  // Внутренний бар копилки «Копим / Накоплено» — свой экземпляр капли, как у
+  // «Кино»/«Целей»: внешний переключатель вкладки двигал бы каплю своего бара,
+  // а не этого.
+  function mountSavingsSwitch() {
+    if (savingsSwitch) { savingsSwitch.destroy(); savingsSwitch = null; }
+    const container = document.querySelector('.seg-switch[data-switch="savings"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitSwitch("savings", value, instance)
+    });
+    if (!instance) return;
+    instance.setActive(savingsView, false);
+    savingsSwitch = instance;
+  }
+
+  // Внутренний бар желаний «Загадано / Исполнено» — свой экземпляр капли,
+  // как у «Кино»/«Целей»: внешний переключатель вкладки двигал бы каплю
+  // своего бара, а не этого.
+  function mountWishesViewSwitch() {
+    if (wishesViewSwitch) { wishesViewSwitch.destroy(); wishesViewSwitch = null; }
+    const container = document.querySelector('.seg-switch[data-switch="wishesView"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitSwitch("wishesView", value, instance)
+    });
+    if (!instance) return;
+    instance.setActive(wishesView, false);
+    wishesViewSwitch = instance;
   }
 
   // Переключение под-вкладки «Фло»: меняем только #flo-body, капля и бар живые.
@@ -6846,6 +6935,28 @@
   function commitSwitch(key, value, instance) {
     if (switchValue(key) === value) return;
     setSwitchValue(key, value);
+    if (key === "wishesView") {
+      // Бар «Загадано / Исполнено»: меняем только списки, капля и бары живые.
+      const lists = document.getElementById("wish-lists");
+      if (!lists) { render(); return; }
+      lists.innerHTML = renderWishLists();
+      instance?.setActive(value, true);
+      document.querySelectorAll('.seg-switch[data-switch="wishesView"] .seg-switch-btn').forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
+    if (key === "savings") {
+      // Внутренний бар копилки: меняем только список, капля и бар остаются живыми.
+      const body = document.getElementById("savings-body");
+      if (!body) { render(); return; }
+      body.innerHTML = renderSavingsList();
+      instance?.setActive(value, true);
+      document.querySelectorAll('.seg-switch[data-switch="savings"] .seg-switch-btn').forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
     if (key === "goals") {
       // Внутренний бар целей: меняем только список, капля и бар остаются живыми.
       const list = document.getElementById("goals-body");
@@ -6925,6 +7036,16 @@
       floSwitch.destroy();
       floSwitch = null;
     }
+    // Бар копилки («Копим/Накоплено») — в теле «Наша пара».
+    if (key === "pair" && savingsSwitch) {
+      savingsSwitch.destroy();
+      savingsSwitch = null;
+    }
+    // Бар желаний («Загадано/Исполнено») — там же.
+    if (key === "pair" && wishesViewSwitch) {
+      wishesViewSwitch.destroy();
+      wishesViewSwitch = null;
+    }
     body.innerHTML = key === "pair" ? renderPairView()
       : key === "dates" ? renderDatesBody()
         : key === "tasks" ? (tasksView === "movies" ? renderMoviesBody() : tasksView === "goals" ? renderGoalsBody() : renderTasksBody())
@@ -6939,6 +7060,8 @@
     if (key === "pair") {
       mountWishSwitch();
       if (pairView === "flo") mountFloSwitch();
+      if (pairView === "savings") mountSavingsSwitch();
+      if (pairView === "wishes") mountWishesViewSwitch();
     }
     if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
     if (key === "tasks" && tasksView === "goals") mountGoalsSwitch();
@@ -7449,6 +7572,33 @@
     refreshState();
   });
 
+  // Клавиатурная активация карточек role="button": нативный клик у div/article
+  // не срабатывает, поэтому Enter/Space синтезируют click — он проходит через
+  // тот же делегированный обработчик. Enter — по keydown, Space — по keyup
+  // (keydown гасит прокрутку и автоповтор при удержании). Нативные контролы
+  // (button, a, input…) пропускаем: у них своя активация, иначе был бы дабл.
+  let spaceCard = null;
+  const cardFromEvent = (e) => {
+    const t = e.target;
+    if (!t || typeof t.closest !== "function") return null;
+    if (t.closest("button, a[href], input, select, textarea, summary, [contenteditable]")) return null;
+    return t.closest('[role="button"][tabindex]:not([tabindex="-1"])');
+  };
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const card = cardFromEvent(e);
+    if (!card) return;
+    e.preventDefault();
+    if (e.key === "Enter") card.click();
+    else spaceCard = card;
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key !== " " && e.key !== "Spacebar") { spaceCard = null; return; }
+    const card = spaceCard;
+    spaceCard = null;
+    if (card && e.target === card && document.activeElement === card) card.click();
+  });
+
   document.addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
@@ -7514,6 +7664,16 @@
         // Под-вкладки «Фло»: свой экземпляр капли, как у «Кино»/«Целей».
         if (key === "flo") {
           commitFloView(value);
+          return;
+        }
+        // Бар копилки: свой экземпляр капли, как у «Кино»/«Целей».
+        if (key === "savings") {
+          commitSwitch("savings", value, savingsSwitch);
+          return;
+        }
+        // Бар желаний «Загадано / Исполнено» — свой экземпляр капли.
+        if (key === "wishesView") {
+          commitSwitch("wishesView", value, wishesViewSwitch);
           return;
         }
         if (!["pair", "dates", "memories", "tasks", "places"].includes(key)) return;
@@ -8191,6 +8351,7 @@
             <div class="saving-history">
               <div class="saving-history-row"><span class="saving-history-name">Начало истории</span><span>${esc(formatDay(appState?.pair?.started_at || ""))}</span></div>
               <div class="saving-history-row"><span class="saving-history-name"><span style="color: var(--berry);">${FLAME_ICON}</span> Рекорд серии</span><span>${Number(appState?.user?.best_streak || 0)} дн.</span></div>
+              ${historyStatsRows()}
             </div>`
         });
       } else if (action === "copy-code") {

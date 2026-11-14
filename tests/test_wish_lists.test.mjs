@@ -41,6 +41,7 @@ function makeLoader() {
     "STATE_RECENT_LIMIT", "STATE_ACTIVE_LIMIT", "ARCHIVE_PAGE_SIZE",
     [
       "let wishView = 'mine';",
+      "let wishesView = 'open';",
       "let appState = null;",
       "let archiveCachePairId = null;",
       "const viewerTimeZone = () => 'Europe/Moscow';",
@@ -65,8 +66,10 @@ function makeLoader() {
     extractBraced("function formatTimestamp"),
       extractBraced("function completionMeta"),
       extractBraced("function completedWishItem"),
+      extractBraced("function renderSegment"),
       extractBraced("function renderWishLists"),
-      "return { renderWishLists, setWishView: (v) => { wishView = v; }, setAppState: (v) => { appState = v; } };"
+      extractBraced("function renderWishBlock"),
+      "return { renderWishLists, renderWishBlock, setWishView: (v) => { wishView = v; }, setWishesView: (v) => { wishesView = v; }, setAppState: (v) => { appState = v; } };"
     ].join("\n")
   );
 }
@@ -83,10 +86,11 @@ const RICH = {
   ]
 };
 
-function renderLists(appState, view) {
+function renderLists(appState, view, wishesView = "open") {
   const lists = makeLoader()(10, 200, 20);
   lists.setAppState(appState);
   lists.setWishView(view);
+  lists.setWishesView(wishesView);
   return lists.renderWishLists();
 }
 
@@ -95,7 +99,25 @@ test("вид «Мои»: свои желания с кнопками, чужих
   ok(html.includes("Моё желание"), "своего желания нет");
   ok(!html.includes("Чужое желание"), "чужое желание попало в вид «Мои»");
   ok(html.includes('data-action="add-wish"'), "нет кнопки добавления");
-  ok(html.includes("Исполненные · 1"), "нет блока исполненных");
+});
+
+test("вид «Загадано»: исполненные желания живут в отдельном виде", () => {
+  const html = renderLists(RICH, "mine");
+  ok(!html.includes("Моё исполненное"), "исполненные попали в «Загадано»");
+  ok(!html.includes("Исполненные ·"), "старый заголовок блока исполненных");
+});
+
+test("вид «Исполнено»: только исполненные желания, загаданных нет", () => {
+  const html = renderLists(RICH, "mine", "done");
+  ok(html.includes("Моё исполненное"), "исполненного желания нет");
+  ok(!html.includes("Моё желание"), "загаданное желание попало в «Исполнено»");
+  ok(!html.includes('data-action="add-wish"'), "в «Исполнено» нечего добавлять");
+});
+
+test("пустой вид «Исполнено» показывает заглушку", () => {
+  const html = renderLists({ ...RICH, wishes: [], completedWishes: [] }, "mine", "done");
+  ok(html.includes("Пока пусто"));
+  ok(html.includes("Исполненных желаний пока нет"), "заглушка не про исполненные");
 });
 
 test("вид «партнёр»: чужие желания без кнопок, своего нет", () => {
@@ -112,11 +134,40 @@ test("пустой вид «партнёр» показывает заглушк
   ok(html.includes("Он ещё не добавил"), "пол партнёра не учтён");
 });
 
+test("блок желаний: бар «Загадано / Исполнено» над переключателем «Мои / Её»", () => {
+  const lists = makeLoader()(10, 200, 20);
+  lists.setAppState(RICH);
+  lists.setWishView("mine");
+  lists.setWishesView("open");
+  const html = lists.renderWishBlock();
+  ok(html.includes('data-switch="wishesView"'), "нет бара «Загадано / Исполнено»");
+  ok(html.includes("Загадано") && html.includes("Исполнено"), "нет подписей вида");
+  ok(html.includes("seg-switch-btn is-active"), "активный вид не помечен");
+  ok(html.includes('class="wish-switch"'), "нет переключателя «Мои / Её»");
+  ok(html.includes('id="wish-lists"'), "нет контейнера списков");
+  // Бар вида — над переключателем «Мои / Её», списки — под обоими.
+  ok(html.indexOf('data-switch="wishesView"') < html.indexOf('class="wish-switch"'), "бар вида должен быть выше");
+  ok(html.indexOf('class="wish-switch"') < html.indexOf('id="wish-lists"'), "списки должны быть ниже переключателей");
+});
+
+test("бар желаний подключён по образцу планов", () => {
+  ok(/let wishesView = "open";/.test(source), "нет состояния wishesView");
+  ok(/if \(key === "wishesView"\) return wishesView;/.test(source), "switchValue не знает wishesView");
+  ok(/else if \(key === "wishesView"\) wishesView = value;/.test(source), "setSwitchValue не знает wishesView");
+  ok(/renderSegment\("wishesView", wishesView, \[\["open", "Загадано"\], \["done", "Исполнено"\]\], "is-sub"\)/.test(source), "внутренний бар желаний не найден");
+  ok(/getElementById\("wish-lists"\)/.test(source), "commitSwitch не меняет списки желаний");
+  ok(/commitSwitch\("wishesView", value, wishesViewSwitch\)/.test(source), "фолбэк-клик не ведёт к экземпляру капли желаний");
+  ok(/mountWishesViewSwitch\(\);/.test(source), "mountWishesViewSwitch не вызывается из render()");
+  ok(/if \(wishesViewSwitch\) \{ wishesViewSwitch\.destroy\(\); wishesViewSwitch = null; \}/.test(source), "wishesViewSwitch не снимается в destroySwitches");
+  ok(/if \(key === "pair" && wishesViewSwitch\) \{/.test(source), "wishesViewSwitch не снимается при смене вида вкладки");
+  ok(/if \(pairView === "wishes"\) mountWishesViewSwitch\(\);/.test(source), "капля желаний не перемонтируется после смены вида вкладки");
+});
+
 test("архивная кнопка «Показать ещё» остаётся внутри вынесенных списков", () => {
   // Порог архивов — 10 недавних: даём 11 исполненных, чтобы кнопка появилась.
   const many = Array.from({ length: 11 }, (_, i) => ({
     id: 100 + i, body: `Желание ${i}`, owner_id: 1, url: "", done: 1, done_at: 5, created_at: 100 + i, display_name: "Оля"
   }));
-  const html = renderLists({ ...RICH, completedWishes: many }, "mine");
+  const html = renderLists({ ...RICH, completedWishes: many }, "mine", "done");
   ok(html.includes("load-archive"), "архивные кнопки потерялись при выносе списков");
 });

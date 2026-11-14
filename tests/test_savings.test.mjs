@@ -32,6 +32,8 @@ function extractBraced(text, declaration) {
 const load = new Function(
   [
     "let appState = { savings: [] };",
+    // Вид копилки («Копим/Накоплено»).
+    "let savingsView = 'saving';",
     // savingsList() читает mergedArchive — стаб возвращает недавние как есть.
     "const mergedArchive = (type, recent) => recent || [];",
     "const archiveMoreHtml = () => \"\";",
@@ -49,11 +51,13 @@ const load = new Function(
     extractBraced(appSource, "function savingsList"),
     extractBraced(appSource, "function savingIsFull"),
     extractBraced(appSource, "function savingItem"),
+    extractBraced(appSource, "function renderSegment"),
+    extractBraced(appSource, "function renderSavingsList"),
     extractBraced(appSource, "function renderSavingsBody"),
-    "return { formatAmount, savingIsFull, savingItem, renderSavingsBody, setState: (v) => { appState = v; } };"
+    "return { formatAmount, savingIsFull, savingItem, renderSavingsBody, setState: (v) => { appState = v; }, setView: (v) => { savingsView = v; } };"
   ].join("\n")
 );
-const { formatAmount, savingIsFull, savingItem, renderSavingsBody, setState } = load();
+const { formatAmount, savingIsFull, savingItem, renderSavingsBody, setState, setView } = load();
 
 // Intl.NumberFormat("ru-RU") разделяет тысячи неразрывным пробелом (U+00A0).
 const NBSP = "\u00A0";
@@ -73,7 +77,8 @@ test("savingIsFull: накоплено >= цели", () => {
 
 test("savingItem: пилюля типа, собрано/цель, прогресс и три кнопки", () => {
   const shared = savingItem({ id: 1, kind: "shared", title: "Море", target: 30000, collected: 12000 });
-  ok(shared.includes(">Общая</span>"), "общая копилка без чипа is-muted");
+  ok(!shared.includes(">Общая</span>"), "у общей копилки пилюли типа нет");
+  ok(!shared.includes(">Личная</span>"), "у общей копилки пилюли типа нет");
   ok(shared.includes(`12${NBSP}000`), "собрано");
   ok(shared.includes(`из 30${NBSP}000`), "цель");
   ok(shared.includes('width:40%'), "прогресс 12000/30000 = 40%");
@@ -93,18 +98,59 @@ test("savingItem: пилюля типа, собрано/цель, прогрес
   ok(bare.includes("width:0%"), "нулевая цель — прогресс 0");
 });
 
-test("renderSavingsBody: активные и «Накопленные» разделяются", () => {
+test("renderSavingsBody: бар «Копим/Накоплено», общие и личные в одном списке", () => {
   setState({ savings: [
     { id: 1, kind: "shared", title: "Море", target: 30000, collected: 12000 },
-    { id: 2, kind: "personal", title: "Готово", target: 100, collected: 100 }
+    { id: 2, kind: "shared", title: "Свадьба", target: 100, collected: 100 },
+    { id: 3, kind: "personal", title: "Ноутбук", target: 1000, collected: 100 }
   ] });
+  setView("saving");
   const body = renderSavingsBody();
-  ok(body.includes("Накопленные · 1"), "секция полных копилок");
-  ok(body.indexOf("Море") < body.indexOf("Накопленные"), "активные выше накопленных");
+  // Один внутренний бар с каплей — вид; охвата «Наши/Мои» нет.
+  ok(body.includes('data-switch="savings"'), "бар «Копим/Накоплено»");
+  ok(body.includes(">Копим</button>") && body.includes(">Накоплено</button>"), "подписи вида");
+  ok(!body.includes('data-switch="savingsScope"'), "лишнего бара «Наши/Мои» нет");
+  ok(!body.includes(">Наши</button>") && !body.includes(">Мои</button>"), "подписей охвата нет");
+  // «Копим»: общие и личные копилки в одном списке, различаются пилюлями.
+  ok(body.includes("Море") && body.includes("Ноутбук"), "общие и личные в одном списке");
+  ok(body.includes(">Личная</span>"), "пилюля личной копилки");
+  ok(!body.includes(">Общая</span>"), "у общих копилок пилюли нет");
+  ok(!body.includes("Свадьба"), "полная копилка не в «Копим»");
   ok(!body.includes("Пока пусто"), "пустое состояние не показано при наличии копилок");
   ok(body.includes('data-action="add-saving"'), "есть кнопка создания");
+
+  // «Накоплено»: полная копилка, копить уже нечего.
+  setView("saved");
+  const saved = renderSavingsBody();
+  ok(saved.includes("Свадьба"), "полная копилка в «Накоплено»");
+  ok(!saved.includes("Море") && !saved.includes("Ноутбук"), "неполные не в «Накоплено»");
+  ok(!saved.includes('data-action="add-saving"'), "в «Накоплено» копить нечего");
+
+  setView("saving");
   setState({ savings: [] });
-  ok(renderSavingsBody().includes("Пока пусто"), "пустой список даёт заглушку");
+  const empty = renderSavingsBody();
+  ok(empty.includes("Пока пусто"), "пустой список даёт заглушку");
+  ok(empty.includes("Создать копилку"), "в пустом «Копим» есть кнопка создания");
+});
+
+test("бар «Копим / Накоплено» подключён по образцу планов", () => {
+  ok(/let savingsView = "saving";/.test(appSource), "нет состояния savingsView");
+  ok(/if \(key === "savings"\) return savingsView;/.test(appSource), "switchValue не знает savings");
+  ok(/else if \(key === "savings"\) savingsView = value;/.test(appSource), "setSwitchValue не знает savings");
+  ok(/renderSegment\("savings", savingsView, \[\["saving", "Копим"\], \["saved", "Накоплено"\]\], "is-sub"\)/.test(appSource), "внутренний бар копилки не найден");
+  ok(/getElementById\("savings-body"\)/.test(appSource), "commitSwitch не меняет список копилок");
+  ok(/commitSwitch\("savings", value, savingsSwitch\)/.test(appSource), "фолбэк-клик не ведёт к экземпляру капли копилок");
+  ok(/mountSavingsSwitch\(\);/.test(appSource), "mountSavingsSwitch не вызывается из render()");
+  ok(/if \(savingsSwitch\) \{ savingsSwitch\.destroy\(\); savingsSwitch = null; \}/.test(appSource), "savingsSwitch не снимается в destroySwitches");
+  ok(/if \(key === "pair" && savingsSwitch\) \{/.test(appSource), "savingsSwitch не снимается при смене вида вкладки");
+  ok(/if \(pairView === "savings"\) mountSavingsSwitch\(\);/.test(appSource), "капля копилки не перемонтируется после смены вида вкладки");
+});
+
+test("у общих копилок нет пилюли типа, у личных — есть", () => {
+  const shared = savingItem({ id: 1, kind: "shared", title: "Море", target: 30000, collected: 12000 });
+  ok(!shared.includes("day-chip"), "у общей копилки осталась пилюля типа");
+  const personal = savingItem({ id: 2, kind: "personal", title: "Ноутбук", target: 1000, collected: 100 });
+  ok(personal.includes(">Личная</span>"), "у личной копилки нет пилюли «Личная»");
 });
 
 test("маршруты копилок зарегистрированы в воркере", () => {

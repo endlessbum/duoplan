@@ -10,8 +10,9 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Лендинг — <https://duoplan.stacheight.workers.dev>
 - Mini App — <https://duoplan.stacheight.workers.dev/app>
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
-- Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", version, database }`
-- Текущая версия — `2026.11.13.8` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
+  (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
+- Текущая версия — `2026.11.14.53` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -38,11 +39,11 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 40 миграций схемы D1 |
+| `migrations/` | 44 миграции схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
-| `tests/` | pytest (31 файл) и `node:test` (67 файлов) + браузерные harness'ы |
+| `tests/` | pytest (32 файла) и `node:test` (76 файлов) + браузерные harness'ы |
 
 **Production:** Cloudflare Worker + D1 + static assets. Worker обслуживает только
 `/api/*`, `/health` и `/telegram/*` (`run_worker_first`), остальное отдаёт
@@ -70,12 +71,13 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 
 ## Схема D1
 
-30 таблиц: `pairs`, `users`, `pair_members`, `member_stats`, `tasks`, `dates`,
+34 таблицы: `pairs`, `users`, `pair_members`, `member_stats`, `tasks`, `dates`,
 `memories`, `wishes`, `quotes`, `places`, `trips`, `goals`, `goal_items`,
 `movies`, `movie_ratings`, `savings`, `savings_deposits`, `daily_rolls`,
 `daily_completions`, `rate_limits`, `telegram_updates`, `notification_log`,
 `app_meta`, `closed_codes`, `cycle_profiles`, `cycle_periods`, `cycle_logs`,
-`cycle_measurements`, `cycle_meds`, `cycle_med_logs`.
+`cycle_measurements`, `cycle_meds`, `cycle_med_logs`, `health_meds`,
+`health_med_logs`, `contacts`, `contact_phones`.
 
 | Миграция | Что добавляет |
 |---|---|
@@ -876,8 +878,8 @@ npx wrangler deploy --dry-run
 node scripts/check-touch-drag.mjs
 ```
 
-98 файлов тестов: 31 pytest и 67 `node:test` (последний прогон — 204 pytest
-и 716 node:test).
+108 файлов тестов: 32 pytest и 76 `node:test` (последний прогон — 217 pytest
+и 882 node:test).
 Python-часть покрывает гонки входа и выхода из пары, параллельные попытки
 подбора кода, запрет входа владельцу пустой пары, двойное начисление XP,
 валидацию, часовой пояс и DST, FSM-медиа, миграции, приватный гейт, уровни
@@ -913,7 +915,7 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.13.8`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.14.53`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.
 
 ### Воспроизводимость окружения

@@ -71,6 +71,33 @@ TABLES = {
     # Снимки статистики «Ваша история» по парам (migrations/0030): без них
     # вернувшийся партнёр потерял бы свою историю после переноса в D1.
     "member_stats": "pair_id, tg_id, points, streak, best_streak, last_activity, updated_at",
+    # Трекер Фло: без этих таблиц перенос в D1 молча терял настройки цикла,
+    # периоды, дневник, измерения, препараты и журнал приёма (P1 аудита).
+    # Порядок: родители раньше детей (meds -> med_logs), как у goals/movies.
+    "cycle_profiles": (
+        "tg_id, avg_cycle_length, avg_period_length, cycle_length_known, "
+        "share_enabled, share_level, share_sex, share_mood, share_sleep, share_bbt, "
+        "share_confirmed, context, onboarded, notify_enabled, notify_period, "
+        "notify_ovulation, notify_fertile, notify_delay, notify_period_days, "
+        "notify_delay_days, notify_diary, share_notify, created_at, updated_at"
+    ),
+    "cycle_periods": "id, tg_id, start_date, end_date, end_unknown, created_at, updated_at",
+    "cycle_logs": (
+        "id, tg_id, date, flow, clots, energy, mood, symptoms, symptoms_clear, note, "
+        "sex, sex_count, leakage, pain_score, pain_locations, life_impact, mucus, "
+        "sleep_hours, sleep_quality, stress, sick, travel, weight_kg, bleeding_details, "
+        "created_at, updated_at"
+    ),
+    "cycle_measurements": (
+        "id, tg_id, date, time, kind, value, unit, result, note, created_at, updated_at"
+    ),
+    "cycle_meds": (
+        "id, tg_id, name, category, dosage, form, schedule, start_date, end_date, "
+        "status, note, created_at, updated_at"
+    ),
+    "cycle_med_logs": (
+        "id, med_id, tg_id, date, time, status, dose_taken, note, created_at, updated_at"
+    ),
     # Журнал уведомлений: без него после переноса дедупликация пуста и уже
     # отправленные за сегодня сводки/напоминания уйдут повторно.
     # rate_limits/join_attempts/fsm_states/meta осознанно не переносим:

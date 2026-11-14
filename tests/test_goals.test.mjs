@@ -156,7 +156,8 @@ test("app: диалог цели и действия", () => {
   // Регрессия 2026-11-11: в Promise.all state() порядок запросов разъехался
   // с деструктуризацией — goals получал строки копилок, savings — пункты
   // целей (заметено на сиде архива). Порядок: savings → goals → goalItems.
-  ok(/movieRatings, savings, goals, goalItems, daily, partnerUser\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
+  // В конце — partnerUser и stats (итоги пары для окна «Ваша история»).
+  ok(/movieRatings, savings, goals, goalItems, daily, partnerUser, stats\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
   const stateStart = workerSource.indexOf("movieRatings, savings, goals, goalItems");
   const savingsQ = workerSource.indexOf("FROM savings WHERE pair_id=? AND (kind='shared'", stateStart);
   const goalsQ = workerSource.indexOf("FROM goals WHERE pair_id=? AND (is_private=0", stateStart);

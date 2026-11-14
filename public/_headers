@@ -24,6 +24,10 @@
 /setup.js
   Cache-Control: no-cache
 
+# Демо лендинга не версионируется — запретить эвристическое кэширование.
+/demo.js
+  Cache-Control: no-cache
+
 # Версионированные ассеты: долгое кэширование (URL меняется при изменении).
 /app.js
   Cache-Control: public, max-age=31536000, immutable

@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal } from "node:assert/strict";
+import { deepStrictEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -328,6 +328,48 @@ test("маркеры: звезда жёлтая, личное — серое, и
   equal(cssSource.includes("var(--cal-private)"), true);
   equal(cssSource.includes("--cal-wish: #"), true);
   equal(cssSource.includes("--cal-wish: var(--berry"), false);
+});
+
+// WCAG 2.2 SC 1.4.11: значимый графический объект (звезда календаря) —
+// минимум 3:1 к соседнему цвету. Регресс P2-04: #d9a520 давал ~2.2:1.
+function _lum(hex) {
+  const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map(v => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+}
+function _contrast(a, b) {
+  const [hi, lo] = [_lum(a), _lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+function _cssVar(section, name) {
+  const m = section.match(new RegExp(`${name}:\\s*(#[0-9a-fA-F]{6}|rgba?\\([^)]*\\))`));
+  return m ? m[1] : null;
+}
+function _blendOver(fg, bg, alpha) {
+  const f = [1, 3, 5].map(i => parseInt(fg.slice(i, i + 2), 16));
+  const b = [1, 3, 5].map(i => parseInt(bg.slice(i, i + 2), 16));
+  return "#" + f.map((v, i) => Math.round(v * alpha + b[i] * (1 - alpha)).toString(16).padStart(2, "0")).join("");
+}
+
+test("звезда желаний: контраст ≥3:1 на всех фонах обеих тем", () => {
+  const darkAt = cssSource.indexOf(':root[data-theme="dark"]');
+  const light = cssSource.slice(0, darkAt);
+  const dark = cssSource.slice(darkAt, darkAt + 6000);
+  for (const [label, section] of [["светлая", light], ["тёмная", dark]]) {
+    const wish = _cssVar(section, "--cal-wish");
+    const surface = _cssVar(section, "--surface");
+    const bg = _cssVar(section, "--bg");
+    ok(wish && surface && bg, `${label}: тема не определяет --cal-wish/--surface/--bg`);
+    // Фон выбранной ячейки — --berry-soft поверх --surface.
+    const soft = _cssVar(section, "--berry-soft");
+    const berry = _cssVar(section, "--berry");
+    const alpha = soft ? Number(soft.match(/[\d.]+(?=\))/)?.[0] ?? soft.match(/,\s*([\d.]+)\)/)?.[1]) : 0;
+    const selected = berry && alpha ? _blendOver(berry, surface, alpha) : surface;
+    for (const [where, back] of [["surface", surface], ["bg", bg], ["selected", selected]]) {
+      const ratio = _contrast(wish, back);
+      ok(ratio >= 3, `${label}: --cal-wish ${wish} на ${where} ${back} = ${ratio.toFixed(2)}:1 < 3:1`);
+    }
+  }
 });
 
 test("в календарь попадают только свои вручённые желания", () => {

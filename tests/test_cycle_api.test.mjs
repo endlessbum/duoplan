@@ -67,6 +67,7 @@ const buildApi = new Function(
     extractLine("const CYCLE_MED_STATUS"),
     extractLine("const NOTIFY_COLUMNS"),
     extractLine("const CYCLE_MS_DAY"),
+    extractBraced("function optionalTime"),
     extractBraced("function cycleValidDate"),
     extractBraced("function cycleDayNum"),
     extractBraced("function cycleDateStr"),
@@ -510,6 +511,29 @@ test("POST /api/cycle/measurement stores LH result and rejects bad kind/result",
   );
 });
 
+test("POST /api/cycle/measurement: время строго ЧЧ:ММ или пусто", async () => {
+  // Регресс P2: slice(0,5) сохранял невалидный ввод вроде «25:99»/«abcde».
+  for (const bad of ["25:99", "12:60", "abcde", "9:30", "2026-11-02T07:30:00"]) {
+    const { api, env, request } = makeEnv({
+      gender: "female",
+      body: { date: "2026-11-02", kind: "bbt", value: 36.6, time: bad }
+    });
+    await rejects(
+      api(request, env, new URL("https://duoplan.test/api/cycle/measurement")),
+      err => isHttpError(err, 400, "INVALID_TIME"),
+      `time=${bad} должен отклоняться`
+    );
+  }
+  const { api, env, request, writes } = makeEnv({
+    gender: "female",
+    body: { date: "2026-11-02", kind: "bbt", value: 36.6, time: "23:59" }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/measurement"));
+  const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_measurements"));
+  ok(insert);
+  equal(insert.args[2], "23:59", "валидное время сохраняется без преобразований");
+});
+
 test("POST /api/cycle/measurement/delete removes by id", async () => {
   const { api, env, request, writes } = makeEnv({ gender: "female", body: { id: 9 } });
   await api(request, env, new URL("https://duoplan.test/api/cycle/measurement/delete"));
@@ -563,6 +587,28 @@ test("POST /api/cycle/med-log records taken/skipped and distinguishes dose", asy
     noMed.api(noMed.request, noMed.env, new URL("https://duoplan.test/api/cycle/med-log")),
     err => isHttpError(err, 404, "NOT_FOUND")
   );
+});
+
+test("POST /api/cycle/med-log: время приёма строго ЧЧ:ММ или пусто", async () => {
+  for (const bad of ["25:99", "12:60", "abcde", "9:30", "2026-11-02T08:00:00"]) {
+    const { api, env, request } = makeEnv({
+      gender: "female",
+      body: { med_id: 5, date: "2026-11-02", status: "taken", time: bad }
+    });
+    await rejects(
+      api(request, env, new URL("https://duoplan.test/api/cycle/med-log")),
+      err => isHttpError(err, 400, "INVALID_TIME"),
+      `time=${bad} должен отклоняться`
+    );
+  }
+  const { api, env, request, writes } = makeEnv({
+    gender: "female",
+    body: { med_id: 5, date: "2026-11-02", status: "taken" }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/med-log"));
+  const insert = writes.find(w => w.sql.includes("INSERT INTO cycle_med_logs"));
+  ok(insert);
+  equal(insert.args[3], null, "пустое время сохраняется как NULL");
 });
 
 test("POST /api/cycle/med/delete removes course and its logs", async () => {

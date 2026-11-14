@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
@@ -19,6 +20,28 @@ from duoplan.services import DuoPlanService
 from duoplan import cycle as flo  # noqa: E402
 
 log = logging.getLogger(__name__)
+
+
+async def cycle_reminder_tick(db, bot, service) -> None:
+    """Один тик напоминаний Фло: текущее время в поясе сервиса → отправка → чистка."""
+    now = datetime.now(service.tz)
+    await flo.send_cycle_reminders(
+        db,
+        lambda tg_id, text: bot.send_message(tg_id, text),
+        # owners уже несут u.timezone из JOIN — отдельный запрос не нужен.
+        lambda tg_id: None,
+        now,
+    )
+    await flo.prune_old_notifications(db, days=7)
+
+
+async def cycle_reminder_loop(db, bot, service) -> None:
+    while True:
+        try:
+            await cycle_reminder_tick(db, bot, service)
+        except Exception:
+            log.exception("cycle_reminder_loop failed")
+        await asyncio.sleep(60)
 
 WEBHOOK_HINT = (
     "Для этого BOT_TOKEN уже установлен webhook ({url}).\n"
@@ -97,22 +120,7 @@ async def main() -> int:
             settings.db_path,
         )
         # Фоновая задача: напоминания Фло раз в минуту (аналог cron в worker.js).
-        async def cycle_reminder_loop() -> None:
-            while True:
-                try:
-                    now = datetime.now(service.tz)
-                    await flo.send_cycle_reminders(
-                        db,
-                        lambda tg_id, text: bot.send_message(tg_id, text),
-                        lambda tg_id: db.one("SELECT timezone FROM users WHERE tg_id=?", (tg_id,)).get("timezone") if db else None,
-                        now,
-                    )
-                    await flo.prune_old_notifications(db, days=7)
-                except Exception:
-                    log.exception("cycle_reminder_loop failed")
-                await asyncio.sleep(60)
-
-        asyncio.create_task(cycle_reminder_loop())
+        asyncio.create_task(cycle_reminder_loop(db, bot, service))
         await dp.start_polling(bot)
         return 0
     finally:

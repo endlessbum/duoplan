@@ -4,327 +4,936 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f7f3ed">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <meta name="description" content="DuoPlan — приложение для пар: общие планы, цели, кино, значимые даты, места и путешествия, дневник, вишлисты и копилка.">
+  <meta name="description" content="DuoPlan — общее пространство для пары: планы, значимые даты, места, кино, дневник, цели, вишлист, копилка и Фло.">
   <meta property="og:type" content="website">
   <meta property="og:locale" content="ru_RU">
   <meta property="og:title" content="DuoPlan — ваше общее пространство">
-  <meta property="og:description" content="Планы, воспоминания и маленькие радости — в одном уютном месте для вас двоих.">
+  <meta property="og:description" content="Общие планы, важные моменты и маленькие радости — в одном месте для вас двоих.">
   <title>DuoPlan — ваше общее пространство</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <style>
     :root {
-      --paper: #f7f3ed;
+      /* Цвета синхронизированы с public/app.css DuoPlan. */
+      --bg: #f7f3ed;
       --surface: #fffdf9;
+      --surface-2: #f1ebe2;
       --ink: #292524;
-      --muted: #746d68;
-      --line: #e8e0d8;
-      --berry: #a94455;
-      --berry-dark: #833342;
-      --berry-soft: #f4dfe1;
+      --muted: #766e68;
+      --line: rgba(120, 102, 88, .14);
+      --berry: #b85464;
+      --berry-dark: #963f4e;
+      --berry-soft: rgba(184, 84, 100, .14);
       --sage: #55766a;
-      --sage-soft: #dfe9e2;
-      --shadow: 0 24px 70px rgba(75, 54, 46, .10);
+      --sage-soft: rgba(85, 118, 106, .14);
+      --glass-bg: rgba(255, 253, 249, .72);
+      --glass-border: rgba(255, 255, 255, .72);
+      --glass-shadow: 0 10px 30px rgba(45, 34, 28, .10), inset 0 1px .5px rgba(255,255,255,.85);
+      /* Жидкое стекло и капля — значения дословно из app.css (светлая тема). */
+      --glass-outer-border: rgba(41, 37, 36, .08);
+      --glass-sheen: linear-gradient(180deg, rgba(255,255,255,.42) 0%, rgba(255,255,255,0) 58%);
+      --nav-glass-bg: rgba(255, 253, 249, .74);
+      --nav-label: rgba(41, 37, 36, .84);
+      --glass-inner: inset 0 1px .5px rgba(255,255,255,.9), inset 0 -1px .5px rgba(41,37,36,.05);
+      --droplet-border: rgba(255, 255, 255, .35);
+      --droplet-halo: rgba(255, 255, 255, .15);
+      --sticky-fade: rgba(247, 243, 237, .84);
+      --amber-bg: rgba(214, 140, 60, .18);
+      --amber-ink: #a35f1f;
+      --cherry: #a81f2e;
+      --cherry-soft: rgba(168, 31, 46, .14);
+      --shadow-card: 0 8px 26px rgba(41, 37, 36, .04);
+      --shadow-large: 0 24px 70px rgba(75, 54, 46, .10);
+      --radius-card: 22px;
+      --container: 1120px;
     }
 
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 96px; }
     body {
+      min-width: 320px;
       margin: 0;
+      overflow-x: hidden;
       color: var(--ink);
-      background: var(--paper);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.6;
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      line-height: 1.5;
       -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
     }
     a { color: inherit; }
-    button, a { -webkit-tap-highlight-color: transparent; }
-    a:focus-visible { outline: 3px solid var(--berry); outline-offset: 4px; }
-    .container { width: min(1120px, calc(100% - 40px)); margin: 0 auto; }
+    a, button { -webkit-tap-highlight-color: transparent; }
+    a:focus-visible, button:focus-visible { outline: 3px solid var(--berry); outline-offset: 4px; }
+    svg { display: block; flex: none; }
+    h1, h2, h3, p { margin: 0; }
+    .container { width: min(var(--container), calc(100% - 40px)); margin-inline: auto; }
+    .skip-link {
+      position: fixed; top: 10px; left: 10px; z-index: 100;
+      padding: 10px 14px; border-radius: 10px; background: var(--surface);
+      color: var(--ink); box-shadow: var(--shadow-card); transform: translateY(-150%);
+    }
+    .skip-link:focus { transform: translateY(0); }
 
-    .header { padding: 24px 0; }
-    .nav { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
-    .brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; font-weight: 800; font-size: 22px; letter-spacing: -.04em; }
+    /* Шапка сайта — спокойное стекло, как плавающие элементы Mini App. */
+    .site-header {
+      position: sticky; top: 0; z-index: 20;
+      padding: 14px 0;
+      border-bottom: 1px solid rgba(120, 102, 88, .08);
+      background: rgba(247, 243, 237, .82);
+      backdrop-filter: blur(22px) saturate(170%);
+      -webkit-backdrop-filter: blur(22px) saturate(170%);
+    }
+    .nav { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand {
+      display: inline-flex; align-items: center; gap: 10px;
+      color: var(--ink); text-decoration: none;
+      font-size: 21px; font-weight: 750; letter-spacing: -.045em;
+    }
     .brand-mark { width: 34px; height: 34px; }
-    .nav-link { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 600; }
-    .nav-link:hover { color: var(--ink); }
+    .nav-actions { display: flex; align-items: center; gap: 10px; }
+    .nav-link {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 42px; padding: 0 14px; border-radius: 999px;
+      color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600;
+      transition: background .18s ease, color .18s ease;
+    }
+    .nav-link:hover { background: var(--surface-2); color: var(--ink); }
+    .button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+      min-height: 48px; padding: 0 20px; border: 1px solid transparent;
+      border-radius: 14px; background: var(--berry); color: #fff;
+      text-decoration: none; font: inherit; font-size: 14px; font-weight: 700;
+      box-shadow: 0 8px 20px rgba(184, 84, 100, .18);
+      transition: transform .18s ease, background .18s ease, box-shadow .18s ease;
+    }
+    .button:hover { background: var(--berry-dark); box-shadow: 0 10px 24px rgba(184, 84, 100, .22); transform: translateY(-1px); }
+    .button:active { transform: scale(.98); }
+    .button svg { width: 18px; height: 18px; }
+    .button-small { min-height: 40px; padding-inline: 16px; border-radius: 999px; font-size: 13px; }
 
-    .hero { position: relative; overflow: hidden; padding: 72px 0 100px; }
+    /* Первый экран. Демо справа повторяет реальные блоки главной вкладки DuoPlan. */
+    .hero { position: relative; isolation: isolate; padding: 64px 0 82px; }
+    .hero::before, .hero::after {
+      content: ""; position: absolute; z-index: -1; pointer-events: none; border-radius: 50%;
+    }
     .hero::before {
-      content: "";
-      position: absolute;
-      width: 560px;
-      height: 560px;
-      top: -240px;
-      right: -140px;
-      border-radius: 50%;
-      background: var(--berry-soft);
-      opacity: .55;
-      filter: blur(2px);
+      width: 560px; height: 560px; top: -290px; right: -170px;
+      background: var(--berry-soft); filter: blur(4px); opacity: .8;
+    }
+    .hero::after {
+      width: 360px; height: 360px; left: -240px; bottom: -170px;
+      background: var(--sage-soft); filter: blur(10px); opacity: .7;
+    }
+    .hero-grid {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 448px);
+      align-items: center; gap: clamp(38px, 6vw, 78px);
+    }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 9px;
+      margin-bottom: 18px; color: var(--sage);
+      font-size: 12px; font-weight: 700; letter-spacing: .075em; text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 22px; height: 1px; background: currentColor; }
+    h1 {
+      max-width: 620px; margin-bottom: 20px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(46px, 5.6vw, 70px); font-weight: 400;
+      line-height: 1.035; letter-spacing: -.055em;
+    }
+    h1 em { color: var(--berry); font-style: normal; }
+    .hero-copy { max-width: 490px; margin-bottom: 26px; color: var(--muted); font-size: 17px; line-height: 1.65; }
+    .hero-note { margin-top: 18px; color: var(--muted); font-size: 12px; }
+
+    .preview-wrap { position: relative; width: min(320px, 100%); justify-self: end; }
+    /* iPhone 18 Pro Max, White Titanium: металлический корпус градиентом,
+       Dynamic Island, боковые кнопки. Экран внутри повторяет главный
+       экран Mini App; живые данные подставляет /demo.js. */
+    .iphone {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 440 / 956;
+      border-radius: 62px;
+      background: linear-gradient(145deg, #f8f6f3 0%, #e7e4df 22%, #cfccc5 48%, #eae7e2 72%, #f9f7f4 100%);
+      box-shadow:
+        0 34px 64px rgba(75, 54, 46, .16),
+        0 6px 16px rgba(41, 37, 36, .10),
+        inset 0 1px 1px rgba(255,255,255,.95),
+        inset 0 -2px 8px rgba(120,102,88,.16);
+    }
+    .iphone-screen {
+      position: absolute; inset: 11px;
+      display: flex; flex-direction: column;
+      border-radius: 52px;
+      background: var(--bg);
+      overflow: hidden;
+      box-shadow: inset 0 0 0 2px rgba(18,16,15,.9), inset 0 0 14px rgba(0,0,0,.3);
+    }
+    .iphone-island {
+      position: absolute; top: 11px; left: 50%; transform: translateX(-50%);
+      width: 32%; height: 25px; border-radius: 999px; background: #0a0a0b; z-index: 3;
+    }
+    .iphone-island::after {
+      content: ""; position: absolute; right: 13%; top: 50%; transform: translateY(-50%);
+      width: 7px; height: 7px; border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #33404e, #05070a 72%);
+    }
+    .iphone-statusbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 15px 28px 2px; color: var(--ink);
+      font-size: 12px; font-weight: 650; letter-spacing: .01em;
+    }
+    .iphone-statusbar-icons { display: inline-flex; align-items: center; gap: 5px; }
+    .iphone-btn {
+      position: absolute; width: 4px; border-radius: 3px;
+      background: linear-gradient(90deg, #b7b2aa, #ece9e4 45%, #a8a397);
+      box-shadow: 0 0 1px rgba(41,37,36,.35);
+    }
+    .iphone-btn-action { left: -2px; top: 17%; height: 30px; }
+    .iphone-btn-volume-up { left: -2px; top: 24.5%; height: 24px; }
+    .iphone-btn-volume-down { left: -2px; top: 29%; height: 38px; }
+    .iphone-btn-side { right: -2px; top: 24%; height: 58px; border-radius: 0 3px 3px 0; }
+    .iphone-btn-camera { right: -2px; top: 63%; height: 46px; width: 5px; border-radius: 0 4px 4px 0; background: linear-gradient(90deg, #c9c4bc, #efece7 45%, #b3aea6); }
+    /* Живой экран: макет повторяет public/app.html + app.css DuoPlan.
+       Все правила ниже — дословные порты из app.css (светлая тема),
+       ограниченные областью .demo-screen, чтобы не пересечься со стилями
+       лендинга. Нижняя панель и сегменты — настоящие .bottom-nav/.seg-switch
+       с «жидкой» SVG-каплей из public/nav.js. */
+    .demo-screen { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 4px 12px 6px; overflow: hidden; }
+    .demo-view {
+      flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+      padding: 0 3px 76px; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+      /* Карточки при прокрутке уходят под стеклянную нижнюю панель и
+         растворяются у кромки экрана — как в Mini App, без резкого среза. */
+      -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent 97%);
+      mask-image: linear-gradient(to bottom, #000 80%, transparent 97%);
+    }
+    .demo-view::-webkit-scrollbar { display: none; }
+    .iphone-home-indicator {
+      position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%);
+      width: 32%; height: 5px; border-radius: 999px; background: rgba(24,21,20,.7); z-index: 6;
+    }
+    .iphone-screen::after {
+      content: ""; position: absolute; inset: 0; border-radius: inherit; z-index: 5;
+      background: linear-gradient(112deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 24%, transparent 42%);
       pointer-events: none;
     }
-    .hero-grid { position: relative; display: grid; grid-template-columns: 1.04fr .96fr; align-items: center; gap: 72px; }
-    .eyebrow { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 22px; color: var(--sage); font-size: 13px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
-    .eyebrow::before { content: ""; width: 24px; height: 1px; background: currentColor; }
-    h1, h2, h3, p { margin-top: 0; }
-    h1 { max-width: 620px; margin-bottom: 24px; font-family: Georgia, "Times New Roman", serif; font-size: clamp(48px, 6vw, 78px); font-weight: 400; line-height: 1.02; letter-spacing: -.055em; }
-    h1 em { color: var(--berry); font-weight: 400; }
-    .hero-copy { max-width: 530px; margin-bottom: 32px; color: var(--muted); font-size: 18px; }
-    .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; }
-    .button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 52px; padding: 0 24px; border-radius: 14px; background: var(--berry); color: white; text-decoration: none; font-weight: 700; box-shadow: 0 10px 24px rgba(184, 84, 100, .20); transition: transform .2s, background .2s; }
-    .button:hover { background: var(--berry-dark); transform: translateY(-2px); }
-    .button svg { width: 20px; height: 20px; }
-    .note { color: var(--muted); font-size: 13px; }
 
-    .preview { position: relative; max-width: 420px; margin-left: auto; padding: 20px; border: 1px solid rgba(255,255,255,.8); border-radius: 30px; background: rgba(255,253,249,.78); box-shadow: var(--shadow); backdrop-filter: blur(12px); transform: rotate(2deg); }
-    .preview-top { display: flex; align-items: center; gap: 12px; padding: 6px 4px 20px; }
-    .preview-pair { position: relative; display: inline-flex; margin-right: 12px; }
-    .preview-avatar { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: var(--sage-soft); color: var(--sage); font-family: Georgia, serif; font-size: 17px; border: 2px solid var(--surface); }
-    .preview-avatar.is-second { margin-left: -12px; background: var(--berry-soft); color: var(--berry-dark); }
-    .preview-title { font-weight: 750; line-height: 1.3; }
-    .preview-subtitle { color: var(--muted); font-size: 12px; }
-    .preview-stats { display: flex; gap: 8px; margin-top: 14px; }
-    .preview-chip { padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 650; }
-    .preview-card { margin-top: 10px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
-    .preview-label { margin-bottom: 6px; color: var(--berry); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-    .preview-card h3 { margin-bottom: 5px; font-size: 16px; }
-    .preview-card p { margin-bottom: 0; color: var(--muted); font-size: 13px; }
-    .preview-done { display: inline-block; margin-top: 10px; color: var(--sage); font-size: 11px; font-weight: 750; }
-    .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .mini { padding: 15px; }
-    .mini-icon { display: block; margin-bottom: 10px; color: var(--sage); }
-    .mini-icon svg { width: 22px; height: 22px; }
-    .preview-nav { display: flex; justify-content: space-around; margin: 14px -20px -20px; padding: 10px 6px 8px; border-top: 1px solid var(--line); border-radius: 0 0 29px 29px; background: rgba(255,253,249,.72); }
-    .preview-nav-item { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 44px; color: var(--muted); font-size: 9px; font-weight: 650; }
-    .preview-nav-item svg { width: 19px; height: 19px; }
-    .preview-nav-item.is-active { color: var(--berry); }
+    /* --- Плавающая пилюля пары (порт .top-glass-bar/.pair-pill) --- */
+    .demo-screen .app-topbar { position: absolute; top: 6px; right: 12px; z-index: 3; display: flex; }
+    .demo-screen .glass-btn {
+      appearance: none; border: 1px solid var(--glass-border); outline: 1px solid var(--glass-outer-border);
+      background: var(--glass-bg); color: var(--ink);
+      backdrop-filter: blur(22px) saturate(190%); -webkit-backdrop-filter: blur(22px) saturate(190%);
+      box-shadow: var(--glass-shadow); border-radius: 999px; min-height: 40px; padding: 5px 12px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
+      transition: transform .18s cubic-bezier(.22,1,.36,1), background .18s ease;
+    }
+    .demo-screen .glass-btn:active { transform: scale(.94); }
+    .demo-screen .pair-pill { min-height: 44px; padding: 6px; gap: 10px; }
+    .demo-screen .pair-avatars { display: inline-flex; align-items: center; }
+    .demo-screen .mini-avatar {
+      width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+      background: var(--berry-soft); color: var(--berry); font-weight: 600; font-size: 11.5px;
+      border: 1.5px solid var(--surface);
+    }
+    .demo-screen .mini-avatar.is-second { margin-left: -6px; background: var(--sage-soft); color: var(--sage); }
 
-    .features { padding: 92px 0; background: var(--surface); }
-    .section-head { max-width: 620px; margin-bottom: 46px; }
-    h2 { margin-bottom: 16px; font-family: Georgia, "Times New Roman", serif; font-size: clamp(34px, 4vw, 48px); font-weight: 400; line-height: 1.12; letter-spacing: -.035em; }
-    .section-head p { margin-bottom: 0; color: var(--muted); }
-    .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-    .feature { padding: 28px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface); }
-    .feature-icon { display: grid; place-items: center; width: 44px; height: 44px; margin-bottom: 24px; border-radius: 13px; background: var(--berry-soft); color: var(--berry-dark); }
+    /* --- Шапка вкладки (порт .tab-header без safe-area отступов) ---
+       Название центрируется в полосе плавающей пилюли пары — как в app.css:
+       padding-top поднимает контент на уровень кнопок, справа резерв под пилюлю. */
+    .demo-screen .tab-header {
+      position: sticky; top: 0; z-index: 2; margin: 0 -3px 12px;
+      padding: 8px 92px 8px 3px; min-height: 58px;
+      background: var(--sticky-fade);
+      backdrop-filter: blur(16px) saturate(160%); -webkit-backdrop-filter: blur(16px) saturate(160%);
+      display: flex; flex-direction: column; justify-content: center; gap: 2px;
+    }
+    .demo-screen .tab-header-title {
+      margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 22px; font-weight: 400;
+      line-height: 1.15; letter-spacing: -.025em; color: var(--ink);
+    }
+    .demo-screen .tab-header-sub { margin: 0; font-size: 11.5px; color: var(--muted); }
+
+    /* --- Карточки, пилюли, кнопки (порт .card/.day-chip/.primary/...) ---
+       .eyebrow: гасим «тире» и uppercase-стили лендинга (.eyebrow::before,
+       .eyebrow) — внутри экрана действует только вид из app.css. */
+    .demo-screen .eyebrow {
+      display: block; margin: 0 0 6px; font-size: 11.5px; font-weight: 600;
+      color: var(--muted); text-transform: none; letter-spacing: normal; gap: 0;
+    }
+    .demo-screen .eyebrow::before { content: none; }
+    .demo-screen .card {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
+      padding: 15px; margin-bottom: 10px; box-shadow: 0 8px 26px rgba(41,37,36,.04);
+    }
+    .demo-screen .hero-card { border-color: var(--berry); }
+    .demo-screen .card.is-done { opacity: .72; background: var(--surface-2); }
+    .demo-screen .card.is-done h3, .demo-screen .card.is-done p { color: var(--muted); }
+    .demo-screen .card h2, .demo-screen .card h3 { margin: 0 0 6px; font-size: 16px; line-height: 1.3; }
+    .demo-screen .card p { margin: 0; color: var(--muted); font-size: 13px; }
+    .demo-screen .stats-row { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 10px; }
+    .demo-screen .day-chip, .demo-screen .stat-pill {
+      display: inline-flex; align-items: center; height: 19px; padding: 0 7px;
+      white-space: nowrap; font-size: 10px; font-weight: 500; position: relative;
+    }
+    .demo-screen .stat-pill svg { width: 12px; height: 12px; flex: none; }
+    .demo-screen .xp-gain {
+      position: absolute; left: 50%; bottom: calc(100% + 6px); color: var(--berry);
+      font-size: 14px; font-weight: 700; line-height: 1; white-space: nowrap; pointer-events: none;
+      animation: xp-gain 1s ease both;
+    }
+    @keyframes xp-gain {
+      0% { opacity: 0; transform: translate(-50%, 8px); }
+      20% { opacity: 1; transform: translate(-50%, 0); }
+      70% { opacity: 1; transform: translate(-50%, -6px); }
+      100% { opacity: 0; transform: translate(-50%, -16px); }
+    }
+    .demo-screen .stat-pill { gap: 5px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+    .demo-screen .primary, .demo-screen .secondary {
+      appearance: none; border-radius: 999px; min-height: 40px; padding: 0 15px;
+      font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      transition: transform .15s ease, opacity .15s ease;
+    }
+    .demo-screen .primary { border: 0; background: var(--berry); color: #fff; }
+    .demo-screen .secondary { border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); }
+    .demo-screen .primary:active, .demo-screen .secondary:active { transform: scale(.98); }
+    .demo-screen .full { width: 100%; }
+    .demo-screen .card-action { display: flex; width: fit-content; margin: 18px auto 0; }
+    .demo-screen .card-action.full { width: 100%; }
+    .demo-screen .item-row + .card-action { margin-top: 12px; }
+    .demo-screen .add-button { margin-bottom: 12px; }
+
+    /* --- Строки элементов (порт .item-*) --- */
+    .demo-screen .item-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .demo-screen .item-main { flex: 1; min-width: 0; }
+    .demo-screen .item-title { font-weight: 600; font-size: 14px; margin: 0 0 4px; word-break: break-word; }
+    .demo-screen .item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+    .demo-screen .item-meta + .item-meta { margin-top: 6px; }
+    .demo-screen .item-when { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+    .demo-screen .item-when > span:first-of-type { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .demo-screen .item-when-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
+    .demo-screen .item-when-line .day-chip { flex-shrink: 0; }
+    .demo-screen .item-when-line > span:not(.day-chip) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .demo-screen .item-when-row { display: flex; align-items: center; gap: 8px; max-width: 100%; }
+    .demo-screen .day-chip { border-radius: 8px; background: var(--sage-soft); color: var(--sage); }
+    .demo-screen .day-chip.is-muted { background: var(--surface-2); color: var(--muted); }
+    .demo-screen .day-chip.is-countdown { background: var(--amber-bg); color: var(--amber-ink); }
+    .demo-screen .day-chip.is-overdue { background: var(--cherry-soft); color: var(--cherry); }
+    .demo-screen .day-chip.is-private { background: var(--surface-2); color: var(--muted); }
+    .demo-screen .item-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+    .demo-screen .icon-btn {
+      width: 30px; height: 30px; border-radius: 999px; border: 1px solid var(--line);
+      background: var(--surface-2); color: var(--ink); display: grid; place-items: center; cursor: pointer;
+    }
+    .demo-screen .icon-btn svg { width: 15px; height: 15px; }
+    .demo-screen .section-head-inline { display: flex; align-items: center; justify-content: space-between; margin: 14px 2px 6px; }
+    .demo-screen .section-head-inline h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); }
+
+    /* --- Дневник, цитаты, цели, кино, места --- */
+    .demo-screen .memory-card { cursor: pointer; }
+    .demo-screen .card .memory-body {
+      margin: 0 0 6px; color: var(--ink); font-size: 13px; white-space: pre-wrap;
+      overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .demo-screen .memory-card .memory-author { font-size: 13px; }
+    .demo-screen .quote-card { position: relative; padding-left: 38px; }
+    .demo-screen .quote-mark {
+      position: absolute; left: 12px; top: 4px; font-family: Georgia, "Times New Roman", serif;
+      font-size: 38px; line-height: 1; color: var(--berry); opacity: .3;
+    }
+    .demo-screen .card .quote-text {
+      margin: 0 0 8px; color: var(--ink); font-size: 13px; line-height: 1.55;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .demo-screen .card .quote-source { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+    .demo-screen .quote-card .item-meta { margin-top: 14px; }
+    .demo-screen .quote-card .item-row { align-items: center; }
+    .demo-screen .goal-items { display: grid; gap: 8px; margin-top: 4px; }
+    .demo-screen .goal-item { display: flex; align-items: center; gap: 10px; }
+    .demo-screen .goal-item-check {
+      flex: none; width: 28px; height: 28px; padding: 0; border: 1px solid var(--line);
+      border-radius: 50%; background: var(--bg); color: var(--muted);
+      display: grid; place-items: center; cursor: pointer;
+    }
+    .demo-screen .goal-item-title { font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
+    .demo-screen .goal-item.is-done { opacity: .45; }
+    .demo-screen .goal-item.is-done .goal-item-title { color: var(--muted); }
+    .demo-screen .movie-card, .demo-screen .movie-pick { cursor: pointer; }
+    .demo-screen .movie-watched, .demo-screen .place-visited { opacity: .72; }
+    .demo-screen .place-hero, .demo-screen .movie-hero { border-color: var(--berry); }
+    .demo-screen .place-hero h3 { margin: 6px 0; }
+    .demo-screen .place-hero p { margin: 0 0 14px; }
+    .demo-screen .place-count { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    .demo-screen .place-random { margin-bottom: 14px; }
+    .demo-screen .place-note {
+      margin: 0 0 6px; color: var(--muted); font-size: 13px; line-height: 1.5;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+
+    /* --- Сегмент-переключатели (порт .seg-switch) --- */
+    .demo-screen .seg-switch {
+      display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: max-content;
+      padding: 5px; border-radius: 999px; background: var(--glass-bg);
+      border: 1px solid var(--glass-border); outline: 1px solid var(--glass-outer-border);
+      backdrop-filter: blur(26px) saturate(200%); -webkit-backdrop-filter: blur(26px) saturate(200%);
+      box-shadow: var(--glass-shadow); margin: 0 auto 14px; user-select: none;
+      position: relative; isolation: isolate; touch-action: none;
+    }
+    .demo-screen .seg-switch-btn {
+      position: relative; z-index: 1; touch-action: none; appearance: none; border: 0;
+      background: transparent; color: var(--nav-label, var(--muted)); border-radius: 999px;
+      padding: 7px 13px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+      transition: color .2s ease;
+    }
+    .demo-screen .seg-switch-btn.is-active { color: var(--berry); }
+    .demo-screen .seg-switch.is-sub { padding: 4px 3px; margin: 0 auto 12px; max-width: 100%; }
+    .demo-screen .seg-switch.is-sub .seg-switch-btn { padding: 6px 8px; font-size: 11.5px; letter-spacing: -.2px; white-space: nowrap; }
+    .demo-screen .seg-switch.is-dense { width: 100%; max-width: 100%; padding: 5px; }
+    .demo-screen .seg-switch.is-dense .seg-switch-btn { padding: 7px 3px; white-space: nowrap; overflow: hidden; }
+
+    /* --- Нижний бар с жидкой каплей (порт .bottom-nav из app.css) ---
+       Позиционирование адаптировано: absolute внутри .demo-screen
+       вместо fixed в окне приложения. */
+    .demo-screen .bottom-nav {
+      position: absolute; left: 12px; right: 12px; bottom: 12px;
+      height: 56px; padding: 4px; border-radius: 999px;
+      border: 1px solid var(--glass-border); outline: 1px solid var(--glass-outer-border);
+      background-color: var(--nav-glass-bg, var(--glass-bg)); background-image: var(--glass-sheen);
+      backdrop-filter: blur(34px) saturate(175%); -webkit-backdrop-filter: blur(34px) saturate(175%);
+      box-shadow: var(--glass-shadow);
+      display: grid; grid-template-columns: repeat(5, 1fr); align-items: stretch;
+      z-index: 4; user-select: none; -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent; touch-action: none; isolation: isolate;
+    }
+    .demo-screen .bottom-nav::after {
+      content: ""; position: absolute; inset: 0; border-radius: inherit;
+      pointer-events: none; box-shadow: var(--glass-inner); z-index: 3;
+    }
+    .demo-screen .nav-droplet {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      overflow: visible; pointer-events: none; z-index: 0;
+    }
+    .demo-screen .nav-drop-stop-top { stop-color: rgba(255,255,255,.55); }
+    .demo-screen .nav-drop-stop-mid { stop-color: rgba(255,255,255,.22); }
+    .demo-screen .nav-drop-stop-bottom { stop-color: rgba(255,255,255,.08); }
+    .demo-screen .nav-droplet-path {
+      fill: url(#nav-drop-fill); stroke: var(--droplet-border, rgba(255,255,255,.45));
+      stroke-width: 1.2; filter: drop-shadow(0 8px 18px var(--droplet-halo, rgba(0,0,0,.18)));
+      transition: stroke .3s ease, filter .3s ease;
+    }
+    .demo-screen .bottom-nav.is-dragging { cursor: grabbing; }
+    .demo-screen .nav-item {
+      position: relative; z-index: 1; appearance: none; border: 0; background: transparent;
+      color: var(--muted); border-radius: 999px; padding: 4px 2px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      font: inherit; cursor: pointer; transition: color .2s ease; touch-action: none;
+    }
+    .demo-screen .nav-item.is-active { color: var(--berry); }
+    .demo-screen .bottom-nav.is-dragging .nav-item, .demo-screen .bottom-nav.is-dragging .nav-icon { transition: none; }
+    .demo-screen .nav-icon { width: 20px; height: 20px; display: grid; place-items: center; transform: none; color: inherit; transition: color .2s ease; }
+    .demo-screen .nav-icon svg { width: 19px; height: 19px; }
+    .demo-screen .nav-label { font-size: 10px; line-height: 1.1; }
+
+    /* --- «Наша пара»: сегмент, календарь, настройки, желания, копилка ---
+       Порты из app.css: .wish-switch, .cal-*, .settings-*, .swatch-*,
+       .theme-*, .saving-*, .wish-comment, .pair-exit, .movie-sort. */
+    .demo-screen .wish-switch {
+      display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: max-content;
+      padding: 4px; border-radius: 999px; background: var(--glass-bg);
+      border: 1px solid var(--glass-border); outline: 1px solid var(--glass-outer-border);
+      backdrop-filter: blur(26px) saturate(200%); -webkit-backdrop-filter: blur(26px) saturate(200%);
+      box-shadow: var(--glass-shadow); margin: 0 auto 12px; user-select: none;
+      position: relative; isolation: isolate; touch-action: none;
+    }
+    .demo-screen .wish-switch-btn {
+      position: relative; z-index: 1; touch-action: none; appearance: none; border: 0;
+      background: transparent; color: var(--nav-label, var(--muted)); border-radius: 999px;
+      padding: 6px 12px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: color .2s ease;
+    }
+    .demo-screen .wish-switch-btn.is-active { color: var(--berry); }
+
+    .demo-screen .wish-comment {
+      margin: 2px 0 6px; font-size: 12.5px; line-height: 1.45;
+      color: var(--muted); white-space: pre-wrap; word-break: break-word;
+    }
+    .demo-screen .pair-exit { margin-top: 2px; display: flex; justify-content: center; }
+    .demo-screen .pair-leave { color: var(--berry); width: min(220px, 100%); }
+
+    /* Календарь пары (.calendar-card/.cal-*) */
+    .demo-screen .calendar-card { display: grid; gap: 8px; }
+    .demo-screen .cal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .demo-screen .cal-title { margin: 0; font-size: 15.5px; font-weight: 600; letter-spacing: -.01em; text-align: center; }
+    .demo-screen .cal-nav-btn {
+      width: 30px; height: 30px; flex: none; border-radius: 50%; border: 1px solid var(--line);
+      background: var(--surface-2); color: var(--ink); font: inherit; font-size: 16px; line-height: 1;
+      display: grid; place-items: center; cursor: pointer;
+      transition: transform .16s ease, background .2s ease;
+    }
+    .demo-screen .cal-nav-btn:active { transform: scale(.92); background: var(--berry-soft); }
+    .demo-screen .cal-weekdays, .demo-screen .cal-grid {
+      display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px;
+    }
+    .demo-screen .cal-weekdays { color: var(--muted); font-size: 10.5px; letter-spacing: .02em; text-align: center; }
+    .demo-screen .cal-day {
+      position: relative; aspect-ratio: 1 / 1; min-width: 0; padding: 0; border: 0;
+      border-radius: 10px; background: transparent; color: var(--ink); font: inherit;
+      font-size: 12.5px; display: grid; place-items: center; cursor: pointer;
+      transition: background .16s ease, color .16s ease;
+    }
+    .demo-screen .cal-day .cal-num { line-height: 1; transform: translateY(-2px); }
+    .demo-screen .cal-day.is-outside { color: var(--muted); opacity: .45; }
+    .demo-screen .cal-day.is-today { box-shadow: inset 0 0 0 1.5px var(--berry); }
+    .demo-screen .cal-day.is-selected { background-color: var(--berry-soft); color: var(--berry); font-weight: 600; }
+    .demo-screen .cal-day.has-events .cal-num { font-weight: 500; }
+    .demo-screen .cal-dots {
+      position: absolute; left: 0; right: 0; bottom: 2px;
+      display: flex; align-items: center; gap: 3px; row-gap: 2px; flex-wrap: wrap; justify-content: center;
+    }
+    .demo-screen .cal-dot { width: 4.5px; height: 4.5px; border-radius: 50%; display: inline-block; flex: none; }
+    .demo-screen .cal-dot.is-task { background: #4f8a5f; }
+    .demo-screen .cal-dot.is-date { background: #c25550; }
+    .demo-screen .cal-dot.is-private { background: #948d86; }
+    .demo-screen .cal-dot.is-birthday { background: #8a6bb8; }
+    .demo-screen .cal-dot.is-cycle { background: #b06a2c; }
+    .demo-screen .cal-dot-pair { display: inline-flex; align-items: center; flex: none; }
+    .demo-screen .cal-dot-pair .cal-dot + .cal-dot { margin-left: -2px; box-shadow: 0 0 0 1px var(--surface); }
+    .demo-screen .cal-day.is-selected .cal-dot-pair .cal-dot + .cal-dot { box-shadow: 0 0 0 1px var(--berry-soft); }
+    .demo-screen .cal-star { font-size: 9.5px; line-height: 1; color: #a16207; display: inline-block; }
+    .demo-screen .cal-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 10.5px; color: var(--muted); }
+    .demo-screen .cal-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+    .demo-screen .cal-events { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+    .demo-screen .cal-events-date { margin: 0; font-size: 12px; font-weight: 500; }
+    .demo-screen .cal-event { display: flex; align-items: flex-start; gap: 7px; }
+    .demo-screen .cal-event .cal-dot { margin-top: 5px; }
+    .demo-screen .cal-event .cal-star { font-size: 11px; margin-top: 1px; }
+    .demo-screen .cal-event-body { display: grid; gap: 1px; min-width: 0; }
+    .demo-screen .cal-event-title { font-size: 13px; overflow-wrap: anywhere; }
+    .demo-screen .cal-event-meta { font-size: 11px; color: var(--muted); }
+    .demo-screen .cal-empty { margin: 0; font-size: 12px; color: var(--muted); }
+
+    /* Настройки пары (.settings-row/.settings-hint/.swatch/.theme-*) */
+    .demo-screen .settings-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin: 12px 0 2px;
+    }
+    .demo-screen .settings-label { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; }
+    .demo-screen .settings-hint { margin: 5px 0 0; font-size: 11px; color: var(--muted); line-height: 1.4; }
+    .demo-screen .swatch-row { display: inline-flex; gap: 7px; }
+    .demo-screen .swatch {
+      width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--surface);
+      outline: 1px solid var(--line); cursor: pointer; padding: 0;
+      transition: transform .15s ease;
+    }
+    .demo-screen .swatch:active { transform: scale(.9); }
+    .demo-screen .swatch.is-active { outline: 2px solid var(--ink); outline-offset: 2px; }
+    .demo-screen .settings-row input[type="time"],
+    .demo-screen .settings-row input[type="text"],
+    .demo-screen select.settings-select {
+      height: 40px; border: 1px solid var(--line); border-radius: 11px; padding: 0 10px;
+      background: var(--bg); color: var(--ink); font: inherit; font-size: 12.5px; text-align: center;
+      min-width: 0;
+    }
+    .demo-screen .settings-row input[type="text"] { width: 108px; }
+    .demo-screen select.settings-select { display: block; margin: 0 auto; max-width: 100%; appearance: none; -webkit-appearance: none; }
+    .demo-screen .settings-row select.settings-select { margin: 0; flex: none; }
+    .demo-screen .theme-switch {
+      display: inline-flex; gap: 3px; padding: 3px; border-radius: 999px;
+      background: var(--surface-2); border: 1px solid var(--line);
+    }
+    .demo-screen .theme-option {
+      appearance: none; border: 0; background: transparent; color: var(--muted);
+      border-radius: 999px; padding: 5px 9px; font: inherit; font-size: 11px;
+      font-weight: 500; cursor: pointer; white-space: nowrap;
+    }
+    .demo-screen .theme-option.is-active { background: var(--berry-soft); color: var(--berry); }
+
+    /* Копилка (.saving-*) */
+    .demo-screen .saving-full { opacity: .72; }
+    .demo-screen .saving-progress {
+      height: 4px; border-radius: 2px; background: var(--surface-2);
+      margin-top: 8px; overflow: hidden;
+    }
+    .demo-screen .saving-progress i { display: block; height: 100%; border-radius: 2px; background: var(--berry); }
+
+    /* Сортировка списка «Кино» (.movie-sort) */
+    .demo-screen .movie-sort { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin: 0 0 10px; }
+    .demo-screen .movie-sort-field { position: relative; flex: 1; min-width: 0; }
+    .demo-screen .movie-sort-field.is-kind { flex: 0 0 auto; }
+    .demo-screen .movie-sort-field.is-kind select { width: auto; }
+    .demo-screen .movie-sort-field select {
+      width: 100%; height: 34px; padding: 0 26px 0 9px; border: 1px solid var(--line);
+      border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit;
+      font-size: 12px; text-align: left; appearance: none; -webkit-appearance: none;
+      text-overflow: ellipsis;
+    }
+    .demo-screen .movie-sort-chevron {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      color: var(--muted); pointer-events: none;
+    }
+    .demo-screen .movie-sort-dir svg { transition: transform .2s ease; }
+    .demo-screen .movie-sort-dir.is-asc svg { transform: rotate(180deg); }
+    .demo-screen .movie-sort-count { margin-left: 2px; flex: none; }
+
+    /* Возможности — карточки повторяют радиус, фон и тени реальных .card. */
+    .features { padding: 76px 0 84px; background: rgba(255,253,249,.46); border-block: 1px solid rgba(120,102,88,.07); }
+    .section-head { max-width: 650px; margin-bottom: 34px; }
+    .section-head .eyebrow { margin-bottom: 10px; color: var(--muted); }
+    h2 { margin-bottom: 12px; font-family: Georgia, "Times New Roman", serif; font-size: clamp(34px, 4vw, 46px); font-weight: 400; line-height: 1.12; letter-spacing: -.04em; }
+    .section-description { max-width: 590px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+    .feature-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 14px; }
+    .feature {
+      display: flex; flex-direction: column; min-height: 184px; padding: 20px;
+      border: 1px solid var(--line); border-radius: var(--radius-card);
+      background: var(--surface); box-shadow: var(--shadow-card);
+      transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+    .feature:hover { transform: translateY(-2px); border-color: rgba(184,84,100,.28); box-shadow: 0 12px 28px rgba(41,37,36,.065); }
+    .feature-icon {
+      display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 17px;
+      border-radius: 12px; background: var(--berry-soft); color: var(--berry-dark);
+    }
     .feature:nth-child(even) .feature-icon { background: var(--sage-soft); color: var(--sage); }
-    .feature-icon svg { width: 22px; height: 22px; }
-    .feature h3 { margin-bottom: 9px; font-size: 17px; }
-    .feature p { margin-bottom: 0; color: var(--muted); font-size: 14px; }
+    .feature-icon svg { width: 20px; height: 20px; }
+    .feature h3 { margin-bottom: 7px; font-size: 15px; font-weight: 700; line-height: 1.35; }
+    .feature p { color: var(--muted); font-size: 13px; line-height: 1.52; }
+    .feature.is-highlight { border-color: rgba(184,84,100,.32); }
+    .feature.is-highlight .feature-icon { background: var(--berry-soft); color: var(--berry-dark); }
 
-    .steps { padding: 96px 0; }
-    .steps-grid { display: grid; grid-template-columns: .9fr 1.1fr; gap: 90px; align-items: start; }
-    .step { display: grid; grid-template-columns: 42px 1fr; gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--line); }
+    /* Сценарий старта. */
+    .steps { padding: 82px 0 88px; }
+    .steps-grid { display: grid; grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); align-items: start; gap: 76px; }
+    .steps-list { display: grid; }
+    .step { display: grid; grid-template-columns: 40px minmax(0,1fr); gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--line); }
     .step:first-child { padding-top: 0; }
-    .step-number { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 50%; color: var(--berry-dark); font-family: Georgia, serif; }
-    .step h3 { margin-bottom: 5px; font-size: 16px; }
-    .step p { margin-bottom: 0; color: var(--muted); font-size: 14px; }
+    .step:last-child { border-bottom: 0; }
+    .step-number {
+      display: grid; place-items: center; width: 36px; height: 36px;
+      border: 1px solid var(--line); border-radius: 50%; background: var(--surface);
+      color: var(--berry-dark); font-family: Georgia, "Times New Roman", serif; font-size: 16px;
+    }
+    .step h3 { margin: 1px 0 5px; font-size: 15px; font-weight: 700; }
+    .step p { color: var(--muted); font-size: 13px; line-height: 1.55; }
 
-    .cta { padding: 0 0 80px; }
-    .cta-box { position: relative; overflow: hidden; padding: 64px 40px; border-radius: 30px; background: #303e38; color: #fffdf9; text-align: center; }
-    .cta-box::after { content: ""; position: absolute; width: 340px; height: 340px; left: -140px; bottom: -240px; border: 1px solid rgba(255,255,255,.15); border-radius: 50%; box-shadow: 0 0 0 50px rgba(255,255,255,.025), 0 0 0 100px rgba(255,255,255,.025); }
-    .cta-box h2 { position: relative; z-index: 1; max-width: 620px; margin: 0 auto 16px; }
-    .cta-box p { position: relative; z-index: 1; max-width: 500px; margin: 0 auto 28px; color: #cdd8d1; }
-    .cta-box .button { position: relative; z-index: 1; }
-    .footer { padding: 0 0 34px; color: var(--muted); font-size: 13px; }
-    .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
+    .cta { padding: 0 0 76px; }
+    .cta-box {
+      position: relative; isolation: isolate; overflow: hidden;
+      padding: 54px 28px; border: 1px solid rgba(255,255,255,.1); border-radius: 28px;
+      background: #303e38; color: var(--surface); text-align: center;
+      box-shadow: 0 18px 42px rgba(41,37,36,.10);
+    }
+    .cta-box::before, .cta-box::after {
+      content: ""; position: absolute; z-index: -1; width: 300px; height: 300px;
+      border: 1px solid rgba(255,255,255,.12); border-radius: 50%; pointer-events: none;
+    }
+    .cta-box::before { left: -150px; bottom: -220px; box-shadow: 0 0 0 36px rgba(255,255,255,.025), 0 0 0 72px rgba(255,255,255,.02); }
+    .cta-box::after { right: -180px; top: -230px; box-shadow: 0 0 0 36px rgba(255,255,255,.025); }
+    .cta-box h2 { max-width: 640px; margin: 0 auto 12px; font-size: clamp(31px, 4vw, 42px); }
+    .cta-box p { max-width: 490px; margin: 0 auto 24px; color: #d0d9d3; font-size: 14px; }
+    .cta-box .button { position: relative; }
+    .cta-box .button:hover { background: #fff; color: var(--berry-dark); }
+    .footer { padding: 0 0 28px; color: var(--muted); font-size: 12px; }
+    .footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 18px; border-top: 1px solid var(--line); }
     .footer a { text-decoration: none; }
     .footer a:hover { color: var(--ink); }
 
-    @media (max-width: 800px) {
-      .hero { padding: 44px 0 72px; }
-      .hero-grid, .steps-grid { grid-template-columns: 1fr; gap: 50px; }
-      .preview { margin: 0 auto; transform: none; }
-      .feature-grid { grid-template-columns: 1fr 1fr; }
-      .steps-grid { gap: 24px; }
+    @media (max-width: 900px) {
+      .hero { padding: 52px 0 68px; }
+      .hero-grid { grid-template-columns: minmax(0,1fr) minmax(330px, .92fr); gap: 30px; }
+      h1 { font-size: clamp(43px, 5.6vw, 58px); }
+      .feature-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .steps-grid { gap: 42px; }
     }
-    @media (max-width: 540px) {
-      .container { width: min(100% - 28px, 1120px); }
-      .header { padding: 18px 0; }
-      .nav-link { display: inline-flex; align-items: center; min-height: 40px; font-size: 13px; }
-      h1 { font-size: 47px; }
-      .hero-copy { font-size: 16px; }
-      .feature-grid { grid-template-columns: 1fr; }
-      .features, .steps { padding: 68px 0; }
-      .preview { padding: 14px; border-radius: 24px; }
-      .preview-nav { margin: 14px -14px -14px; border-radius: 0 0 23px 23px; }
-      .cta-box { padding: 48px 22px; border-radius: 24px; }
-      .footer-inner { flex-direction: column; gap: 6px; }
+    @media (max-width: 720px) {
+      .container { width: min(var(--container), calc(100% - 32px)); }
+      .hero { padding: 44px 0 62px; }
+      .hero-grid { grid-template-columns: minmax(0,1fr); gap: 38px; }
+      .hero-copy { max-width: 560px; }
+      .preview-wrap { width: min(100%, 448px); justify-self: center; }
+      .steps-grid { grid-template-columns: 1fr; gap: 26px; }
+      .steps { padding: 66px 0 72px; }
+      .features { padding: 66px 0 72px; }
+    }
+    @media (max-width: 480px) {
+      .container { width: calc(100% - 28px); }
+      .site-header { padding: 10px 0; }
+      .brand { gap: 8px; font-size: 19px; }
+      .brand-mark { width: 30px; height: 30px; }
+      .nav { gap: 8px; }
+      .nav-actions { gap: 4px; }
+      .nav-link { min-height: 38px; padding: 0 9px; font-size: 12px; }
+      .button-small { min-height: 38px; padding: 0 12px; font-size: 12px; }
+      .hero { padding: 38px 0 54px; }
+      .eyebrow { margin-bottom: 14px; font-size: 10px; }
+      h1 { max-width: 420px; margin-bottom: 15px; font-size: clamp(39px, 11vw, 48px); }
+      .hero-copy { margin-bottom: 20px; font-size: 15px; }
+      .hero-note { margin-top: 13px; font-size: 11px; }
+      .preview-wrap { width: 100%; }
+      .demo-screen .tab-header { padding: 8px 84px 8px 3px; min-height: 54px; }
+      .demo-screen .card { padding: 13px; }
+      .demo-screen .nav-label { font-size: 9px; }
+      .demo-screen .nav-icon svg { width: 18px; height: 18px; }
+      .demo-screen .seg-switch-btn { font-size: 11.5px; padding: 6px 10px; }
+      .features { padding: 58px 0 62px; }
+      .section-head { margin-bottom: 24px; }
+      h2 { font-size: 34px; }
+      .section-description { font-size: 14px; }
+      .feature-grid { grid-template-columns: 1fr; gap: 10px; }
+      .feature { min-height: 0; padding: 17px; border-radius: 19px; }
+      .feature-icon { width: 36px; height: 36px; margin-bottom: 12px; border-radius: 11px; }
+      .feature-icon svg { width: 18px; height: 18px; }
+      .feature h3 { margin-bottom: 4px; font-size: 14px; }
+      .feature p { font-size: 12.5px; }
+      .cta { padding-bottom: 58px; }
+      .cta-box { padding: 42px 20px; border-radius: 23px; }
+      .cta-box h2 { font-size: 32px; }
+      .footer-inner { align-items: flex-start; flex-direction: column; gap: 7px; }
+    }
+    @media (max-width: 350px) {
+      .nav-link { display: none; }
+      .demo-screen .nav-label { font-size: 9px; }
     }
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
-      .button { transition: none; }
+      *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
     }
   </style>
 </head>
 <body id="top">
-  <header class="header">
+  <a class="skip-link" href="#main">Перейти к содержимому</a>
+
+  <header class="site-header">
     <div class="container nav">
       <a class="brand" href="#top" aria-label="DuoPlan — на главную">
         <svg class="brand-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true">
-          <circle cx="15" cy="20" r="11" fill="#f4dfe1" stroke="#a94455" stroke-width="2"/>
+          <circle cx="15" cy="20" r="11" fill="#f4dfe1" stroke="#b85464" stroke-width="2"/>
           <circle cx="25" cy="20" r="11" fill="#dfe9e2" fill-opacity=".8" stroke="#55766a" stroke-width="2"/>
         </svg>
-        DuoPlan
+        <span>DuoPlan</span>
       </a>
-      <a class="nav-link" href="#possibilities">Возможности</a>
+      <nav class="nav-actions" aria-label="Основная навигация">
+        <a class="nav-link" href="#possibilities">Возможности</a>
+        <a class="button button-small" href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">
+          Открыть в Telegram
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </a>
+      </nav>
     </div>
   </header>
 
-  <main>
-    <section class="hero">
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
       <div class="container hero-grid">
-        <div>
+        <div class="hero-copy-block">
           <p class="eyebrow">Пространство для двоих</p>
-          <h1>Всё наше<br>В одном <em>месте</em></h1>
-          <p class="hero-copy">Общие планы, тёплые воспоминания и маленькие ритуалы, которые помогают быть ближе — прямо в Telegram</p>
-          <div class="actions">
-            <a class="button" href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">
-              Открыть DuoPlan
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-            </a>
-            <span class="note">Бесплатно · без установки</span>
-          </div>
+          <h1 id="hero-title">Всё ваше.<br>В одном <em>месте.</em></h1>
+          <p class="hero-copy">Общие планы, важные даты, воспоминания и маленькие ритуалы, которые помогают быть ближе. Всё ваше общее пространство — прямо в Telegram.</p>
+          <p class="hero-note">
+            Открывается в Telegram — отдельная установка не нужна
+          </p>
         </div>
 
-        <div class="preview" aria-label="Пример пространства DuoPlan">
-          <div class="preview-top">
-            <span class="preview-pair" aria-hidden="true">
-              <span class="preview-avatar">А</span>
-              <span class="preview-avatar is-second">Б</span>
-            </span>
-            <div><div class="preview-title">Наше пространство</div><div class="preview-subtitle">Два человека · одна история</div></div>
-          </div>
-          <div class="preview-stats">
-            <span class="preview-chip">Серия · 6 дней</span>
-            <span class="preview-chip">Очки · 240</span>
-          </div>
-          <div class="preview-card">
-            <div class="preview-label">Ритуал дня</div>
-            <h3>Прогулка без телефонов</h3>
-            <p>Полчаса только для вас двоих. Обсудите что-нибудь хорошее</p>
-            <span class="preview-done">Выполнено +10 XP</span>
-          </div>
-          <div class="preview-grid">
-            <div class="preview-card mini">
-              <span class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg></span>
-              <h3>Наши планы</h3><p>Идеи и дела</p>
+        <div class="preview-wrap">
+          <div class="iphone" role="group" aria-label="Интерактивный пример DuoPlan: главный экран пары с ритуалом дня, планы, даты, места и дневник — разделы переключаются нижней навигацией">
+            <span class="iphone-btn iphone-btn-action" aria-hidden="true"></span>
+            <span class="iphone-btn iphone-btn-volume-up" aria-hidden="true"></span>
+            <span class="iphone-btn iphone-btn-volume-down" aria-hidden="true"></span>
+            <span class="iphone-btn iphone-btn-side" aria-hidden="true"></span>
+            <span class="iphone-btn iphone-btn-camera" aria-hidden="true"></span>
+            <div class="iphone-screen">
+              <div class="iphone-island" aria-hidden="true"></div>
+              <div class="iphone-statusbar">
+                <span id="demo-clock">--:--</span>
+                <span class="iphone-statusbar-icons" aria-hidden="true">
+                  <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+                  <svg width="16" height="11" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 4.2a10 10 0 0 1 13 0M4 6.8a6.5 6.5 0 0 1 8 0M6.6 9.3a3 3 0 0 1 2.8 0"/><circle cx="8" cy="11" r="0.9" fill="currentColor" stroke="none"/></svg>
+                  <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x="0.7" y="0.7" width="20" height="10.6" rx="3" stroke="currentColor" opacity=".45"/><rect x="2.4" y="2.4" width="14" height="7.2" rx="1.6" fill="currentColor"/><path d="M22.5 4v4a2.2 2.2 0 0 0 0-4Z" fill="currentColor" opacity=".45"/></svg>
+                </span>
+              </div>
+              <div class="demo-screen">
+            <div class="app-topbar">
+              <button class="glass-btn pair-pill" type="button" aria-label="Наша пара">
+                <span class="pair-avatars" aria-hidden="true">
+                  <span class="mini-avatar">А</span>
+                  <span class="mini-avatar is-second">М</span>
+                </span>
+              </button>
             </div>
-            <div class="preview-card mini">
-              <span class="mini-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14Z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></span>
-              <h3>Общий дневник</h3><p>Важные моменты</p>
+            <div class="demo-view" id="demo-view"></div>
+
+            <!-- Нижний бар — разметка дословно из public/app.html:
+                 плавающее стекло + SVG-капля, геометрией и жестом управляет
+                 public/nav.js (createLiquidNav), переключение — demo.js. -->
+            <nav class="bottom-nav" aria-label="Разделы пространства">
+              <svg class="nav-droplet" aria-hidden="true" focusable="false">
+                <defs>
+                  <linearGradient id="nav-drop-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop class="nav-drop-stop-top" offset="0" />
+                    <stop class="nav-drop-stop-mid" offset="0.62" />
+                    <stop class="nav-drop-stop-bottom" offset="1" />
+                  </linearGradient>
+                </defs>
+                <path class="nav-droplet-path" d="" />
+              </svg>
+
+              <button class="nav-item is-active" type="button" data-tab="home" aria-current="page">
+                <span class="nav-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/></svg>
+                </span>
+                <span class="nav-label">Главная</span>
+              </button>
+              <button class="nav-item" type="button" data-tab="tasks">
+                <span class="nav-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg>
+                </span>
+                <span class="nav-label">Планы</span>
+              </button>
+              <button class="nav-item" type="button" data-tab="dates">
+                <span class="nav-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/><path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/></svg>
+                </span>
+                <span class="nav-label">Даты</span>
+              </button>
+              <button class="nav-item" type="button" data-tab="places">
+                <span class="nav-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/><circle cx="12" cy="10.4" r="2.4"/></svg>
+                </span>
+                <span class="nav-label">Места</span>
+              </button>
+              <button class="nav-item" type="button" data-tab="memories">
+                <span class="nav-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/><path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/></svg>
+                </span>
+                <span class="nav-label">Дневник</span>
+              </button>
+            </nav>
+              </div>
+            <span class="iphone-home-indicator" aria-hidden="true"></span>
             </div>
-          </div>
-          <div class="preview-nav" role="img" aria-label="Нижняя навигация приложения">
-            <span class="preview-nav-item is-active">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20.5s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/></svg>
-              <span>Главная</span>
-            </span>
-            <span class="preview-nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg>
-              <span>Планы</span>
-            </span>
-            <span class="preview-nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/><path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/></svg>
-              <span>Даты</span>
-            </span>
-            <span class="preview-nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/><circle cx="12" cy="10.4" r="2.4"/></svg>
-              <span>Места</span>
-            </span>
-            <span class="preview-nav-item">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/><path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/></svg>
-              <span>Дневник</span>
-            </span>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="features" id="possibilities">
+    <section class="features" id="possibilities" aria-labelledby="features-title">
       <div class="container">
         <div class="section-head">
-          <p class="eyebrow">Ближе друг к другу</p>
-          <h2>Для больших планов<br>и маленьких радостей</h2>
-          <p>Не ещё одна социальная сеть, а личное пространство, которое принадлежит только вам</p>
+          <p class="eyebrow">Всё важное рядом</p>
+          <h2 id="features-title">Для больших планов<br>и маленьких радостей</h2>
+          <p class="section-description">Не ещё одна социальная сеть, а личное пространство, которое принадлежит только вам двоим.</p>
         </div>
+
         <div class="feature-grid">
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg></div>
-            <h3>Общие планы</h3><p>Собирайте идеи свиданий, поездок и дел, а затем воплощайте их вместе</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 12.5 3.8 3.8L18.5 7.6"/><rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/></svg></span>
+            <h3>Общие планы</h3>
+            <p>Собирайте идеи свиданий, поездок и дел, а затем воплощайте их вместе.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/><path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/></svg></div>
-            <h3>Значимые даты</h3><p>Храните важные события вашей истории и не позволяйте им затеряться</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3.5"/><path d="M8 3v3.5M16 3v3.5M3.5 9.5h17"/></svg></span>
+            <h3>Значимые даты</h3>
+            <p>Храните важные события вашей истории и не позволяйте им затеряться.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/><path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/></svg></div>
-            <h3>Общий дневник</h3><p>Сохраняйте воспоминания, мысли и моменты, к которым хочется возвращаться</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19.5A2.5 2.5 0 0 1 7.5 17H19V4H7.5A2.5 2.5 0 0 0 5 6.5v13Z"/><path d="M5 19.5A2.5 2.5 0 0 0 7.5 22H19v-5"/></svg></span>
+            <h3>Общий дневник</h3>
+            <p>Сохраняйте воспоминания, мысли и моменты, к которым хочется возвращаться.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z"/></svg></div>
-            <h3>Вишлист</h3><p>Делитесь желаниями и подсказками для подарков без лишних догадок</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9L12 3Z"/></svg></span>
+            <h3>Вишлист</h3>
+            <p>Делитесь желаниями и подсказками для подарков без лишних догадок.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/></svg></div>
-            <h3>Ритуал дня</h3><p>Получайте одно простое совместное действие и отмечайте маленькие победы</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7.5-4.35-7.5-10.3a4.3 4.3 0 0 1 7.5-2.85 4.3 4.3 0 0 1 7.5 2.85c0 5.95-7.5 10.3-7.5 10.3Z"/></svg></span>
+            <h3>Ритуал дня</h3>
+            <p>Получайте одно простое совместное действие и отмечайте маленькие победы.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="9" cy="8" r="4"/><circle cx="17" cy="10" r="3"/><path d="M2 21v-2a6 6 0 0 1 12 0v2m2-6a5 5 0 0 1 6 4.9V21"/></svg></div>
-            <h3>Только для вас</h3><p>Создайте пространство и пригласите партнёра по личному коду или ссылке</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="4"/><circle cx="17" cy="10" r="3"/><path d="M2 21v-2a6 6 0 0 1 12 0v2m2-6a5 5 0 0 1 6 4.9V21"/></svg></span>
+            <h3>Пространство для двоих</h3>
+            <p>Создайте пару и пригласите партнёра по личному коду или ссылке.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/><circle cx="12" cy="10.4" r="2.4"/></svg></div>
-            <h3>Места</h3><p>Собирайте список «куда сходить» с картами и отметками посещений — и вытягивайте случайное место на вечер</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-10.4a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21Z"/><circle cx="12" cy="10.4" r="2.4"/></svg></span>
+            <h3>Места</h3>
+            <p>Собирайте места, куда хотите сходить, отмечайте посещения и выбирайте идею на вечер.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3Z"/><path d="m6.2 5.3 3.1 3.9"/><path d="m12.4 3.4 3.1 4"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></div>
-            <h3>Кино на вечер</h3><p>Общий список фильмов и сериалов с рейтингами IMDb и TMDB — выбирайте вместе и ставьте оценки</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3Z"/><path d="m6.2 5.3 3.1 3.9"/><path d="m12.4 3.4 3.1 4"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span>
+            <h3>Кино на вечер</h3>
+            <p>Ведите общий список фильмов и сериалов, выбирайте, что посмотреть, и сохраняйте оценки.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="9" width="15" height="11.5" rx="2.5"/><path d="M9 9V6.8a3 3 0 0 1 6 0V9"/><path d="M9.6 9v11.5M14.4 9v11.5"/></svg></div>
-            <h3>Путешествия</h3><p>Отмечайте города и страны, куда мечтаете съездить вдвоём, — и вспоминайте уже пройденные</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="9" width="15" height="11.5" rx="2.5"/><path d="M9 9V6.8a3 3 0 0 1 6 0V9"/><path d="M9.6 9v11.5M14.4 9v11.5"/></svg></span>
+            <h3>Путешествия</h3>
+            <p>Отмечайте города и страны, куда мечтаете съездить вдвоём, и вспоминайте уже пройденные.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg></div>
-            <h3>Цели</h3><p>Общие и личные цели со списком шагов — прогресс виден обоим, приватные остаются вашими</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg></span>
+            <h3>Цели</h3>
+            <p>Ставьте общие и личные цели, добавляйте шаги и следите за прогрессом.</p>
           </article>
           <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 7V4H5a2 2 0 0 0 0 4h15v12a1 1 0 0 0 1 1h1v-4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></div>
-            <h3>Копилка</h3><p>Копите на общую мечту или личную цель: сумма, прогресс и история каждого пополнения</p>
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 7V4H5a2 2 0 0 0 0 4h15v12a1 1 0 0 0 1 1h1v-4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></span>
+            <h3>Копилка</h3>
+            <p>Копите на общую мечту или личную цель и следите за историей пополнений.</p>
           </article>
-          <article class="feature">
-            <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5s6.8 7.2 6.8 11.3a6.8 6.8 0 0 1-13.6 0C5.2 10.7 12 3.5 12 3.5Z"/></svg></div>
-            <h3>Фло</h3><p>Личный календарь для неё: месячные, прогноз, дневник самочувствия и напоминания — только для владелицы. Партнёру можно предоставить доступ только к определённым событиям</p>
+          <article class="feature is-highlight">
+            <span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5s6.8 7.2 6.8 11.3a6.8 6.8 0 0 1-13.6 0C5.2 10.7 12 3.5 12 3.5Z"/></svg></span>
+            <h3>Фло</h3>
+            <p>Календарь цикла и личный дневник самочувствия. Женщина сама выбирает, какими отметками поделиться с партнёром.</p>
           </article>
         </div>
       </div>
     </section>
 
-    <section class="steps">
+    <section class="steps" aria-labelledby="steps-title">
       <div class="container steps-grid">
         <div class="section-head">
           <p class="eyebrow">Легко начать</p>
-          <h2>Ваше пространство за пару минут</h2>
-          <p>Не нужно устанавливать приложение или придумывать новый пароль</p>
+          <h2 id="steps-title">Ваше пространство — за пару минут</h2>
+          <p class="section-description">Не нужно устанавливать отдельное приложение или придумывать новый пароль.</p>
         </div>
-        <div>
-          <div class="step"><span class="step-number">1</span><div><h3>Откройте бота</h3><p>Перейдите к @duoplanbot в Telegram и нажмите «Запустить»</p></div></div>
-          <div class="step"><span class="step-number">2</span><div><h3>Создайте пространство</h3><p>Отправьте партнёру приглашение или войдите по полученному коду</p></div></div>
-          <div class="step"><span class="step-number">3</span><div><h3>Наполняйте его вместе</h3><p>Добавьте первый план, тёплую запись или желание — остальное придёт само</p></div></div>
+        <div class="steps-list">
+          <div class="step">
+            <span class="step-number">1</span>
+            <div><h3>Откройте бота</h3><p>Перейдите к @duoplanbot в Telegram и нажмите «Запустить».</p></div>
+          </div>
+          <div class="step">
+            <span class="step-number">2</span>
+            <div><h3>Создайте пространство</h3><p>Отправьте партнёру приглашение или присоединитесь по полученному коду.</p></div>
+          </div>
+          <div class="step">
+            <span class="step-number">3</span>
+            <div><h3>Наполняйте его вместе</h3><p>Добавьте первый план, сохраните важную дату или запишите общее желание.</p></div>
+          </div>
         </div>
       </div>
     </section>
 
-    <section class="cta">
+    <section class="cta" aria-labelledby="cta-title">
       <div class="container cta-box">
-        <h2>Начните вашу общую историю</h2>
-        <p>DuoPlan уже ждёт в Telegram. Первое совместное пространство — всего в одном сообщении</p>
-        <a class="button" href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">Перейти к @duoplanbot</a>
+        <h2 id="cta-title">Начните вашу общую историю</h2>
+        <p>DuoPlan уже ждёт в Telegram. Первое совместное пространство — всего в одном сообщении.</p>
+        <a class="button" href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">
+          Перейти к @duoplanbot
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </a>
       </div>
     </section>
   </main>
 
+  <script src="nav.js?v=2026.11.14.53" defer></script>
+  <script src="demo.js" defer></script>
   <footer class="footer">
-    <div class="container footer-inner"><span>DuoPlan · Пространство для двоих</span><a href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">Telegram-бот</a></div>
+    <div class="container footer-inner">
+      <span>DuoPlan · Пространство для двоих</span>
+      <a href="https://t.me/duoplanbot" target="_blank" rel="noopener noreferrer">Telegram-бот</a>
+    </div>
   </footer>
 </body>
 </html>

@@ -9,7 +9,7 @@ notification_log и — главное — уведомление партнёр
 
 from datetime import UTC, datetime
 
-from duoplan.cycle import send_cycle_reminders
+from duoplan.cycle import prune_old_notifications, send_cycle_reminders
 
 # 2026-11-12 10:00 UTC = 13:00 MSK — «сегодня» в Europe/Moscow.
 NOW = datetime(2026, 11, 12, 10, 0, tzinfo=UTC)
@@ -118,3 +118,27 @@ async def test_reminders_dedup_across_runs(pair):
     # Второй прогон в тот же день — notification_log уже отмечен, повторов нет.
     await send_cycle_reminders(db, rec.send, lambda _tg: "Europe/Moscow", now=NOW)
     assert len(rec.sent) == first_count
+
+
+async def test_prune_old_notifications_returns_deleted_rowcount(db):
+    """prune_old_notifications возвращает rowcount, а не lastrowid (P3).
+
+    execute_row отдаёт (lastrowid, rowcount): для DELETE lastrowid — id
+    последней вставки соединения, а не число удалённых строк.
+    """
+    from datetime import date
+
+    today = date.today().isoformat()
+    for i in range(3):
+        await db.execute(
+            "INSERT INTO notification_log(tg_id, day, kind, sent_at) VALUES(?,?,?,?)",
+            (1, "2020-01-01", f"cycle_old_{i}", 0),
+        )
+    await db.execute(
+        "INSERT INTO notification_log(tg_id, day, kind, sent_at) VALUES(?,?,?,?)",
+        (1, today, "cycle_fresh", 0),
+    )
+    deleted = await prune_old_notifications(db, days=7)
+    assert deleted == 3
+    left = await db.one("SELECT COUNT(*) AS c FROM notification_log")
+    assert left["c"] == 1

@@ -26,7 +26,7 @@ const stubs = `
   function showToast(m) { globalThis.__toasts.push(m); }
   function handleRequestError() {}
   function render() {}
-  function openDialog() {}
+  function openDialog(config) { globalThis.__dialog = config; }
   const EDIT_ICON = "e", DELETE_ICON = "d", COPY_ICON = "c";
   function esc(v) {
     return String(v ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
@@ -45,7 +45,7 @@ function buildContacts(contactsStateValue, extra = {}, reqImpl = null) {
     `  contactsView = ${JSON.stringify(extra.contactsView ?? "mine")};`,
     `  contactsSearch = ${JSON.stringify(extra.contactsSearch ?? "")};`
   ].join("\n");
-  const src = `${stubs}\n${requestSrc}\n${setters}\n${section}\nreturn { renderContactsBody, renderContactsList, contactsFormatDigits, contactsNormalizePhone, contactsMatches, contactsListFor, handleContactsAction, getSearch: () => contactsSearch };`;
+  const src = `${stubs}\n${requestSrc}\n${setters}\n${section}\nreturn { renderContactsBody, renderContactsList, contactsFormatDigits, contactsNormalizePhone, contactsMatches, contactsListFor, handleContactsAction, openContactInfoDialog, getSearch: () => contactsSearch };`;
   return new Function(src)();
 }
 
@@ -75,14 +75,26 @@ test("C2: список в алфавитном порядке, номера сг
   assert.ok(annaCard.includes("+7 915 123 45 67") && annaCard.includes("+7 926 987 65 43"), "оба номера под одним именем");
 });
 
-test("C3: в списке нет кнопок правки — только имя и номера", () => {
+test("C3: в списке нет кнопок правки и комментария — только имя и номера", () => {
   const ui = buildContacts(state);
   const html = ui.renderContactsList();
   assert.ok(!html.includes("contacts-edit"), "правки нет в списке");
   assert.ok(!html.includes("contacts-delete"), "удаления нет в списке");
   assert.ok(html.includes("contact-open"), "тап по имени открывает окно контакта");
   assert.ok(html.includes("contacts-copy"), "тап по номеру копирует");
-  assert.ok(html.includes("с работы"), "комментарий виден в списке");
+  // Комментарий виден только в карточке контакта — в списке его нет.
+  assert.ok(!html.includes("с работы"), "комментарий не виден в списке");
+  assert.ok(!html.includes("contact-comment"), "блока комментария в списке нет");
+});
+
+test("C3b: комментарий виден в карточке контакта, подпись «тап копирует» убрана", () => {
+  const ui = buildContacts(state);
+  ui.openContactInfoDialog(state.mine[1]);
+  const fields = globalThis.__dialog?.fields || "";
+  assert.ok(fields.includes("с работы"), "комментарий виден в карточке");
+  assert.ok(fields.includes("Комментарий"), "есть блок комментария");
+  assert.ok(!fields.includes("тап копирует"), "подпись «Номера — тап копирует» удалена");
+  assert.ok(fields.includes("+7 915 123 45 67"), "номера видны в карточке");
 });
 
 test("C4: у контакта без фамилии и комментария лишних блоков нет", () => {

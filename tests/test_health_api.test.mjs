@@ -43,6 +43,7 @@ const buildApi = new Function(
     extractLine("const HEALTH_MED_FORMS"),
     extractLine("const HEALTH_MED_STATUS"),
     extractLine("const HEALTH_TIME_RE"),
+    extractBraced("function optionalTime"),
     extractBraced("function cycleValidDate"),
     extractBraced("function cycleDayNum"),
     extractBraced("function cycleDateStr"),
@@ -223,6 +224,27 @@ test("POST /api/health/med-log сохраняет факт приёма за д�
   ok(insert.sql.includes("ON CONFLICT(med_id,date)"), "один итог за день (upsert)");
   equal(insert.args[0], 5);
   equal(insert.args[1], 777);
+});
+
+test("POST /api/health/med-log: время приёма строго ЧЧ:ММ или пусто", async () => {
+  // Регресс P2: раньше String(body.time).slice(0,5) сохранял любой ввод —
+  // «25:99», «abcde» и обрезанные длинные строки попадали в базу.
+  for (const bad of ["25:99", "12:60", "abcde", "9:30", "2026-11-10T09:15:00", "123456"]) {
+    const { api, env, request } = makeEnv({ body: { med_id: 5, date: "2026-11-10", status: "taken", time: bad } });
+    await rejects(
+      api(request, env, new URL("https://duoplan.test/api/health/med-log")),
+      err => isHttpError(err, 400, "INVALID_TIME"),
+      `time=${bad} должен отклоняться`
+    );
+  }
+  // Границы и пустое значение: валидное время сохраняется, пустое — NULL.
+  for (const [time, expected] of [["00:00", "00:00"], ["23:59", "23:59"], ["", null], [undefined, null]]) {
+    const { api, env, request, writes } = makeEnv({ body: { med_id: 5, date: "2026-11-10", status: "taken", time } });
+    await api(request, env, new URL("https://duoplan.test/api/health/med-log"));
+    const insert = writes.find(w => w.sql.includes("INSERT INTO health_med_logs"));
+    ok(insert, "запись сохраняется");
+    equal(insert.args[3], expected, `time=${time}`);
+  }
 });
 
 test("POST /api/health/med/delete удаляет препарат и историю атомарно", async () => {

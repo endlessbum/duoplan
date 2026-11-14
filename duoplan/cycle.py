@@ -981,8 +981,8 @@ async def mark_notification_sent(db: Any, tg_id: int, day: date, kind: str, now_
 async def prune_old_notifications(db: Any, days: int = 7) -> int:
     """Удалить записи старше N дней. Возвращает число удалённых строк."""
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    row_id, _ = await db.execute_row("DELETE FROM notification_log WHERE day < ?", (cutoff,))
-    return row_id
+    _, deleted = await db.execute_row("DELETE FROM notification_log WHERE day < ?", (cutoff,))
+    return deleted
 
 
 # ---------------------------------------------------------------------------

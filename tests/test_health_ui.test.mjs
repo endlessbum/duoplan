@@ -66,7 +66,7 @@ test("H1: сегмент «Дневник» содержит третий вид
 test("H2: пустой список — приглашение добавить, приватность объяснена", () => {
   const ui = buildHealth({ meds: [], med_logs: [] });
   const html = ui.renderHealthBody();
-  assert.ok(html.includes("Пока нет препаратов"));
+  assert.ok(!html.includes("Пока нет препаратов"), "пустой список не сопровождается подписью");
   assert.ok(html.includes("Добавить препарат"));
   assert.ok(html.includes("не видны партнёру"), "личный журнал: партнёр не видит");
 });
