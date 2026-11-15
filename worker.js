@@ -1183,6 +1183,11 @@ function publicUser(user, pairTz = null) {
     accent_color: user.accent_color || null,
     photo_url: user.photo_url || null,
     show_avatar: Number(user.show_avatar ?? 1) === 1,
+    // «Месячные в основном календаре»: NULL — авто по полу (владелице вкл,
+    // остальным выкл до явного выбора в настройках).
+    show_cycle_calendar: user.show_cycle_calendar == null
+      ? user.gender === "female"
+      : Number(user.show_cycle_calendar) === 1,
     // Личное имя партнёра просматривающего — чтобы поле в настройках
     // показывало текущее значение. Партнёру эта строка не видна: в state()
     // подмена идёт только в name его пары и подписи авторов.
@@ -3069,6 +3074,7 @@ async function api(request, env, url, ctx = null) {
       weekly_digest_enabled: { type: "boolean" },
       weekly_digest_day: { type: "string", enum: ["sun", "mon"] },
       show_avatar: { type: "boolean" },
+      show_cycle_calendar: { type: "boolean" },
       display_name: { type: "string" },
       partner_name: { type: "string" }
     });
@@ -3086,6 +3092,13 @@ async function api(request, env, url, ctx = null) {
       if (typeof body.show_avatar !== "boolean") throw new HttpError(400, "Флаг включённости должен быть булевым", "INVALID_SETTING");
       updates.push("show_avatar=?");
       values.push(body.show_avatar ? 1 : 0);
+    }
+    // «Месячные в основном календаре»: boolean → 0/1, NULL не принимаем —
+    // «не задано» живёт только до первого явного выбора пользователя.
+    if (body?.show_cycle_calendar !== undefined) {
+      if (typeof body.show_cycle_calendar !== "boolean") throw new HttpError(400, "Флаг включённости должен быть булевым", "INVALID_SETTING");
+      updates.push("show_cycle_calendar=?");
+      values.push(body.show_cycle_calendar ? 1 : 0);
     }
     // Личное имя пользователя: null/пустая строка оставляет имя из Telegram,
     // не пустая — обрезается и ограничивается 80 кодовыми точками.
@@ -6192,7 +6205,7 @@ async function ensureSchema(env) {
     // Коды удалённых пространств (последний участник вышел): вход по такому
     // коду отвечает «пространство закрыто», а не «код не найден».
     `CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY,closed_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,weekly_digest_enabled INTEGER NOT NULL DEFAULT 0,weekly_digest_time TEXT,weekly_digest_day TEXT NOT NULL DEFAULT 'sun',accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY,username TEXT,display_name TEXT NOT NULL DEFAULT '',role TEXT NOT NULL DEFAULT 'a',pair_id INTEGER REFERENCES pairs(id) ON DELETE SET NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,best_streak INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',gender TEXT,digest_time TEXT,digest_enabled INTEGER NOT NULL DEFAULT 1,dates_digest_time TEXT,dates_digest_enabled INTEGER NOT NULL DEFAULT 1,weekly_digest_enabled INTEGER NOT NULL DEFAULT 0,weekly_digest_time TEXT,weekly_digest_day TEXT NOT NULL DEFAULT 'sun',accent_color TEXT,photo_url TEXT,show_avatar INTEGER NOT NULL DEFAULT 1,partner_custom_name TEXT,custom_name TEXT,show_cycle_calendar INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS pair_members (tg_id INTEGER PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,role TEXT NOT NULL DEFAULT 'a',joined_at INTEGER NOT NULL)`,
     // Снимки статистики «Ваша история» по парам (migrations/0030).
     `CREATE TABLE IF NOT EXISTS member_stats (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,best_streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY (pair_id,tg_id))`,
@@ -6278,6 +6291,7 @@ async function ensureSchema(env) {
     ["users", "show_avatar", "INTEGER NOT NULL DEFAULT 1"],
     ["users", "partner_custom_name", "TEXT"],
     ["users", "custom_name", "TEXT"],
+    ["users", "show_cycle_calendar", "INTEGER"],
     ["pairs", "timezone", "TEXT NOT NULL DEFAULT 'Europe/Moscow'"],
     ["pairs", "awaiting_return", "INTEGER NOT NULL DEFAULT 0"],
     ["pairs", "last_partner", "INTEGER NOT NULL DEFAULT 0"],

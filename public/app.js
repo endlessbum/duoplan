@@ -2036,12 +2036,15 @@
     const myId = Number(appState.user?.tg_id);
     const wishes = mergedArchive("done_wishes", appState.completedWishes || [])
       .filter((wish) => Number(wish.owner_id) === myId);
-    // Фло: периоды месячных для владелицы или партнёра (при шеринге)
+    // Фло: периоды месячных для владелицы или партнёра (при шеринге) —
+    // только если пользователь не выключил их в настройках.
     const cyclePeriods = [];
-    if (appState.user?.gender === 'female' && floState) {
-      cyclePeriods.push(...floAllPeriods());
-    } else if (floPartner?.shared === true && floPartner?.periods) {
-      cyclePeriods.push(...floPartner.periods);
+    if (appState.user?.show_cycle_calendar === true) {
+      if (appState.user?.gender === 'female' && floState) {
+        cyclePeriods.push(...floAllPeriods());
+      } else if (floPartner?.shared === true && floPartner?.periods) {
+        cyclePeriods.push(...floPartner.periods);
+      }
     }
     const today = calendarTodayKey();
     const { year, month } = calendarCurrentMonth();
@@ -2166,6 +2169,17 @@
       <button class="swatch${key === accent ? " is-active" : ""}" type="button" data-action="set-accent" data-accent="${key}"
         style="background:${palette[dark ? "dark" : "light"]}" aria-label="Акцентный цвет: ${key}"></button>
     `).join("");
+    // «Месячные в основном календаре»: владелице доступно всегда (по умолчанию
+    // включено), партнёру — только когда владелица открыла календарь
+    // (share confirmed); до этого пункт виден, но неактивен.
+    const floPartnerCal = floPartner?.shared === true && floPartner?.confirmed === true;
+    const cycleCalAllowed = user.gender === "female" || floPartnerCal;
+    const cycleCalOn = user.show_cycle_calendar === true;
+    const cycleCalHint = user.gender === "female"
+      ? "Отметки месячных красной каплей в общем календаре — только фактические дни"
+      : floPartnerCal
+        ? "Показывать месячные партнёрши в общем календаре"
+        : "Партнёрша ещё не открыла вам календарь месячных";
     return `
       <section class="card">
         <p class="eyebrow">Настройки</p>
@@ -2178,6 +2192,10 @@
           <span class="settings-label"><input type="checkbox" id="show-avatar" ${user.show_avatar !== false ? "checked" : ""}> Отображение аватара</span>
         </label>
         <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары. Если у пользователя фото нет, остаётся буква, пока аватар не появится</p>
+        <label class="settings-row">
+          <span class="settings-label"><input type="checkbox" id="cycle-calendar" ${cycleCalOn ? "checked" : ""}${cycleCalAllowed ? "" : " disabled"}> Месячные в основном календаре</span>
+        </label>
+        <p class="settings-hint">${esc(cycleCalHint)}</p>
         <div class="settings-row">
           <span class="settings-label">Ваше имя</span>
           <input id="display-name-input" type="text" maxlength="80" autocomplete="off" placeholder="${esc(user.display_name || "")}" value="${esc(user.custom_name || "")}">
@@ -9083,6 +9101,9 @@
             weekly_digest_time: timeOf("weekly-digest-time"),
             weekly_digest_day: document.getElementById("weekly-digest-day")?.value === "mon" ? "mon" : "sun",
             show_avatar: document.getElementById("show-avatar")?.checked ?? true,
+            // У выключенного чекбокса (нет доступа к календарю партнёрши)
+            // .checked читается как сохранённое значение — оно и уходит.
+            show_cycle_calendar: document.getElementById("cycle-calendar")?.checked ?? (appState.user?.gender === "female"),
             // Пустое поле оставляет текущее имя из Telegram.
             display_name: document.getElementById("display-name-input")?.value?.trim() || null,
             // Пустое поле сбрасывает личное имя партнёра на имя из Telegram.

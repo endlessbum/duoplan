@@ -508,10 +508,14 @@ test("карточки role=button активируются с клавиату�
   ok(source.includes('closest("button, a[href], input, select, textarea, summary, [contenteditable]")'),
     "нет защиты от дабл-активации на нативных контролах");
   ok(source.includes('preventDefault()'), "Space не глушит прокрутку страницы");
-  // Видимый фокус: глобальный reset обнулял outline у [tabindex] и диалога —
-  // возвращаем :focus-visible-стиль, но не для программного tabindex="-1".
+  // Видимый фокус: глобальный reset обнулял outline у [tabindex] —
+  // возвращаем :focus-visible-стиль для карточек. У окна диалога фокусное
+  // кольцо намеренно подавлено (programmatic dialog.focus() давал синее
+  // кольцо по периметру — репорт пользователя).
   ok(cssSource.includes('[tabindex]:not([tabindex="-1"]):focus-visible'), "нет фокус-стиля для карточек");
-  ok(cssSource.includes('.sheet-dialog:focus-visible'), "нет фокус-стиля для диалога");
+  ok(cssSource.includes('.sheet-dialog:focus-visible'), "нет подавления фокуса у диалога");
+  const accentBlock = cssSource.slice(cssSource.indexOf(".flo-chip:focus-visible"), cssSource.indexOf("[tabindex]:not"));
+  ok(!accentBlock.includes("sheet-dialog"), "у диалога снова accent-кольцо");
 });
 
 test("удержание Enter не повторяет клик по карточке (e.repeat)", () => {

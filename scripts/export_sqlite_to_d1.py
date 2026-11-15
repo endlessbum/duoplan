@@ -31,7 +31,7 @@ TABLES = {
         "last_activity, best_streak, timezone, digest_time, digest_enabled, "
         "dates_digest_time, dates_digest_enabled, weekly_digest_enabled, "
         "weekly_digest_time, weekly_digest_day, accent_color, photo_url, "
-        "show_avatar, partner_custom_name, custom_name, created_at, updated_at"
+        "show_avatar, partner_custom_name, custom_name, show_cycle_calendar, created_at, updated_at"
     ),
     "tasks": (
         "id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, "

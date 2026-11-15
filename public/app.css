@@ -99,7 +99,8 @@ select:focus,
 select:focus-visible,
 [tabindex]:focus,
 [tabindex]:focus-visible,
-.sheet-dialog:focus {
+.sheet-dialog:focus,
+.sheet-dialog:focus-visible {
   outline: none;
 }
 
@@ -2882,8 +2883,7 @@ textarea:focus-visible {
    и на самом диалоге: глобальный reset выше обнулял outline без замены
    (WCAG 2.2 SC 2.4.7). tabindex="-1" — программный фокус, не Tab-стоп,
    кольца не получает. */
-[tabindex]:not([tabindex="-1"]):focus-visible,
-.sheet-dialog:focus-visible {
+[tabindex]:not([tabindex="-1"]):focus-visible {
   outline: 2px solid var(--accent, #4a7dff);
   outline-offset: 2px;
 }

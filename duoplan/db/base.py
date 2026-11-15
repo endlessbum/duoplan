@@ -119,6 +119,10 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     12: (
         "ALTER TABLE cycle_logs ADD COLUMN sex_count INTEGER NOT NULL DEFAULT 1",
     ),
+    # «Месячные в основном календаре» (migrations/0045): NULL — авто по полу.
+    13: (
+        "ALTER TABLE users ADD COLUMN show_cycle_calendar INTEGER",
+    ),
 }
 
 

@@ -114,7 +114,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
     "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "mucus",
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url",
-    "rating_checked_at", "rating_source", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "show_avatar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "rating_checked_at", "rating_source", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -141,7 +141,8 @@ test("чистый проход миграции без гонки записы�
   // + bleeding_details (cycle_logs) + context (cycle_profiles) — переработка 7/5.1
   // + share_sex/share_mood/share_sleep/share_bbt/share_confirmed
   //   (cycle_profiles, переработка P0: категории шеринга)
-  deepStrictEqual(log.alters.length, 60);
+  // + show_cycle_calendar (users, «Месячные в основном календаре» — migrations/0045)
+  deepStrictEqual(log.alters.length, 61);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

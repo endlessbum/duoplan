@@ -40,6 +40,7 @@ SCHEMA: list[str] = [
         "weekly_digest_enabled INTEGER NOT NULL DEFAULT 0, weekly_digest_time TEXT, "
         "weekly_digest_day TEXT NOT NULL DEFAULT 'sun', accent_color TEXT, photo_url TEXT, "
         "show_avatar INTEGER NOT NULL DEFAULT 1, partner_custom_name TEXT, custom_name TEXT, "
+        "show_cycle_calendar INTEGER, "
         "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     ),
     (

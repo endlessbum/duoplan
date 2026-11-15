@@ -506,3 +506,45 @@ test("в слотах пилюли пары рисуется paintAvatarSlot с 
     "syncTopControls не использует paintPairAvatars"
   );
 });
+
+// ------------------------------------------------------------------
+// «Месячные в основном календаре» (show_cycle_calendar)
+// ------------------------------------------------------------------
+
+test("POST /api/settings сохраняет show_cycle_calendar как 0/1", async () => {
+  const { api, env, queries, request } = makeApiEnv({ body: { show_cycle_calendar: false } });
+  await api(request, env, new URL("https://duoplan.test/api/settings"));
+  const update = queries.find(q => q.sql.startsWith("UPDATE users SET"));
+  ok(update.sql.includes("show_cycle_calendar=?"), "нет show_cycle_calendar");
+  equal(update.args[0], 0);
+
+  const on = makeApiEnv({ body: { show_cycle_calendar: true } });
+  await on.api(on.request, on.env, new URL("https://duoplan.test/api/settings"));
+  const upd2 = on.queries.find(q => q.sql.startsWith("UPDATE users SET"));
+  equal(upd2.args[0], 1);
+});
+
+test("POST /api/settings отклоняет не-булев show_cycle_calendar", async () => {
+  const bad = makeApiEnv({ body: { show_cycle_calendar: "yes" } });
+  await rejects(
+    bad.api(bad.request, bad.env, new URL("https://duoplan.test/api/settings")),
+    error => error.status === 400
+  );
+});
+
+test("publicUser: show_cycle_calendar — авто по полу при NULL, явное значение важнее", () => {
+  // NULL + female → вкл (у владелицы сразу включено).
+  const f = publicUser({ tg_id: 1, display_name: "Я", points: 0, gender: "female", show_cycle_calendar: null });
+  equal(f.show_cycle_calendar, true);
+  // NULL + male → выкл (партнёру — только после явного выбора).
+  const m = publicUser({ tg_id: 2, display_name: "Он", points: 0, gender: "male", show_cycle_calendar: null });
+  equal(m.show_cycle_calendar, false);
+  // NULL без пола → выкл (безопасный дефолт).
+  const n = publicUser({ tg_id: 3, display_name: "?", points: 0, show_cycle_calendar: null });
+  equal(n.show_cycle_calendar, false);
+  // Явные значения побеждают дефолт.
+  const off = publicUser({ tg_id: 1, display_name: "Я", points: 0, gender: "female", show_cycle_calendar: 0 });
+  equal(off.show_cycle_calendar, false);
+  const on = publicUser({ tg_id: 2, display_name: "Он", points: 0, gender: "male", show_cycle_calendar: 1 });
+  equal(on.show_cycle_calendar, true);
+});
