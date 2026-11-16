@@ -96,6 +96,11 @@ function makeJoinMockDb({ membershipRow = null, pairs = {}, closedCodes = [], me
                 counters.set(params[0], count);
                 return { count };
               }
+              // Скользящее окно (INV-SEC-03): чтение счётчика предыдущего bucket.
+              if (sql === "SELECT count FROM rate_limits WHERE bucket_key=?") {
+                const prev = counters.get(params[0]);
+                return prev ? { count: prev } : null;
+              }
               if (sql.includes("FROM pair_members pm JOIN pairs p")) return member;
               if (sql.startsWith("SELECT * FROM pairs WHERE code=?")) {
                 pairReads++;
@@ -157,6 +162,11 @@ function makeJoinMockDbWithStatIntercept({ membershipRow = null, pairs = {}, clo
                 const count = (counters.get(params[0]) || 0) + 1;
                 counters.set(params[0], count);
                 return { count };
+              }
+              // Скользящее окно (INV-SEC-03): чтение счётчика предыдущего bucket.
+              if (sql === "SELECT count FROM rate_limits WHERE bucket_key=?") {
+                const prev = counters.get(params[0]);
+                return prev ? { count: prev } : null;
               }
               if (sql.includes("FROM pair_members pm JOIN pairs p")) return member;
               if (sql.startsWith("SELECT * FROM pairs WHERE code=?")) {
@@ -374,4 +384,36 @@ test("если снимка member_stats нет (пара ждала до поя
   ok(statRead(), "попытка чтения снимка была");
   ok(!batches.flat().some((sql) => sql.includes("points=0")), "снимка отсутствует — оставляем текущие значения");
   ok(!batches.flat().some((sql) => sql.includes("UPDATE users SET points=")), "нет UPDATE users для статистики");
+});
+
+// Аудит 2026-11-16 (INV-SEC-03): фиксированные bucket-окна допускали двойной
+// burst на стыке — 5 неудач в конце окна и ещё 5 в начале следующего.
+// Скользящая оценка: вклад предыдущего окна тает линейно по мере его
+// «старения», поэтому лимит держится закрытым и сразу после границы.
+test("скользящее окно: burst на стыке bucket'ов не проходит", async () => {
+  const { db } = makeJoinMockDb({});
+  const W = 15 * 60;
+  // Искусственная граница окна: bucket вычисляется из timestamp, поэтому
+  // подставляем выровненные метки напрямую — реальное время не важно.
+  const aligned = 1800000000 - (1800000000 % W);
+  const env = { DB: db };
+  // Пять неудач вплотную к концу окна.
+  for (let i = 0; i < 5; i++) {
+    await claimJoinAttempt(env, 42, aligned + W - 1);
+  }
+  // Первая попытка следующего окна: prev=5 с весом ~1 — лимит закрыт.
+  await rejects(
+    () => claimJoinAttempt(env, 42, aligned + W + 1),
+    (error) => error.status === 429 && error.code === "JOIN_RATE_LIMITED"
+  );
+  // Середина нового окна: вес предыдущего ~0.5 → эффективный счёт 4.5 —
+  // попытки снова разрешены (старые неудачи «протухают»).
+  await claimJoinAttempt(env, 42, aligned + W + W / 2);
+});
+
+test("claimJoinAttempt: timestamp по умолчанию — текущее время", async () => {
+  const { db, counters } = makeJoinMockDb({});
+  const bucket = Math.floor(now() / (15 * 60));
+  await claimJoinAttempt({ DB: db }, 42);
+  strictEqual(counters.get(`jf:42:${bucket}`), 1);
 });

@@ -420,3 +420,28 @@ async def test_join_rate_limit_is_atomic_under_concurrency(db):
         "SELECT count FROM rate_limits WHERE bucket_key LIKE ?", ("jf:70:%",)
     )
     assert row is not None and row["count"] == total, "каждая попытка получила свой слот"
+
+
+@pytest.mark.asyncio
+async def test_join_attempt_sliding_window_blocks_boundary_burst(db):
+    """INV-SEC-03: фиксированные bucket'ы допускали 10 попыток на стыке.
+
+    Пять неудач вплотную к концу окна + первая попытка следующего обязаны
+    упереться в лимит: вклад предыдущего окна тает линейно, а не обнуляется
+    скачком (parity с worker.claimJoinAttempt).
+    """
+    import pytest as _pytest
+
+    from duoplan.services import JOIN_ATTEMPT_LIMIT, JOIN_ATTEMPT_WINDOW, DuoPlanService, ValidationError
+
+    service = DuoPlanService(db)
+    window = JOIN_ATTEMPT_WINDOW
+    aligned = 1800000000 - (1800000000 % window)
+    # Пять неудач в конце окна.
+    for _ in range(JOIN_ATTEMPT_LIMIT):
+        await service._claim_join_attempt(80, timestamp=aligned + window - 1)
+    # Первая попытка следующего окна: prev=5 с весом ~1 — лимит закрыт.
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service._claim_join_attempt(80, timestamp=aligned + window + 1)
+    # Середина нового окна: вес предыдущего ~0.5 — попытки снова идут.
+    await service._claim_join_attempt(80, timestamp=aligned + window + window // 2)

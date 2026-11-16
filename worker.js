@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.14.53";
+const APP_VERSION = "2026.11.17.60";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.14.53";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.14.53";
+const DB_SCHEMA_VERSION = "2026.11.17.60";
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -791,16 +791,30 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
 // RETURNING (как rateLimit выше) ДО чтения кода: N одновременных запросов
 // получают слоты 1..N, и только первые JOIN_ATTEMPT_LIMIT доходят до пар.
 // Успешный вход и гонка захвата слот возвращают через releaseJoinAttempt.
+//
+// Аудит 2026-11-16 (INV-SEC-03): фиксированные bucket-окна допускали
+// двойной burst на стыке — 5 неудач в конце окна и ещё 5 в начале следующего.
+// Теперь действует скользящая оценка: счётчик текущего окна плюс вклад
+// предыдущего, тающий линейно по мере «старения» (weight = 1 - elapsed/W).
+// Пять неудач вплотную к границе держат лимит закрытым и в начале нового
+// окна; по мере затухания старых попыток вход снова разрешается. Строка
+// окна живёт на bucket+2, чтобы счётчик предыдущего окна дожил до конца
+// текущего (expires_at чистится общим механизмом rate_limits).
 const JOIN_ATTEMPT_LIMIT = 5;
 const JOIN_ATTEMPT_WINDOW = 15 * 60;
 
-async function claimJoinAttempt(env, userId) {
-  const bucket = Math.floor(now() / JOIN_ATTEMPT_WINDOW);
+async function claimJoinAttempt(env, userId, timestamp = now()) {
+  const bucket = Math.floor(timestamp / JOIN_ATTEMPT_WINDOW);
   const key = `jf:${userId}:${bucket}`;
   const row = await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
     ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at
-    RETURNING count`).bind(key, (bucket + 1) * JOIN_ATTEMPT_WINDOW).first();
-  if ((row?.count || 0) > JOIN_ATTEMPT_LIMIT) {
+    RETURNING count`).bind(key, (bucket + 2) * JOIN_ATTEMPT_WINDOW).first();
+  const prev = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?")
+    .bind(`jf:${userId}:${bucket - 1}`).first();
+  const elapsed = timestamp - bucket * JOIN_ATTEMPT_WINDOW;
+  const weight = 1 - elapsed / JOIN_ATTEMPT_WINDOW;
+  const effective = (row?.count || 0) + (prev?.count || 0) * weight;
+  if (effective > JOIN_ATTEMPT_LIMIT) {
     throw new HttpError(429, "Слишком много неудачных попыток входа по коду. Попробуйте снова через 15 минут.", "JOIN_RATE_LIMITED");
   }
   return key;
@@ -2232,6 +2246,11 @@ async function api(request, env, url, ctx = null) {
   // Лимит проверяем ДО записи пользователя: иначе флуд всё равно создаёт
   // строки в users, а rate limit срабатывает только после (репорт 2026-10-29).
   const ownerIdList = ownerIds(env);
+  // PRIVATE_BOT — несекретный флаг в wrangler vars: без него пустой OWNER_IDS
+  // по-прежнему открывает бот (локальная разработка); с ним — fail closed.
+  if (String(env?.PRIVATE_BOT || "") === "true" && !ownerIdList.length) {
+    throw new HttpError(503, "Приватный бот настроен без OWNER_IDS — задайте переменную окружения", "PRIVATE_BOT_MISCONFIGURED");
+  }
   const isBotOwner = ownerIdList.includes(tgUser.id);
   const knownUser = ownerIdList.length
     ? await env.DB.prepare("SELECT tg_id FROM users WHERE tg_id=?").bind(tgUser.id).first()
@@ -3561,6 +3580,12 @@ async function webhook(request, env, url) {
   }
   // Схема (включая индекс по received_at) создаётся до INSERT дедупликации.
   await ensureSchemaOnce(env);
+  // Fail closed ДО дедупликации: при неверной конфигурации приватного режима
+  // update не должен помечаться как обработанный — иначе повтор Telegram
+  // после задания OWNER_IDS будет проглочен дедупом (WEBHOOK-01).
+  if (String(env?.PRIVATE_BOT || "") === "true" && !ownerIds(env).length) {
+    throw new HttpError(503, "Приватный бот настроен без OWNER_IDS", "PRIVATE_BOT_MISCONFIGURED");
+  }
   // Чистку дедуп-таблицы делаем в cron (sendDigests), а не здесь: минус один
   // запрос на каждый апдейт вебхука (репорт 2026-11-03, §5.5).
 
@@ -3603,13 +3628,30 @@ const openPair = /^[A-F0-9]{8}$/i.test(inviteCode)
   ? await env.DB.prepare("SELECT id FROM pairs WHERE code=? AND user_b=0 AND (awaiting_return=0 OR last_partner=?)").bind(inviteCodeUpper, message.from.id).first()
   : null;
     if (!openPair) {
+      // Корректно сформированный, но неподходящий код (не найден, закрыт,
+      // занят или зарезервирован) — неудачная попытка входа: слот общего
+      // лимитера расходуется здесь (аудит 2026-11-16, INV-SEC-01). Раньше
+      // гейт завершался до joinPair/claimJoinAttempt, и перебор через
+      // /start CODE шёл мимо счётчика. Битый формат попыткой не считается —
+      // как INVALID_CODE в joinPair; слот не возвращаем — это неудача.
+      let rateLimited = false;
+      if (/^[A-F0-9]{8}$/i.test(inviteCode)) {
+        try {
+          await claimJoinAttempt(env, message.from.id);
+        } catch (error) {
+          if (error instanceof HttpError && error.code === "JOIN_RATE_LIMITED") rateLimited = true;
+          else console.error("join attempt claim failed", error);
+        }
+      }
       // Отказ — некритичный путь: update_id уже записан в telegram_updates,
       // и упавший сюда 500 привёл бы к повтору апдейта, который дедуп вернёт
       // как {ok:true} — отказ так и не был бы доставлен. Гасим сбой тихо.
       try {
         await telegram(env, "sendMessage", {
           chat_id: message.chat.id,
-          text: "Это приватный бот DuoPlan — доступ по приглашению. Попросите владельца прислать ссылку-приглашение (t.me/<бот>?start=КОД) и откройте её."
+          text: rateLimited
+            ? "Слишком много неудачных попыток входа по коду. Попробуйте снова через 15 минут."
+            : "Это приватный бот DuoPlan — доступ по приглашению. Попросите владельца прислать ссылку-приглашение (t.me/<бот>?start=КОД) и откройте её."
         });
       } catch (error) {
         console.error("private gate denial failed", error);
@@ -3622,50 +3664,63 @@ const openPair = /^[A-F0-9]{8}$/i.test(inviteCode)
     const text = clean(msgText);
     const code = startPayload(text);
     let joined = false;
-    if (code) {
-      let joinFailText = "";
-      const existingMembership = await membership(env, user.tg_id);
-      if (existingMembership) {
-        joined = clean(existingMembership.code).toUpperCase() === code.toUpperCase();
-        // Чужой код при живом членстве — не «приглашение недоступно»,
-        // а «вы уже в пространстве» (зеркально ответу бота).
-        if (!joined) joinFailText = "Вы уже в пространстве — этот код к другой паре. Новый код можно применить только после выхода из текущей.";
-      } else {
-        try {
-          await joinPair(env, user, code, url);
-          joined = true;
-        } catch (error) {
-          const racedMembership = await membership(env, user.tg_id);
-          joined = !!racedMembership && clean(racedMembership.code).toUpperCase() === code.toUpperCase();
-          if (!racedMembership) {
-            if (error instanceof HttpError) {
-              joined = false;
-              // «Пространство закрыто» и «код зарезервирован» честнее общего
-              // «приглашение недоступно».
-              joinFailText = error.code === "PAIR_CLOSED"
-                ? "Это пространство закрыто: последний участник вышел. Попросите партнёра отправить вам код нового пространства."
-                : error.code === "PAIR_RESERVED"
-                  ? "Это пространство ждёт возвращения прежнего партнёра — старый код на другого аккаунта не действует."
-                  : "";
-            } else throw error;
+    try {
+      if (code) {
+        let joinFailText = "";
+        const existingMembership = await membership(env, user.tg_id);
+        if (existingMembership) {
+          joined = clean(existingMembership.code).toUpperCase() === code.toUpperCase();
+          // Чужой код при живом членстве — не «приглашение недоступно»,
+          // а «вы уже в пространстве» (зеркально ответу бота).
+          if (!joined) joinFailText = "Вы уже в пространстве — этот код к другой паре. Новый код можно применить только после выхода из текущей.";
+        } else {
+          try {
+            await joinPair(env, user, code, url);
+            joined = true;
+          } catch (error) {
+            const racedMembership = await membership(env, user.tg_id);
+            joined = !!racedMembership && clean(racedMembership.code).toUpperCase() === code.toUpperCase();
+            if (!racedMembership) {
+              if (error instanceof HttpError) {
+                joined = false;
+                // «Пространство закрыто» и «код зарезервирован» честнее общего
+                // «приглашение недоступно».
+                joinFailText = error.code === "PAIR_CLOSED"
+                  ? "Это пространство закрыто: последний участник вышел. Попросите партнёра отправить вам код нового пространства."
+                  : error.code === "PAIR_RESERVED"
+                    ? "Это пространство ждёт возвращения прежнего партнёра — старый код на другого аккаунта не действует."
+                    : "";
+              } else throw error;
+            }
           }
         }
+        await openApp(env, message.chat.id, url, joined
+          ? "Готово — теперь у вас одно пространство на двоих."
+          : (joinFailText || "Это приглашение недоступно. Проверьте код у партнёра."));
+      } else if (text.startsWith("/help")) {
+        await telegram(env, "sendMessage", {
+          chat_id: message.chat.id,
+          text: "DuoPlan хранит ваши общие планы, даты, воспоминания и желания. Откройте Mini App кнопкой ниже: там можно добавлять, редактировать и завершать записи."
+        });
+        await openApp(env, message.chat.id, url, "Ваше пространство всегда под рукой.");
+      } else {
+        await openApp(env, message.chat.id, url, "Совместные планы, воспоминания и желания — в одном месте.");
       }
-      await openApp(env, message.chat.id, url, joined
-        ? "Готово — теперь у вас одно пространство на двоих."
-        : (joinFailText || "Это приглашение недоступно. Проверьте код у партнёра."));
-    } else if (text.startsWith("/help")) {
-      await telegram(env, "sendMessage", {
-        chat_id: message.chat.id,
-        text: "DuoPlan хранит ваши общие планы, даты, воспоминания и желания. Откройте Mini App кнопкой ниже: там можно добавлять, редактировать и завершать записи."
-      });
-      await openApp(env, message.chat.id, url, "Ваше пространство всегда под рукой.");
-    } else {
-      await openApp(env, message.chat.id, url, "Совместные планы, воспоминания и желания — в одном месте.");
+    } finally {
+      // Вход по приглашению не состоялся (гонка, занятая пара, резерв кода,
+      // сбой openApp/Telegram API) — не оставляем «известного» пользователя
+      // без членства в паре (аудит 2026-11-16, INV-ROB-02). finally: раньше
+      // исключение openApp перескакивало очистку, и повторная доставка видела
+      // уже созданную строку users как knownUser. Ошибку самой очистки не
+      // маскируем под исходное исключение — логируем отдельно.
+      if (invitedNow && !joined) {
+        try {
+          await dropUnconfirmedUser(env, user.tg_id);
+        } catch (cleanupError) {
+          console.error("webhook invited-user cleanup failed", cleanupError);
+        }
+      }
     }
-    // Вход по приглашению не состоялся (гонка, занятая пара, резерв кода) —
-    // не оставляем «известного» пользователя без членства в паре.
-    if (invitedNow && !joined) await dropUnconfirmedUser(env, user.tg_id);
   } catch (error) {
     console.error("webhook delivery failed", error);
     // Снимаем отметку об обработке, чтобы Telegram мог повторить доставку.
@@ -4054,24 +4109,57 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0${scope === "mine" ? " AND w.owner_id=?" : ""} ORDER BY w.created_at ASC, w.id ASC`,
   // Фло: периоды и дневник одной лентой (kind различает строки). Данные
   // принадлежат tg_id владельца — пару в запросе нет, бинды [userId, userId].
-  cycle: () => `SELECT 'period' AS kind, p.start_date AS day, p.end_date, NULL AS flow, NULL AS clots, NULL AS energy, NULL AS mood, NULL AS symptoms, NULL AS symptoms_clear, NULL AS note, NULL AS sex, NULL AS sex_count, NULL AS leakage, NULL AS pain_score, NULL AS pain_locations, NULL AS life_impact, NULL AS mucus, NULL AS sleep_hours, NULL AS sleep_quality, NULL AS stress, NULL AS sick, NULL AS travel, NULL AS weight_kg,
-      CASE WHEN p.end_unknown=1 THEN 'end_unknown' ELSE NULL END AS extra, p.created_at
+  // Все ветки UNION ALL обязаны иметь одинаковый набор колонок в одном
+  // порядке. Раньше measurement/med/med_log склеивались в extra через
+  // '|' — символ из пользовательского текста ломал разбор. Теперь поля
+  // разделены, mapper получает их как есть.
+  cycle: () => `SELECT 'period' AS kind, p.start_date AS day, p.end_date,
+      NULL AS flow, NULL AS clots, NULL AS energy, NULL AS mood, NULL AS symptoms, NULL AS symptoms_clear,
+      NULL AS note, NULL AS sex, NULL AS sex_count, NULL AS leakage, NULL AS pain_score, NULL AS pain_locations,
+      NULL AS life_impact, NULL AS mucus, NULL AS sleep_hours, NULL AS sleep_quality, NULL AS stress,
+      NULL AS sick, NULL AS travel, NULL AS weight_kg,
+      p.end_unknown, NULL AS bleeding_details,
+      NULL AS m_kind, NULL AS m_value, NULL AS m_unit, NULL AS m_result, NULL AS m_time,
+      NULL AS category, NULL AS form, NULL AS schedule, NULL AS status,
+      NULL AS med_name, NULL AS med_time, NULL AS med_status, NULL AS dose_taken, p.created_at
     FROM cycle_periods p WHERE p.tg_id=?
     UNION ALL
-    SELECT 'log', l.date, NULL, l.flow, l.clots, l.energy, l.mood, l.symptoms, l.symptoms_clear, l.note, l.sex, l.sex_count, l.leakage, l.pain_score, l.pain_locations, l.life_impact, l.mucus, l.sleep_hours, l.sleep_quality, l.stress, l.sick, l.travel, l.weight_kg, NULL, l.created_at
+    SELECT 'log', l.date, NULL,
+      l.flow, l.clots, l.energy, l.mood, l.symptoms, l.symptoms_clear, l.note, l.sex, l.sex_count,
+      l.leakage, l.pain_score, l.pain_locations, l.life_impact, l.mucus, l.sleep_hours, l.sleep_quality,
+      l.stress, l.sick, l.travel, l.weight_kg,
+      NULL, l.bleeding_details,
+      NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, l.created_at
     FROM cycle_logs l WHERE l.tg_id=?
     UNION ALL
-    SELECT 'measurement', m.date, NULL, NULL, NULL, NULL, NULL, NULL, NULL, m.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-      m.kind || '|' || COALESCE(CAST(m.value AS TEXT), '') || '|' || COALESCE(m.unit, '') || '|' || COALESCE(m.result, '') || '|' || COALESCE(m.time, ''), m.created_at
+    SELECT 'measurement', m.date, NULL,
+      NULL, NULL, NULL, NULL, NULL, NULL, m.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL,
+      m.kind, m.value, m.unit, m.result, m.time,
+      NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, m.created_at
     FROM cycle_measurements m WHERE m.tg_id=?
     UNION ALL
-    SELECT 'med', md.start_date, md.end_date, NULL, NULL, NULL, NULL, NULL, NULL,
-      md.name || CASE WHEN md.dosage IS NOT NULL THEN ' (' || md.dosage || ')' ELSE '' END, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-      COALESCE(md.category, '') || '|' || COALESCE(md.form, '') || '|' || COALESCE(md.schedule, '') || '|' || md.status, md.created_at
+    SELECT 'med', md.start_date, md.end_date,
+      NULL, NULL, NULL, NULL, NULL, NULL,
+      md.name || CASE WHEN md.dosage IS NOT NULL THEN ' (' || md.dosage || ')' ELSE '' END,
+      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL,
+      NULL, NULL, NULL, NULL, NULL,
+      md.category, md.form, md.schedule, md.status,
+      NULL, NULL, NULL, NULL, md.created_at
     FROM cycle_meds md WHERE md.tg_id=?
     UNION ALL
-    SELECT 'med_log', ml.date, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ml.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-      COALESCE(mm.name, '') || '|' || COALESCE(ml.time, '') || '|' || ml.status || '|' || COALESCE(ml.dose_taken, ''), ml.created_at
+    SELECT 'med_log', ml.date, NULL,
+      NULL, NULL, NULL, NULL, NULL, NULL, ml.note, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL,
+      NULL, NULL, NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL,
+      COALESCE(mm.name, ''), ml.time, ml.status, ml.dose_taken, ml.created_at
     FROM cycle_med_logs ml LEFT JOIN cycle_meds mm ON mm.id=ml.med_id WHERE ml.tg_id=?
     ORDER BY day ASC`
 };
@@ -4200,19 +4288,51 @@ const EXPORT_ROW_MAPPERS = {
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   }),
-  cycle: (row) => row.kind === "period"
-    ? { kind: "period", start_date: row.day, end_date: row.end_date || null, end_unknown: row.extra === "end_unknown", created_at: row.created_at }
-    : {
-        kind: "log",
-        date: row.day,
-        flow: row.flow || null,
-        mood: row.mood || null,
-        symptoms: (() => { try { return JSON.parse(row.symptoms || "[]"); } catch { return []; } })(),
-        note: clean(row.note) || "",
-        sex: row.sex || null,
-        sex_count: row.sex_count || 0,
-        created_at: row.created_at
-      }
+  // Каждая ветка UNION ALL сохраняет свой kind: сводить всё к "log"
+  // нельзя — measurement/med/med_log потеряли бы поля до рендера TXT.
+  cycle: (row) => {
+    const json = (value, fallback) => { try { return JSON.parse(value || fallback); } catch { return JSON.parse(fallback); } };
+    if (row.kind === "period") {
+      return {
+        kind: "period", start_date: row.day, end_date: row.end_date || null,
+        end_unknown: Number(row.end_unknown) === 1, created_at: row.created_at
+      };
+    }
+    if (row.kind === "measurement") {
+      return {
+        kind: "measurement", date: row.day,
+        m_kind: row.m_kind || "", m_value: row.m_value ?? null, m_unit: row.m_unit || null,
+        m_result: row.m_result || null, m_time: row.m_time || null,
+        note: clean(row.note) || "", created_at: row.created_at
+      };
+    }
+    if (row.kind === "med") {
+      return {
+        kind: "med", start_date: row.day, end_date: row.end_date || null, name: clean(row.note) || "",
+        category: row.category || null, form: row.form || null, schedule: row.schedule || null,
+        status: row.status || null, created_at: row.created_at
+      };
+    }
+    if (row.kind === "med_log") {
+      return {
+        kind: "med_log", date: row.day, med_name: clean(row.med_name) || "",
+        time: row.med_time || null, status: row.med_status || null,
+        dose_taken: row.dose_taken ?? null, note: clean(row.note) || "", created_at: row.created_at
+      };
+    }
+    return {
+      kind: "log", date: row.day, flow: row.flow || null, clots: !!row.clots,
+      energy: row.energy || null, mood: row.mood || null,
+      symptoms: json(row.symptoms, "[]"), symptoms_clear: !!row.symptoms_clear,
+      note: clean(row.note) || "", sex: row.sex || null, sex_count: row.sex_count || 0,
+      leakage: row.leakage || null, pain_score: row.pain_score ?? null,
+      pain_locations: row.pain_locations || "[]", life_impact: row.life_impact || null,
+      mucus: row.mucus || "{}", sleep_hours: row.sleep_hours ?? null,
+      sleep_quality: row.sleep_quality || null, stress: row.stress || null,
+      sick: !!row.sick, travel: !!row.travel, weight_kg: row.weight_kg ?? null,
+      bleeding_details: json(row.bleeding_details, "null"), created_at: row.created_at
+    };
+  }
 };
 
 // ------------------------------------------------------------------
@@ -4324,25 +4444,24 @@ const EXPORT_TXT_ROWS = {
       };
     }
     if (row.kind === "measurement") {
-      const [mKind, mValue, mUnit, mResult, mTime] = String(row.extra || "").split("|");
+      const mKind = row.m_kind || "";
       const label = mKind === "bbt" ? "Базальная температура" : "Тест на ЛГ";
       const value = mKind === "bbt"
-        ? (mValue ? `${mValue}${mUnit === "F" ? "°F" : "°C"}` : null)
-        : (mResult ? ({ negative: "отрицательный", positive: "положительный", unclear: "неясно" })[mResult] || mResult : null);
+        ? (row.m_value !== null && row.m_value !== undefined ? `${row.m_value}${row.m_unit === "F" ? "°F" : "°C"}` : null)
+        : (row.m_result ? ({ negative: "отрицательный", positive: "положительный", unclear: "неясно" })[row.m_result] || row.m_result : null);
       return {
         head: `${label} — ${row.date}`,
-        fields: [["Время", mTime], ["Значение", value], ["Заметка", row.note], ["Записано", exportTxtTime(row.created_at)]]
+        fields: [["Время", row.m_time], ["Значение", value], ["Заметка", row.note], ["Записано", exportTxtTime(row.created_at)]]
       };
     }
     if (row.kind === "med") {
-      const [mCategory, mForm, mSchedule, mStatus] = String(row.extra || "").split("|");
-      const statusLabel = { active: "активен", completed: "завершён", paused: "приостановлен" }[mStatus] || mStatus;
+      const statusLabel = { active: "активен", completed: "завершён", paused: "приостановлен" }[row.status] || row.status;
       return {
-        head: `Препарат: ${row.note}`,
+        head: `Препарат: ${row.name}`,
         fields: [
-          ["Категория", mCategory ? ({ hormonal: "гормональный", contraceptive: "контрацепция", supplement: "БАД", other: "прочее" })[mCategory] || mCategory : null],
-          ["Форма", mForm ? ({ tablet: "таблетка", capsule: "капсула", injection: "инъекция", patch: "пластырь", iud: "спираль", other: "прочее" })[mForm] || mForm : null],
-          ["Приём", mSchedule],
+          ["Категория", row.category ? ({ hormonal: "гормональный", contraceptive: "контрацепция", supplement: "БАД", other: "прочее" })[row.category] || row.category : null],
+          ["Форма", row.form ? ({ tablet: "таблетка", capsule: "капсула", injection: "инъекция", patch: "пластырь", iud: "спираль", other: "прочее" })[row.form] || row.form : null],
+          ["Приём", row.schedule],
           ["Статус", statusLabel],
           ["Окончание курса", row.end_date],
           ["Создан", exportTxtTime(row.created_at)]
@@ -4350,14 +4469,13 @@ const EXPORT_TXT_ROWS = {
       };
     }
     if (row.kind === "med_log") {
-      const [mName, mTime, mStatus, mDose] = String(row.extra || "").split("|");
-      const statusLabel = mStatus === "taken" ? "принят" : mStatus === "skipped" ? "пропущен" : mStatus;
+      const statusLabel = row.status === "taken" ? "принят" : row.status === "skipped" ? "пропущен" : row.status;
       return {
-        head: `${mName || "Препарат"} — ${row.date}`,
+        head: `${row.med_name || "Препарат"} — ${row.date}`,
         fields: [
-          ["Время", mTime],
+          ["Время", row.time],
           ["Статус", statusLabel],
-          ["Фактическая доза", mDose],
+          ["Фактическая доза", row.dose_taken],
           ["Комментарий", row.note],
           ["Записано", exportTxtTime(row.created_at)]
         ]
@@ -4367,6 +4485,11 @@ const EXPORT_TXT_ROWS = {
         head: `День ${row.date}`,
         fields: [
           ["Интенсивность", row.flow ? CYCLE_FLOW_LABELS[row.flow] || row.flow : null],
+          ["Смен в день", row.bleeding_details?.changes_per_day ?? null],
+          ["Пропитывание", row.bleeding_details?.saturation
+            ? ({ low: "слабое", medium: "среднее", high: "сильное" })[row.bleeding_details.saturation] || row.bleeding_details.saturation
+            : null],
+          ["Ночная смена", row.bleeding_details?.night_change ? "отмечено" : null],
           ["Сгустки", row.clots ? "отмечены" : null],
           ["Энергия", row.energy ? CYCLE_ENERGY_LABELS[row.energy] || row.energy : null],
           ["Настроение", row.mood ? CYCLE_MOOD_LABELS[row.mood] || row.mood : null],

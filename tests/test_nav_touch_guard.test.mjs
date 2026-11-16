@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { equal, ok, match } from "node:assert/strict";
+import { deepStrictEqual, equal, ok, match } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -90,4 +90,47 @@ test("цель жеста ищется обходом предков, а не cl
   // внутри страницы, где кнопки не имеют класса .nav-item.
   match(body, /el\.dataset && el\.dataset\.tab/);
   match(body, /el = el\.parentNode/);
+});
+
+test("настольный бар поднимается по классу приложения, мобильная геометрия не тронута", () => {
+  // Мобильная формула (погружение на треть высоты) обязана остаться нетронутой.
+  match(ruleFor(".bottom-nav"), /8px\s*-\s*\(62px\s*\/\s*3\)/);
+
+  const desktop = appCss.match(/\.is-desktop-app\s+\.bottom-nav\s*\{([\s\S]*?)\}/);
+  ok(desktop, "нет правила .is-desktop-app .bottom-nav");
+  match(desktop[1], /bottom:\s*calc\([^;]*\+\s*20px\)/);
+  ok(!/62px\s*\/\s*3/.test(desktop[1]), "настольная формула всё ещё опускает бар");
+  match(desktop[1], /safe-area-inset-bottom/);
+  ok(!/@media\s*\(min-width:\s*768px\)/.test(appCss), "подъём всё ещё завязан на ширину окна");
+});
+
+test("класс is-desktop-app ставится по платформе Telegram, а не по ширине", () => {
+  const appSource = readFileSync(join(root, "public", "app.js"), "utf8");
+  const start = appSource.indexOf("// DESKTOP_BAR_BEGIN");
+  const end = appSource.indexOf("// DESKTOP_BAR_END");
+  ok(start !== -1 && end > start, "в app.js нет блока DESKTOP_BAR");
+  const code = appSource.slice(start, end);
+
+  // Площадка для теста: подменяем tg, matchMedia и document.documentElement.
+  const run = (platform, matchMediaMatches, hasTg = true) => {
+    const added = [];
+    new Function("tg", "window", "document", code)(
+      hasTg ? { platform } : null,
+      { matchMedia: () => ({ matches: matchMediaMatches }) },
+      { documentElement: { classList: { add: (c) => added.push(c) } } }
+    );
+    return added;
+  };
+
+  for (const platform of ["tdesktop", "macos", "weba", "webr", "UNIGRAM"]) {
+    deepStrictEqual(run(platform, false), ["is-desktop-app"], `платформа ${platform} должна поднимать бар`);
+  }
+  // Широкий экран сам по себе десктопом не делает — решает платформа.
+  deepStrictEqual(run("android", true), [], " широкий телефон не должен получать десктопный бар");
+  deepStrictEqual(run("ios", true), []);
+  deepStrictEqual(run("unknown", true), []);
+  // Без Telegram (обычный браузер) — мышь + широкое окно.
+  deepStrictEqual(run(undefined, true, false), ["is-desktop-app"]);
+  deepStrictEqual(run(undefined, false, false), []);
+  match(code, /tg\?\.platform/);
 });

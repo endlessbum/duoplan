@@ -1,5 +1,16 @@
 (() => {
   const tg = window.Telegram?.WebApp;
+  // DESKTOP_BAR_BEGIN
+  // Бар поднимаем только в десктопных клиентах. Платформа приходит из
+  // Telegram WebApp, а не из ширины окна: широкий телефон в альбомной
+  // ориентации не должен получать десктопную геометрию.
+  const DESKTOP_TG_PLATFORMS = new Set(["tdesktop", "macos", "weba", "webr", "unigram"]);
+  const isDesktopBarPlatform = (platform) => DESKTOP_TG_PLATFORMS.has(String(platform || "").toLowerCase());
+  // Обычный браузер без Telegram: десктопом считаем мышь + широкое окно.
+  const desktopBar = isDesktopBarPlatform(tg?.platform)
+    || (!tg && window.matchMedia?.("(min-width: 768px) and (pointer: fine)").matches);
+  if (desktopBar) document.documentElement.classList.add("is-desktop-app");
+  // DESKTOP_BAR_END
   const appEl = document.getElementById("app");
   const bottomNav = document.getElementById("bottom-nav");
   const navDroplet = document.getElementById("nav-droplet");
@@ -2042,8 +2053,10 @@
     if (appState.user?.show_cycle_calendar === true) {
       if (appState.user?.gender === 'female' && floState) {
         cyclePeriods.push(...floAllPeriods());
-      } else if (floPartner?.shared === true && floPartner?.periods) {
-        cyclePeriods.push(...floPartner.periods);
+      } else if (floPartner?.shared === true) {
+        // calendar_periods — полная история для любого месяца сетки;
+        //periods — лишь короткая сводка для списка (6 последних).
+        cyclePeriods.push(...(floPartner.calendar_periods || floPartner.periods || []));
       }
     }
     const today = calendarTodayKey();
@@ -2326,7 +2339,10 @@
     ovulation: "Овуляция", luteal: "Лютеиновая", delay: "Задержка", stale: "Данные устарели"
   };
 
-  async function loadFloState() {
+  // silent — предзагрузка при старте: без перерисовки и без ошибки на экране.
+  // При сетевом сбое оставляем floState пустым, чтобы вкладка Фло сама
+  // повторила запрос, когда владелица её откроет.
+  async function loadFloState({ silent = false } = {}) {
     if (floBusy) return;
     floBusy = true;
     try {
@@ -2335,12 +2351,12 @@
       floFetchedMonths = new Set();
       if (!floMonth) floMonth = floState.today.slice(0, 7);
     } catch (error) {
-      floState = { failed: true };
-      handleRequestError(error);
+      floState = silent ? null : { failed: true };
+      if (!silent) handleRequestError(error);
     } finally {
       floBusy = false;
     }
-    render();
+    if (!silent) render();
   }
 
   // Диалог «Запись дня» открыт: перерисовываем его карточку после каждой
@@ -3257,16 +3273,21 @@
     return true;
   }
 
-  async function loadFloPartner() {
+  // silent — обновление фоновым тиком: данные приходят, но перерисовку
+  // делает сам вызывающий (только если ответ действительно изменился).
+  async function loadFloPartner({ silent = false } = {}) {
+    if (floPartnerBusy) return;
     floPartnerBusy = true;
     try {
       floPartner = await request("/api/cycle/partner");
     } catch (error) {
-      floPartner = { shared: false };
+      // При фоновом обновлении сохраняем последний удачно загруженный ответ:
+      // кратковременный сбой сети не должен «отключать» выданный доступ.
+      if (!silent || !floPartner) floPartner = { shared: false };
     } finally {
       floPartnerBusy = false;
     }
-    render();
+    if (!silent) render();
   }
 
   // Партнёрский вид Фло (мужская версия): только чтение. Данные приходят
@@ -6079,13 +6100,20 @@
       const del = row.querySelector("[data-action='remove-contact-phone']");
       if (del) del.hidden = rows.length <= 1;
     }
+    // Третий номер — предел: «+» прячем, вместо него подсказка в самом
+    // диалоге (тост уходил под блюр окна и был не виден).
+    const full = rows.length >= 3;
+    const addBtn = dialogFields.querySelector("[data-action='add-contact-phone']");
+    if (addBtn) addBtn.hidden = full;
+    const limit = document.getElementById("contact-phones-limit");
+    if (limit) limit.hidden = !full;
   }
 
   function addContactPhoneRow() {
     const box = contactPhonesBox();
     if (!box) return;
     if (box.querySelectorAll(".contact-phone-row").length >= 3) {
-      showToast("Максимум 3 номера на контакт");
+      syncContactPhoneButtons();
       return;
     }
     const wrap = document.createElement("div");
@@ -6130,6 +6158,7 @@
           </div>
         </div>
         <button class="goal-add" type="button" data-action="add-contact-phone" aria-label="Добавить номер">+</button>
+        <p class="contact-phones-limit" id="contact-phones-limit" hidden>Максимум 3 номера на контакт</p>
         <label class="field"><span>Комментарий (необязательно)</span><textarea name="comment" data-fmt="none" rows="2" maxlength="500" placeholder="Кто это, где знакомы, наводящая информация">${esc(source.comment || "")}</textarea></label>
       `,
       onSubmit: async (fd) => {
@@ -6171,6 +6200,7 @@
       }
     };
     openDialog(config);
+    syncContactPhoneButtons();
   }
 
   // Окно контакта: вся информация, копирование номеров с иконкой, правка
@@ -9293,9 +9323,18 @@
       // Партнёр зашёл в пространство, пока приложение было открыто —
       // минутный тик заметит это без действия пользователя.
       const gainedPartner = !hadPartner && Boolean(next?.pair?.user_b);
+      // Выдача доступа к календарю месячных живёт в cycle_profiles и не
+      // отражается в /api/state — подтягиваем отдельно. Иначе пункт настроек
+      // у мужчины останется неактивным до перезагрузки страницы. Первый раз
+      // данные грузит renderPairView (с перерисовкой), здесь — только revisit.
+      const prevFloPartner = floPartner;
+      if (appState?.user?.gender === "male" && appState?.pair && floPartner !== undefined) {
+        await loadFloPartner({ silent: true });
+      }
+      const floPartnerChanged = !deepEqual(prevFloPartner, floPartner);
       // Данные не изменились — перерисовка не нужна: она сбрасывает ввод,
-      // выделение текста и фокус.
-      const unchanged = deepEqual(next, appState);
+      // выделение текста и фокус. Доступ партнёрши тоже считаем изменением.
+      const unchanged = deepEqual(next, appState) && !floPartnerChanged;
       appState = next;
       if (gainedPartner) showToast("Партнёр в пространстве!");
       if (unchanged) return;
@@ -9357,6 +9396,12 @@
       // фото — в память WebView, буквы и акценты — в слоты пилюли. Пилюля
       // показывается уже готовой, без мерцания подложки под фото.
       await preloadPairAvatars();
+      // Красные капли месячных в основном календаре должны быть видны сразу
+      // после входа, а не только после первого захода во вкладку Фло.
+      // silent — без лишней перерисовки; render() ниже нарисует готовые данные.
+      if (appState?.user?.gender === "female" && appState?.pair) {
+        await loadFloState({ silent: true });
+      }
       render();
       updateDroplet("home", false);
       // Успешная загрузка — сбрасываем состояние ошибки

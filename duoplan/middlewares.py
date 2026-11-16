@@ -12,7 +12,12 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import TelegramObject, User
 
 from duoplan.config import Settings
-from duoplan.services import DuoPlanService
+from duoplan.services import (
+    JOIN_CODE_RE,
+    DuoPlanService,
+    ValidationError,
+    normalize_code,
+)
 
 log = logging.getLogger(__name__)
 
@@ -90,13 +95,28 @@ class PrivateBotMiddleware(BaseMiddleware):
             if match and match.group(1):
                 payload = match.group(1).strip()
 
-        if not payload or await service.open_pair_for_code(payload, tg_id=user.id) is None:
+        open_pair = await service.open_pair_for_code(payload, tg_id=user.id) if payload else None
+        if open_pair is None:
+            denied_text = PRIVATE_BOT_DENIED_TEXT
+            if payload and JOIN_CODE_RE.fullmatch(normalize_code(payload)):
+                # Корректно сформированный, но неподходящий код — неудачная
+                # попытка входа: слот общего лимитера расходуется здесь (аудит
+                # 2026-11-16, INV-SEC-01 — parity с webhook-гейтом worker.js).
+                # Раньше отказ завершался до join_pair/_claim_join_attempt, и
+                # перебор через /start CODE шёл мимо счётчика. Битый формат
+                # попыткой не считается; слот неудачи не возвращается.
+                # Действующий код сюда не доходит: он проверен выше, а
+                # join_pair зарезервирует свой слот сам — двойного счёта нет.
+                try:
+                    await service.record_join_attempt_failure(user.id)
+                except ValidationError as exc:
+                    denied_text = str(exc)
             bot: Bot | None = data.get("bot")
             chat = getattr(event, "chat", None)
             chat_id = getattr(chat, "id", None)
             if bot is not None and isinstance(chat_id, int):
                 try:
-                    await bot.send_message(chat_id, PRIVATE_BOT_DENIED_TEXT)
+                    await bot.send_message(chat_id, denied_text)
                 except TelegramAPIError as exc:
                     # Отказ — лучшая попытка: пользователь мог заблокировать бота.
                     log.info(
@@ -112,7 +132,15 @@ class PrivateBotMiddleware(BaseMiddleware):
         try:
             return await handler(event, data)
         finally:
-            await self._drop_unconfirmed(service, user.id)
+            # Ошибку самой очистки не маскируем под исходное исключение
+            # обработчика — логируем отдельно (аудит 2026-11-16, INV-ROB-02).
+            try:
+                await self._drop_unconfirmed(service, user.id)
+            except Exception:
+                log.exception(
+                    "PrivateBotMiddleware: не удалось убрать временного пользователя %s",
+                    user.id,
+                )
 
     @staticmethod
     async def _drop_unconfirmed(service: DuoPlanService, tg_id: int) -> None:

@@ -506,6 +506,17 @@ html.dialog-locked {
   isolation: isolate;
 }
 
+/* Настольная версия Mini App: класс ставит само приложение по платформе
+   Telegram (public/app.js, DESKTOP_BAR_BEGIN). Бар поднимаем без погружения
+   на треть высоты — там нет системного индикатора, который это компенсирует.
+   Мобильная геометрия выше не меняется: класс выставляется только для
+   tdesktop/macos/weba/webr/unigram (или мыши в обычном браузере).
+   Safe-area-переменные оставляем в формуле — десктопный WebView с индикатором
+   продолжает отступать от него. */
+.is-desktop-app .bottom-nav {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 20px);
+}
+
 /* Внутренняя окантовка стекла: тонкий блик сверху и едва заметная тень снизу. */
 .bottom-nav::after {
   content: "";
@@ -2725,6 +2736,15 @@ input[type="checkbox"]:active {
 }
 .contact-info-row .contact-phone { flex: 1; }
 .contacts-search { margin: 10px 0 4px; }
+
+/* Подсказка лимита номеров в диалоге контакта: показывается на месте
+   кнопки «+», когда номеров уже три. Внутри диалога — не уходит под блюр. */
+.contact-phones-limit {
+  margin: 0 0 12px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--muted);
+}
 
 /* Секс в календаре Фло — красные сердечки по числу отметок вместо точки. */
 .cal-heart {

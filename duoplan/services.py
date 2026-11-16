@@ -50,6 +50,11 @@ DAILY_XP = 10
 JOIN_ATTEMPT_LIMIT = 5
 JOIN_ATTEMPT_WINDOW = 15 * 60
 
+# Формат кода приглашения — parity с worker.js /^[A-F0-9]{8}$/i: гейт
+# приватного бота считает попыткой только корректно сформированный код,
+# битый формат слот не расходует (как INVALID_CODE в joinPair).
+JOIN_CODE_RE = re.compile(r"^[A-F0-9]{8}$")
+
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 MAX_LIMIT = 100
@@ -617,7 +622,18 @@ class DuoPlanService:
                 log.info("join_pair: не удалось уведомить владельца %s", owner_id)
         return True
 
-    async def _claim_join_attempt(self, tg_id: int) -> str:
+    async def record_join_attempt_failure(self, tg_id: int) -> None:
+        """Учесть неудачную попытку входа по коду из приватного гейта.
+
+        Parity с ``worker.claimJoinAttempt`` в webhook(): неверный, но
+        корректно сформированный код в ``/start`` от незнакомца расходует
+        слот лимита — иначе перебор шёл мимо счётчика (аудит 2026-11-16,
+        INV-SEC-01). Превышение лимита — ``ValidationError`` с текстом
+        для пользователя; слот неудачи не возвращается.
+        """
+        await self._claim_join_attempt(tg_id)
+
+    async def _claim_join_attempt(self, tg_id: int, timestamp: int | None = None) -> str:
         """Атомарно зарезервировать попытку входа и проверить лимит.
 
         Аудит 2026-11-11 (P2): отдельный SELECT счётчика и последующий
@@ -625,19 +641,34 @@ class DuoPlanService:
         значение и обойти лимит. Один UPSERT с ``RETURNING`` внутри
         ``BEGIN IMMEDIATE`` выдаёт каждому запросу уникальный номер слота ещё
         до чтения кода — parity с ``worker.claimJoinAttempt``.
+
+        Аудит 2026-11-16 (INV-SEC-03): фиксированные bucket-окна допускали
+        двойной burst на стыке. Действует скользящая оценка: счётчик
+        текущего окна плюс вклад предыдущего, тающий линейно по мере
+        «старения» — parity с worker.js.
         """
-        bucket = now() // JOIN_ATTEMPT_WINDOW
+        timestamp = now() if timestamp is None else timestamp
+        bucket = timestamp // JOIN_ATTEMPT_WINDOW
         key = f"jf:{tg_id}:{bucket}"
         async with self.db.transaction():
             rows = await self.db.query(
                 "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, 1, ?) "
                 "ON CONFLICT(bucket_key) DO UPDATE SET count = count + 1, "
                 "expires_at = excluded.expires_at RETURNING count",
-                (key, (bucket + 1) * JOIN_ATTEMPT_WINDOW),
+                # Строка живёт ещё одно окно: счётчик предыдущего bucket
+                # должен дожить до конца текущего для скользящей оценки.
+                (key, (bucket + 2) * JOIN_ATTEMPT_WINDOW),
+            )
+            prev_rows = await self.db.query(
+                "SELECT count FROM rate_limits WHERE bucket_key = ?",
+                (f"jf:{tg_id}:{bucket - 1}",),
             )
         # Нет строки от RETURNING — консервативно считаем лимит исчерпанным.
         count = int(rows[0]["count"]) if rows else JOIN_ATTEMPT_LIMIT + 1
-        if count > JOIN_ATTEMPT_LIMIT:
+        prev_count = int(prev_rows[0]["count"]) if prev_rows else 0
+        elapsed = timestamp - bucket * JOIN_ATTEMPT_WINDOW
+        weight = 1 - elapsed / JOIN_ATTEMPT_WINDOW
+        if count + prev_count * weight > JOIN_ATTEMPT_LIMIT:
             raise ValidationError(
                 "Слишком много неудачных попыток входа по коду. "
                 "Попробуйте снова через 15 минут."

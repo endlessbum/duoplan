@@ -58,3 +58,66 @@ async def test_legacy_meta_version_is_migrated_without_data_loss(tmp_path):
             assert found is not None
     finally:
         await db.close()
+
+
+def test_schema_version_covers_all_migrations():
+    """Защита от PY-DB-01: версия схемы обязана покрывать последний шаг
+    MIGRATIONS — иначе существующая база никогда не добежит до миграции."""
+    from duoplan.db.base import MIGRATIONS
+
+    assert SCHEMA_VERSION == max(MIGRATIONS), (
+        f"SCHEMA_VERSION={SCHEMA_VERSION}, но в MIGRATIONS есть шаг {max(MIGRATIONS)}"
+    )
+
+
+async def test_legacy_v12_database_gets_show_cycle_calendar(tmp_path):
+    """PY-DB-01: база user_version=12 без колонки show_cycle_calendar
+    обязана домигрировать до v13 при первом старте, данные — сохраниться."""
+    import sqlite3
+
+    path = tmp_path / "legacy-v12.db"
+    # Собираем «старую» базу: свежая схема минус колонка миграции 13,
+    # версия зафиксирована на 12 — ровно состояние базы прошлого релиза.
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '12')")
+    conn.execute(
+        "CREATE TABLE users (tg_id INTEGER PRIMARY KEY, username TEXT, "
+        "display_name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'a', "
+        "gender TEXT, pair_id INTEGER, points INTEGER NOT NULL DEFAULT 0, "
+        "streak INTEGER NOT NULL DEFAULT 0, last_activity TEXT, "
+        "best_streak INTEGER NOT NULL DEFAULT 0, "
+        "timezone TEXT NOT NULL DEFAULT 'Europe/Moscow', digest_time TEXT, "
+        "digest_enabled INTEGER NOT NULL DEFAULT 1, dates_digest_time TEXT, "
+        "dates_digest_enabled INTEGER NOT NULL DEFAULT 1, "
+        "weekly_digest_enabled INTEGER NOT NULL DEFAULT 0, weekly_digest_time TEXT, "
+        "weekly_digest_day TEXT NOT NULL DEFAULT 'sun', accent_color TEXT, "
+        "photo_url TEXT, show_avatar INTEGER NOT NULL DEFAULT 1, "
+        "partner_custom_name TEXT, custom_name TEXT, "
+        "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO users(tg_id, display_name, created_at, updated_at) "
+        "VALUES(42, 'Владелец', 1, 1)"
+    )
+    conn.execute("PRAGMA user_version = 12")
+    conn.commit()
+    conn.close()
+
+    db = await connect_database(path)
+    try:
+        row = await db.one("PRAGMA user_version")
+        assert int(row["user_version"]) == SCHEMA_VERSION == 13
+        cols = await db.query("PRAGMA table_info(users)")
+        names = {c["name"] for c in cols}
+        assert "show_cycle_calendar" in names, "миграция 13 не применилась"
+        user = await db.one("SELECT display_name FROM users WHERE tg_id = 42")
+        assert user["display_name"] == "Владелец", "данные пользователя потеряны"
+        # Повторное открытие — идемпотентно, duplicate column не роняет старт.
+        await db.close()
+        db = await connect_database(path)
+        row = await db.one("PRAGMA user_version")
+        assert int(row["user_version"]) == 13
+    finally:
+        await db.close()

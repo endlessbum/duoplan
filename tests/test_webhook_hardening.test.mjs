@@ -109,9 +109,9 @@ test("версии не опережают текущую дату и схема
   ok(compare(schemaParts, today) <= 0, `DB_SCHEMA_VERSION ${schema} в будущем`);
   ok(compare(appParts, today) <= 0, `APP_VERSION ${app} в будущем`);
   ok(compare(schemaParts, appParts) <= 0, "версия схемы новее версии приложения");
-  // Версии схемы и приложения совпадают на релизе (текущая версия — 2026.11.14.53).
-  deepStrictEqual(schema, "2026.11.14.53", "версия схемы обновлена");
-  deepStrictEqual(app, "2026.11.14.53", "версия приложения обновлена");
+  // Версии схемы и приложения совпадают на релизе (текущая версия — 2026.11.17.60).
+  deepStrictEqual(schema, "2026.11.17.60", "версия схемы обновлена");
+  deepStrictEqual(app, "2026.11.17.60", "версия приложения обновлена");
 });
 
 // Резерв кода на этапе гейта: зарезервированный код открывает приватный бот
@@ -129,7 +129,9 @@ test("гейт вебхука проверяет резерв кода (awaiting
 test("гонка приглашения снимает регистрацию проигравшего", () => {
   const webhook = source.slice(source.indexOf("async function webhook"));
   match(webhook, /const invitedNow = Boolean\(ownerIdList\.length && !isBotOwner && !knownUser\)/);
-  match(webhook, /if \(invitedNow && !joined\) await dropUnconfirmedUser\(env, user\.tg_id\)/);
+  // Аудит 2026-11-16 (INV-ROB-02): очистка в finally — сбой openApp не должен
+  // её пропускать; ошибка самой очистки гасится отдельным catch.
+  match(webhook, /finally \{[\s\S]*?if \(invitedNow && !joined\) \{[\s\S]*?await dropUnconfirmedUser\(env, user\.tg_id\)/);
 });
 
 test("dropUnconfirmedUser удаляет только запись без пары и без членства", async () => {
@@ -159,4 +161,31 @@ test("dropUnconfirmedUser удаляет только запись без пар
   match(calls[0].sql, /DELETE FROM users WHERE tg_id=\? AND pair_id IS NULL/);
   match(calls[0].sql, /NOT EXISTS\(SELECT 1 FROM pair_members WHERE tg_id=\?\)/);
   deepStrictEqual(calls[0].params, [777, 777]);
+});
+
+test("PRIVATE_BOT без OWNER_IDS — ошибка конфигурации, а не открытый бот", () => {
+  // Проверка встроена в api() и webhook() без отдельной функции: тестовые
+  // харнессы извлекают их через new Function и передают только ownerIds.
+  const api = source.slice(source.indexOf("async function api("), source.indexOf("async function webhook("));
+  const webhook = source.slice(source.indexOf("async function webhook("));
+  for (const [name, body] of [["api", api], ["webhook", webhook]]) {
+    ok(body.includes('String(env?.PRIVATE_BOT || "") === "true"'),
+      `${name}: нет fail-closed проверки`);
+    ok(body.includes("PRIVATE_BOT_MISCONFIGURED"), `${name}: нет кода ошибки`);
+  }
+  // Порядок важен: проверка до допуска пользователя.
+  ok(api.indexOf("PRIVATE_BOT_MISCONFIGURED") < api.indexOf("ensureUser(env"),
+    "api: проверка должна быть до ensureUser");
+  // WEBHOOK-01: 503 не должен фиксировать update_id в дедупликации.
+  ok(webhook.indexOf("PRIVATE_BOT_MISCONFIGURED") < webhook.indexOf("INSERT OR IGNORE INTO telegram_updates"),
+    "webhook: проверка должна быть до INSERT в telegram_updates");
+});
+
+test("OWNER_IDS вынесен из wrangler.jsonc в окружение", () => {
+  const cfg = readFileSync(join(root, "wrangler.jsonc"), "utf8");
+  ok(!/"OWNER_IDS"\s*:/.test(cfg), "ID владельца снова лежит в конфигурации репозитория");
+  match(cfg, /"PRIVATE_BOT"\s*:\s*"true"/, "нет флага приватного режима");
+  // Оба гейта используют флаг; проверка живёт рядом с ownerIds в api/webhook.
+  equal((source.match(/PRIVATE_BOT_MISCONFIGURED/g) || []).length, 2,
+    "ожидается по одной проверке в api() и webhook()");
 });

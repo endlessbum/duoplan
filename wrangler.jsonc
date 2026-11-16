@@ -10,9 +10,10 @@
   "vars": {
     "APP_ORIGIN": "https://duoplan.stacheight.workers.dev",
     "BOT_USERNAME": "duoplanbot",
-    // Гейт приватного бота: Telegram-ID владельца(ов), через запятую — для
-    // /api/* и /telegram/webhook. Пустой — бот открыт (существующее поведение).
-    "OWNER_IDS": "1218491598"
+    // Приватный режим: OWNER_IDS задаётся в Variables and Secrets (и в
+    // .dev.vars для локальной разработки) — ID владельца не хранится в репо.
+    // С этим флагом пустой OWNER_IDS = 503, а не открытый бот.
+    "PRIVATE_BOT": "true"
   },
   "assets": {
     "directory": "./public",

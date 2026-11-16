@@ -386,9 +386,9 @@ test("загружаемый сейчас тип (loading) перезагруз�
 // ------------------------------------------------------------------
 // refreshState: связка «состояние изменилось → перезагрузка архива → рендер»
 // ------------------------------------------------------------------
-function loadRefreshState({ request, revalidateArchiveCache, render, handleRequestError }) {
+function loadRefreshState({ request, revalidateArchiveCache, render, handleRequestError, partnerLoader }) {
   return new Function(
-    "request", "revalidateArchiveCache", "render", "handleRequestError", "dialog",
+    "request", "revalidateArchiveCache", "render", "handleRequestError", "dialog", "__partnerLoader",
     [
       "class HTMLInputElement {}",
       "class HTMLTextAreaElement {}",
@@ -400,6 +400,9 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       "let sessionExpired = false;",
       "let refreshInProgress = false;",
       "let appState = null;",
+      // Доступ партнёрши к календарю месячных живёт отдельно от /api/state.
+      "let floPartner = undefined;",
+      "async function loadFloPartner() { const v = await __partnerLoader(); if (v !== undefined) floPartner = v; }",
       // Капли (нижняя панель и переключатели видов): refreshState пропускает
       // тик, пока идёт жест по любой из них.
       "let liquidNav = null;",
@@ -413,9 +416,9 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       "async function preloadPairAvatars() {}",
       extractBraced("function deepEqual"),
       extractBraced("async function refreshState"),
-      "return { refreshState, setAppState: (v) => { appState = v; } };"
+      "return { refreshState, setAppState: (v) => { appState = v; }, setFloPartner: (v) => { floPartner = v; } };"
     ].join("\n")
-  )(request, revalidateArchiveCache, render, handleRequestError, { open: false });
+  )(request, revalidateArchiveCache, render, handleRequestError, { open: false }, partnerLoader || (async () => undefined));
 }
 
 test("refreshState: изменившееся состояние перезагружает архив и рендерит дважды", async () => {
@@ -448,6 +451,42 @@ test("refreshState: неизменившееся состояние — без �
   await refresh.refreshState();
   equal(revalidations, 0);
   equal(renders, 0);
+});
+
+test("refreshState: выданный доступ к месячным обновляет настройки без перезагрузки страницы", async () => {
+  let renders = 0;
+  let partnerLoads = 0;
+  const refresh = loadRefreshState({
+    // /api/state не меняется: шеринг живёт в cycle_profiles.
+    request: async () => ({ v: 1 }),
+    revalidateArchiveCache: async () => {},
+    render: () => { renders++; },
+    handleRequestError: () => {},
+    partnerLoader: async () => {
+      partnerLoads++;
+      return { shared: true, confirmed: true, periods: [], calendar_periods: [] };
+    }
+  });
+  refresh.setAppState({ v: 1, user: { gender: "male" }, pair: { user_b: 2 } });
+  refresh.setFloPartner({ shared: false });
+  await refresh.refreshState();
+  equal(partnerLoads, 1);
+  equal(renders, 2); // доступ появился: обычные два рендера (сразу и после архива)
+});
+
+test("refreshState: у владелицы partner-эндпоинт не дёргается", async () => {
+  let partnerLoads = 0;
+  const refresh = loadRefreshState({
+    request: async () => ({ v: 2 }),
+    revalidateArchiveCache: async () => {},
+    render: () => {},
+    handleRequestError: () => {},
+    partnerLoader: async () => { partnerLoads++; return undefined; }
+  });
+  refresh.setAppState({ v: 2, user: { gender: "female" }, pair: { user_b: 2 } });
+  refresh.setFloPartner({ shared: false });
+  await refresh.refreshState();
+  equal(partnerLoads, 0);
 });
 
 test("refreshState: параллельный запуск блокируется, ошибки сети глотаются молча", async () => {

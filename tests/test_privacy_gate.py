@@ -353,3 +353,88 @@ async def test_user_who_left_pair_keeps_gate_access(tmp_path) -> None:
     }) is True
     assert await service.user(8) is not None, "вышедший из пары не теряет доступ к боту"
     await db.close()
+
+
+# --------------------------------- счётчик попыток гейта (аудит 2026-11-16)
+
+async def _gate_denial(service: DuoPlanService, middleware: TestMiddleware,
+                       bot: FakeBot, code: str) -> bool:
+    """Прогнать /start <code> от незнакомца; True — событие прошло дальше."""
+    handled = False
+
+    async def handler(_event: object, _data: dict) -> bool:
+        nonlocal handled
+        handled = True
+        return True
+
+    await middleware(
+        handler,
+        _as_event(f"/start {code}"),
+        {"service": service, "bot": bot, "settings": middleware.settings,
+         "event_from_user": FakeUser(777)},
+    )
+    return handled
+
+
+async def test_gate_counts_failed_invite_codes(tmp_path) -> None:
+    """INV-SEC-01: неверные валидно сформированные коды через /start расходуют
+    лимит — после пяти отказов приходит отказ лимитера, а не обычный."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    middleware = _middleware(service, owner_ids=(99,))
+    bot = FakeBot()
+
+    texts: list[str] = []
+    for i in range(1, 7):
+        # Уникальные валидные коды: все мимо пар, формат [A-F0-9]{8}.
+        handled = await _gate_denial(service, middleware, bot, f"BBBB{i:04X}"[:8])
+        assert not handled
+        texts.append(bot.sent[-1])
+    for text in texts[:5]:
+        assert "приватный бот" in text, f"ожидался обычный отказ, получено: {text}"
+    assert "15 минут" in texts[5], f"шестая попытка обязана быть лимитером: {texts[5]}"
+    await db.close()
+
+
+async def test_gate_ignores_malformed_code_for_rate_limit(tmp_path) -> None:
+    """Битый формат кода попыткой не считается — слот не расходуется."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    middleware = _middleware(service, owner_ids=(99,))
+    bot = FakeBot()
+
+    for _ in range(3):
+        assert not await _gate_denial(service, middleware, bot, "НЕ-КОД!")
+    row = await service.db.one(
+        "SELECT count FROM rate_limits WHERE bucket_key LIKE 'jf:777:%'"
+    )
+    assert row is None, "некорректный формат не должен писать rate_limits"
+    await db.close()
+
+
+async def test_gate_rate_limit_does_not_double_count_valid_code(tmp_path) -> None:
+    """Действующий код проходит гейт и НЕ расходует слот на гейте: слот
+    резервирует join_pair внутри обработчика — двойного счёта нет."""
+    db = await connect_database(tmp_path / "gate.db")
+    service = DuoPlanService(db)
+    await service.ensure_user(7, None, "Owner")
+    code = await service.create_pair(7, "Owner")
+    middleware = _middleware(service, owner_ids=(99,))
+    bot = FakeBot()
+
+    async def joining_handler(_event: object, _data: dict) -> bool:
+        await service.ensure_user(777, "guest", "Гость")
+        # join_pair проигрывает: слот гейта не должен был тратиться,
+        # а слот join_pair — обычная неудача.
+        assert await service.join_pair(777, "Гость", "00000000") is False
+        return True
+
+    await _invited_event(service, middleware, code, joining_handler)
+    # Успешный путь: гейт пропустил валидный код, join_pair внутри не вызывался
+    # с этим кодом — rate_limits остался пустым до join_pair-попытки.
+    rows = await service.db.query(
+        "SELECT bucket_key, count FROM rate_limits WHERE bucket_key LIKE 'jf:777:%'"
+    )
+    # Только одна неудача join_pair (00000000), не две.
+    assert sum(int(r["count"]) for r in rows) == 1, rows
+    await db.close()
