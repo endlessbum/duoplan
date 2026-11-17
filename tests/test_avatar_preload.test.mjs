@@ -268,11 +268,21 @@ function extractFunction(declaration) {
 
 test("initApp прогревает аватары до первого render()", () => {
   const initApp = extractFunction("async function initApp");
-  const preload = initApp.indexOf("await preloadPairAvatars()");
+  // Аватары прогреваются внутри Promise.all вместе с Фло/здоровьем/контактами.
+  const preload = initApp.indexOf("preloadPairAvatars()");
   const render = initApp.indexOf("render();");
   ok(preload !== -1, "в initApp нет прогрева аватаров");
   ok(render !== -1, "в initApp нет render()");
   ok(preload < render, "прогрев обязан идти до показа интерфейса");
+});
+
+test("initApp тихо предзагружает здоровье и контакты до render()", () => {
+  const initApp = extractFunction("async function initApp");
+  ok(initApp.includes("loadHealth({ silent: true })"), "нет тихой предзагрузки здоровья");
+  ok(initApp.includes("loadContacts({ silent: true })"), "нет тихой предзагрузки контактов");
+  ok(initApp.includes("appState?.pair?.user_b"), "контакты грузятся только при наличии партнёра");
+  const prefetch = initApp.indexOf("loadHealth({ silent: true })");
+  ok(prefetch < initApp.indexOf("render();"), "предзагрузка обязана идти до показа интерфейса");
 });
 
 test("refreshState и сохранение настроек прогревают новое фото до перерисовки", () => {

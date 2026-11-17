@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.17.60";
+const APP_VERSION = "2026.11.17.71";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,24 @@ const APP_VERSION = "2026.11.17.60";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.17.60";
+const DB_SCHEMA_VERSION = "2026.11.17.71";
+// Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
+// (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
+// backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
+// и share_confirmed (аудит 2026-11-17, DB-MIG-01).
+const SHARE_BACKFILL_INTRODUCED = "2026.11.14.27";
+function schemaVersionParts(value) {
+  return String(value || "").split(".").map(Number);
+}
+function schemaVersionGte(a, b) {
+  const pa = schemaVersionParts(a);
+  const pb = schemaVersionParts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff) return diff > 0;
+  }
+  return true;
+}
 const DEFAULT_TZ = "Europe/Moscow";
 
 // Акцентные цвета интерфейса: ключ хранится в users.accent_color (NULL = «berry»),
@@ -780,10 +797,14 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
 // Вход по коду — главная точка перебора: успешный подбор открывает чужое
 // пространство целиком. Код — 4 байта (2^32 вариантов), общий лимит 240/мин
 // на аккаунт даёт сотни тысяч попыток в сутки, а путь /start CODE в вебхуке
-// общего лимита не имеет вовсе. Считаем только неудачные попытки («код не
-// найден»): опечатки пользователя почти не задевает, перебор упирается в
-// 5 неудач за 15 минут на аккаунт. Таблица rate_limits общая с rateLimit —
-// устаревшие окна чистятся тем же механизмом по expires_at.
+// общего лимита не имеет вовсе. Считаем неудачные попытки: любой
+// валидно сформированный код, по которому вход не состоялся по бизнес-
+// причине — CODE_NOT_FOUND, PAIR_CLOSED, OWN_CODE, PAIR_FULL, PAIR_RESERVED
+// (различие ответов не должно быть бесплатным оракулом, репорт 2026-11-10).
+// Не расходуют слот: битый формат кода (INVALID_CODE) и уже состоящий в паре
+// пользователь (ALREADY_PAIRED — проверяется до claimJoinAttempt); успешный
+// вход и гонка захвата возвращают событие через releaseJoinAttempt. Лимит —
+// 5 неудач в любом скользящем 15-минутном интервале на аккаунт.
 //
 // Аудит 2026-11-11 (P2): отдельный SELECT счётчика и последующий инкремент
 // позволяли параллельным запросам прочитать одно и то же старое значение и
@@ -792,40 +813,49 @@ async function rateLimit(env, key, limit, windowSeconds = 60) {
 // получают слоты 1..N, и только первые JOIN_ATTEMPT_LIMIT доходят до пар.
 // Успешный вход и гонка захвата слот возвращают через releaseJoinAttempt.
 //
-// Аудит 2026-11-16 (INV-SEC-03): фиксированные bucket-окна допускали
-// двойной burst на стыке — 5 неудач в конце окна и ещё 5 в начале следующего.
-// Теперь действует скользящая оценка: счётчик текущего окна плюс вклад
-// предыдущего, тающий линейно по мере «старения» (weight = 1 - elapsed/W).
-// Пять неудач вплотную к границе держат лимит закрытым и в начале нового
-// окна; по мере затухания старых попыток вход снова разрешается. Строка
-// окна живёт на bucket+2, чтобы счётчик предыдущего окна дожил до конца
-// текущего (expires_at чистится общим механизмом rate_limits).
+// Аудит 2026-11-16/17 (INV-SEC-03, RATE-01/02): фиксированные bucket-окна
+// допускали двойной burst на стыке, а weighted-приближение двух bucket'ов
+// всё равно пропускало до 7 проверок в одном фактических 15 минутах и имело
+// гонку между UPSERT и чтением предыдущего bucket. Теперь — точный
+// sliding log: каждая неудача — отдельная строка rate_limits с expires_at =
+// attempted_at + WINDOW. Вставка разрешена, только если событий пользователя
+// за последние WINDOW секунд меньше лимита — ОДНИМ атомарным
+// INSERT ... SELECT ... WHERE ... RETURNING: параллельные запросы не могут
+// прочитать устаревший счётчик, а решения принимаются на актуальных данных
+// (RATE-02 закрыт тем же оператором). Не более JOIN_ATTEMPT_LIMIT событий в
+// любом скользящем 15-минутном интервале — строго. Отклонённая лимитером
+// попытка строки не оставляет и не продлевает блокировку.
+//
+// Аудит 2026-11-17 re-audit (RATE-MIG-01): COUNT(*) заменён на SUM(count) —
+// legacy bucket-строки jf:<id>:<bucket> хранят агрегированное число попыток
+// в count, и COUNT(*) считал count=5 за одну попытку, ослабляя лимит после
+// обновления. У новых событий count=1, сумма эквивалентна их числу.
+// (RATE-PERF-01): LIKE 'jf:<id>:%' заменён индексируемым диапазоном
+// [jf:<id>:, jf:<id>;) — ':' и ';' соседние ASCII-коды, диапазон покрывает
+// все ключи пользователя и читается по первичному ключу без полного SCAN.
+// Истёкшие события вычищает DELETE rate_limits по expires_at: вероятностно
+// в rateLimit и детерминированно в cron (RATE-CLEAN-01).
 const JOIN_ATTEMPT_LIMIT = 5;
 const JOIN_ATTEMPT_WINDOW = 15 * 60;
 
 async function claimJoinAttempt(env, userId, timestamp = now()) {
-  const bucket = Math.floor(timestamp / JOIN_ATTEMPT_WINDOW);
-  const key = `jf:${userId}:${bucket}`;
-  const row = await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at) VALUES(?,1,?)
-    ON CONFLICT(bucket_key) DO UPDATE SET count=count+1, expires_at=excluded.expires_at
-    RETURNING count`).bind(key, (bucket + 2) * JOIN_ATTEMPT_WINDOW).first();
-  const prev = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket_key=?")
-    .bind(`jf:${userId}:${bucket - 1}`).first();
-  const elapsed = timestamp - bucket * JOIN_ATTEMPT_WINDOW;
-  const weight = 1 - elapsed / JOIN_ATTEMPT_WINDOW;
-  const effective = (row?.count || 0) + (prev?.count || 0) * weight;
-  if (effective > JOIN_ATTEMPT_LIMIT) {
+  const key = `jf:${userId}:${timestamp}:${hex(crypto.getRandomValues(new Uint8Array(4)))}`;
+  const row = await env.DB.prepare(`INSERT INTO rate_limits(bucket_key,count,expires_at)
+    SELECT ?,1,? WHERE (SELECT COALESCE(SUM(count),0) FROM rate_limits
+      WHERE bucket_key >= ? AND bucket_key < ? AND expires_at > ?) < ?
+    RETURNING bucket_key`)
+    .bind(key, timestamp + JOIN_ATTEMPT_WINDOW,
+      `jf:${userId}:`, `jf:${userId};`, timestamp, JOIN_ATTEMPT_LIMIT).first();
+  if (!row) {
     throw new HttpError(429, "Слишком много неудачных попыток входа по коду. Попробуйте снова через 15 минут.", "JOIN_RATE_LIMITED");
   }
   return key;
 }
 
 async function releaseJoinAttempt(env, key) {
-  // Успех/гонка — не неудачная попытка: освобождаем зарезервированный слот.
-  // DELETE убирает пустую строку, чтобы счётчик окна не рос от успешных входов.
-  await env.DB.prepare("UPDATE rate_limits SET count=count-1 WHERE bucket_key=? AND count>0")
-    .bind(key).run();
-  await env.DB.prepare("DELETE FROM rate_limits WHERE bucket_key=? AND count<=0").bind(key).run();
+  // Успех/гонка — не неудачная попытка: удаляем событие sliding log, чтобы
+  // успешные входы не расходовали лимит.
+  await env.DB.prepare("DELETE FROM rate_limits WHERE bucket_key=?").bind(key).run();
 }
 
 async function ensureUser(env, tgUser, requestedTimeZone) {
@@ -2324,32 +2354,53 @@ async function api(request, env, url, ctx = null) {
       if (conflict && !comment && !conflict.comment) {
         throw new HttpError(409, "Имя занято. Укажите наводящую информацию в комментарии или измените имя", "NAME_TAKEN");
       }
-      if (id) {
-        const changed = await env.DB.prepare("UPDATE contacts SET name=?, surname=?, comment=?, updated_at=? WHERE id=? AND pair_id=? AND owner_id=?")
-          .bind(name, surname, comment, stamp, id, pair.id, user.tg_id).run();
-        if (!changed.meta.changes) throw new HttpError(404, "Контакт не найден", "NOT_FOUND");
-        // Номера заменяются целиком: до 3 строк, порядок как в форме.
-        await env.DB.batch([
-          env.DB.prepare("DELETE FROM contact_phones WHERE contact_id=?").bind(id),
-          ...phones.map((phone, sort) => env.DB.prepare("INSERT INTO contact_phones(contact_id, phone, sort, created_at) VALUES(?,?,?,?)")
-            .bind(id, phone, sort, stamp))
-        ]);
-      } else {
-        const insert = await env.DB.prepare("INSERT INTO contacts(pair_id, owner_id, name, surname, comment, created_at, updated_at) VALUES(?,?,?,?,?,?,?)")
-          .bind(pair.id, user.tg_id, name, surname, comment, stamp, stamp).run();
-        const newId = insert.meta?.last_row_id;
-        await env.DB.batch(phones.map((phone, sort) => env.DB.prepare("INSERT INTO contact_phones(contact_id, phone, sort, created_at) VALUES(?,?,?,?)")
-          .bind(newId, phone, sort, stamp)));
-      }
+      await contactWriteRetry(async () => {
+        if (id) {
+          // Замена атомарна: UPDATE полей и DELETE/INSERT номеров — один batch
+          // (D1 исполняет его единой транзакцией). EXISTS-страховка в дочерних
+          // запросах: при чужом/несуществующем контакте номера не трогаются,
+          // а meta.changes родительского UPDATE даёт честный 404 (CONTACT-TXN-01).
+          const results = await env.DB.batch([
+            env.DB.prepare("UPDATE contacts SET name=?, surname=?, comment=?, updated_at=? WHERE id=? AND pair_id=? AND owner_id=?")
+              .bind(name, surname, comment, stamp, id, pair.id, user.tg_id),
+            // Номера заменяются целиком: до 3 строк, порядок как в форме.
+            env.DB.prepare("DELETE FROM contact_phones WHERE contact_id=? AND EXISTS(SELECT 1 FROM contacts WHERE id=? AND pair_id=? AND owner_id=?)")
+              .bind(id, id, pair.id, user.tg_id),
+            ...phones.map((phone, sort) => env.DB.prepare(
+              "INSERT INTO contact_phones(contact_id, phone, sort, created_at) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM contacts WHERE id=? AND pair_id=? AND owner_id=?)"
+            ).bind(id, phone, sort, stamp, id, pair.id, user.tg_id))
+          ]);
+          if (!results[0]?.meta?.changes) throw new HttpError(404, "Контакт не найден", "NOT_FOUND");
+        } else {
+          // Создание целиком одним batch: родитель и номера — одна
+          // транзакция D1, частичного состояния не бывает (CONTACT-TXN-02).
+          // id задаём сами — случайный в пределах 2^40; коллизия почти
+          // исключена, а при совпадении UNIQUE constraint откатит весь batch.
+          // На повторе contactWriteRetry id генерируется заново.
+          const newId = contactNewId();
+          await env.DB.batch([
+            env.DB.prepare("INSERT INTO contacts(id, pair_id, owner_id, name, surname, comment, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)")
+              .bind(newId, pair.id, user.tg_id, name, surname, comment, stamp, stamp),
+            ...phones.map((phone, sort) => env.DB.prepare("INSERT INTO contact_phones(contact_id, phone, sort, created_at) VALUES(?,?,?,?)")
+              .bind(newId, phone, sort, stamp))
+          ]);
+        }
+      });
       return json(await contactsState(env, user.tg_id));
     }
     if (request.method === "POST" && url.pathname === "/api/contacts/delete") {
       const id = Number(body.id);
       if (!Number.isInteger(id)) throw new HttpError(400, "Проверьте контакт", "INVALID_ID");
-      const changed = await env.DB.prepare("DELETE FROM contacts WHERE id=? AND pair_id=? AND owner_id=?")
-        .bind(id, pair.id, user.tg_id).run();
-      if (!changed.meta.changes) throw new HttpError(404, "Контакт не найден", "NOT_FOUND");
-      await env.DB.prepare("DELETE FROM contact_phones WHERE contact_id=?").bind(id).run();
+      // Удаление атомарно: сначала номера (под EXISTS — чужой контакт их
+      // не потеряет), затем сам контакт. Один batch — либо всё, либо
+      // ничего; ошибки «после факта» не бывает (CONTACT-TXN-01).
+      const results = await contactWriteRetry(() => env.DB.batch([
+        env.DB.prepare("DELETE FROM contact_phones WHERE contact_id=? AND EXISTS(SELECT 1 FROM contacts WHERE id=? AND pair_id=? AND owner_id=?)")
+          .bind(id, id, pair.id, user.tg_id),
+        env.DB.prepare("DELETE FROM contacts WHERE id=? AND pair_id=? AND owner_id=?")
+          .bind(id, pair.id, user.tg_id)
+      ]));
+      if (!results[1]?.meta?.changes) throw new HttpError(404, "Контакт не найден", "NOT_FOUND");
       return json(await contactsState(env, user.tg_id));
     }
     throw new HttpError(404, "Такого раздела контактов нет", "NOT_FOUND");
@@ -2380,11 +2431,18 @@ async function api(request, env, url, ctx = null) {
       if (!cycleValidDate(start)) throw new HttpError(400, "Проверьте дату начала", "INVALID_DATE");
       const end = body.end_date ? String(body.end_date) : null;
       if (end && (!cycleValidDate(end) || end < start)) throw new HttpError(400, "Проверьте дату окончания", "INVALID_DATE");
-      // Напоминание: строго HH:MM и только при включённом флаге — иначе
+      // Напоминание: список времён «ЧЧ:ММ[,ЧЧ:ММ…]» — по одному на каждый
+      // приём по схеме (до 4). Только при включённом флаге — иначе
       // «включено без времени» молча не срабатывало бы в кроне.
       const remindEnabled = body.remind_enabled === true;
       let remindTime = body.remind_time ? String(body.remind_time) : null;
-      if (remindTime && !HEALTH_TIME_RE.test(remindTime)) throw new HttpError(400, "Время напоминания — ЧЧ:ММ", "INVALID_TIME");
+      if (remindTime) {
+        const times = [...new Set(remindTime.split(",").map(t => t.trim()).filter(Boolean))];
+        if (!times.length || times.length > 4 || times.some(t => !HEALTH_TIME_RE.test(t))) {
+          throw new HttpError(400, "Время напоминания — ЧЧ:ММ", "INVALID_TIME");
+        }
+        remindTime = times.join(",");
+      }
       if (remindEnabled && !remindTime) throw new HttpError(400, "Укажите время напоминания", "INVALID_TIME");
       if (!remindEnabled) remindTime = null;
       const str = (v, max) => v ? String(v).slice(0, max) : null;
@@ -3168,6 +3226,16 @@ async function api(request, env, url, ctx = null) {
     updates.push("updated_at=?");
     values.push(now(), user.tg_id);
     await env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE tg_id=?`).bind(...values).run();
+    // Смена акцента: актуальные HTML Widgets уведомлений перекрашиваются
+    // через chat_data + chatDataChanged (код Widget неизменяем). Best-effort:
+    // сбой Telegram API не должен ломать сохранение настройки.
+    if (body?.accent_color !== undefined) {
+      try {
+        await syncWidgetAccents(env, user.tg_id, body.accent_color);
+      } catch (syncError) {
+        console.error("widget accent sync failed", syncError);
+      }
+    }
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/settings") {
@@ -3554,7 +3622,15 @@ async function telegram(env, method, payload, attempt = 0) {
     await new Promise(resolve => setTimeout(resolve, wait));
     return telegram(env, method, payload, attempt + 1);
   }
-  if (!response.ok || !result.ok) throw new Error(result.description || `Telegram API ${response.status}`);
+  if (!response.ok || !result.ok) {
+    // isTelegramApi — ответ самого Bot API (description от Telegram);
+    // сетевые ошибки fetch до сюда не доходят. По этому признаку
+    // deliverActionNotification отличает отказ sendWidget (можно слать
+    // callback-fallback) от потерянного ответа (нельзя слепо дублировать).
+    const error = new Error(result.description || `Telegram API ${response.status}`);
+    error.isTelegramApi = true;
+    throw error;
+  }
   return result.result;
 }
 
@@ -3572,6 +3648,461 @@ async function openApp(env, chatId, requestUrl, text) {
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: [[{ text: "Открыть наше пространство", web_app: { url: appUrl(env, requestUrl) } }]] }
   });
+}
+
+// ------------------------------------------------------------------
+// Кнопки действий в уведомлениях (план duoplan_notification_actions, v2).
+// direct_action — HTML Widget (Bot API 10.4): цвет кнопки — персональный
+// акцент users.accent_color, действие — widget_query с одноразовым nonce
+// из telegram_action_tokens. Fallback при отказе sendWidget — нативная
+// inline-клавиатура с HMAC-подписанным callback_data (callback_query).
+// form_action/navigation — одна контекстная web_app-кнопка с dp_*-ссылкой.
+// ------------------------------------------------------------------
+
+// Серверная палитра акцентов — зеркало ACCENT_PALETTES в public/app.js
+// (тест test_notification_actions проверяет равенство). Ключ из
+// users.accent_color проверяется по ACCENT_KEYS; в chat_data уходит только
+// ключ, HEX выбирает Widget по теме Telegram (light/dark).
+const ACCENT_HEX = {
+  berry: { light: "#b85464", dark: "#d97383" },
+  sage: { light: "#55766a", dark: "#7ba394" },
+  ocean: { light: "#4a6f8f", dark: "#7fa3c0" },
+  violet: { light: "#7a5f9e", dark: "#a48cc9" },
+  amber: { light: "#b06a2c", dark: "#d3924e" }
+};
+
+const WIDGET_TOKEN_TTL = 3 * 86400000;   // nonce живёт 3 дня
+const WIDGET_REGISTRY_TTL = 7 * 86400000; // реестр — 7 дней (акцент-синк)
+
+// Фиксированный HTML-шаблон Widget: состояние целиком в chat_data
+// ({"a":accentKey,"d":doneText|null,"acts":[[token,label],...]}), поэтому
+// смена акцента — это editMessageWidgetData + chatDataChanged, без замены
+// кода. Кнопки — единственные элементы; инпутов в Widget нет.
+function buildActionWidgetHtml() {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0;background:transparent}
+body{padding:10px 12px;font-family:inherit}
+#w{display:flex;flex-direction:column;gap:8px}
+button{width:100%;min-height:44px;border:0;border-radius:12px;background:var(--acc);color:var(--on);font:inherit;font-weight:700;cursor:pointer;padding:0 12px}
+button[disabled]{opacity:.55;cursor:default}
+#st{font-size:13px;opacity:.75;text-align:center;min-height:1em;padding-top:2px}
+</style></head><body><div id="w"></div><div id="st"></div><script>
+(function(){
+var W=window.TelegramWidget;if(!W)return;
+var A=${JSON.stringify(ACCENT_HEX)};
+function lum(h){var n=parseInt(h.slice(1),16);var r=(n>>16&255)/255,g=(n>>8&255)/255,b=(n&255)/255;
+function f(c){return c<=0.03928?c/12.92:Math.pow((c+0.055)/1.055,2.4)}
+return 0.2126*f(r)+0.7152*f(g)+0.0722*f(b)}
+function onC(h){return (1.05)/(lum(h)+0.05)>=4.5?"#ffffff":"#17212b"}
+function render(){
+var s={};try{s=JSON.parse(W.chatData||"{}")}catch(e){}
+var p=A[s.a]||A.berry;var bg=W.colorScheme==="dark"?p.dark:p.light;
+document.documentElement.style.setProperty("--acc",bg);
+document.documentElement.style.setProperty("--on",onC(bg));
+var box=document.getElementById("w");box.innerHTML="";
+(s.acts||[]).forEach(function(a){
+var b=document.createElement("button");b.type="button";b.textContent=a[1];
+if(s.d){b.disabled=true}
+b.onclick=function(){if(s.d)return;
+// TelegramWidget: один запрос за раз — блокируем все кнопки до ответа,
+// иначе второй тап отклонится NOT_ALLOWED/PENDING и покажет ложную ошибку.
+var bs=box.querySelectorAll("button");for(var i=0;i<bs.length;i++)bs[i].disabled=true;
+W.request(a[0]).then(function(r){document.getElementById("st").textContent=(r&&r.result)||"Готово";},
+function(){for(var j=0;j<bs.length;j++)bs[j].disabled=false;document.getElementById("st").textContent="Не удалось — попробуйте ещё раз";});};
+box.appendChild(b);});
+document.getElementById("st").textContent=s.d||"";
+}
+W.onEvent("chatDataChanged",render);W.onEvent("themeChanged",render);
+render();if(W.ready)W.ready();
+})();
+</script></body></html>`;
+}
+
+// Одноразовый nonce для Widget-действия. Хранит всю бизнес-привязку:
+// получатель, тип, ресурс, дату и статус — payload клиента не источник истины.
+async function createActionToken(env, spec) {
+  const token = hex(crypto.getRandomValues(new Uint8Array(16)));
+  const stamp = now();
+  await env.DB.prepare(`INSERT INTO telegram_action_tokens(token,tg_id,action_type,ref_id,action_date,status,group_id,created_at,expires_at)
+    VALUES(?,?,?,?,?,?,?,?,?)`)
+    .bind(token, spec.tgId, spec.actionType, spec.refId, spec.actionDate || null, spec.status || null,
+      spec.groupId || null, stamp, stamp + WIDGET_TOKEN_TTL).run();
+  return token;
+}
+
+// Атомарное потребление nonce: UPDATE ... WHERE consumed_at IS NULL —
+// два одновременных клика не выполнят действие дважды.
+async function consumeActionToken(env, token, tgId) {
+  const stamp = now();
+  const res = await env.DB.prepare(`UPDATE telegram_action_tokens SET consumed_at=?
+    WHERE token=? AND tg_id=? AND consumed_at IS NULL AND expires_at>?`)
+    .bind(stamp, token, tgId, stamp).run();
+  return Number(res.meta?.changes) === 1;
+}
+
+// После выбора одного статуса препарата закрываем всю группу nonce —
+// альтернативная кнопка того же сообщения тоже становится недействительной.
+async function consumeActionTokenGroup(env, groupId) {
+  if (!groupId) return;
+  await env.DB.prepare(`UPDATE telegram_action_tokens SET consumed_at=? WHERE group_id=? AND consumed_at IS NULL`)
+    .bind(now(), groupId).run();
+}
+
+// Подпись fallback callback_data: HMAC-SHA256(WEBHOOK_SECRET) от строки
+// «dp1|<code>|<params>|<tgId>», первые 12 байт hex (24 символа). Привязка к
+// tg_id получателя: скопированный payload другого пользователя не сработает.
+async function callbackSignature(env, payload) {
+  return hex(await hmac(env.WEBHOOK_SECRET, payload)).slice(0, 24);
+}
+
+// Текст Web App-кнопки для form_action/navigation + URL с dp_*-параметрами.
+// В query — только тип цели, дата и числовой id: имён, дозировок и прочих
+// персональных данных в ссылке нет.
+function actionTargetUrl(env, requestUrl, target) {
+  const url = new URL(appUrl(env, requestUrl));
+  url.searchParams.set("dp_v", "1");
+  url.searchParams.set("dp_target", target.type);
+  if (target.day) url.searchParams.set("dp_day", target.day);
+  if (Number.isInteger(target.id)) url.searchParams.set("dp_id", String(target.id));
+  return url.toString();
+}
+
+// Отправка direct_action: Widget с персональным акцентом; при отказе
+// Bot API (isTelegramApi) — нативная клавиатура с HMAC-callback без общей
+// ссылки. Сетевые ошибки и потерянный ответ НЕ запускают fallback вслепую:
+// сообщение могло уже уйти, а дедуп notification_log не даст повторить.
+async function sendActionNotification(env, member, kind, text, action, requestUrl) {
+  const user = await env.DB.prepare("SELECT accent_color FROM users WHERE tg_id=?").bind(member).first();
+  const accent = ACCENT_KEYS.includes(user?.accent_color) ? user.accent_color : "berry";
+  const stamp = now();
+  if (action.mode === "direct_action") {
+    const groupId = hex(crypto.getRandomValues(new Uint8Array(8)));
+    const specs = action.buttons.map(b => ({
+      tgId: member,
+      actionType: b.action.type,
+      refId: b.action.refId,
+      actionDate: b.action.actionDate || null,
+      status: b.action.status || null,
+      groupId
+    }));
+    const tokens = [];
+    for (const spec of specs) tokens.push(await createActionToken(env, spec));
+    const chatData = JSON.stringify({ a: accent, d: null, acts: action.buttons.map((b, i) => [tokens[i], b.text]) });
+    try {
+      const sent = await telegram(env, "sendWidget", {
+        chat_id: member,
+        html: buildActionWidgetHtml(),
+        caption: text,
+        parse_mode: "HTML",
+        show_caption_above_media: true,
+        allow_queries: true,
+        chat_data: chatData
+      });
+      // Реестр для accent-синка и сверки message_id: best-effort, сам
+      // widget_query работает и без него (nonce — источник истины).
+      try {
+        await env.DB.prepare(`INSERT INTO telegram_notification_widgets(tg_id,chat_id,message_id,kind,chat_data,created_at,expires_at)
+          VALUES(?,?,?,?,?,?,?)`)
+          .bind(member, member, sent?.message_id ?? 0, kind, chatData, stamp, stamp + WIDGET_REGISTRY_TTL).run();
+      } catch (registryError) {
+        console.error("widget registry failed", registryError);
+      }
+      return true;
+    } catch (error) {
+      if (!error?.isTelegramApi) throw error;
+      console.error("sendWidget rejected, callback fallback", error?.message);
+    }
+    // Fallback: нативная клавиатура, по кнопке на действие, без web_app.
+    const rows = [];
+    for (const b of action.buttons) {
+      rows.push([{
+        text: b.text,
+        callback_data: await callbackPayloadFor(env, member, b.action)
+      }]);
+    }
+    await telegram(env, "sendMessage", {
+      chat_id: member,
+      text,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: rows }
+    });
+    return true;
+  }
+  // form_action / navigation: ровно одна контекстная web_app-кнопка.
+  const url = actionTargetUrl(env, requestUrl, action.target);
+  await telegram(env, "sendMessage", {
+    chat_id: member,
+    text,
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [[{ text: action.buttonText, web_app: { url } }]] }
+  });
+  return true;
+}
+
+// callback_data для fallback-кнопки: короткий подписанный payload.
+// Форматы: dp1|td|<taskId>|<sig> (task done),
+//          dp1|ht|<medId>|<YYYYMMDD>|<sig> / dp1|hs|... (health taken/skipped).
+async function callbackPayloadFor(env, tgId, actionSpec) {
+  if (actionSpec.type === "task_done") {
+    const body = `dp1|td|${actionSpec.refId}`;
+    return `${body}|${await callbackSignature(env, `${body}|${tgId}`)}`;
+  }
+  if (actionSpec.type === "health_med") {
+    const code = actionSpec.status === "skipped" ? "hs" : "ht";
+    const ymd = String(actionSpec.actionDate || "").replace(/-/g, "");
+    const body = `dp1|${code}|${actionSpec.refId}|${ymd}`;
+    return `${body}|${await callbackSignature(env, `${body}|${tgId}`)}`;
+  }
+  throw new HttpError(500, "Неизвестный тип действия", "BAD_ACTION");
+}
+
+// ---- Общие бизнес-операции кнопок (Widget и callback fallback) ----
+// Обе поверхности вызывают их с уже проверенными сервером параметрами:
+// Widget — из строки nonce, callback — из подписанного payload.
+
+// «✅ Выполнено» для плана: та же семантика, что POST /api/tasks/:id/done —
+// условный UPDATE по status='open', проверки пары и приватности перед ним.
+async function executeTaskDone(env, tgId, taskId) {
+  const user = await env.DB.prepare("SELECT tg_id FROM users WHERE tg_id=?").bind(tgId).first();
+  if (!user) return "unavailable";
+  const pair = await membership(env, tgId);
+  if (!pair) return "unavailable";
+  let visible;
+  try {
+    visible = await ensureTaskVisible(env, pair, { tg_id: tgId }, taskId);
+  } catch {
+    return "unavailable"; // 404 приватности — нейтрально, без раскрытия
+  }
+  if (!visible) return "unavailable";
+  const res = await env.DB.prepare("UPDATE tasks SET status='done',completed_by=?,completed_at=? WHERE id=? AND pair_id=? AND status='open'")
+    .bind(tgId, now(), taskId, pair.id).run();
+  if (Number(res.meta?.changes) === 1) return "done";
+  const current = await env.DB.prepare("SELECT status FROM tasks WHERE id=? AND pair_id=?").bind(taskId, pair.id).first();
+  return current?.status === "done" ? "already" : "unavailable";
+}
+
+// «✅ Принят» / «⏭ Пропущен» для препарата: один итог за день, дата — из
+// nonce/payload уведомления, не текущая. Противоположная существующая
+// отметка не перезаписывается — только предложение исправить в приложении.
+async function executeHealthMedStatus(env, tgId, medId, actionDate, status) {
+  if (!["taken", "skipped"].includes(status)) return "unavailable";
+  const user = await env.DB.prepare("SELECT tg_id,timezone FROM users WHERE tg_id=?").bind(tgId).first();
+  if (!user) return "unavailable";
+  if (!cycleValidDate(actionDate)) return "unavailable";
+  const tz = validTimeZone(user.timezone) || DEFAULT_TZ;
+  if (actionDate > localDay(tz, now() * 1000)) return "unavailable"; // будущая дата
+  const med = await env.DB.prepare("SELECT id,start_date,end_date,status FROM health_meds WHERE id=? AND tg_id=?")
+    .bind(medId, tgId).first();
+  // Препарат удалён, чужой, на паузе/завершён или дата вне курса — действие
+  // устарело: паузу/завершение, поставленные после отправки, уважаем.
+  if (!med || med.status !== "active") return "unavailable";
+  if (med.start_date && actionDate < med.start_date) return "unavailable";
+  if (med.end_date && actionDate > med.end_date) return "unavailable";
+  const existing = await env.DB.prepare("SELECT status FROM health_med_logs WHERE med_id=? AND tg_id=? AND date=?")
+    .bind(medId, tgId, actionDate).first();
+  if (existing) return existing.status === status ? "already" : "conflict";
+  const stamp = now();
+  // ON CONFLICT DO NOTHING: два почти одновременных нажатия не создают
+  // вторую строку и не перезаписывают итог.
+  await env.DB.prepare(`INSERT INTO health_med_logs(med_id,tg_id,date,status,created_at,updated_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(med_id,date) DO NOTHING`)
+    .bind(medId, tgId, actionDate, status, stamp, stamp).run();
+  return "done";
+}
+
+const ACTION_RESULT_TEXT = {
+  done: {
+    task_done: "План отмечен выполненным",
+    health_med: "Принято",
+    health_med_skipped: "Отмечено как пропущенное"
+  },
+  already: {
+    task_done: "Уже выполнено",
+    health_med: "Уже отмечено"
+  },
+  conflict: { health_med: "На эту дату уже есть другая отметка — измените её в приложении" },
+  unavailable: { task_done: "Действие недоступно", health_med: "Действие недоступно" },
+  stale: { task_done: "Кнопка устарела — откройте DuoPlan через меню бота", health_med: "Кнопка устарела — откройте DuoPlan через меню бота" }
+};
+
+function actionResultText(actionType, status, detail = null) {
+  if (status === "done" && actionType === "health_med" && detail === "skipped") {
+    return ACTION_RESULT_TEXT.done.health_med_skipped;
+  }
+  return ACTION_RESULT_TEXT[status]?.[actionType] || "Действие недоступно";
+}
+
+// Разбор результата бизнес-операции в (код, текст) для Widget/callback.
+async function runActionOperation(env, tgId, actionType, refId, actionDate, status) {
+  if (actionType === "task_done") {
+    const ref = Number(refId);
+    if (!positiveId(ref)) return "unavailable";
+    return executeTaskDone(env, tgId, ref);
+  }
+  if (actionType === "health_med") {
+    const ref = Number(refId);
+    if (!positiveId(ref)) return "unavailable";
+    return executeHealthMedStatus(env, tgId, ref, actionDate, status);
+  }
+  return "unavailable";
+}
+
+// Обновление chat_data Widget после действия: кнопки блокируются,
+// показывается подтверждённый результат. Best-effort — действие уже
+// зафиксировано в D1, ошибка Telegram API только логируется.
+async function updateWidgetChatData(env, chatId, messageId, resultText, accent) {
+  try {
+    const row = await env.DB.prepare("SELECT chat_data FROM telegram_notification_widgets WHERE chat_id=? AND message_id=?")
+      .bind(chatId, messageId).first();
+    if (!row?.chat_data) return;
+    const state = JSON.parse(row.chat_data);
+    state.d = resultText;
+    if (accent) state.a = accent;
+    const chatData = JSON.stringify(state);
+    try {
+      await telegram(env, "editMessageWidgetData", { chat_id: chatId, message_id: messageId, chat_data: chatData });
+    } catch (editError) {
+      // «message is not modified» и недоступное сообщение — не страшно.
+      if (!/not modified|message to edit not found|message can't be edited/i.test(String(editError?.message || editError))) {
+        console.error("editMessageWidgetData failed", editError);
+      }
+    }
+    await env.DB.prepare("UPDATE telegram_notification_widgets SET chat_data=?, status='consumed' WHERE chat_id=? AND message_id=?")
+      .bind(chatData, chatId, messageId).run();
+  } catch (error) {
+    console.error("widget state update failed", error);
+  }
+}
+
+// Перекраска актуальных Widget-уведомлений после смены accent_color:
+// chat_data редактируется через editMessageWidgetData, открытый Widget
+// получает chatDataChanged и меняет CSS-переменную без замены HTML.
+// Обновляем только активные и не просроченные записи (до 30 штук),
+// последовательно; недоступные сообщения помечаем stale.
+async function syncWidgetAccents(env, tgId, accentKey) {
+  const key = ACCENT_KEYS.includes(accentKey) ? accentKey : "berry";
+  const rows = (await env.DB.prepare(`SELECT chat_id,message_id,chat_data FROM telegram_notification_widgets
+    WHERE tg_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 30`)
+    .bind(tgId, now()).all()).results || [];
+  for (const row of rows) {
+    try {
+      const state = JSON.parse(row.chat_data || "{}");
+      state.a = key;
+      const chatData = JSON.stringify(state);
+      await telegram(env, "editMessageWidgetData", { chat_id: row.chat_id, message_id: row.message_id, chat_data: chatData });
+      await env.DB.prepare("UPDATE telegram_notification_widgets SET chat_data=? WHERE chat_id=? AND message_id=?")
+        .bind(chatData, row.chat_id, row.message_id).run();
+    } catch (error) {
+      console.error("widget accent update failed", row.message_id, error?.message || error);
+      if (/message to edit not found|message can't be edited|chat not found/i.test(String(error?.message || error))) {
+        await env.DB.prepare("UPDATE telegram_notification_widgets SET status='stale' WHERE chat_id=? AND message_id=?")
+          .bind(row.chat_id, row.message_id).run();
+      }
+    }
+  }
+}
+
+// Основной обработчик widget_query (Bot API 10.4): Telegram подтверждает
+// from.id, data — недоверенный lookup key одноразового nonce.
+async function handleNotificationWidgetQuery(env, q) {
+  const answer = (data) => telegram(env, "answerWidgetQuery", { widget_query_id: q.id, data: String(data || "").slice(0, 1000) })
+    .catch(error => console.error("answerWidgetQuery failed", error));
+  try {
+    const tgId = positiveId(q?.from?.id) ? Number(q.from.id) : null;
+    const chatId = positiveId(q?.chat?.id) ? Number(q.chat.id) : null;
+    const data = typeof q?.data === "string" ? q.data : "";
+    if (!tgId || !chatId || q?.chat?.type !== "private" || chatId !== tgId || !q?.message_id || !data || data.length > 64) {
+      await answer("Недоступно");
+      return;
+    }
+    const token = await env.DB.prepare("SELECT * FROM telegram_action_tokens WHERE token=?").bind(data).first();
+    // Одноразовость и TTL — атомарным UPDATE: параллельный второй клик
+    // получит changes=0 и не выполнит действие повторно.
+    const fresh = token && await consumeActionToken(env, data, tgId);
+    if (!fresh) {
+      await answer("Кнопка устарела или недоступна");
+      return;
+    }
+    let status;
+    try {
+      status = await runActionOperation(env, tgId, token.action_type, token.ref_id, token.action_date, token.status);
+    } catch (opError) {
+      // Операция не выполнилась (транзиентный сбой D1 и т.п.) — возвращаем
+      // nonce, иначе кнопка была бы мертва до TTL при живом действии.
+      try {
+        await env.DB.prepare("UPDATE telegram_action_tokens SET consumed_at=NULL WHERE token=? AND tg_id=?")
+          .bind(data, tgId).run();
+      } catch (restoreError) {
+        console.error("action token restore failed", restoreError);
+      }
+      throw opError;
+    }
+    if (status === "done" || status === "already" || status === "conflict") {
+      await consumeActionTokenGroup(env, token.group_id);
+    }
+    const text = actionResultText(token.action_type, status, token.status);
+    await answer(text);
+    // Подтверждённое состояние — в chat_data: Widget перерисует кнопки
+    // disabled по chatDataChanged. Не ждём его: ответ уже ушёл.
+    await updateWidgetChatData(env, chatId, q.message_id, text, null);
+  } catch (error) {
+    console.error("widget_query failed", error);
+    try { await answer("Не удалось сохранить. Попробуйте ещё раз"); } catch {}
+  }
+}
+
+// Fallback-обработчик callback_query (только когда sendWidget отклонён
+// Bot API): HMAC-подписанный payload, те же бизнес-операции.
+async function handleNotificationCallback(env, cb) {
+  const cbId = cb?.id;
+  const answer = (text) => telegram(env, "answerCallbackQuery", { callback_query_id: cbId, text: String(text || "").slice(0, 200) })
+    .catch(error => console.error("answerCallbackQuery failed", error));
+  try {
+    const tgId = positiveId(cb?.from?.id) ? Number(cb.from.id) : null;
+    const chat = cb?.message?.chat;
+    const msgFrom = cb?.message?.from;
+    const data = typeof cb?.data === "string" ? cb.data : "";
+    const staleText = "Кнопка устарела — откройте DuoPlan через меню бота";
+    if (!cbId || !tgId || chat?.type !== "private" || Number(chat.id) !== tgId
+        || (msgFrom && msgFrom.is_bot !== true) || !env.WEBHOOK_SECRET || !data || data.length > 64) {
+      await answer("Действие недоступно");
+      return;
+    }
+    const parts = data.split("|");
+    // dp1|<code>|<params...>|<sig24>
+    let actionType = null, refId = null, actionDate = null, status = null, signed = "";
+    if (parts.length === 4 && parts[0] === "dp1" && parts[1] === "td") {
+      actionType = "task_done"; refId = Number(parts[2]); signed = `dp1|td|${parts[2]}|${tgId}`;
+    } else if (parts.length === 5 && parts[0] === "dp1" && ["ht", "hs"].includes(parts[1])) {
+      actionType = "health_med"; refId = Number(parts[2]); actionDate = `${parts[3].slice(0, 4)}-${parts[3].slice(4, 6)}-${parts[3].slice(6, 8)}`;
+      status = parts[1] === "hs" ? "skipped" : "taken";
+      signed = `dp1|${parts[1]}|${parts[2]}|${parts[3]}|${tgId}`;
+    } else {
+      await answer(staleText);
+      return;
+    }
+    const expected = await callbackSignature(env, signed);
+    const given = parts[parts.length - 1];
+    if (!positiveId(refId) || !safeEqual(expected, given)) {
+      await answer(staleText);
+      return;
+    }
+    const result = await runActionOperation(env, tgId, actionType, refId, actionDate, status);
+    const text = actionResultText(actionType, result, status);
+    await answer(text);
+    // Убираем отработавшую клавиатуру: использованная кнопка не должна
+    // выглядеть активной. Сбой правки не отменяет сохранённое действие.
+    try {
+      await telegram(env, "editMessageReplyMarkup", {
+        chat_id: chat.id, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] }
+      });
+    } catch (editError) {
+      console.error("editMessageReplyMarkup failed", editError);
+    }
+  } catch (error) {
+    console.error("callback_query failed", error);
+    try { await answer("Не удалось сохранить. Попробуйте ещё раз"); } catch {}
+  }
 }
 
 async function webhook(request, env, url) {
@@ -3602,6 +4133,26 @@ async function webhook(request, env, url) {
       .bind(updateId, now()).run();
     if (!seen.meta.changes) return json({ ok: true });
     recorded = true;
+  }
+  // widget_query / callback_query — кнопки действий уведомлений. Обработчики
+  // сами отвечают Telegram (answerWidgetQuery/answerCallbackQuery) на всех
+  // ветках; сбой снимает дедуп-отметку, чтобы Telegram мог повторить апдейт.
+  if (update?.widget_query || update?.callback_query) {
+    try {
+      if (update.widget_query) await handleNotificationWidgetQuery(env, update.widget_query);
+      else await handleNotificationCallback(env, update.callback_query);
+    } catch (error) {
+      console.error("action query failed", error);
+      if (recorded && updateId) {
+        try {
+          await env.DB.prepare("DELETE FROM telegram_updates WHERE update_id=?").bind(updateId).run();
+        } catch (cleanupError) {
+          console.error("webhook dedup cleanup failed", cleanupError);
+        }
+      }
+      return json({ ok: false, error: "delivery_failed" }, 500);
+    }
+    return json({ ok: true });
   }
   // Тело апдейта может быть любым JSON: "null" парсится успешно и даёт
   // update === null, поэтому обращение к update.message падало бы TypeError
@@ -4573,7 +5124,12 @@ async function telegramForm(env, method, form, attempt = 0) {
   return result.result;
 }
 
-async function deliverNotification(env, member, day, kind, text) {
+// deliverNotification: kind/text как раньше + опциональный action —
+// {mode:"direct_action",buttons:[{text,action:{type,refId,actionDate?,status?}}]}
+// | {mode:"form_action"|"navigation", buttonText, target:{type,day?,id?}}.
+// Без action — прежнее поведение (общая кнопка «Открыть наше пространство»),
+// её сохраняют /start, /help и служебные ответы.
+async function deliverNotification(env, member, day, kind, text, action = null, requestUrl = null) {
   // Журнал — и дедуп, и защита от повторов при транзиентных сбоях крона.
   const marked = await env.DB.prepare("INSERT OR IGNORE INTO notification_log(tg_id,day,kind,sent_at) VALUES(?,?,?,?)")
     .bind(member, day, kind, now()).run();
@@ -4583,7 +5139,12 @@ async function deliverNotification(env, member, day, kind, text) {
   }
   try {
     // requestUrl в кроне нет: appUrl использует env.APP_ORIGIN из vars.
-    await openApp(env, member, { origin: "" }, text);
+    const urlCtx = requestUrl || { origin: "" };
+    if (action) {
+      await sendActionNotification(env, member, kind, text, action, urlCtx);
+    } else {
+      await openApp(env, member, urlCtx, text);
+    }
     console.log(`[metric] notification_sent member=${member} kind=${kind} day=${day}`);
     return true;
   } catch (error) {
@@ -4655,7 +5216,12 @@ async function processPairNotifications(env, pair, stamp, budget) {
       if (Number(reminder.task.is_private) === 1 && Number(reminder.task.created_by) !== Number(member)) continue;
       budget.left -= 2;
       const title = Number(reminder.task.is_private) === 1 ? RICH_MASKED : richToHtml(reminder.task.title);
-      await deliverNotification(env, member, today, reminder.kind, `${reminder.lead}: ${title} (${reminder.task.time})`);
+      // direct_action: Widget с «✅ Выполнено»; fallback — подписанный
+      // callback. Действие то же, что POST /api/tasks/:id/done.
+      await deliverNotification(env, member, today, reminder.kind, `${reminder.lead}: ${title} (${reminder.task.time})`, {
+        mode: "direct_action",
+        buttons: [{ text: "✅ Выполнено", action: { type: "task_done", refId: Number(reminder.task.id) } }]
+      });
     }
   }
 
@@ -4802,8 +5368,11 @@ async function sendCycleReminders(env) {
           const yesterday = cycleDateStr(cycleDayNum(state.today) - 1);
           const hasLog = state.logs.some(l => l.date === yesterday);
           if (!hasLog) {
+            // navigation: запись дневника — форма в Mini App, поэтому
+            // одна web_app-кнопка с dp_*-ссылкой на нужную дату.
             await deliverNotification(env, owner.tg_id, state.today, "cycle_diary",
-              "Вчерашний день не записан в дневнике Фло — если хочешь, отметь его.");
+              "Вчерашний день не записан в дневнике Фло — если хочешь, отметь его.",
+              { mode: "navigation", buttonText: "📝 Записать день", target: { type: "cycle_diary", day: yesterday } });
           }
         }
       }
@@ -6212,15 +6781,22 @@ function healthReminderKinds(meds, today, nowHM) {
   const out = [];
   for (const m of meds || []) {
     if (m.status !== "active") continue;
-    if (m.remind_enabled !== true || !HEALTH_TIME_RE.test(String(m.remind_time || ""))) continue;
+    if (m.remind_enabled !== true) continue;
     if (m.start_date && m.start_date > today) continue;
     if (m.end_date && m.end_date < today) continue;
-    if (String(m.remind_time) > nowHM) continue;
+    // remind_time — список времён по числу приёмов схемы; каждое время —
+    // отдельное напоминание со своим dedup-ключом (слот ЧЧММ в kind).
+    const times = String(m.remind_time || "").split(",").map(t => t.trim()).filter(t => HEALTH_TIME_RE.test(t));
+    if (!times.length) continue;
     const meta = [m.dosage, m.schedule].filter(Boolean).join(" · ");
-    out.push({
-      kind: `health_med_${m.id}`,
-      text: `Напоминание о приёме: ${m.name}${meta ? ` (${meta})` : ""}. Отметьте приём в «Дневник → Здоровье».`
-    });
+    for (const t of times) {
+      if (t > nowHM) continue;
+      out.push({
+        kind: `health_med_${m.id}_${t.replace(":", "")}`,
+        medId: m.id,
+        text: `Напоминание о приёме (${t}): ${m.name}${meta ? ` (${meta})` : ""}. Отметьте приём в «Дневник → Здоровье».`
+      });
+    }
   }
   return out;
 }
@@ -6247,8 +6823,17 @@ async function sendHealthReminders(env) {
       const nowHM = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
       // D1 отдаёт BOOLEAN как 0/1: healthReminderKinds ждёт строго true.
       const normalized = userMeds.map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 }));
-      for (const { kind, text } of healthReminderKinds(normalized, today, nowHM)) {
-        await deliverNotification(env, tgId, today, kind, text);
+      for (const { kind, text, medId } of healthReminderKinds(normalized, today, nowHM)) {
+        // direct_action: «✅ Принят»/«⏭ Пропущен» отмечают именно дату
+        // напоминания (today в поясе пользователя); nonce одноразовый,
+        // обе кнопки делят group_id — после первого выбора вторая гаснет.
+        await deliverNotification(env, tgId, today, kind, text, {
+          mode: "direct_action",
+          buttons: [
+            { text: "✅ Принят", action: { type: "health_med", refId: Number(medId), actionDate: today, status: "taken" } },
+            { text: "⏭ Пропущен", action: { type: "health_med", refId: Number(medId), actionDate: today, status: "skipped" } }
+          ]
+        });
       }
     } catch (error) {
       console.error("health reminder failed", tgId, error);
@@ -6257,6 +6842,29 @@ async function sendHealthReminders(env) {
 }
 
 // ---- Контакты («Дневник → Контакты»): телефонная книга пары ----
+
+// Транзиентные сбои D1 (обрыв соединения, «internal error» на стороне
+// Cloudflare) роняли сохранение контакта общим 500 — при повторном тапе
+// обычно проходило. Одна повторная попытка при не-HTTP ошибке: все ветки
+// записи контакта атомарны (batch) или компенсируются, поэтому повтор
+// не создаёт дублей и не оставляет частичных данных.
+// Свой id для атомарной вставки контакта с номерами одним batch
+// (CONTACT-TXN-02): last_insert_rowid между операторами batch не используем —
+// на D1 его поведение внутри транзакции не гарантировано. Случайный id в
+// пределах 2^40: пространство ~1 трлн, коллизия практически исключена;
+// UNIQUE constraint при совпадении откатывает весь batch — сироты нет.
+function contactNewId() {
+  return 1 + Math.floor(Math.random() * 0x10000000000);
+}
+
+async function contactWriteRetry(fn) {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    return fn();
+  }
+}
 
 // Номер приводится к единому виду «+7 ХХХ ХХХ ХХ ХХ»: принимаем 10 цифр;
 // 11 цифр с ведущей 7/8 (легаси-ввод «8 915 …», «+7915…») сворачиваем до 10.
@@ -6304,8 +6912,12 @@ async function contactsState(env, tgId) {
 }
 
 async function ensureSchema(env) {
+  // Версия, записанная до этой инициализации: нужна, чтобы не повторять
+  // одноразовый бэкфилл категорий шеринга на базах, где он уже применялся.
+  let previousSchemaVersion = null;
   try {
     const meta = await env.DB.prepare("SELECT value FROM app_meta WHERE key='schema_version'").first();
+    previousSchemaVersion = meta?.value ? String(meta.value) : null;
     if (meta?.value === DB_SCHEMA_VERSION) {
       try {
         await env.DB.batch([
@@ -6383,6 +6995,13 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_contacts_pair_owner ON contacts(pair_id,owner_id)`,
     `CREATE TABLE IF NOT EXISTS contact_phones (id INTEGER PRIMARY KEY AUTOINCREMENT,contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,phone TEXT NOT NULL,sort INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS idx_contact_phones_contact ON contact_phones(contact_id,sort)`,
+    // Кнопки действий в уведомлениях (паритет с migrations/0046): одноразовые
+    // nonce для HTML Widget и реестр сообщений для обновления chat_data.
+    `CREATE TABLE IF NOT EXISTS telegram_action_tokens (token TEXT PRIMARY KEY,tg_id INTEGER NOT NULL,action_type TEXT NOT NULL,ref_id INTEGER NOT NULL,action_date TEXT,status TEXT,group_id TEXT,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed_at INTEGER)`,
+    `CREATE INDEX IF NOT EXISTS idx_tg_action_tokens_tg ON telegram_action_tokens(tg_id,expires_at)`,
+    `CREATE TABLE IF NOT EXISTS telegram_notification_widgets (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,kind TEXT NOT NULL,chat_data TEXT,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'active')`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_widgets_msg ON telegram_notification_widgets(chat_id,message_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_tg_widgets_tg ON telegram_notification_widgets(tg_id,status,expires_at)`,
     `CREATE INDEX IF NOT EXISTS idx_goal_items_goal ON goal_items(goal_id,done)`,
     `CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id,watched)`,
     `CREATE INDEX IF NOT EXISTS idx_savings_pair ON savings(pair_id,kind)`,
@@ -6475,7 +7094,7 @@ async function ensureSchema(env) {
       }
     }
   }
-  await env.DB.batch([
+  const tailStatements = [
     env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
       SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_a)`),
     env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
@@ -6485,14 +7104,37 @@ async function ensureSchema(env) {
     env.DB.prepare(`INSERT OR IGNORE INTO member_stats(pair_id,tg_id,points,streak,best_streak,last_activity,updated_at)
       SELECT p.id,p.last_partner,u.points,u.streak,u.best_streak,u.last_activity,?
       FROM pairs p JOIN users u ON u.tg_id=p.last_partner
-      WHERE p.awaiting_return=1 AND p.last_partner!=0`).bind(now()),
-    // Бэкфилл категорий шеринга из легаси-уровня (переработка P0): уровни
-    // periods/symptoms/full раньше передавали секс/настроение/сон/БТ вместе с
-    // календарём — переносим это в категории, но share_confirmed=0: состав
-    // деактивируется до подтверждения женщиной (никакого молча расширения).
-    env.DB.prepare(`UPDATE cycle_profiles SET share_sex=1, share_mood=1, share_sleep=1, share_bbt=1, share_confirmed=0
-      WHERE share_enabled=1 AND share_level IN ('periods','symptoms','full')`)
-  ]);
+      WHERE p.awaiting_return=1 AND p.last_partner!=0`).bind(now())
+  ];
+  // Бэкфилл категорий шеринга из легаси-уровня (переработка P0, миграция
+  // 0042): уровни periods/symptoms/full раньше передавали секс/настроение/
+  // сон/БТ вместе с календарём — переносим в категории, share_confirmed=0:
+  // состав деактивируется до подтверждения женщиной (никакого молча
+  // расширения). Аудит 2026-11-17 (DB-MIG-01): backfill ОДНОРАЗОВЫЙ — маркер
+  // в app_meta, а не версия схемы: иначе каждый bump DB_SCHEMA_VERSION заново
+  // включал все категории и сбрасывал share_confirmed, затирая выбор
+  // пользователя. Маркер и UPDATE пишутся одним batch — атомарно. Базы,
+  // уже прошедшие версию введения backfill, UPDATE не получают — только
+  // маркер (они прогоняли его на каждом релизе и могли успеть настроить
+  // категории вручную).
+  let shareBackfillPending = true;
+  try {
+    const marker = await env.DB.prepare("SELECT value FROM app_meta WHERE key='cycle_share_categories_backfill_v1'").first();
+    shareBackfillPending = marker?.value !== "1";
+  } catch {
+    // app_meta может отсутствовать на битой инициализации — тогда backfill
+    // уместен: таблицы только что созданы пустыми, UPDATE безвреден.
+  }
+  if (shareBackfillPending) {
+    const alreadyRan = previousSchemaVersion && schemaVersionGte(previousSchemaVersion, SHARE_BACKFILL_INTRODUCED);
+    if (!alreadyRan) {
+      tailStatements.push(env.DB.prepare(`UPDATE cycle_profiles SET share_sex=1, share_mood=1, share_sleep=1, share_bbt=1, share_confirmed=0
+        WHERE share_enabled=1 AND share_level IN ('periods','symptoms','full')`));
+    }
+    tailStatements.push(env.DB.prepare(`INSERT INTO app_meta(key,value) VALUES('cycle_share_categories_backfill_v1','1')
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value`));
+  }
+  await env.DB.batch(tailStatements);
   await env.DB.prepare(
     "INSERT INTO app_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
   ).bind(DB_SCHEMA_VERSION).run();
@@ -6527,7 +7169,7 @@ async function setup(request, env, url) {
     await telegram(env, "setWebhook", {
       url: `${base}/telegram/webhook`,
       secret_token: env.WEBHOOK_SECRET,
-      allowed_updates: ["message"],
+      allowed_updates: ["message", "widget_query", "callback_query"],
       drop_pending_updates: false
     });
     const [, , me] = await Promise.all([
@@ -6600,7 +7242,27 @@ export default {
   // Cron (wrangler.jsonc → triggers.crons): сводки, напоминания о планах,
   // напоминания Фло и напоминания о приёме препаратов («Дневник → Здоровье»).
   async scheduled(event, env) {
-    await sendDigests(env);
+    // Каждая cron-задача изолирована: сбой одной не должна пропускать
+    // остальные (CRON-01 — sendDigests без try/catch обрывал весь тик).
+    try {
+      await sendDigests(env);
+    } catch (error) {
+      console.error("digests failed", error);
+    }
+    try {
+      // RATE-CLEAN-01 (аудит 2026-11-17): события jf: sliding log чистим
+      // детерминированно в cron — путь /start CODE идёт через webhook и не
+      // обязан проходить rateLimit, поэтому вероятностной чистки могло не
+      // быть вовсе, и просроченные строки копились в D1.
+      await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at <= ?").bind(now()).run();
+      // TTL для кнопок действий: просроченные nonce и закрытые записи
+      // реестра Widget. notification_log не трогаем — его семантика
+      // дедупа отдельная и бессрочная.
+      await env.DB.prepare("DELETE FROM telegram_action_tokens WHERE expires_at <= ?").bind(now()).run();
+      await env.DB.prepare("DELETE FROM telegram_notification_widgets WHERE expires_at <= ?").bind(now()).run();
+    } catch (error) {
+      console.error("rate_limits cleanup failed", error);
+    }
     try {
       await sendCycleReminders(env);
     } catch (error) {

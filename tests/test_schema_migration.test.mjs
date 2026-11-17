@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, rejects } from "node:assert/strict";
+import { deepStrictEqual, ok, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,19 +33,25 @@ function extractFunction(name) {
 }
 
 const schemaVersion = source.match(/const DB_SCHEMA_VERSION = "[^"]+";/)?.[0];
+const backfillIntro = source.match(/const SHARE_BACKFILL_INTRODUCED = "[^"]+";/)?.[0];
 const nowDecl = source.match(/const now = \(\) => [^;]+;/)?.[0];
 const weakMap = "const schemaReady = new WeakMap();";
 if (!schemaVersion) throw new Error("DB_SCHEMA_VERSION не найдена");
+if (!backfillIntro) throw new Error("SHARE_BACKFILL_INTRODUCED не найдена");
 if (!nowDecl) throw new Error("now() не найдена");
 const load = new Function(
-  `${schemaVersion}\n${nowDecl}\n${weakMap}\n${extractFunction("ensureSchema")}\n${extractFunction("ensureSchemaOnce")}\n` +
-  "return { ensureSchemaOnce, DB_SCHEMA_VERSION };"
+  `${schemaVersion}\n${backfillIntro}\n${nowDecl}\n${weakMap}\n` +
+  `${extractFunction("schemaVersionParts")}\n${extractFunction("schemaVersionGte")}\n` +
+  `${extractFunction("ensureSchema")}\n${extractFunction("ensureSchemaOnce")}\n` +
+  "return { ensureSchemaOnce, DB_SCHEMA_VERSION, SHARE_BACKFILL_INTRODUCED };"
 );
-const { ensureSchemaOnce, DB_SCHEMA_VERSION } = load();
+const { ensureSchemaOnce, DB_SCHEMA_VERSION, SHARE_BACKFILL_INTRODUCED } = load();
 
 // Мок D1: SELECT app_meta всегда "таблицы нет" (полная инициализация),
 // ALTER racing-колонок имитирует выигравший конкурентный isolate.
-function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = {}) {
+// Опция appMeta — Map ключ→значение: чтения app_meta обслуживаются из неё
+// (нужна тестам одноразового бэкфилла DB-MIG-01).
+function makeMockDb({ racingColumns = new Set(), failingColumns = new Set(), appMeta = null } = {}) {
   const tables = {
     pairs: new Set(["id", "code", "name1", "name2", "user_a", "user_b", "started_at", "together_pts", "created_at", "updated_at"]),
     users: new Set(["tg_id", "display_name", "role", "pair_id", "points", "streak", "last_activity", "best_streak", "created_at", "updated_at"]),
@@ -62,16 +68,21 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = 
     rate_limits: new Set(["bucket_key", "count"])
   };
   const failedOnce = new Set();
-  const log = { alters: [], versionWrite: null };
+  const log = { alters: [], versionWrite: null, batches: [] };
   const db = {
     prepare(sql) {
       return {
         sql,
         bind(value) {
           log.versionWrite = value;
-          return { run: async () => ({}) };
+          return { run: async () => ({}), sql };
         },
         async first() {
+          if (appMeta) {
+            const key = sql.match(/app_meta WHERE key='([^']+)'/)?.[1];
+            if (key) return appMeta.has(key) ? { value: appMeta.get(key) } : null;
+            return null;
+          }
           throw new Error("no such table: app_meta");
         },
         async all() {
@@ -96,6 +107,7 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set() } = 
       };
     },
     async batch(statements) {
+      log.batches.push(statements.map((statement) => statement.sql));
       return statements.map(() => ({ meta: { changes: 0 } }));
     }
   };
@@ -156,4 +168,55 @@ test("после неудачной миграции следующий вызо
   // Тот же env.DB: схема не запомнена как готовая, миграция выполняется заново.
   await ensureSchemaOnce({ DB: db });
   deepStrictEqual(log.versionWrite, DB_SCHEMA_VERSION);
+});
+
+// Аудит 2026-11-17 (DB-MIG-01): бэкфилл категорий шеринга выполнялся при
+// КАЖДОМ изменении DB_SCHEMA_VERSION — UPDATE заново включал все категории и
+// сбрасывал share_confirmed, затирая выбор пользователя. Теперь backfill
+// одноразовый: маркер cycle_share_categories_backfill_v1 в app_meta.
+const BACKFILL_UPDATE = /UPDATE cycle_profiles SET share_sex=1, share_mood=1, share_sleep=1, share_bbt=1, share_confirmed=0/;
+const MARKER_INSERT = /INSERT INTO app_meta\(key,value\) VALUES\('cycle_share_categories_backfill_v1','1'\)/;
+const allBatchSql = (log) => log.batches.flat();
+
+test("DB-MIG-01: бэкфилл выполняется один раз и помечается в app_meta", async () => {
+  const appMeta = new Map(); // «пустая» база: app_meta есть, ключей нет
+  const { db, log } = makeMockDb({ appMeta });
+  await ensureSchemaOnce({ DB: db });
+  const sqls = allBatchSql(log);
+  ok(sqls.some((sql) => BACKFILL_UPDATE.test(sql)), "первый прогон: UPDATE категорий в batch");
+  ok(sqls.some((sql) => MARKER_INSERT.test(sql)), "первый прогон: маркер backfill записан");
+});
+
+test("DB-MIG-01: повторный запуск ensureSchema не повторяет бэкфилл", async () => {
+  // База уже на текущей версии и с маркером — ранний выход вообще без batch.
+  const appMeta = new Map([
+    ["schema_version", DB_SCHEMA_VERSION],
+    ["cycle_share_categories_backfill_v1", "1"]
+  ]);
+  const { db, log } = makeMockDb({ appMeta });
+  await ensureSchemaOnce({ DB: db });
+  const sqls = allBatchSql(log);
+  ok(!sqls.some((sql) => BACKFILL_UPDATE.test(sql)), "backfill не повторяется на актуальной схеме");
+});
+
+test("DB-MIG-01: база, уже прогонявшая backfill до маркера, UPDATE не получает", async () => {
+  // Версия схемы ≥ введения backfill (миграция 0042), но маркера ещё нет:
+  // старый код выполнял UPDATE на каждом релизе — пользователь мог успеть
+  // настроить категории вручную. Пропускаем UPDATE, ставим только маркер.
+  const appMeta = new Map([["schema_version", SHARE_BACKFILL_INTRODUCED]]);
+  const { db, log } = makeMockDb({ appMeta });
+  await ensureSchemaOnce({ DB: db });
+  const sqls = allBatchSql(log);
+  ok(!sqls.some((sql) => BACKFILL_UPDATE.test(sql)),
+    "UPDATE пропущен: база уже применяла backfill раньше");
+  ok(sqls.some((sql) => MARKER_INSERT.test(sql)), "маркер записан, чтобы не проверять снова");
+});
+
+test("DB-MIG-01: база старше введения backfill получает UPDATE и маркер", async () => {
+  const appMeta = new Map([["schema_version", "2026.01.01.1"]]);
+  const { db, log } = makeMockDb({ appMeta });
+  await ensureSchemaOnce({ DB: db });
+  const sqls = allBatchSql(log);
+  ok(sqls.some((sql) => BACKFILL_UPDATE.test(sql)), "легаси-база: UPDATE категорий применён");
+  ok(sqls.some((sql) => MARKER_INSERT.test(sql)), "легаси-база: маркер записан");
 });

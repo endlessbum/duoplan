@@ -16,9 +16,20 @@ const schemaVersion = worker.match(/const DB_SCHEMA_VERSION = "([^"]+)";/)?.[1];
 test("версия в README совпадает с APP_VERSION и DB_SCHEMA_VERSION", () => {
   ok(appVersion && schemaVersion, "версии в worker.js не найдены");
   equal(appVersion, schemaVersion, "на релизе версии должны совпадать");
-  const versions = readme.match(/20\d{2}\.\d{2}\.\d{2}\.\d+/g) || [];
-  ok(versions.length > 0, "в README нет версии");
-  for (const v of versions) equal(v, appVersion, `README содержит устаревшую версию ${v}`);
+  // TEST-README-01: сравниваем ТОЛЬКО поле текущей версии. Исторические
+  // даты версий (например, граница SHARE_BACKFILL_INTRODUCED) — не текущая
+  // версия релиза и не должны ломать тест.
+  const current = readme.match(/Текущая версия — `([^`]+)`/)?.[1];
+  ok(current, "в README нет поля «Текущая версия»");
+  equal(current, appVersion, `README: текущая версия ${current} ≠ APP_VERSION ${appVersion}`);
+});
+
+test("граница backfill в README совпадает с SHARE_BACKFILL_INTRODUCED", () => {
+  // Историческая контрольная версия одноразового backfill категорий —
+  // полезна в документации, но должна совпадать с константой в worker.js.
+  const cutoff = worker.match(/const SHARE_BACKFILL_INTRODUCED = "([^"]+)";/)?.[1];
+  ok(cutoff, "SHARE_BACKFILL_INTRODUCED в worker.js не найдена");
+  ok(readme.includes(cutoff), `README не упоминает границу backfill ${cutoff}`);
 });
 
 test("список миграций в README совпадает с файлами migrations/*.sql", () => {

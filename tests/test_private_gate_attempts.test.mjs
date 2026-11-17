@@ -52,6 +52,7 @@ const factory = new Function(
     extractLine("const now = "),
     extractLine("const clean = "),
     extractLine("const START_PAYLOAD_RE = "),
+    extractBraced("function hex"),
     limitDecl,
     windowDecl,
     extractBraced("async function claimJoinAttempt"),
@@ -61,7 +62,21 @@ const factory = new Function(
   ].join("\n")
 );
 
-// Мок D1: дедупликация, users (knownUser), pairs (openPair), rate_limits.
+// Мок D1: дедупликация, users (knownUser), pairs (openPair), rate_limits
+// как sliding log событий (Map ключ → {e: expires_at, c: count}).
+// Атомарный INSERT ... SELECT ... WHERE ... RETURNING воспроизводим честно —
+// как в test_join_rate_limit.test.mjs.
+function rateLimitInsert(rateLimits, args) {
+  const [key, expiresAt, lo, hi, timestamp, limit] = args;
+  let count = 0;
+  for (const [eventKey, event] of rateLimits) {
+    if (eventKey >= lo && eventKey < hi && event.e > timestamp) count += event.c;
+  }
+  if (count >= limit) return null;
+  rateLimits.set(key, { e: expiresAt, c: 1 });
+  return { bucket_key: key };
+}
+
 function makeDb({ users = {}, pairs = {} } = {}) {
   const rateLimits = new Map();
   const seenUpdates = new Set();
@@ -86,17 +101,15 @@ function makeDb({ users = {}, pairs = {} } = {}) {
                 seenUpdates.delete(Number(args[0]));
                 return { meta: { changes: 1 } };
               }
+              if (sql.startsWith("DELETE FROM rate_limits")) {
+                rateLimits.delete(args[0]);
+                return { meta: { changes: 1 } };
+              }
               throw new Error("неожиданный run(): " + sql);
             },
             async first() {
-              if (sql.startsWith("INSERT INTO rate_limits") && sql.includes("RETURNING count")) {
-                const count = (rateLimits.get(args[0]) || 0) + 1;
-                rateLimits.set(args[0], count);
-                return { count };
-              }
-              if (sql === "SELECT count FROM rate_limits WHERE bucket_key=?") {
-                const prev = rateLimits.get(args[0]);
-                return prev ? { count: prev } : null;
+              if (sql.startsWith("INSERT INTO rate_limits") && sql.includes("RETURNING bucket_key")) {
+                return rateLimitInsert(rateLimits, args);
               }
               if (sql.includes("FROM users WHERE tg_id=?")) {
                 return users[args[0]] ? { tg_id: args[0] } : null;
@@ -168,7 +181,7 @@ test("INV-SEC-01: шесть несуществующих валидных ко�
     ok(denials[i].includes("приватный бот"), `попытка ${i + 1}: обычный отказ`);
   }
   ok(denials[5].includes("15 минут"), "шестая попытка — отказ лимитера, а не обычный");
-  // Счётчик реально пополнялся: ключ jf:<user>:<bucket> есть в rate_limits.
+  // Счётчик реально пополнялся: события jf:<user>:<ts>:<hex> есть в rate_limits.
   ok([...db.rateLimits.keys()].some((key) => key.startsWith("jf:777:")), "слоты лимитера записаны");
 });
 

@@ -13,6 +13,7 @@ const zipName = "DuoPlan.zip";
 const allowedTopLevel = [
   ".env.example",
   ".gitignore",
+  "AGENTS.md",
   "README.md",
   "requirements.txt",
   "pyproject.toml",

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.11.17.60">
+  <link rel="stylesheet" href="/app.css?v=2026.11.17.71">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -121,6 +121,9 @@
         </button>
       </div>
       <div id="dialog-fields"></div>
+      <!-- Ошибки сабмита живут внутри диалога: тост снаружи уходит под
+           top-layer <dialog> и блюрится (репорт: «размытый» комментарий). -->
+      <p id="dialog-error" class="dialog-error" role="alert" hidden></p>
       <div class="sheet-actions">
         <button type="button" id="dialog-cancel" class="secondary" data-action="close-dialog">Отмена</button>
         <button type="submit" id="dialog-submit" class="primary">Сохранить</button>
@@ -144,8 +147,8 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.11.17.60" defer></script>
-  <script src="/nav.js?v=2026.11.17.60" defer></script>
-  <script src="/app.js?v=2026.11.17.60" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.17.71" defer></script>
+  <script src="/nav.js?v=2026.11.17.71" defer></script>
+  <script src="/app.js?v=2026.11.17.71" defer></script>
 </body>
 </html>

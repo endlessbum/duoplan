@@ -37,6 +37,7 @@
   const dialogFields = document.getElementById("dialog-fields");
   const dialogSubmit = document.getElementById("dialog-submit");
   const dialogCancel = document.getElementById("dialog-cancel");
+  const dialogError = document.getElementById("dialog-error");
   const toastEl = document.getElementById("toast");
 
   // Пять слотов дока: «Желания» переехали в «Нашу пару» (переключатель
@@ -818,6 +819,30 @@
     showToast(error?.status !== undefined || error?.code ? error.message : "Что-то пошло не так, попробуйте ещё раз");
   }
 
+  // Ошибка внутри открытого диалога: тост лежит под top-layer <dialog>
+  // и размывается блюром — текст показываем элементом #dialog-error.
+  // Тот же фильтр текста, что в handleRequestError; 401 помечает сессию.
+  function showDialogError(error) {
+    if (!dialogError) return;
+    if (error?.status === 401) {
+      sessionExpired = true;
+      // Липкий тост останется после закрытия диалога — сессия не восстановится
+      // сама, и пользователь должен это видеть.
+      showToast(error.message, { sticky: true });
+    }
+    dialogError.textContent = error?.status !== undefined || error?.code
+      ? error.message
+      : "Что-то пошло не так, попробуйте ещё раз";
+    dialogError.hidden = false;
+  }
+
+  function hideDialogError() {
+    if (dialogError) {
+      dialogError.hidden = true;
+      dialogError.textContent = "";
+    }
+  }
+
   // Зависший запрос (плохая сеть, «спящий» воркер) раньше держал спиннер
   // вечно: пользователь не понимал, идёт ли сохранение.
   const REQUEST_TIMEOUT_MS = 20000;
@@ -969,6 +994,28 @@
     render();
     if (pushScroll) {
       window.scrollTo({ top: 0, behavior: "instant" });
+    }
+  }
+
+  // dp_*-ссылки из уведомлений бота (form_action/navigation, план
+  // duoplan_notification_actions): в query только тип цели, дата и
+  // числовой id — имён, дозировок и прочих данных в ссылке нет.
+  function applyDeepLink() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("dp_v") !== "1") return;
+      const target = params.get("dp_target");
+      const day = params.get("dp_day") || "";
+      const validDay = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+      if (target === "cycle_diary") {
+        if (appState?.pair) {
+          pairView = "flo";
+          floView = "today";
+          if (validDay) floSelectedDate = validDay;
+        }
+      }
+    } catch {
+      // Битая ссылка не должна ломать запуск приложения.
     }
   }
 
@@ -5722,24 +5769,69 @@
   const HEALTH_MED_FORMS = [["tablet", "таблетка"], ["capsule", "капсула"], ["injection", "укол"], ["patch", "пластырь"], ["iud", "спираль"], ["other", "прочее"]];
   const HEALTH_MED_STATUS = [["active", "активен"], ["paused", "пауза"], ["completed", "завершён"]];
   const HEALTH_MED_STATUS_LABELS = Object.fromEntries(HEALTH_MED_STATUS);
+  // Схема приёма — фиксированный выбор: от неё зависит число полей времени
+  // напоминания. Доза — тоже выбор, варианты зависят от формы препарата.
+  const HEALTH_MED_SCHEDULES = ["", "1 раз в день", "2 раза в день", "3 раза в день", "4 раза в день"];
+  const HEALTH_MED_DOSES = {
+    tablet: ["1/2 таблетки", "1 таблетка", "2 таблетки", "3 таблетки"],
+    capsule: ["1 капсула", "2 капсулы", "3 капсулы", "4 капсулы"],
+    injection: ["1 доза", "2 дозы"],
+    patch: ["1 пластырь"],
+    iud: ["1 спираль"],
+    other: ["1 доза", "2 дозы", "3 дозы"]
+  };
+  // Время по умолчанию для N приёмов в день — равномерно по светлому дню.
+  const HEALTH_MED_DEFAULT_TIMES = {
+    1: ["09:00"], 2: ["09:00", "21:00"], 3: ["08:00", "14:00", "20:00"], 4: ["08:00", "12:00", "16:00", "20:00"]
+  };
+  const HEALTH_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+  // Число приёмов из схемы («2 раза в день» → 2); свободный текст старых
+  // записей и «—» дают 0 — тогда число полей берётся из сохранённых времён.
+  function healthScheduleCount(schedule) {
+    const n = parseInt(String(schedule || ""), 10);
+    return n >= 1 && n <= 4 ? n : 0;
+  }
+  // remind_time хранится списком «ЧЧ:ММ,ЧЧ:ММ» — по одному времени на приём.
+  function healthTimesList(m) {
+    return String(m?.remind_time || "").split(",").map(t => t.trim()).filter(t => HEALTH_TIME_RE.test(t));
+  }
+  function healthTimesCount(m) {
+    return healthScheduleCount(m?.schedule) || healthTimesList(m).length || 1;
+  }
+  function healthDefaultTime(index, count) {
+    return HEALTH_MED_DEFAULT_TIMES[count]?.[index] || "09:00";
+  }
+  // Поля времени: сохранённые значения важнее дефолтных, пустые слоты
+  // добираются из HEALTH_MED_DEFAULT_TIMES.
+  function healthRemindTimesHtml(m) {
+    const stored = healthTimesList(m);
+    const count = healthTimesCount(m);
+    const values = [];
+    for (let i = 0; i < count; i++) values.push(stored[i] || healthDefaultTime(i, count));
+    return values.map(t => `<input name="remind_times" data-fmt="none" type="time" value="${esc(t)}">`).join("");
+  }
 
   // «Сегодня» зрителя: отметки приёма привязаны к личному дню, не к паре.
   function healthToday() {
     return new Intl.DateTimeFormat("en-CA", { timeZone: viewerTimeZone(), year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   }
 
-  async function loadHealth(force = false) {
+  // silent — предзагрузка при старте: без перерисовки и без ошибки на экране,
+  // как у loadFloState; при сбое состояние остаётся пустым и вкладка догрузит
+  // данные при первом открытии, как раньше.
+  async function loadHealth({ force = false, silent = false } = {}) {
     if (healthBusy || (healthState && !force)) return;
     healthBusy = true;
     try {
       healthState = await request("/api/health/meds");
     } catch (error) {
-      healthState = { failed: true };
-      handleRequestError(error);
+      healthState = silent ? null : { failed: true };
+      if (!silent) handleRequestError(error);
     } finally {
       healthBusy = false;
     }
-    render();
+    if (!silent) render();
   }
 
   function healthMedLog(medId, date) {
@@ -5759,24 +5851,33 @@
   // вынесен отдельно (тестируется без диалога).
   function healthMedDialogFields(m) {
     const f = m || {};
+    const doses = f.form && HEALTH_MED_DOSES[f.form] ? HEALTH_MED_DOSES[f.form] : [];
+    const doseDisabled = !doses.length;
+    const scheduleOptions = HEALTH_MED_SCHEDULES
+      .map(s => `<option value="${esc(s)}"${(f.schedule || "") === s ? " selected" : ""}>${s || "—"}</option>`).join("");
+    const doseOptions = `<option value="">—</option>` + doses
+      .map(d => `<option value="${esc(d)}"${f.dosage === d ? " selected" : ""}>${esc(d)}</option>`).join("");
     return `
       <label class="field"><span>Название</span>
         <input name="name" data-fmt="none" type="text" maxlength="120" required value="${esc(f.name || "")}" placeholder="Например, магний">
       </label>
       <div class="flo-actions" style="margin-top:6px">
         <label class="field" style="flex:1"><span>Форма</span>
-          <select name="form"><option value="">—</option>${HEALTH_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          <select name="form" data-health-form><option value="">—</option>${HEALTH_MED_FORMS.map(([c, l]) => `<option value="${c}"${f.form === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         </label>
         <label class="field" style="flex:1"><span>Статус</span>
           <select name="status">${HEALTH_MED_STATUS.map(([c, l]) => `<option value="${c}"${(f.status || "active") === c ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         </label>
       </div>
-      <label class="field"><span>Доза (справочно)</span>
-        <input name="dosage" data-fmt="none" type="text" maxlength="120" value="${esc(f.dosage || "")}" placeholder="Например, 1 таблетка">
-      </label>
-      <label class="field"><span>Схема приёма</span>
-        <input name="schedule" data-fmt="none" type="text" maxlength="200" value="${esc(f.schedule || "")}" placeholder="Например, 1 раз в день после еды">
-      </label>
+      <div class="flo-actions" style="margin-top:6px">
+        <label class="field" style="flex:1"><span>Схема приёма</span>
+          <select name="schedule" data-health-schedule>${scheduleOptions}</select>
+        </label>
+        <label class="field" style="flex:1"><span>Доза за приём</span>
+          <select name="dosage" data-health-dose${doseDisabled ? " disabled" : ""}>${doseOptions}</select>
+        </label>
+      </div>
+      <p class="settings-hint">Доза выбирается после формы препарата; без формы список дозы пуст.</p>
       <div class="flo-actions" style="margin-top:6px">
         <label class="field" style="flex:1"><span>Начало курса</span>
           <input name="start_date" type="date" required value="${esc(f.start_date || healthToday())}">
@@ -5786,10 +5887,10 @@
         </label>
       </div>
       <label class="field"><span><input type="checkbox" name="remind_enabled"${f.remind_enabled ? " checked" : ""}> Напоминание в боте</span></label>
-      <label class="field"><span>Время напоминания</span>
-        <input name="remind_time" type="time" value="${esc(f.remind_time || "09:00")}">
-      </label>
-      <p class="settings-hint">Бот напомнит о приёме в указанное время, пока курс активен. Отметка о приёме — общий итог за день.</p>
+      <div class="field"><span>Время приёма — по одному на каждый приём по схеме</span>
+        <div class="health-times" id="health-remind-times">${healthRemindTimesHtml(f)}</div>
+      </div>
+      <p class="settings-hint">Бот напомнит о приёме в каждое указанное время, пока курс активен. Отметка о приёме — общий итог за день.</p>
       <label class="field"><span>Комментарий</span>
         <input name="note" data-fmt="none" type="text" maxlength="1000" value="${esc(f.note || "")}">
       </label>
@@ -5813,18 +5914,36 @@
       throw err;
     }
     const remindEnabled = fd.get("remind_enabled") === "on";
-    const remindTime = String(fd.get("remind_time") || "");
-    if (remindEnabled && !remindTime) {
-      const err = new Error("Укажите время напоминания");
-      err.code = "INVALID_TIME";
-      throw err;
+    const schedule = String(fd.get("schedule") || "").trim() || null;
+    const schedN = healthScheduleCount(schedule);
+    // Времён столько, сколько приёмов по схеме; без схемы — одно.
+    const times = (typeof fd.getAll === "function" ? fd.getAll("remind_times") : [fd.get("remind_times")])
+      .map(v => String(v || "").trim()).filter(Boolean);
+    if (remindEnabled) {
+      if (!times.length) {
+        const err = new Error("Укажите время приёма");
+        err.code = "INVALID_TIME";
+        throw err;
+      }
+      if (schedN && times.length !== schedN) {
+        const err = new Error(`Укажите время для каждого приёма — ${schedN}`);
+        err.code = "INVALID_TIME";
+        throw err;
+      }
+      for (const t of times) {
+        if (!HEALTH_TIME_RE.test(t)) {
+          const err = new Error("Время приёма — ЧЧ:ММ");
+          err.code = "INVALID_TIME";
+          throw err;
+        }
+      }
     }
     return {
       name, dosage: String(fd.get("dosage") || "").trim() || null,
-      form: String(fd.get("form") || "") || null, schedule: String(fd.get("schedule") || "").trim() || null,
+      form: String(fd.get("form") || "") || null, schedule,
       start_date: startDate, end_date: String(fd.get("end_date") || "") || null,
       status: String(fd.get("status") || "active"), note: String(fd.get("note") || "").trim() || null,
-      remind_enabled: remindEnabled, remind_time: remindEnabled ? remindTime : null,
+      remind_enabled: remindEnabled, remind_time: remindEnabled ? times.join(",") : null,
       ...(id ? { id } : {})
     };
   }
@@ -5842,6 +5961,38 @@
         return appState;
       }
     });
+    // Доза зависит от формы, число полей времени — от схемы приёма:
+    // пересобираем их при смене селектов, уже введённые значения храним.
+    const fieldsBox = document.getElementById("dialog-fields");
+    const doseSel = fieldsBox?.querySelector?.("[data-health-dose]");
+    const timesBox = fieldsBox?.querySelector?.("#health-remind-times");
+    const syncDose = () => {
+      if (!doseSel) return;
+      const form = fieldsBox?.querySelector?.("[data-health-form]")?.value || "";
+      const options = form && HEALTH_MED_DOSES[form] ? HEALTH_MED_DOSES[form] : [];
+      const current = doseSel.value;
+      doseSel.innerHTML = `<option value="">—</option>` + options
+        .map(d => `<option value="${esc(d)}"${d === current ? " selected" : ""}>${esc(d)}</option>`).join("");
+      doseSel.disabled = !options.length;
+    };
+    const syncTimes = () => {
+      const inputs = timesBox?.querySelectorAll?.("input") || [];
+      if (!timesBox || typeof timesBox.appendChild !== "function") return;
+      const sched = fieldsBox?.querySelector?.("[data-health-schedule]")?.value || "";
+      const n = healthScheduleCount(sched) || inputs.length || 1;
+      const current = [...inputs].map(i => i.value);
+      timesBox.innerHTML = "";
+      for (let i = 0; i < n; i++) {
+        const inp = document.createElement("input");
+        inp.name = "remind_times";
+        inp.type = "time";
+        inp.dataset.fmt = "none";
+        inp.value = current[i] || healthDefaultTime(i, n);
+        timesBox.appendChild(inp);
+      }
+    };
+    fieldsBox?.querySelector?.("[data-health-form]")?.addEventListener?.("change", syncDose);
+    fieldsBox?.querySelector?.("[data-health-schedule]")?.addEventListener?.("change", syncTimes);
   }
 
   function renderHealthBody() {
@@ -5854,23 +6005,32 @@
     }
     const today = healthToday();
     const meds = healthState.meds || [];
+    // «Добавить препарат» — над карточкой списка, как в остальных вкладках;
+    // на пустом списке кнопка живёт внутри карточки «Пока пусто».
+    if (!meds.length) {
+      return `<section class="card"><h3>Пока пусто</h3>
+        <p>Личный журнал: препараты и приём не видны партнёру</p>
+        <div style="margin-top:12px;"><button class="primary full card-action" type="button" data-action="health-med-new">Добавить препарат</button></div>
+      </section>`;
+    }
     const rows = meds.map(m => {
       const log = healthMedLog(m.id, today);
       const statusLabel = HEALTH_MED_STATUS_LABELS[m.status] || m.status;
       const { taken, skipped } = healthIntakeCounts(m.id);
       const meta = [m.dosage, m.schedule, m.form ? HEALTH_MED_FORMS.find(([c]) => c === m.form)?.[1] : ""].filter(Boolean).join(" · ");
-      const remind = m.remind_enabled && m.remind_time ? `<span class="day-chip">Напоминание ${esc(m.remind_time)}</span>` : "";
+      // Отметки приёма — полноширинные кнопки, как «Добавить препарат»:
+      // «Принят» в цвете акцента (.primary → var(--berry)), «Пропущен»
+      // нейтральная .secondary. Выбранная за сегодня помечается кольцом.
       const chips = m.status === "active" ? `
-        <div class="flo-chips" style="margin-top:6px">
-          <button type="button" class="flo-chip${log?.status === "taken" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="taken">Принят</button>
-          <button type="button" class="flo-chip${log?.status === "skipped" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="skipped">Пропущен</button>
+        <div class="health-intake">
+          <button type="button" class="primary full card-action${log?.status === "taken" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="taken">Принят</button>
+          <button type="button" class="secondary full card-action${log?.status === "skipped" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="skipped">Пропущен</button>
           ${log ? `<button type="button" class="flo-chip" data-action="health-intake-clear" data-med="${m.id}">Снять отметку</button>` : ""}
-          <button type="button" class="flo-chip${m.remind_enabled ? " is-on" : ""}" data-action="health-remind-toggle" data-med="${m.id}" data-enabled="${!m.remind_enabled}">${m.remind_enabled ? `Напоминание: ${esc(m.remind_time)}` : "Напоминание: выкл"}</button>
         </div>` : "";
       return `<div class="item-row">
         <div class="item-main">
-          <p class="item-title">${esc(m.name)}</p>
-          <div class="item-meta"><span class="day-chip is-muted">${esc(statusLabel)}</span>${remind}<span>${esc(meta)}</span></div>
+          <h3 class="health-med-name">${esc(m.name)}</h3>
+          <div class="item-meta"><span class="day-chip is-muted">${esc(statusLabel)}</span><span>${esc(meta)}</span></div>
           <div class="item-meta"><span>${esc(m.start_date || "")}${m.end_date ? ` — ${esc(m.end_date)}` : ""}</span><span>принято ${taken} · пропущено ${skipped}</span></div>
           ${chips}
         </div>
@@ -5878,11 +6038,9 @@
       </div>`;
     }).join("");
     return `
+      <button class="primary full add-button" type="button" data-action="health-med-new">Добавить препарат</button>
       <section class="card">
-        <h3>Мои препараты</h3>
-        <p class="settings-hint">Личный журнал: препараты и приём не видны партнёру. Бот напомнит о приёме в заданное время, пока курс активен</p>
         ${rows}
-        <button type="button" class="primary full card-action" style="margin-top:8px" data-action="health-med-new">Добавить препарат</button>
         <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение</p>
       </section>`;
   }
@@ -5927,28 +6085,6 @@
       } catch (error) { handleRequestError(error); }
       return render();
     }
-    if (action === "health-remind-toggle") {
-      const m = (healthState?.meds || []).find(x => x.id === medId);
-      if (!m) return;
-      if (btn.dataset.enabled === "true" && !m.remind_time) {
-        // Включение без времени — открываем диалог: «вкл без времени» на
-        // сервере отклоняется, лучше сразу дать ввести время.
-        openHealthMedDialog({ ...m, end_date: m.end_date || "", remind_enabled: true });
-        showToast("Укажите время напоминания и сохраните");
-        return;
-      }
-      try {
-        healthState = await request("/api/health/med", {
-          method: "POST",
-          body: {
-            id: m.id, name: m.name, dosage: m.dosage, form: m.form, schedule: m.schedule,
-            start_date: m.start_date, end_date: m.end_date, status: m.status, note: m.note,
-            remind_enabled: btn.dataset.enabled === "true", remind_time: m.remind_time
-          }
-        });
-      } catch (error) { handleRequestError(error); }
-      return render();
-    }
   }
 
   // ------------------------------------------------------------------
@@ -5978,18 +6114,19 @@
     return `+7 ${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 8)} ${digits.slice(8, 10)}`;
   }
 
-  async function loadContacts(force = false) {
+  // silent — как у loadHealth: стартовая предзагрузка без перерисовки.
+  async function loadContacts({ force = false, silent = false } = {}) {
     if (contactsBusy || (contactsState && !force)) return;
     contactsBusy = true;
     try {
       contactsState = await request("/api/contacts");
     } catch (error) {
-      contactsState = { failed: true };
-      handleRequestError(error);
+      contactsState = silent ? null : { failed: true };
+      if (!silent) handleRequestError(error);
     } finally {
       contactsBusy = false;
     }
-    render();
+    if (!silent) render();
   }
 
   function contactsListFor(isMine) {
@@ -6019,19 +6156,23 @@
   function renderContactsList() {
     const list = contactsCurrentList();
     if (!list.length) return "";
-    // Одна карточка на контакт: номера группируются под именем, высота
-    // карточки растёт с числом номеров. Кнопок в списке нет — тап по имени
-    // открывает окно контакта, тап по номеру копирует его.
-    return list.map(c => `
+    // Вся книга — одной карточкой: контакты идут строками внутри неё,
+    // разделённые тонкой линией. Номера группируются под именем. Кнопок
+    // в списке нет — тап по имени открывает окно контакта, тап по номеру
+    // копирует его.
+    return `
       <section class="card contact-card">
-        <button class="contact-name" type="button" data-action="contact-open" data-id="${c.id}">
-          ${esc(c.name)}${c.surname ? ` <span class="contact-surname">${esc(c.surname)}</span>` : ""}
-        </button>
-        <div class="contact-phones">
-          ${(c.phones || []).map(phone => `
-            <button class="contact-phone" type="button" data-action="contacts-copy" data-phone="${esc(phone)}">${esc(phone)}</button>`).join("")}
-        </div>
-      </section>`).join("");
+        ${list.map(c => `
+          <div class="contact-item">
+            <button class="contact-name" type="button" data-action="contact-open" data-id="${c.id}">
+              ${esc(c.name)}${c.surname ? ` <span class="contact-surname">${esc(c.surname)}</span>` : ""}
+            </button>
+            <div class="contact-phones">
+              ${(c.phones || []).map(phone => `
+                <button class="contact-phone" type="button" data-action="contacts-copy" data-phone="${esc(phone)}">${esc(phone)}</button>`).join("")}
+            </div>
+          </div>`).join("")}
+      </section>`;
   }
 
   // Контент после переключателя «Мои/Её(Его)»: кнопка добавления, поиск,
@@ -6151,7 +6292,7 @@
       fields: `
         ${header}
         <label class="field"><span>Имя</span><input name="name" data-fmt="none" maxlength="120" required placeholder="Как записать в книге" value="${esc(source.name || "")}"></label>
-        <label class="field"><span>Фамилия (необязательно)</span><input name="surname" data-fmt="none" maxlength="120" placeholder="Чтобы не путать однофамильцев" value="${esc(source.surname || "")}"></label>
+        <label class="field"><span>Фамилия (необязательно)</span><input name="surname" data-fmt="none" maxlength="120" placeholder="Чтобы не путать с тёзками" value="${esc(source.surname || "")}"></label>
         <div class="field"><span>Номера — до 3</span>
           <div class="goal-steps" id="contact-phones">
             ${phones.map(p => contactPhoneRowHtml(p)).join("")}
@@ -6173,7 +6314,7 @@
         }
         for (const d of digitsList) {
           if (d.length !== 10) {
-            const err = new Error("Введите полный номер — 10 цифр после +7, он сохранится как +7 ХХХ ХХХ ХХ ХХ");
+            const err = new Error("Введите полный номер — 10 цифр");
             err.code = "INVALID_PHONE";
             throw err;
           }
@@ -6195,7 +6336,7 @@
           // Существующий с комментарием — пропускаем без предупреждения.
         }
         contactsState = await request("/api/contacts", { method: "POST", body });
-        showToast(source.id ? "Контакт сохранён" : "Контакт добавлен");
+        showToast(source.id ? "Контакт изменён" : "Контакт добавлен");
         return appState;
       }
     };
@@ -6446,7 +6587,8 @@
 
   // Hero-карточка рандома — информер: показывается до первого запуска
   // рандома на этом устройстве и после этого не нужна (флаг в localStorage,
-  // как PIN и тема — серверу он не нужен).
+  // как PIN и тема — серверу он не нужен). На пустом списке не показывается:
+  // «Пока пусто» уже объясняет, что сначала нужно добавить место.
   const PLACE_RANDOM_KEY = "duoplan.placeRandomUsed";
   function placeRandomUsed() {
     return randomFlagUsed(PLACE_RANDOM_KEY);
@@ -6542,11 +6684,10 @@
     }
     // «Рандом» — кнопка внутри карточки-информера до первого запуска на этом
     // устройстве; после первого выбора карточка исчезает, а кнопка
-    // возвращается отдельной — под «Добавить место».
-    if (!heroUsed) {
-      const hint = empty
-        ? "Пока нечего выбирать — добавьте первое место"
-        : open.length ? "" : "Все места уже посещены — добавьте новое";
+    // возвращается отдельной — под «Добавить место». На пустом списке
+    // информер не показываем: записей для выбора ещё нет.
+    if (!heroUsed && !empty) {
+      const hint = open.length ? "" : "Все места уже посещены — добавьте новое";
       html += `
         <section class="card place-hero">
           <h3>Не знаете, куда пойти?</h3>
@@ -6870,7 +7011,8 @@
   }
 
   // Hero-карточка кино — информер, как у мест: до первого запуска рандома
-  // на этом устройстве (флаг в localStorage), потом не нужна.
+  // на этом устройстве (флаг в localStorage), потом не нужна. На пустом
+  // списке не показывается — «Пока пусто» уже объясняет следующий шаг.
   const MOVIE_RANDOM_KEY = "duoplan.movieRandomUsed";
   function movieRandomUsed() {
     return randomFlagUsed(MOVIE_RANDOM_KEY);
@@ -7018,6 +7160,9 @@
     const disabledClass = partnerMissing() ? " is-disabled" : "";
     const pick = currentMoviePick();
     const heroUsed = movieRandomUsed();
+    // Информер показываем, только когда в списке есть хоть одна запись
+    // (открытая или просмотренная) — до первой записи он не нужен.
+    const hasAny = all.length + watched.length > 0;
     let html = "";
     // Пустой список планов — как в «Кино»: «Найти кино» внутри карточки.
     // Условие — по нефильтрованному all: пустой результат фильтра («только
@@ -7036,14 +7181,12 @@
     }
     // «Рандом» — кнопка внутри карточки-информера до первого запуска на этом
     // устройстве; после первого выбора карточка исчезает, а кнопка
-    // возвращается отдельной — под «Найти кино». Подсказка различает
-    // «список пуст» и «всё просмотрено», как в «Местах».
-    if (!heroUsed) {
+    // возвращается отдельной — под «Найти кино». На пустом списке информер
+    // не показываем: записей для выбора ещё нет.
+    if (!heroUsed && hasAny) {
       // Пул рандома — нефильтрованный all: фильтр вида не сужает выбор.
       // «Всё просмотрено» — только когда непросмотренных нет вообще.
-      const hint = !all.length
-        ? (watched.length ? "Всё из списка уже просмотрено — добавьте новое" : "Сначала добавьте фильм или сериал")
-        : "";
+      const hint = !all.length ? "Всё из списка уже просмотрено — добавьте новое" : "";
       html += `
         <section class="card place-hero movie-hero">
           <h3>Не знаете, что посмотреть?</h3>
@@ -7757,6 +7900,7 @@
       dialogSubmit.hidden = config.submitLabel === null;
     }
     if (dialogCancel) dialogCancel.textContent = config.cancelLabel ?? "Отмена";
+    hideDialogError();
     dialog.showModal();
     // Нативные фокус-шаги showModal отдают фокус первой кнопке («Закрыть»).
     // Забираем его на контейнер диалога: никакая строка ввода фокус не
@@ -8062,9 +8206,9 @@
       render();
       showToast(`Добавлено: ${btn.dataset.title}`);
     } catch (error) {
-      // 409 «уже в списке» и прочие ошибки показываем тостом и возвращаем
-      // диалог к жизни — можно продолжить поиск.
-      handleRequestError(error);
+      // 409 «уже в списке» и прочие ошибки показываем внутри диалога —
+      // тост ушёл бы под top-layer и слился бы с блюром.
+      showDialogError(error);
       dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = false; });
     } finally {
       dialogSubmitting = false;
@@ -8092,12 +8236,14 @@
       // Цепочка шагов (например, повторное подтверждение выхода).
       chain?.();
     } catch (error) {
-      handleRequestError(error);
+      showDialogError(error);
     } finally {
       dialogSubmitting = false;
       if (submitBtn) submitBtn.disabled = false;
     }
   });
+  // Ошибка сабмита гаснет при первом же вводе — не висит над исправленным полем.
+  dialogForm.addEventListener("input", () => hideDialogError());
 
   // ------------------------------------------------------------------
   // Меню форматирования выделенного текста (как в Telegram): появляется
@@ -9392,16 +9538,21 @@
 
     try {
       appState = await request("/api/state");
-      // Пока на экране «Открываем ваше пространство…», прогреваем аватары:
-      // фото — в память WebView, буквы и акценты — в слоты пилюли. Пилюля
-      // показывается уже готовой, без мерцания подложки под фото.
-      await preloadPairAvatars();
-      // Красные капли месячных в основном календаре должны быть видны сразу
-      // после входа, а не только после первого захода во вкладку Фло.
-      // silent — без лишней перерисовки; render() ниже нарисует готовые данные.
-      if (appState?.user?.gender === "female" && appState?.pair) {
-        await loadFloState({ silent: true });
-      }
+      // Пока на экране «Открываем ваше пространство…», прогружаем всё, что
+      // вкладки запросили бы позже по одному: аватары пары, состояние Фло
+      // (красные капли в календаре сразу после входа), здоровье и контакты.
+      // silent-варианты не перерисовывают экран и не показывают ошибок —
+      // render() ниже нарисует уже готовые данные; при сбое предзагрузки
+      // вкладка просто догрузит их при первом открытии, как раньше.
+      await Promise.all([
+        preloadPairAvatars(),
+        appState?.user?.gender === "female" && appState?.pair
+          ? loadFloState({ silent: true })
+          : Promise.resolve(),
+        loadHealth({ silent: true }),
+        appState?.pair?.user_b ? loadContacts({ silent: true }) : Promise.resolve()
+      ]);
+      applyDeepLink();
       render();
       updateDroplet("home", false);
       // Успешная загрузка — сбрасываем состояние ошибки

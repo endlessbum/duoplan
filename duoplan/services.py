@@ -45,8 +45,9 @@ DAILY_XP = 10
 
 # Перебор кодов приглашения — главная точка подбора (parity с worker.js
 # JOIN_ATTEMPT_LIMIT/JOIN_ATTEMPT_WINDOW): считаем только неудачные попытки,
-# 5 за 15 минут на аккаунт. Слот резервируется атомарно ДО чтения кода,
-# успешный вход его возвращает. Хранится в общей с D1 таблице rate_limits.
+# не более 5 событий в любом скользящем 15-минутном интервале на аккаунт.
+# Слот резервируется атомарно ДО чтения кода, успешный вход его удаляет.
+# Хранится в общей с D1 таблице rate_limits (sliding log событий).
 JOIN_ATTEMPT_LIMIT = 5
 JOIN_ATTEMPT_WINDOW = 15 * 60
 
@@ -636,39 +637,58 @@ class DuoPlanService:
     async def _claim_join_attempt(self, tg_id: int, timestamp: int | None = None) -> str:
         """Атомарно зарезервировать попытку входа и проверить лимит.
 
-        Аудит 2026-11-11 (P2): отдельный SELECT счётчика и последующий
-        инкремент позволяли параллельным запросам прочитать одно устаревшее
-        значение и обойти лимит. Один UPSERT с ``RETURNING`` внутри
-        ``BEGIN IMMEDIATE`` выдаёт каждому запросу уникальный номер слота ещё
-        до чтения кода — parity с ``worker.claimJoinAttempt``.
+        Точный sliding log (аудит 2026-11-16/17, INV-SEC-03, RATE-01/02 —
+        parity с ``worker.claimJoinAttempt``): каждая неудача — отдельная
+        строка ``rate_limits`` с ``expires_at = attempted_at + WINDOW``.
+        Вставка разрешена, только если событий пользователя за последние
+        ``JOIN_ATTEMPT_WINDOW`` секунд меньше лимита — одним атомарным
+        ``INSERT ... SELECT ... WHERE ... RETURNING`` внутри ``BEGIN
+        IMMEDIATE``: параллельные запросы не читают устаревший счётчик.
+        Не более ``JOIN_ATTEMPT_LIMIT`` событий в любом скользящем
+        15-минутном интервале. Отклонённая попытка строки не оставляет и не
+        продлевает блокировку; успешный вход удаляет событие через
+        ``_release_join_attempt``.
 
-        Аудит 2026-11-16 (INV-SEC-03): фиксированные bucket-окна допускали
-        двойной burst на стыке. Действует скользящая оценка: счётчик
-        текущего окна плюс вклад предыдущего, тающий линейно по мере
-        «старения» — parity с worker.js.
+        Аудит 2026-11-17 re-audit: ``SUM(count)`` вместо ``COUNT(*)`` —
+        legacy bucket-строки хранят агрегат (RATE-MIG-01); диапазон
+        ``bucket_key >= ? AND < ?`` вместо ``LIKE`` — индекс по PK без
+        полного SCAN (RATE-PERF-01).
         """
         timestamp = now() if timestamp is None else timestamp
-        bucket = timestamp // JOIN_ATTEMPT_WINDOW
-        key = f"jf:{tg_id}:{bucket}"
+        key = f"jf:{tg_id}:{timestamp}:{secrets.token_hex(4)}"
+        # Границы префикса jf:<id>: — индексируемый диапазон по PK
+        # (parity worker.claimJoinAttempt, RATE-PERF-01): LIKE 'jf:<id>:%'
+        # не использует индекс и сканировал всю rate_limits. ':' и ';' —
+        # соседние ASCII-коды, диапазон покрывает все ключи пользователя.
+        lo, hi = f"jf:{tg_id}:", f"jf:{tg_id};"
         async with self.db.transaction():
+            # Чистка протухших событий этого пользователя: в Python-боте нет
+            # периодического DELETE по expires_at (как в worker.rateLimit и
+            # cron), а sliding log пишет до JOIN_ATTEMPT_LIMIT строк на окно.
+            await self.db.execute_row(
+                "DELETE FROM rate_limits WHERE bucket_key >= ? AND bucket_key < ? "
+                "AND expires_at <= ?",
+                (lo, hi, timestamp),
+            )
+            # RATE-MIG-01: SUM(count), а не COUNT(*) — legacy bucket-строки
+            # jf:<id>:<bucket> хранят агрегат в count; COUNT(*) считал
+            # count=5 за одну попытку. У новых событий count=1.
             rows = await self.db.query(
-                "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, 1, ?) "
-                "ON CONFLICT(bucket_key) DO UPDATE SET count = count + 1, "
-                "expires_at = excluded.expires_at RETURNING count",
-                # Строка живёт ещё одно окно: счётчик предыдущего bucket
-                # должен дожить до конца текущего для скользящей оценки.
-                (key, (bucket + 2) * JOIN_ATTEMPT_WINDOW),
+                "INSERT INTO rate_limits(bucket_key, count, expires_at) "
+                "SELECT ?, 1, ? WHERE (SELECT COALESCE(SUM(count), 0) "
+                "FROM rate_limits WHERE bucket_key >= ? AND bucket_key < ? "
+                "AND expires_at > ?) < ? "
+                "RETURNING bucket_key",
+                (
+                    key,
+                    timestamp + JOIN_ATTEMPT_WINDOW,
+                    lo,
+                    hi,
+                    timestamp,
+                    JOIN_ATTEMPT_LIMIT,
+                ),
             )
-            prev_rows = await self.db.query(
-                "SELECT count FROM rate_limits WHERE bucket_key = ?",
-                (f"jf:{tg_id}:{bucket - 1}",),
-            )
-        # Нет строки от RETURNING — консервативно считаем лимит исчерпанным.
-        count = int(rows[0]["count"]) if rows else JOIN_ATTEMPT_LIMIT + 1
-        prev_count = int(prev_rows[0]["count"]) if prev_rows else 0
-        elapsed = timestamp - bucket * JOIN_ATTEMPT_WINDOW
-        weight = 1 - elapsed / JOIN_ATTEMPT_WINDOW
-        if count + prev_count * weight > JOIN_ATTEMPT_LIMIT:
+        if not rows:
             raise ValidationError(
                 "Слишком много неудачных попыток входа по коду. "
                 "Попробуйте снова через 15 минут."
@@ -676,17 +696,11 @@ class DuoPlanService:
         return key
 
     async def _release_join_attempt(self, key: str) -> None:
-        """Вернуть слот: успешный вход и гонка захвата не считаются неудачей."""
-        async with self.db.transaction():
-            await self.db.execute_row(
-                "UPDATE rate_limits SET count = count - 1 "
-                "WHERE bucket_key = ? AND count > 0",
-                (key,),
-            )
-            await self.db.execute_row(
-                "DELETE FROM rate_limits WHERE bucket_key = ? AND count <= 0",
-                (key,),
-            )
+        """Удалить событие sliding log: успех и гонка не считаются неудачей."""
+        await self.db.execute_row(
+            "DELETE FROM rate_limits WHERE bucket_key = ?",
+            (key,),
+        )
 
     async def _join_candidate(self, normalized: str, tg_id: int):
         """Проверки входа по коду до захвата слота.

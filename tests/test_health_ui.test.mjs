@@ -69,17 +69,30 @@ test("H2: пустой список — приглашение добавить,
   assert.ok(!html.includes("Пока нет препаратов"), "пустой список не сопровождается подписью");
   assert.ok(html.includes("Добавить препарат"));
   assert.ok(html.includes("не видны партнёру"), "личный журнал: партнёр не видит");
+  assert.ok(!html.includes("Мои препараты"), "заголовок карточки убран");
 });
 
-test("H3: список препаратов — статус, напоминание, отметки за сегодня", () => {
+test("H3: список препаратов — статус, имя заголовком, полноширинные отметки", () => {
   const ui = buildHealth(richState);
   const html = ui.renderHealthBody();
   assert.ok(html.includes("Магний"));
   assert.ok(html.includes("Витамин D"));
-  assert.ok(html.includes("Напоминание: 09:00"), "включённое напоминание видно");
+  // Имя препарата — заголовком карточки (h3), не подписью.
+  assert.ok(html.includes('<h3 class="health-med-name">Магний</h3>'), "имя препарата — заголовок");
+  // Чип «Напоминание» из карточки убран — настройка только в диалоге.
+  assert.ok(!html.includes("Напоминание:"), "чип напоминания в карточке отсутствует");
+  assert.ok(!html.includes("health-remind-toggle"), "переключателя напоминания в списке нет");
   assert.ok(html.includes("принято 1 · пропущено 0"));
-  const takenChip = html.match(/<button[^>]*data-action="health-intake"[^>]*data-med="7"[^>]*>/);
-  assert.ok(takenChip && /is-on/.test(takenChip[0]), "отметка «принят» подсвечена");
+  // «Принят» — primary (цвет акцента), «Пропущен» — secondary, обе full.
+  const takenBtn = html.match(/<button[^>]*data-action="health-intake"[^>]*data-med="7"[^>]*data-status="taken"[^>]*>/);
+  assert.ok(takenBtn && /primary/.test(takenBtn[0]), "«Принят» — primary-кнопка");
+  const skippedBtn = html.match(/<button[^>]*data-action="health-intake"[^>]*data-med="7"[^>]*data-status="skipped"[^>]*>/);
+  assert.ok(skippedBtn && /secondary/.test(skippedBtn[0]), "«Пропущен» — secondary-кнопка");
+  assert.ok(/is-on/.test(takenBtn[0]), "отметка «принят» помечена");
+  // Кнопка добавления — над карточкой списка, как в других вкладках.
+  const addIdx = html.indexOf('data-action="health-med-new"');
+  const cardIdx = html.indexOf('<section class="card">');
+  assert.ok(addIdx > -1 && cardIdx > -1 && addIdx < cardIdx, "«Добавить препарат» над карточкой");
   assert.ok(html.includes("общий итог за день"), "дневной статус честно подписан");
 });
 
@@ -90,15 +103,25 @@ test("H4: у препарата на паузе нет чипов приёма",
   assert.ok(!row.includes('data-action="health-intake"'), "пауза — отметок приёма нет");
 });
 
-test("H5: диалог препарата содержит настройку напоминания", () => {
+test("H5: диалог препарата — схема и доза селектами, время по числу приёмов", () => {
   const ui = buildHealth({ meds: [], med_logs: [] });
   const fields = ui.healthMedDialogFields(null);
-  assert.ok(fields.includes('name="remind_time"'), "время напоминания вводится");
+  assert.ok(fields.includes('name="schedule"'), "схема приёма — выбор");
+  assert.ok(fields.includes("4 раза в день"), "варианты схемы 1–4 раза");
+  assert.ok(fields.includes('name="dosage"'), "доза — выбор");
+  assert.ok(fields.includes('name="remind_times"'), "поля времени приёма есть");
   assert.ok(fields.includes('name="remind_enabled"'), "переключатель напоминания есть");
-  assert.ok(fields.includes("Бот напомнит о приёме в указанное время"));
+  assert.ok(fields.includes("Бот напомнит о приёме в каждое указанное время"));
   assert.ok(fields.includes("Удалить препарат") === false, "для нового препарата кнопки удаления нет");
-  const editing = ui.healthMedDialogFields({ id: 7, name: "Магний", remind_enabled: true, remind_time: "09:00" });
+  const editing = ui.healthMedDialogFields({ id: 7, name: "Магний", remind_enabled: true, remind_time: "09:00", schedule: "2 раза в день", form: "tablet" });
   assert.ok(editing.includes("Удалить препарат"), "в правке есть удаление");
+  // Схема «2 раза в день» → два поля времени, сохранённое время в первом.
+  const timeInputs = editing.match(/name="remind_times"/g) || [];
+  assert.equal(timeInputs.length, 2, "два приёма — два поля времени");
+  assert.ok(editing.includes('value="09:00"'), "сохранённое время подставлено");
+  // Без формы доза задизейблена.
+  const noForm = ui.healthMedDialogFields(null);
+  assert.ok(/name="dosage"[^>]*disabled/.test(noForm), "без формы доза недоступна");
 });
 
 test("H6: отметка приёма уходит в /api/health/med-log с личной датой", async () => {
@@ -118,49 +141,32 @@ test("H6: отметка приёма уходит в /api/health/med-log с л�
   delete globalThis.__healthState;
 });
 
-test("H7: включение напоминания без времени открывает диалог", async () => {
-  const noTime = { meds: [{ ...richState.meds[0], remind_enabled: false, remind_time: null }], med_logs: [] };
-  const ui = buildHealth(noTime);
-  await ui.handleHealthAction("health-remind-toggle", { dataset: { med: "7", enabled: "true" } });
-  const dialogs = ui.getDialogs();
-  assert.equal(dialogs.length, 1, "диалог открыт поверх");
-  assert.ok(dialogs[0].fields.includes('name="remind_time"'), "в диалоге есть время напоминания");
-  assert.ok(dialogs[0].fields.includes(" checked"), "напоминание предвключено");
-});
-
-test("H8: переключение напоминания сохраняет препарат целиком", async () => {
-  globalThis.__calls = [];
-  const ui = buildHealth(richState, {}, async (url, opts) => {
-    globalThis.__calls.push({ url, body: opts?.body });
-    return richState;
-  });
-  await ui.handleHealthAction("health-remind-toggle", { dataset: { med: "7", enabled: "false" } });
-  const call = globalThis.__calls[0];
-  assert.ok(call.url.includes("/api/health/med"));
-  assert.equal(call.body.id, 7);
-  assert.equal(call.body.remind_enabled, false);
-  assert.equal(call.body.name, "Магний", "поля препарата передаются на сервер целиком");
-  delete globalThis.__calls;
-});
-
-test("H9: сохранение препарата — напоминание выключено, время не уходит", () => {
+test("H9: сохранение препарата — список времён по схеме, выключено → null", () => {
   const ui = buildHealth({ meds: [], med_logs: [] });
   const fd = new FormData();
   fd.set("name", "Магний");
   fd.set("start_date", today);
-  fd.set("remind_time", "09:00");
+  fd.set("schedule", "2 раза в день");
+  fd.set("remind_times", "08:00");
+  fd.append("remind_times", "20:00");
   fd.set("status", "active");
-  // Чекбокс не отмечен — напоминание выключено.
+  // Чекбокс не отмечен — напоминание выключено, времена не уходят.
   const body = ui.healthMedBodyFromForm(fd, null);
   assert.equal(body.remind_enabled, false);
   assert.equal(body.remind_time, null, "выключенное напоминание шлёт null");
-  // Включённое с пустым временем отклоняется с понятным текстом.
+  assert.equal(body.schedule, "2 раза в день");
+  // Включённое без времён отклоняется.
   fd.set("remind_enabled", "on");
-  fd.set("remind_time", "");
-  assert.throws(() => ui.healthMedBodyFromForm(fd, null), /Укажите время напоминания/);
-  fd.set("remind_time", "09:00");
+  const fdEmpty = new FormData();
+  for (const [k, v] of [["name", "Магний"], ["start_date", today], ["schedule", "1 раз в день"], ["status", "active"], ["remind_enabled", "on"]]) fdEmpty.set(k, v);
+  assert.throws(() => ui.healthMedBodyFromForm(fdEmpty, null), /Укажите время приёма/);
+  // Неполный набор времён под схему «2 раза» отклоняется.
+  const fdOne = new FormData();
+  for (const [k, v] of [["name", "Магний"], ["start_date", today], ["schedule", "2 раза в день"], ["status", "active"], ["remind_enabled", "on"], ["remind_times", "08:00"]]) fdOne.set(k, v);
+  assert.throws(() => ui.healthMedBodyFromForm(fdOne, null), /каждого приёма/);
+  // Полный набор — remind_time хранится списком.
   const on = ui.healthMedBodyFromForm(fd, 7);
-  assert.equal(on.remind_time, "09:00");
+  assert.equal(on.remind_time, "08:00,20:00");
   assert.equal(on.id, 7);
 });
 

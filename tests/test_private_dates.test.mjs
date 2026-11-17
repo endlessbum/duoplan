@@ -602,8 +602,11 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
     if (sendError) throw new Error(sendError);
     sent.push({ chatId, text });
   };
+  // Заглушка канала кнопок действий: deliverNotification теперь передаёт
+  // action для напоминаний о планах — для этих тестов важен только текст.
+  const sendActionNotification = async (env, chatId, kind, text) => { sent.push({ chatId, text }); };
   const load = new Function(
-    "openApp", "now", "positiveId",
+    "openApp", "sendActionNotification", "now", "positiveId",
     [
       'const DEFAULT_TZ = "Europe/Moscow";',
       extractBraced("function escapeHtml"),
@@ -642,7 +645,7 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractBraced("async function processPairNotifications"),
       "return { processPairNotifications };"
     ].join("\n")
-  )(openApp, () => 1760000000, (v) => Number.isSafeInteger(Number(v)) && Number(v) > 0);
+  )(openApp, sendActionNotification, () => 1760000000, (v) => Number.isSafeInteger(Number(v)) && Number(v) > 0);
   const queries = [];
   const db = makeNotificationDb({ dates, tasks, users, logChanges, sendError, queries });
   return {

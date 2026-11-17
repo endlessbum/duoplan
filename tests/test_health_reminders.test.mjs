@@ -31,7 +31,7 @@ const med = (patch = {}) => ({
 test("активный курс с включённым напоминанием: время достигло — напомнить", () => {
   const out = healthReminderKinds([med()], "2026-11-10", "09:00");
   assert.equal(out.length, 1);
-  assert.equal(out[0].kind, "health_med_7");
+  assert.equal(out[0].kind, "health_med_7_0900");
   assert.ok(out[0].text.includes("Магний"));
   assert.ok(out[0].text.includes("после еды"));
   assert.ok(out[0].text.includes("Дневник → Здоровье"), "текст подсказывает, где отметить приём");
@@ -60,9 +60,19 @@ test("битое или отсутствующее время напоминан
   assert.deepEqual(healthReminderKinds([med({ remind_time: "9 утра" })], "2026-11-10", "09:00"), []);
 });
 
+test("несколько времён в remind_time — по напоминанию на каждый наступивший слот", () => {
+  // Схема «3 раза в день»: три слота, dedup-ключи разные — все три дойдут.
+  const out = healthReminderKinds([med({ remind_time: "08:00,14:00,20:00" })], "2026-11-10", "15:00");
+  assert.deepEqual(out.map(r => r.kind), ["health_med_7_0800", "health_med_7_1400"]);
+  assert.ok(out[0].text.includes("08:00") && out[1].text.includes("14:00"), "в тексте — время слота");
+  // Ещё не наступивший слот молчит.
+  const early = healthReminderKinds([med({ remind_time: "08:00,14:00,20:00" })], "2026-11-10", "10:00");
+  assert.deepEqual(early.map(r => r.kind), ["health_med_7_0800"]);
+});
+
 test("несколько препаратов в одном тике — по одному напоминанию на препарат", () => {
   const out = healthReminderKinds([med(), med({ id: 8, name: "Омега-3", remind_time: "09:10" })], "2026-11-10", "09:14");
-  assert.deepEqual(out.map(r => r.kind), ["health_med_7", "health_med_8"]);
+  assert.deepEqual(out.map(r => r.kind), ["health_med_7_0900", "health_med_8_0910"]);
   assert.ok(out[1].text.includes("Омега-3"));
 });
 
@@ -91,7 +101,7 @@ function extractLine(prefix) {
 }
 
 const loadReminders = new Function(
-  "openApp", "now",
+  "openApp", "sendActionNotification", "now",
   [
     'const DEFAULT_TZ = "Europe/Moscow";',
     extractLine("const HEALTH_TIME_RE"),
@@ -155,9 +165,12 @@ const d1Med = (patch = {}) => ({
 function reminderHarness(meds) {
   const sent = [];
   const openApp = async (env, chatId, requestUrl, text) => { sent.push({ chatId, text }); };
+  // Заглушка канала кнопок: для этих тестов важен факт и текст доставки,
+  // сам Widget/callback покрыт test_notification_actions.
+  const sendActionNotification = async (env, chatId, kind, text) => { sent.push({ chatId, text }); };
   const queries = [];
   const db = makeHealthDb(meds, queries);
-  const { sendHealthReminders } = loadReminders(openApp, () => 1760000000);
+  const { sendHealthReminders } = loadReminders(openApp, sendActionNotification, () => 1760000000);
   return { run: () => sendHealthReminders(db.env), sent, queries };
 }
 

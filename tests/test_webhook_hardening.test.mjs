@@ -101,17 +101,21 @@ test("версии не опережают текущую дату и схема
   };
   const appParts = stamp(app);
   const schemaParts = stamp(schema);
-  // Локальная календарная дата, как её выбирает разработчик при подъёме версии:
-  // UTC-дата на часовых поясах восточнее отстаёт от локальной на день.
+  // Дедлайн «не в будущем» считаем только по UTC — локальная календарная дата
+  // зависит от часового пояса машины и давала ложные падения (TEST-01).
+  // Допуск +1 день: у часовых поясов восточнее UTC локальная дата может
+  // опережать UTC на сутки, и версия, проставленная разработчиком «сегодня»
+  // локально, не должна считаться будущей.
   const now = new Date();
-  const today = [now.getFullYear(), now.getMonth() + 1, now.getDate()];
+  const utcTomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  const today = [utcTomorrow.getUTCFullYear(), utcTomorrow.getUTCMonth() + 1, utcTomorrow.getUTCDate()];
   const compare = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
   ok(compare(schemaParts, today) <= 0, `DB_SCHEMA_VERSION ${schema} в будущем`);
   ok(compare(appParts, today) <= 0, `APP_VERSION ${app} в будущем`);
   ok(compare(schemaParts, appParts) <= 0, "версия схемы новее версии приложения");
-  // Версии схемы и приложения совпадают на релизе (текущая версия — 2026.11.17.60).
-  deepStrictEqual(schema, "2026.11.17.60", "версия схемы обновлена");
-  deepStrictEqual(app, "2026.11.17.60", "версия приложения обновлена");
+  // Версии схемы и приложения совпадают на релизе (текущая версия — 2026.11.17.71).
+  deepStrictEqual(schema, "2026.11.17.71", "версия схемы обновлена");
+  deepStrictEqual(app, "2026.11.17.71", "версия приложения обновлена");
 });
 
 // Резерв кода на этапе гейта: зарезервированный код открывает приватный бот

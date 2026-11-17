@@ -416,19 +416,21 @@ async def test_join_rate_limit_is_atomic_under_concurrency(db):
     results = await asyncio.gather(*[attempt() for _ in range(total)])
     assert results.count(False) == JOIN_ATTEMPT_LIMIT, results
     assert results.count("limited") == total - JOIN_ATTEMPT_LIMIT, results
+    # Sliding log (RATE-01): строку оставляют только принятые события —
+    # отклонённые лимитером попытки ничего не записывают.
     row = await service.db.one(
-        "SELECT count FROM rate_limits WHERE bucket_key LIKE ?", ("jf:70:%",)
+        "SELECT COUNT(*) AS n FROM rate_limits WHERE bucket_key LIKE ?", ("jf:70:%",)
     )
-    assert row is not None and row["count"] == total, "каждая попытка получила свой слот"
+    assert row is not None and row["n"] == JOIN_ATTEMPT_LIMIT, "записаны только принятые события"
 
 
 @pytest.mark.asyncio
 async def test_join_attempt_sliding_window_blocks_boundary_burst(db):
-    """INV-SEC-03: фиксированные bucket'ы допускали 10 попыток на стыке.
+    """INV-SEC-03/RATE-01: строгий sliding log — не более 5 событий в любом
+    скользящем 900-секундном интервале (parity с worker.claimJoinAttempt).
 
-    Пять неудач вплотную к концу окна + первая попытка следующего обязаны
-    упереться в лимит: вклад предыдущего окна тает линейно, а не обнуляется
-    скачком (parity с worker.claimJoinAttempt).
+    Burst на стыке «окон» и внутри окна отклоняется, пока старейшее событие
+    не истечёт ровно через JOIN_ATTEMPT_WINDOW секунд.
     """
     import pytest as _pytest
 
@@ -437,11 +439,97 @@ async def test_join_attempt_sliding_window_blocks_boundary_burst(db):
     service = DuoPlanService(db)
     window = JOIN_ATTEMPT_WINDOW
     aligned = 1800000000 - (1800000000 % window)
-    # Пять неудач в конце окна.
-    for _ in range(JOIN_ATTEMPT_LIMIT):
-        await service._claim_join_attempt(80, timestamp=aligned + window - 1)
-    # Первая попытка следующего окна: prev=5 с весом ~1 — лимит закрыт.
+    # Пять неудач в последние секунды окна.
+    for i in range(JOIN_ATTEMPT_LIMIT):
+        await service._claim_join_attempt(80, timestamp=aligned + window - 5 + i)
+    # +1с после границы все пять событий ещё внутри 900 с — лимит закрыт.
     with _pytest.raises(ValidationError, match="15 минут"):
         await service._claim_join_attempt(80, timestamp=aligned + window + 1)
-    # Середина нового окна: вес предыдущего ~0.5 — попытки снова идут.
-    await service._claim_join_attempt(80, timestamp=aligned + window + window // 2)
+    # Спустя пол-окна — события всё ещё свежие.
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service._claim_join_attempt(80, timestamp=aligned + window + window // 2)
+    # Старейшее событие (aligned+window-5) истекает в aligned+window+895:
+    # до этого момента попытка отклонена, после — разрешена.
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service._claim_join_attempt(80, timestamp=aligned + window + 894)
+    await service._claim_join_attempt(80, timestamp=aligned + window + 895)
+
+
+# ------------------------------------------------- re-audit 2026-11-17 (RATE-*)
+
+
+@pytest.mark.asyncio
+async def test_join_attempt_legacy_bucket_count_blocks(db):
+    """RATE-MIG-01: legacy-строка jf:<id>:<bucket> с count=5 — это ПЯТЬ
+    попыток, а не одна. SUM(count) вместо COUNT(*) не даёт обновлению
+    ослабить лимит (parity worker.claimJoinAttempt)."""
+    import pytest as _pytest
+
+    from duoplan.services import JOIN_ATTEMPT_WINDOW, DuoPlanService, ValidationError
+
+    service = DuoPlanService(db)
+    ts = 1800000000
+    # Старая агрегация: одна строка bucket, count=5, ещё не истекла.
+    await service.db.execute_row(
+        "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, ?, ?)",
+        ("jf:90:2000000", 5, ts + JOIN_ATTEMPT_WINDOW),
+    )
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service._claim_join_attempt(90, timestamp=ts)
+
+
+@pytest.mark.asyncio
+async def test_join_attempt_legacy_mixed_and_expired(db):
+    """RATE-MIG-01: смесь legacy+новых событий суммируется; протухшая
+    legacy-строка не влияет на решение."""
+    import pytest as _pytest
+
+    from duoplan.services import JOIN_ATTEMPT_LIMIT, JOIN_ATTEMPT_WINDOW, DuoPlanService, ValidationError
+
+    service = DuoPlanService(db)
+    ts = 1800000000
+    # Старый код мог превысить лимит: count=7 — всё равно блок.
+    await service.db.execute_row(
+        "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, ?, ?)",
+        ("jf:91:2000000", 7, ts + JOIN_ATTEMPT_WINDOW),
+    )
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service._claim_join_attempt(91, timestamp=ts)
+    # Смесь: legacy count=3 + (LIMIT-3) новых событий = лимит — следующая
+    # отклонена.
+    await service.db.execute_row(
+        "DELETE FROM rate_limits WHERE bucket_key LIKE 'jf:92:%'"
+    )
+    await service.db.execute_row(
+        "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, ?, ?)",
+        ("jf:92:2000000", 3, ts + JOIN_ATTEMPT_WINDOW),
+    )
+    for _ in range(JOIN_ATTEMPT_LIMIT - 3):
+        await service._claim_join_attempt(92, timestamp=ts)
+    with _pytest.raises(ValidationError, match="15 минут"):
+        await service._claim_join_attempt(92, timestamp=ts)
+    # Протухшая legacy-строка (expires_at <= ts) не влияет.
+    await service.db.execute_row(
+        "INSERT INTO rate_limits(bucket_key, count, expires_at) VALUES(?, ?, ?)",
+        ("jf:93:2000000", 9, ts),
+    )
+    await service._claim_join_attempt(93, timestamp=ts)
+
+
+@pytest.mark.asyncio
+async def test_join_attempt_query_uses_index_not_scan(db):
+    """RATE-PERF-01: выборка jf-событий — индексируемый диапазон по PK,
+    а не LIKE 'jf:<id>:%', который давал SCAN всей rate_limits."""
+    from duoplan.services import DuoPlanService
+
+    service = DuoPlanService(db)
+    ts = 1800000000
+    rows = await service.db.query(
+        "EXPLAIN QUERY PLAN "
+        "SELECT COALESCE(SUM(count), 0) FROM rate_limits "
+        "WHERE bucket_key >= ? AND bucket_key < ? AND expires_at > ?",
+        ("jf:94:", "jf:94;", ts),
+    )
+    detail = " | ".join(str(r.get("detail", "")) for r in rows)
+    assert "SCAN rate_limits" not in detail, detail
+    assert "SEARCH" in detail and "rate_limits" in detail, detail

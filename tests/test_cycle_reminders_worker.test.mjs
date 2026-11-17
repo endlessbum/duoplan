@@ -57,7 +57,7 @@ const sharedFns = [
 
 // Харнесс A: настоящий sendCycleReminders + настоящий deliverNotification.
 const buildReminders = new Function(
-  "validTimeZone", "DEFAULT_TZ", "cycleState", "cycleForecast", "openApp",
+  "validTimeZone", "DEFAULT_TZ", "cycleState", "cycleForecast", "openApp", "sendActionNotification",
   `${sharedFns}
    ${extractConstObject("CYCLE_PARTNER_NOTICES")}
    ${extractBraced("async function sendCycleReminders")}
@@ -67,7 +67,8 @@ const buildReminders = new Function(
 // Харнесс B: только scheduled() — три cron-задачи подменены стабами.
 const buildScheduled = new Function(
   "sendDigests", "sendCycleReminders", "sendHealthReminders",
-  `${extractBraced("async scheduled(event, env)").replace("async scheduled(", "async function scheduled(")}
+  `const now = () => 0;
+   ${extractBraced("async scheduled(event, env)").replace("async scheduled(", "async function scheduled(")}
    return { scheduled };`
 );
 
@@ -120,7 +121,9 @@ function makeRemindersEnv({ owners = [], partners = {}, states = {}, forecastByO
     },
     // cycleForecast используется только для «фазы вчера» в партнёрской ветке.
     (periods, profile, yesterday) => ({ phase: beforePhase[yesterday] ?? "follicular" }),
-    async (env, member, opts, text) => { sent.push({ member, text }); }
+    async (env, member, opts, text) => { sent.push({ member, text }); },
+    // Заглушка канала кнопок: cycle_diary теперь уходит как navigation.
+    async (env, member, kind, text) => { sent.push({ member, text }); }
   );
   return { sendCycleReminders, env: { DB: db }, db, sent };
 }
@@ -167,7 +170,8 @@ test("R2: diary-напоминание — только когда вчера н
     () => "Europe/Moscow", "Europe/Moscow",
     async () => state({ logs: [{ date: "2026-11-09" }] }),
     () => ({ phase: "follicular" }),
-    async (e, member, o, text) => { sent2.push({ member, text }); }
+    async (e, member, o, text) => { sent2.push({ member, text }); },
+    async (e, member, kind, text) => { sent2.push({ member, text }); }
   );
   await scr2({ DB: db2 });
   ok(!sent2.some(m => m.text.includes("дневнике Фло")), "вчера записан — diary-напоминания нет");
@@ -285,4 +289,46 @@ test("R9: scheduled() вызывает digest → cycle → health по поря
   console.error = () => {};
   try { await scheduled({}, {}); } finally { console.error = origErr; }
   deepStrictEqual(calls, ["digest", "cycle", "health"]);
+});
+
+test("R10: сбой sendDigests не пропускает очистку rate_limits и напоминания", async () => {
+  const calls = [];
+  const { scheduled } = buildScheduled(
+    async () => { calls.push("digest"); throw new Error("digest boom"); },
+    async () => { calls.push("cycle"); },
+    async () => { calls.push("health"); }
+  );
+  const env = {
+    DB: {
+      prepare: () => ({
+        bind: () => ({ run: async () => { calls.push("cleanup"); return { meta: { changes: 0 } }; } })
+      })
+    }
+  };
+  const origErr = console.error;
+  console.error = () => {};
+  try { await scheduled({}, env); } finally { console.error = origErr; }
+  deepStrictEqual(calls, ["digest", "cleanup", "cleanup", "cleanup", "cycle", "health"]);
+});
+
+test("R11: сбой очистки rate_limits не блокирует cycle и health", async () => {
+  const calls = [];
+  const { scheduled } = buildScheduled(
+    async () => { calls.push("digest"); },
+    async () => { calls.push("cycle"); },
+    async () => { calls.push("health"); }
+  );
+  const env = {
+    DB: {
+      prepare: () => ({
+        bind: () => ({ run: async () => { calls.push("cleanup"); throw new Error("db boom"); } })
+      })
+    }
+  };
+  const origErr = console.error;
+  console.error = () => {};
+  try { await scheduled({}, env); } finally { console.error = origErr; }
+  // Первый DELETE падает → остальные TTL-очистки в том же try пропускаются
+  // до следующего тика, но cycle/health не блокируются.
+  deepStrictEqual(calls, ["digest", "cleanup", "cycle", "health"]);
 });

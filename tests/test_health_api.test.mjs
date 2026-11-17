@@ -137,6 +137,30 @@ test("POST /api/health/med: время напоминания строго ЧЧ:
   );
 });
 
+test("POST /api/health/med: список времён по схеме сохраняется", async () => {
+  const { api, env, request, writes } = makeEnv({ body: { ...MED, schedule: "3 раза в день", remind_time: "08:00,14:00,20:00" } });
+  const response = await api(request, env, new URL("https://duoplan.test/api/health/med"));
+  ok(response.status === 200);
+  const insert = writes.find(w => w.sql.includes("INSERT INTO health_meds"));
+  ok(insert.args.includes("08:00,14:00,20:00"), "список времён сохраняется одной строкой");
+});
+
+test("POST /api/health/med: список времён валидируется по слотам", async () => {
+  for (const bad of ["08:00,bad", "08:00,14:00,20:00,22:00,23:00", "25:00,08:00"]) {
+    const { api, env, request } = makeEnv({ body: { ...MED, remind_time: bad } });
+    await rejects(
+      api(request, env, new URL("https://duoplan.test/api/health/med")),
+      err => isHttpError(err, 400, "INVALID_TIME"),
+      `remind_time «${bad}» должен отклоняться`
+    );
+  }
+  // Дубликаты схлопываются, а не отклоняются.
+  const { api, env, request, writes } = makeEnv({ body: { ...MED, remind_time: "08:00, 08:00 ,20:00" } });
+  await api(request, env, new URL("https://duoplan.test/api/health/med"));
+  const insert = writes.find(w => w.sql.includes("INSERT INTO health_meds"));
+  ok(insert.args.includes("08:00,20:00"), "дубликаты и пробелы нормализуются");
+});
+
 test("POST /api/health/med: неизвестный статус и форма отклоняются", async () => {
   for (const patch of [{ status: "archived" }, { form: "syrup" }]) {
     const { api, env, request } = makeEnv({ body: { ...MED, ...patch } });

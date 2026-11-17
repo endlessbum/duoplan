@@ -1,12 +1,13 @@
-// «Рандом»-карточки и главная: правки по запросу 2026-11-06.
+// «Рандом»-карточки и главная: правки по запросу 2026-11-06 и 2026-11-17.
 //
-// * Из hero-карточек «Места» и «Кино» убран eyebrow «Рандом».
+// * 2026-11-17: hero-информеры «Не знаете, куда пойти?» / «Не знаете, что
+//   посмотреть?» показываются до первого запуска «Рандом», но только когда
+//   в списке уже есть записи — на пустой вкладке карточки нет, только
+//   «Пока пусто». После первого запуска остаётся отдельная кнопка «Рандом»
+//   под «Добавить…».
 // * У карточек результата (place-pick / movie-pick) есть кнопка «Закрыть»
 //   (data-action="close-pick"), которая сбрасывает выбор и перерисовывает
-//   экран, не трогая hero-информер и кнопку «Рандом».
-// * «Места» повторяют механику «Кино»: hero живёт до первого успешного
-//   рандома (localStorage-флаг), потом карточка исчезает, а кнопка
-//   «Рандом» остаётся отдельной под «Добавить место».
+//   экран.
 // * На главной дни рождения и значимые даты — разные секции: birthdayItem
 //   под заголовком «Дни рождения», dateItem — под «Значимые даты».
 //
@@ -29,18 +30,26 @@ function sliceBetween(text, startNeedle, endNeedle) {
   return text.slice(start, end);
 }
 
-test("hero-карточки без eyebrow «Рандом»", () => {
-  const placesHero = sliceBetween(appJs, 'class="card place-hero"', "if (pick) html += renderPlacePick");
-  const moviesHero = sliceBetween(appJs, 'class="card place-hero movie-hero"', "if (pick) html += renderMoviePick");
-  ok(!placesHero.includes("eyebrow"), "в карточке «Мест» не должно быть eyebrow");
-  ok(!moviesHero.includes("eyebrow"), "в карточке «Кино» не должно быть eyebrow");
-  ok(placesHero.includes("Не знаете, куда пойти?"), "заголовок мест потерян");
-  ok(moviesHero.includes("Не знаете, что посмотреть?"), "заголовок кино потерян");
+test("hero-информеры «Рандом» есть, но скрыты на пустом списке", () => {
+  // Hero живёт в обоих разделах и управляется флагом первого запуска.
+  ok(appJs.includes("Не знаете, куда пойти?"), "hero мест должен присутствовать");
+  ok(appJs.includes("Не знаете, что посмотреть?"), "hero кино должен присутствовать");
+  ok(appJs.includes("place-hero"), "разметки hero-мест не должно быть");
+  ok(appJs.includes("movie-hero"), "разметки hero-кино не должно быть");
+  // Места: hero только при непустом списке (!heroUsed && !empty).
+  const placesBody = sliceBetween(appJs, "function renderPlacesBody()", "function tripList()");
+  match(placesBody, /if \(!heroUsed && !empty\)/, "hero мест должен быть ограничен непустым списком");
+  // Кино: hero только когда есть хоть одна запись (open или watched).
+  const moviesBody = sliceBetween(appJs, "function renderOpenMovies()", "function renderWishLists()");
+  match(moviesBody, /if \(!heroUsed && hasAny\)/, "hero кино должен быть ограничен наличием записей");
+  // После первого запуска флаг ставится в localStorage.
+  ok(appJs.includes("placeRandomUsed") && appJs.includes("movieRandomUsed"),
+    "флаги первого запуска должны использоваться");
 });
 
 test("карточки результата имеют кнопку «Закрыть»", () => {
   const placePick = sliceBetween(appJs, "function renderPlacePick(", "function placeItem(");
-  const moviePick = sliceBetween(appJs, "function renderMoviePick(", "const MOVIE_RANDOM_KEY");
+  const moviePick = sliceBetween(appJs, "function renderMoviePick(", "function filterMoviesByKind");
   for (const [name, body] of [["place-pick", placePick], ["movie-pick", moviePick]]) {
     ok(body.includes('data-action="close-pick"'), `${name}: нет data-action="close-pick"`);
     ok(body.includes(">Закрыть</button>"), `${name}: нет видимой кнопки «Закрыть»`);
@@ -54,24 +63,28 @@ test("close-pick сбрасывает оба выбора и перерисов�
   ok(handler.includes("render()"), "экран не перерисовывается");
 });
 
-test("«Места» повторяют жизненный цикл hero «Кино»", () => {
-  // Hero рисуется только пока !placeRandomUsed(), после первого draw —
-  // markPlaceRandomUsed() гасит его, а кнопка возвращается отдельной.
+test("«Рандом» — отдельная кнопка под «Добавить…» после первого запуска", () => {
+  // Места: до первого нажатия кнопка живёт внутри hero-карточки; после —
+  // отдельная кнопка под «Добавить место» (видна при непустом списке).
   const placesBody = sliceBetween(appJs, "function renderPlacesBody()", "function tripList()");
-  ok(placesBody.includes("if (!heroUsed)"), "hero мест не привязан к флагу");
+  ok(placesBody.includes("heroUsed"), "hero-флаг мест должен использоваться");
   ok(placesBody.includes('data-action="random-place">Рандом</button>'),
-    "после первого рандома кнопка «Рандом» должна остаться");
+    "кнопка «Рандом» мест должна присутствовать");
+  match(placesBody, /if \(heroUsed\) html \+= `<button class="secondary full place-random"[^`]*random-place/,
+    "отдельная кнопка мест должна показываться только после первого запуска");
   const randomHandler = sliceBetween(appJs, 'action === "random-place"', 'action === "movie-watched"');
   ok(randomHandler.includes("markPlaceRandomUsed()"),
-    "первый успешный рандом должен помечать флаг");
-  // Паритет с кино: те же три точки механики.
-  const moviesBody = sliceBetween(appJs, "function renderMoviesBody()", "function renderWishLists()");
-  ok(moviesBody.includes("if (!heroUsed)"), "hero кино не привязан к флагу");
+    "обработчик должен помечать первый запуск");
+  // Кино: то же самое в renderOpenMovies.
+  const moviesBody = sliceBetween(appJs, "function renderOpenMovies()", "function renderWishLists()");
+  ok(moviesBody.includes("heroUsed"), "hero-флаг кино должен использоваться");
   ok(moviesBody.includes('data-action="random-movie">Рандом</button>'),
-    "после первого рандома кнопка «Рандом» кино должна остаться");
+    "кнопка «Рандом» кино должна присутствовать");
+  match(moviesBody, /if \(heroUsed\) html \+= `<button class="secondary full place-random"[^`]*random-movie/,
+    "отдельная кнопка кино должна показываться только после первого запуска");
   const movieHandler = sliceBetween(appJs, 'action === "random-movie"', 'action === "deposit-saving"');
   ok(movieHandler.includes("markMovieRandomUsed()"),
-    "первый успешный рандом кино должен помечать флаг");
+    "обработчик должен помечать первый запуск");
 });
 
 test("главная: дни рождения под своим заголовком", () => {

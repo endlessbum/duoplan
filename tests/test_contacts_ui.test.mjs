@@ -70,6 +70,9 @@ test("C2: список в алфавитном порядке, номера сг
   const idxAnna = html.indexOf("Анна");
   const idxBoris = html.indexOf("Борис");
   assert.ok(idxAnna > -1 && idxBoris > -1 && idxAnna < idxBoris, "алфавитный порядок");
+  // Вся книга — одной карточкой: секций contact-card ровно одна.
+  assert.equal((html.match(/card contact-card/g) || []).length, 1, "все контакты в одной карточке");
+  assert.ok(html.includes("contact-item"), "контакты — строки внутри карточки");
   // Номера второго контакта — оба в одной карточке (до закрывающего тега имени следующей).
   const annaCard = html.slice(idxAnna, idxBoris);
   assert.ok(annaCard.includes("+7 915 123 45 67") && annaCard.includes("+7 926 987 65 43"), "оба номера под одним именем");
@@ -158,5 +161,5 @@ test("C9: диалог имени занято — предупреждение 
 test("C10: маска ввода ограничивает 10 цифрами, максимум 3 номера", () => {
   ok(section.includes('maxlength="13"'), "10 цифр + 3 пробела");
   ok(section.includes("Максимум 3 номера на контакт"));
-  ok(section.includes("Введите полный номер — 10 цифр после +7"), "запрет неполного номера");
+  ok(section.includes("Введите полный номер — 10 цифр"), "запрет неполного номера");
 });
