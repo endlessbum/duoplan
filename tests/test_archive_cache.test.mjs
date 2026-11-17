@@ -41,7 +41,7 @@ const load = new Function(
     // Групповые кэши сбрасываются syncArchiveCachePair вместе с архивом.
     "const expandedMovieGroups = new Set();",
     "const movieGroupDetails = new Map();",
-    "const movieGroupPending = new Set();",
+    "const movieGroupPending = new Map(); let movieGroupRequestSeq = 0;",
     "let movieGroupSelection = null;",
     "let movieGroupAddTarget = null;",
     "let movieGroupSuggest = null;",
@@ -413,7 +413,7 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       // Групповые кэши фильмов — syncArchiveCachePair сбрасывает их при смене пары.
       "const expandedMovieGroups = new Set();",
       "const movieGroupDetails = new Map();",
-      "const movieGroupPending = new Set();",
+      "const movieGroupPending = new Map(); let movieGroupRequestSeq = 0;",
       "let movieGroupSelection = null;",
       "let movieGroupAddTarget = null;",
       "let movieGroupSuggest = null;",

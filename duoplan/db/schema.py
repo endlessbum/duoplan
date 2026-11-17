@@ -18,6 +18,7 @@ SCHEMA: list[str] = [
         "user_a INTEGER NOT NULL, user_b INTEGER NOT NULL DEFAULT 0, started_at TEXT NOT NULL, "
         "together_pts INTEGER NOT NULL DEFAULT 0, timezone TEXT NOT NULL DEFAULT 'Europe/Moscow', "
         "awaiting_return INTEGER NOT NULL DEFAULT 0, last_partner INTEGER NOT NULL DEFAULT 0, "
+        "place_pick_id INTEGER, movie_pick_id INTEGER, "
         "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     ),
     # Коды закрытых пространств (последний участник вышел): parity с D1.

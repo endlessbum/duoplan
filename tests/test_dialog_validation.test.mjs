@@ -34,5 +34,5 @@ test("close-обработчик не затирает контекст уже �
   // прилетало из отдельной задачи после открытия второго («Вы точно
   // уверены?») и обнуляло его dialogContext — сабмит второго шага молча
   // умирал на гейте !dialogContext, выйти из пространства было нельзя.
-  match(app, /addEventListener\("close", \(\) => \{\s*\n\s*if \(dialog\.open\) return;\s*\n\s*dialogContext = null;/);
+  match(app, /addEventListener\("close", \(\) => \{\s*\n\s*if \(dialog\.open\) return;\s*\n\s*const closedContext = dialogContext;\s*\n\s*dialogContext = null;/);
 });

@@ -320,8 +320,51 @@ test("BUG-01: закрытие диалога очищает контекст, �
     "close-обработчик должен выбрасывать контекст вместе с целью");
   ok(/action === "add-movie"\)\s*\{\s*openMovieSearchDialog\(\);/.test(source),
     "обычное «Найти кино» должно открываться без аргументов");
-  ok(/const groupTarget = consumeMovieGroupTarget\(dialogContext\);/.test(source),
-    "тап по подсказке должен считывать цель из контекста");
+  ok(/const operation = captureAddOperation\(dialogContext\);/.test(source),
+    "тап по подсказке должен фиксировать цель из контекста до запроса");
+});
+
+// BUG-09: сетевая операция привязана к исходному контексту, а не к текущему
+// глобальному dialogContext, который может исчезнуть/замениться во время await.
+test("BUG-09: цель операции фиксируется до await и не подменяется новым окном", () => {
+  const helpers = new Function([
+    extractBraced("function consumeMovieGroupTarget"),
+    extractBraced("function captureAddOperation"),
+    extractBraced("function operationOwnsDialog"),
+    "return { captureAddOperation, operationOwnsDialog };"
+  ].join("\n"))();
+
+  const first = { targetGroupId: "A", returnToManager: true };
+  const operation = helpers.captureAddOperation(first);
+  equal(operation.groupTarget, "A", "цель исходной операции потеряна");
+  equal(operation.returnToManager, true);
+  equal(first.targetGroupId, null, "цель не снята с исходного контекста");
+
+  // Первое окно закрыли, открыли другое для группы B.
+  equal(helpers.operationOwnsDialog(operation, null), false, "закрытое окно всё ещё считается текущим");
+  const second = { targetGroupId: "B", returnToManager: true };
+  equal(helpers.operationOwnsDialog(operation, second), false, "старый обработчик принял новое окно");
+  const other = helpers.captureAddOperation(second);
+  equal(other.groupTarget, "B");
+  equal(operation.groupTarget, "A", "старая операция подменила группу");
+  equal(helpers.operationOwnsDialog(operation, first), true, "своё окно не определяется как текущее");
+});
+
+test("BUG-09: обработчик IMDb не читает глобальный контекст после await и не закрывает чужое окно", () => {
+  const handler = source.slice(
+    source.indexOf('const btn = e.target.closest?.(".movie-suggest-item")'),
+    source.indexOf('dialogForm.addEventListener("submit"')
+  );
+  const captureAt = handler.indexOf("captureAddOperation(dialogContext)");
+  const awaitAt = handler.indexOf("await request(");
+  ok(captureAt >= 0 && awaitAt > captureAt, "контекст не зафиксирован до первого await");
+  ok(!/consumeMovieGroupTarget\(dialogContext\)/.test(handler.slice(awaitAt)),
+    "после await снова читается глобальный контекст");
+  ok(handler.includes("operationOwnsDialog(operation, dialogContext) && dialog.open"),
+    "нет проверки, что диалог всё ещё принадлежит операции");
+  ok(handler.includes("if (ownsDialog) dialog.close();"), "close не защищён проверкой владельца");
+  ok(handler.includes("operation.context.busy = true"), "нет флага busy, привязанного к операции");
+  ok(!handler.includes("dialogSubmitting = true"), "используется глобальный флаг вместо контекстного");
 });
 
 // GAP-02: присоединение уже сохранённой карточки — через movie_id, без
@@ -358,7 +401,11 @@ test("GAP-02: локальный поиск возвращает сохранё�
   deepStrictEqual(candidates.map((m) => m.id), [1, 3]);
   equal(candidates[0].sourceGroupId, null, "отдельная карточка не должна иметь источник");
   equal(candidates[1].sourceGroupTitle, "Другая сага", "не подставлено название исходной группы");
-  deepStrictEqual(makeLocalCandidates(movies, [])("Гарри", "g1").map((m) => m.id), [1, 3]);
+  // Исходная группа g2 уже расформирована и отсутствует в сводках — такую
+  // запись предлагаем как отдельную, без запроса move_from_group_id.
+  const stale = makeLocalCandidates(movies, [{ id: "g1", title: "Гарри Поттер" }])("поттер", "g1");
+  deepStrictEqual(stale.map((m) => m.id), [1, 3]);
+  equal(stale[1].sourceGroupId, null, "расформированная группа не должна требовать переноса");
 });
 
 test("GAP-02: тело запроса содержит movie_id и move_from_group_id только после подтверждения", () => {
@@ -447,7 +494,7 @@ test("UX-03/UX-04: менеджер сохраняет черновик при �
   ok(handler.includes("chain:"), "менеджер не возвращается после успешного удаления");
   ok(handler.includes("Группа расформирована — оба фильма остались в списке отдельно"),
     "нет отдельного сообщения о расформировании группы из двух частей");
-  ok(handler.includes('openMovieGroupManager(groupId, { toast: "Часть убрана из группы" })'),
+  ok(handler.includes('openMovieGroupManager(groupId, { notice: "Часть убрана из группы" })'),
     "менеджер не переоткрывается для группы из 3+ частей");
   const addPart = source.slice(
     source.indexOf('} else if (action === "movie-group-add-part")'),
@@ -455,4 +502,9 @@ test("UX-03/UX-04: менеджер сохраняет черновик при �
   );
   ok(addPart.includes("await saveMovieGroupDraft()"), "перед добавлением части черновик теряется");
   ok(addPart.includes("{ returnToManager: fromManager }"), "после добавления части менеджер не открывается заново");
+  // Уведомление должно жить внутри менеджера: тост под модальным <dialog>
+  // не виден пользователю.
+  ok(source.includes('class="movie-group-notice"'), "result messages inside manager missing");
+  ok(extractBraced("async function afterGroupPartAdded").includes("{ notice: message }"),
+    "менеджер не получает текст результата");
 });

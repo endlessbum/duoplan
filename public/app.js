@@ -29,7 +29,12 @@
   // !dialogContext, и выйти из пространства было невозможно (репорт 2026-11-01).
   dialog.addEventListener("close", () => {
     if (dialog.open) return;
+    const closedContext = dialogContext;
     dialogContext = null;
+    // Черновик менеджера группы принадлежит конкретному открытию диалога:
+    // отмена/закрытие не должны оставлять несохранённые правки, которые
+    // позже «всплывут» при постороннем действии (аудит BUG-10).
+    if (closedContext?.movieGroupDraft === movieGroupDraft) movieGroupDraft = null;
     // Страница за диалогом снова скроллится.
     document.documentElement.classList.remove("dialog-locked");
   });
@@ -133,7 +138,11 @@
   // создании группы. При смене пары всё это сбрасывается вместе с архивом.
   const expandedMovieGroups = new Set();
   const movieGroupDetails = new Map(); // groupId -> { status: "loading"|"ready"|"error", items: [] }
-  const movieGroupPending = new Set();
+  // Незавершённые загрузки: groupId -> { seq, promise }. seq отсекает
+  // устаревшие ответы, promise позволяет повторному вызову дождаться
+  // уже идущего запроса вместо мгновенного выхода (аудит BUG-11).
+  const movieGroupPending = new Map();
+  let movieGroupRequestSeq = 0;
   let movieGroupSelection = null;    // Set<movie_id> — создание группы
   let movieGroupSuggest = null;      // { groupId, movieId } — ждёт подтверждения
   let movieGroupDraft = null;        // черновик диалога управления { groupId, order: [movie_id] }
@@ -7038,9 +7047,10 @@
     const watched = Number(movie.watched) === 1;
     // Режим создания группы: чекбокс на каждой свободной записи. Групповые
     // части не выбираются — один фильм не может быть в двух группах.
-    const selecting = movieGroupSelection && !movie.group_id;
+    const selecting = Boolean(movieGroupSelection) && !movie.group_id;
+    const selected = selecting && movieGroupSelection.has(Number(movie.id));
     const checkHtml = selecting
-      ? `<button class="group-check${movieGroupSelection.has(Number(movie.id)) ? " is-on" : ""}" type="button" data-action="group-toggle-movie" data-id="${movie.id}" role="checkbox" aria-checked="${movieGroupSelection.has(Number(movie.id))}" aria-label="Выбрать для группы: ${esc(movie.title)}"></button>`
+      ? `<button class="group-check${selected ? " is-on" : ""}" type="button" data-action="group-toggle-movie" data-id="${movie.id}" role="checkbox" aria-checked="${selected}" aria-label="${selected ? "Снять выбор" : "Выбрать для группы"}: ${esc(movie.title)}"></button>`
       : "";
     // «Объединить в группу» — только у записей вне групп и вне режима выбора.
     const groupAction = !selecting && !movie.group_id
@@ -7051,7 +7061,7 @@
     const yearPill = movie.year ? `<span class="day-chip is-muted">${esc(movie.year)}</span>` : "";
     const length = formatMovieLength(movie);
     return `
-      <article class="card movie-card${watched ? " movie-watched" : ""}" data-action="open-movie" data-id="${movie.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(movie.title)}">
+      <article class="card movie-card${watched ? " movie-watched" : ""}${selecting ? " is-selecting" : ""}${selected ? " is-selected" : ""}" data-action="${selecting ? "group-toggle-movie" : "open-movie"}" data-id="${movie.id}" role="button" tabindex="0" aria-label="${selecting ? (selected ? "Снять выбор" : "Выбрать для группы") : "Открыть описание"}: ${esc(movie.title)}">
         ${checkHtml}
         <div class="item-row">
           <div class="item-main">
@@ -7344,19 +7354,38 @@
 
   // Полный состав группы с сервера: нужен раскрытой стопке — части могут
   // лежать за пределами первой страницы и загруженного архива.
-  async function loadMovieGroup(groupId) {
+  // Дедупликация по Promise: повторный вызов дожидается уже идущий запрос,
+  // а не завершается мгновенно — иначе «Управлять группой» сразу видел
+  // status "loading" и показывал ошибку (аудит BUG-11).
+  // seq отсекает устаревшие ответы внутри пары, archiveCachePairId — ответы,
+  // прилетевшие после смены пары (кэши групп привязаны к pair_id сервера).
+  // force (обновление после изменения группы) стартует новый запрос даже
+  // при незавершённом: старый ответ по seq уже не перезапишет кэш.
+  async function loadMovieGroup(groupId, options = {}) {
+    const force = Boolean(options?.force);
+    const pending = movieGroupPending.get(groupId);
+    if (pending && !force) return pending.promise;
     const cache = movieGroupDetails.get(groupId);
-    if (cache?.status === "ready" || cache?.status === "loading" || movieGroupPending.has(groupId)) return;
-    movieGroupPending.add(groupId);
+    if (!force && cache?.status === "ready") return;
+    const seq = ++movieGroupRequestSeq;
+    const pairIdAtStart = archiveCachePairId;
     movieGroupDetails.set(groupId, { status: "loading", items: [] });
-    try {
-      const data = await request(`/api/movie-groups/${encodeURIComponent(groupId)}`);
-      movieGroupDetails.set(groupId, { status: "ready", items: data.items || [] });
-    } catch {
-      movieGroupDetails.set(groupId, { status: "error", items: [] });
-    } finally {
-      movieGroupPending.delete(groupId);
-    }
+    const promise = (async () => {
+      const stale = () => archiveCachePairId !== pairIdAtStart
+        || movieGroupPending.get(groupId)?.seq !== seq;
+      try {
+        const data = await request(`/api/movie-groups/${encodeURIComponent(groupId)}`);
+        if (stale()) return;
+        movieGroupDetails.set(groupId, { status: "ready", items: data.items || [] });
+      } catch {
+        if (stale()) return;
+        movieGroupDetails.set(groupId, { status: "error", items: [] });
+      } finally {
+        if (movieGroupPending.get(groupId)?.seq === seq) movieGroupPending.delete(groupId);
+      }
+    })();
+    movieGroupPending.set(groupId, { seq, promise });
+    await promise;
   }
 
   function movieGroupDetailItems(groupId) {
@@ -7368,17 +7397,22 @@
     for (const id of groupIds) {
       if (!id) continue;
       movieGroupDetails.delete(id);
-      await loadMovieGroup(id);
+      // force: даже незавершённая загрузка не должна вернуть состав,
+      // полученный до изменения группы (аудит BUG-11).
+      await loadMovieGroup(id, { force: true });
     }
   }
 
   // Из менеджера группы диалог поиска закрывается — после успешного действия
   // возвращаем пользователя обратно в менеджер, а не на общий список.
-  async function afterGroupPartAdded(groupId, returnToManager) {
+  async function afterGroupPartAdded(groupId, returnToManager, message) {
     await refreshMovieGroupDetails(groupId);
     if (returnToManager && movieGroupMap().has(groupId)) {
-      await openMovieGroupManager(groupId);
+      // Тост под модальным <dialog> не виден — показываем результат внутри
+      // самого менеджера, куда только что вернулись.
+      await openMovieGroupManager(groupId, { notice: message });
     } else {
+      if (message) showToast(message);
       render();
     }
   }
@@ -7610,6 +7644,7 @@
       return;
     }
     const group = movieGroupMap().get(groupId);
+    const notice = options?.notice || options?.toast || "";
     const draft = {
       groupId,
       order: (detail.items || []).map((movie) => Number(movie.id)),
@@ -7620,7 +7655,10 @@
     movieGroupDraft = draft;
     openDialog({
       title: "Управление группой",
-      fields: movieGroupManagerFields(),
+      // Метка связывает черновик с этим конкретным открытием диалога:
+      // закрытие/отмена очищают его (аудит BUG-10).
+      movieGroupDraft: draft,
+      fields: `${notice ? `<p class="movie-group-notice">${esc(notice)}</p>` : ""}${movieGroupManagerFields()}`,
       submitLabel: "Сохранить",
       cancelLabel: "Закрыть",
       onSubmit: async () => {
@@ -7630,7 +7668,6 @@
         return appState;
       }
     });
-    if (options?.toast) showToast(options.toast);
   }
 
   // Порядок частей новой группы — как на экране: сначала выбранные записи
@@ -7694,6 +7731,22 @@
     return target;
   }
 
+  // Сетевая операция добавления привязывается к конкретному открытию
+  // диалога. Значения фиксируются ДО первого await: закрытие окна или
+  // открытие нового диалога во время запроса не должны подменить группу
+  // или заставить старый обработчик закрыть чужое окно.
+  function captureAddOperation(context) {
+    return {
+      context,
+      groupTarget: consumeMovieGroupTarget(context),
+      returnToManager: Boolean(context?.returnToManager)
+    };
+  }
+
+  function operationOwnsDialog(operation, currentContext) {
+    return Boolean(operation?.context && currentContext === operation.context);
+  }
+
   // Диалог поиска IMDb: общий для «Найти кино» и «Добавить часть
   // в группу». Без кнопки сохранения — фильм добавляется тапом по подсказке
   // (механика в делегированном слушателе dialogFields). readOnly гасит
@@ -7740,7 +7793,10 @@
       if (!id || seen.has(id)) continue;
       seen.add(id);
       if (!normalizeMovieTitle(movie.title).includes(needle)) continue;
-      const sourceGroupId = movie.group_id ? String(movie.group_id) : null;
+      // Источник берём только из актуальных сводок: в кэше может остаться
+      // group_id уже расформированной группы, тогда перенос запрашивать не надо.
+      const inGroups = movie.group_id && groups.has(String(movie.group_id));
+      const sourceGroupId = inGroups ? String(movie.group_id) : null;
       if (sourceGroupId && sourceGroupId === String(targetGroupId)) continue;
       result.push({
         id,
@@ -7795,16 +7851,19 @@
       expandedMovieGroups.delete(sourceGroupId);
       if (movieGroupMap().has(sourceGroupId)) await loadMovieGroup(sourceGroupId);
     }
-    await afterGroupPartAdded(groupId, returnToManager);
-    showToast(message);
+    await afterGroupPartAdded(groupId, returnToManager, message);
   }
 
   // Подсказка «похоже на группу» после обычного добавления: только явное
   // предложение, без автоматических объединений. Кандидат — единственная
   // группа, чьё название совпадает с названием фильма (без учёта регистра
-  // и знаков препинания).
+  // и знаков препинания). Unicode-свойства \p{L}\p{N} поддерживают все языки
+  // (аудит UX-13).
   function normalizeMovieTitle(title) {
-    return String(title || "").toLowerCase().replace(/[^0-9a-zа-яё]+/gi, "");
+    return String(title || "")
+      .toLowerCase()
+      .replace(/\p{M}/gu, "")
+      .replace(/[^\p{L}\p{N}]+/gu, "");
   }
 
   function maybeSuggestMovieGroup(movie) {
@@ -8923,17 +8982,22 @@
     // после явного подтверждения.
     const localBtn = e.target.closest?.("[data-action='movie-group-local-pick']");
     if (localBtn) {
-      if (!dialogContext || dialogSubmitting) return;
-      const groupId = dialogContext.targetGroupId;
-      if (!groupId) return;
+      const operationContext = dialogContext;
+      if (!operationContext || operationContext.busy || dialogSubmitting) return;
+      operationContext.busy = true;
+      const groupId = operationContext.targetGroupId;
+      if (!groupId) { operationContext.busy = false; return; }
       const movie = {
         id: Number(localBtn.dataset.movieId),
         title: localBtn.dataset.title || "Фильм"
       };
       const sourceGroupId = localBtn.dataset.sourceGroupId || null;
       const sourceTitle = localBtn.dataset.sourceGroupTitle || "";
-      const returnToManager = Boolean(dialogContext.returnToManager);
+      const returnToManager = Boolean(operationContext.returnToManager);
       if (sourceGroupId) {
+        // Диалог подтверждения заменяет текущий контекст — старый флаг busy
+        // больше не нужен, его уже никто не будет использовать.
+        operationContext.busy = false;
         const targetTitle = movieGroupMap().get(groupId)?.title || "эту группу";
         openDialog({
           title: "Перенести из другой группы?",
@@ -8948,8 +9012,7 @@
         });
         return;
       }
-      dialogSubmitting = true;
-      consumeMovieGroupTarget(dialogContext);
+      consumeMovieGroupTarget(operationContext);
       dialog.close();
       try {
         await attachExistingMovieToGroup(groupId, movie, null);
@@ -8958,13 +9021,16 @@
         showToast(error?.message || "Не удалось добавить фильм в группу");
         render();
       } finally {
-        dialogSubmitting = false;
+        operationContext.busy = false;
       }
       return;
     }
     const btn = e.target.closest?.(".movie-suggest-item");
-    if (!btn || !dialogContext || dialogSubmitting) return;
-    dialogSubmitting = true;
+    if (!btn || !dialogContext || dialogContext.busy || dialogSubmitting) return;
+    // Фиксируем контекст и цель ДО сетевого запроса: после await глобальный
+    // dialogContext может быть очищен или заменён новым окном.
+    const operation = captureAddOperation(dialogContext);
+    operation.context.busy = true;
     dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = true; });
     try {
       appState = await request("/api/movies", {
@@ -8977,37 +9043,41 @@
       // для привязки к группе или подсказки.
       const addedMovie = (appState.movies || []).find((movie) => movie.imdb_id === addedImdb)
         || (appState.movies || [])[0];
-      // Цель берём из контекста этого открытия и сразу обнуляем: ни повторный
-      // тап, ни ошибка API не должны оставить группу «на будущее».
-      const groupTarget = consumeMovieGroupTarget(dialogContext);
-      const returnToManager = Boolean(dialogContext?.returnToManager);
-      dialog.close();
-      if (groupTarget && addedMovie) {
+      // Старый обработчик не должен закрывать уже открытое другое окно и
+      // не должен возвращаться в менеджер вместо пользовательского диалога.
+      const ownsDialog = operationOwnsDialog(operation, dialogContext) && dialog.open;
+      if (ownsDialog) dialog.close();
+      if (operation.groupTarget && addedMovie) {
         // «Добавить часть»: фильм уже создан обычным сценарием — теперь
-        // отдельный запрос привязывает его к группе. При ошибке привязки
-        // фильм НЕ удаляем: он остаётся отдельной карточкой (план 4.2).
+        // отдельный запрос привязывает его к исходной группе. При ошибке
+        // привязки фильм НЕ удаляем: он остаётся отдельной карточкой.
+        let message;
         try {
-          appState = await request(`/api/movie-groups/${encodeURIComponent(groupTarget)}/items`, {
+          appState = await request(`/api/movie-groups/${encodeURIComponent(operation.groupTarget)}/items`, {
             method: "POST",
             body: { movie_id: Number(addedMovie.id) }
           });
-          showToast(`Добавлено в группу: ${addedTitle}`);
+          message = `Добавлено в группу: ${addedTitle}`;
         } catch (error) {
-          showToast(`«${addedTitle}» добавлен, но не вошёл в группу — попробуйте «Управлять группой»`);
+          message = `«${addedTitle}» добавлен, но не вошёл в группу — попробуйте «Управлять группой»`;
         }
-        await afterGroupPartAdded(groupTarget, returnToManager);
+        await afterGroupPartAdded(operation.groupTarget, ownsDialog && operation.returnToManager, message);
       } else {
         render();
         showToast(`Добавлено: ${addedTitle}`);
-        maybeSuggestMovieGroup(addedMovie);
+        if (ownsDialog) maybeSuggestMovieGroup(addedMovie);
       }
     } catch (error) {
-      // 409 «уже в списке» и прочие ошибки показываем внутри диалога —
-      // тост ушёл бы под top-layer и слился бы с блюром.
-      showDialogError(error);
-      dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = false; });
+      if (operationOwnsDialog(operation, dialogContext) && dialog.open) {
+        // 409 «уже в списке» и прочие ошибки показываем внутри диалога —
+        // тост ушёл бы под top-layer и слился бы с блюром.
+        showDialogError(error);
+        dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = false; });
+      } else {
+        showToast(error?.message || "Не удалось добавить фильм");
+      }
     } finally {
-      dialogSubmitting = false;
+      operation.context.busy = false;
     }
   });
   dialogForm.addEventListener("submit", async (e) => {
@@ -9662,7 +9732,10 @@
         movieGroupSelection = new Set([id]);
         render();
       } else if (action === "group-toggle-movie") {
+        if (!movieGroupSelection) return;
         const id = Number(btn.dataset.id);
+        // Части уже существующих групп не участвуют в создании новой.
+        if (findMovieById(id)?.group_id) return;
         if (movieGroupSelection.has(id)) movieGroupSelection.delete(id);
         else movieGroupSelection.add(id);
         render();
@@ -9745,7 +9818,7 @@
               render();
               return;
             }
-            openMovieGroupManager(groupId, { toast: "Часть убрана из группы" });
+            openMovieGroupManager(groupId, { notice: "Часть убрана из группы" });
           }
         });
       } else if (action === "movie-group-disband") {

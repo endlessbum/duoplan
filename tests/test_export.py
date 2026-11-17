@@ -97,7 +97,8 @@ def test_export_substitutes_defaults_for_plain_schema(tmp_path):
     _make_plain_db(db)
     sql = dump(db)
     # timezone в D1 — NOT NULL DEFAULT 'Europe/Moscow': вместо NULL подставляется дефолт.
-    assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, awaiting_return, last_partner, created_at, updated_at) VALUES(1, 'ABC', 'Owner', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 0, 0, 1, 1);" in sql
+    # place_pick_id и movie_pick_id (SCHEMA-12) включены в список колонок.
+    assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, awaiting_return, last_partner, place_pick_id, movie_pick_id, created_at, updated_at) VALUES(1, 'ABC', 'Owner', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 0, 0, NULL, NULL, 1, 1);" in sql
     assert (
         "INSERT OR REPLACE INTO users(tg_id, username, display_name, role, gender, pair_id, "
         "points, streak, last_activity, best_streak, timezone, digest_time, digest_enabled, "
@@ -182,6 +183,9 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
     assert "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, completed_by, completed_at) VALUES(1, 1, 'Сюрприз', 'open', '2026-12-01', '18:00', 0, 0, 1, 10, 1, NULL, NULL);" in sql
     # Личная дата остаётся личной; kind по умолчанию — обычная дата.
     assert "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at) VALUES(1, 1, 'Годовщина', '2026-12-01', '18:00', 0, 0, 1, 10, 'date', 1);" in sql
+    # place_pick_id и movie_pick_id (SCHEMA-12) могут быть NULL в старых базах,
+    # экспортёр должен включать их в список колонок для pairs.
+    assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, awaiting_return, last_partner, place_pick_id, movie_pick_id, created_at, updated_at) VALUES(1, 'ABC', 'Владелец', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 0, 0, NULL, NULL, 1, 1);" in sql
     # Звёздочка в календаре (done_at), ссылка и уточнение к желанию не теряются.
     assert "INSERT OR REPLACE INTO wishes(id, pair_id, owner_id, body, done, done_at, url, comment, created_at) VALUES(1, 1, 10, 'Билеты', 1, '2026-12-02', 'https://example.com/tickets', 'В партере, не дальше 5 ряда', 1);" in sql
     # Настройки пользователя (время сводок, акцент) переезжают вместе с ним.

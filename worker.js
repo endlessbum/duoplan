@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.17.76";
+const APP_VERSION = "2026.11.17.79";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.17.76";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.17.76";
+const DB_SCHEMA_VERSION = "2026.11.17.79";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -7364,7 +7364,7 @@ async function ensureSchema(env) {
   }
 
   const statements = [
-    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',awaiting_return INTEGER NOT NULL DEFAULT 0,last_partner INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS pairs (id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,name1 TEXT NOT NULL,name2 TEXT NOT NULL DEFAULT '',user_a INTEGER NOT NULL,user_b INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,together_pts INTEGER NOT NULL DEFAULT 0,timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',awaiting_return INTEGER NOT NULL DEFAULT 0,last_partner INTEGER NOT NULL DEFAULT 0,place_pick_id INTEGER,movie_pick_id INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     // Коды удалённых пространств (последний участник вышел): вход по такому
     // коду отвечает «пространство закрыто», а не «код не найден».
     `CREATE TABLE IF NOT EXISTS closed_codes (code TEXT PRIMARY KEY,closed_at INTEGER NOT NULL)`,

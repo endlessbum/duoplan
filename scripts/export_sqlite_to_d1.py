@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TABLES = {
     "pairs": (
         "id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, "
-        "awaiting_return, last_partner, created_at, updated_at"
+        "awaiting_return, last_partner, place_pick_id, movie_pick_id, created_at, updated_at"
     ),
     "users": (
         "tg_id, username, display_name, role, gender, pair_id, points, streak, "

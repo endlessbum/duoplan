@@ -336,10 +336,10 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       "let movieGroupSelection = null;",
       extractLine("  const LINK_ICON"),
       extractBraced("function movieItem"),
-      "return { formatMovieLength, movieItem };"
+      "return { formatMovieLength, movieItem, setSelection: (s) => { movieGroupSelection = s; } };"
     ].join("\n")
   );
-  const { formatMovieLength, movieItem } = loadMovie();
+  const { formatMovieLength, movieItem, setSelection } = loadMovie();
   equal(formatMovieLength({ kind: "movie", runtime: 142 }), "2 ч 22 мин");
   equal(formatMovieLength({ kind: "movie", runtime: 120 }), "2 ч");
   equal(formatMovieLength({ kind: "movie", runtime: 45 }), "45 мин");
@@ -371,6 +371,41 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
   // Ни жанра, ни года, ни длительности — карточка не падает.
   const bare = movieItem({ id: 32, title: "Без данных", watched: 0 });
   ok(bare.includes("is-rating-gray"), "карточка без данных отрисовывается с серой пилюлей");
+
+  // Режим создания группы: видимая круглая метка, понятное состояние выбора
+  // и тап по всей карточке, а не только по крошечному чекбоксу.
+  setSelection(new Set([30]));
+  const picked = movieItem({ id: 30, title: "Оппенгеймер", kind: "movie", watched: 0 });
+  const unpicked = movieItem({ id: 34, title: "Дюна", kind: "series", watched: 0 });
+  ok(picked.includes('class="group-check is-on"'), "нет видимой метки выбранного фильма");
+  ok(unpicked.includes('class="group-check"') && !unpicked.includes('class="group-check is-on"'),
+    "неотмеченный фильм должен иметь пустую метку");
+  ok(picked.includes('data-action="group-toggle-movie"'), "тап по карточке не снимает выбор");
+  ok(picked.includes('aria-checked="true"') && unpicked.includes('aria-checked="false"'),
+    "состояние выбора не доступно скринридеру");
+  ok(picked.includes("is-selecting is-selected"), "выбранная карточка не подсвечена");
+  ok(!picked.includes('data-action="open-movie"'), "в режиме выбора карточка не должна открывать описание");
+  // Часть существующей группы не выбирается и остаётся обычной карточкой.
+  const grouped = movieItem({ id: 35, title: "Часть саги", group_id: "g1", watched: 0 });
+  ok(grouped.includes('data-action="open-movie"') && !grouped.includes("group-check"),
+    "часть группы не должна получать чекбокс");
+  setSelection(null);
+  ok(movieItem({ id: 30, title: "Оппенгеймер", watched: 0 }).includes('data-action="open-movie"'),
+    "после выхода из режима выбора карточка снова открывает описание");
+
+  // Метка позиционируется внутри карточки, а ⋮ при наведении — круглая.
+  ok(/^\.movie-card,\s*\.movie-pick \{[\s\S]*?\}\s*\.movie-card \{\s*position: relative;\s*\}/m.test(cssSource),
+    "у карточки нет position: relative — чекбокс уедет за пределы карточки");
+  ok(/\.group-check\.is-on::after \{[\s\S]*?opacity: 1;\s*\}/.test(cssSource),
+    "у выбранной метки нет видимой галочки");
+  const menuRules = cssSource.slice(
+    cssSource.indexOf(".item-menu-toggle {"),
+    cssSource.indexOf(".section-head", cssSource.indexOf(".item-menu-toggle {"))
+  );
+  ok(/width: 34px;[\s\S]*height: 34px;/.test(menuRules), "у ⋮ нет фиксированного круглого размера");
+  ok(/border-radius: 50%;/.test(menuRules), "⋮ не скруглён");
+  ok(/place-items: center;/.test(menuRules), "⋮ не отцентрован внутри круга");
+  ok(/letter-spacing: 0;/.test(menuRules), "разреженный ⋮ смещает точки от центра");
 });
 
 test("renderMovieDetails: описание, актёры, все жанры, режиссёр и рейтинги", () => {

@@ -1417,24 +1417,32 @@ select.settings-select {
 }
 
 /* «⋮» в правом верхнем углу карточки: голые точки без кнопочной обводки —
-   меню действий откроется по тапу. */
+   меню действий откроется по тапу. При наведении/фокусе точки получают
+   аккуратный круглый фон, а не прямоугольную плашку. */
 .item-menu-toggle {
+  width: 34px;
+  height: 34px;
   border: 0;
   background: none;
-  padding: 6px 4px 6px 10px;
+  padding: 0;
   margin: -6px -4px -6px 0;
   color: var(--muted);
   font-size: 20px;
   line-height: 1;
-  letter-spacing: 1px;
+  letter-spacing: 0;
+  display: grid;
+  place-items: center;
   cursor: pointer;
-  border-radius: 8px;
+  border-radius: 50%;
+  transition: background-color 140ms ease, color 140ms ease;
 }
 
 .item-menu-toggle:hover,
-.item-menu-toggle:focus-visible {
+.item-menu-toggle:focus-visible,
+.item-actions.is-open .item-menu-toggle {
   color: var(--ink);
   background: var(--surface-2);
+  border-radius: 50%;
 }
 
 .item-menu {
@@ -1967,10 +1975,16 @@ input[type="checkbox"]:active {
   color: #fff;
 }
 
-/* Карточка «Кино» открывает окно с описанием — тап по всей площади. */
+/* Карточка «Кино» открывает окно с описанием — тап по всей площади.
+   position: relative обязателен: чекбокс режима создания группы positioned
+   абсолютно внутри карточки, иначе он уезжает к краю экрана. */
 .movie-card,
 .movie-pick {
   cursor: pointer;
+}
+
+.movie-card {
+  position: relative;
 }
 
 /* Окно карточки фильма: слоган, рейтинги, жанры, описание, факты. */
@@ -3268,26 +3282,50 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   text-align: center;
 }
 
-/* Чекбокс выбора фильмов при создании группы: круглая метка слева
-   от содержимого карточки, карточка сама по себе кликабельна. */
+/* Чекбокс выбора фильмов при создании группы: крупная круглая метка слева
+   от содержимого карточки. Включённое состояние — залитый круг с галочкой,
+   плюс подсветка всей карточки: выбранные фильмы видно с первого взгляда. */
 .group-check {
   position: absolute;
   top: 12px;
   left: 12px;
   z-index: 2;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  border: 2px solid var(--line);
+  border: 2px solid var(--berry);
   background: var(--surface);
+  box-shadow: 0 2px 8px rgba(20, 20, 40, 0.16);
   cursor: pointer;
   padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.group-check::after {
+  content: "";
+  width: 10px;
+  height: 6px;
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  transform: rotate(-45deg) translate(1px, -1px);
+  opacity: 0;
 }
 
 .group-check.is-on {
-  border-color: var(--berry);
   background: var(--berry);
-  box-shadow: inset 0 0 0 4px var(--surface);
+}
+
+.group-check.is-on::after {
+  opacity: 1;
+}
+
+.movie-card.is-selecting {
+  border-color: var(--berry);
+}
+
+.movie-card.is-selected {
+  box-shadow: 0 0 0 2px var(--berry-soft), 0 8px 26px rgba(41, 37, 36, 0.04);
 }
 
 .movie-card:has(.group-check) .item-row {
@@ -3319,6 +3357,19 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
 .movie-group-select-actions .secondary {
   padding: 8px 14px;
   font-size: 13px;
+}
+
+/* Результат добавления/удаления части внутри снова открытого менеджера: обычный
+   тост оказался бы под модальным <dialog> и был бы не виден. */
+.movie-group-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--berry);
+  border-radius: 12px;
+  background: var(--berry-soft);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 /* Диалог управления группой: строки частей с кнопками порядка. */

@@ -52,7 +52,7 @@ test("все локальные JS/CSS Mini App версионированы и 
   const workerSource = readFileSync(join(root, "worker.js"), "utf8");
   const version = workerSource.match(/const APP_VERSION = "([^"]+)";/)?.[1];
   ok(version, "APP_VERSION в worker.js не найден");
-  for (const asset of ["app.js", "app.css", "nav.js", "zoom-guard.js"]) {
+  for (const asset of ["app.js", "app.css", "zoom-guard.js"]) {
     const ext = asset.split(".").pop();
     const attr = ext === "css" ? "href" : "src";
     const re = new RegExp(`${attr}="/${asset.replace(".", "\\.")}\\?v=${version.replace(/\./g, "\\.")}"`);

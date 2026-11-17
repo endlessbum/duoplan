@@ -25,7 +25,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -149,6 +149,11 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     # «Остановились» (migrations/0048): точка прерванного просмотра фильма/
     # сериала. Тот же ALTER, что в D1 и worker ensureSchema.
     15: ("ALTER TABLE movies ADD COLUMN resume_position TEXT",),
+    # Рандом мест и фильмов (migrations/0049): place_pick_id, movie_pick_id.
+    16: (
+        "ALTER TABLE pairs ADD COLUMN place_pick_id INTEGER",
+        "ALTER TABLE pairs ADD COLUMN movie_pick_id INTEGER",
+    ),
 }
 
 
