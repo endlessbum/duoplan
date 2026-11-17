@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.17.71";
+const APP_VERSION = "2026.11.17.76";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.17.71";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.17.71";
+const DB_SCHEMA_VERSION = "2026.11.17.76";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -103,7 +103,7 @@ const ARCHIVE_QUERIES = {
   // после 200-й записи, те же колонки и порядок, что в state().
   movies: {
     active: true,
-    sql: "SELECT id,imdb_id,title,year,kind,rating,rating_source,rating_checked_at,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    sql: "SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?"
   },
   quotes: {
     active: true,
@@ -230,6 +230,16 @@ const IMDB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (K
 const IMDB_TIMEOUT_MS = 8000;
 const IMDB_SUGGEST_TTL_MS = 24 * 3600 * 1000;
 const imdbSuggestCache = new Map();
+// Единая точка записи в кэш подсказок: обновление ключа переносит его в
+// конец (LRU-порядок), потолок 200 записей действует для ОБОИХ источников —
+// и IMDb, и OMDb-fallback (аудит 2026-11-17, BUG-03: fallback обходил trim).
+function cacheImdbResults(cacheKey, results) {
+  imdbSuggestCache.delete(cacheKey);
+  imdbSuggestCache.set(cacheKey, { at: Date.now(), results });
+  while (imdbSuggestCache.size > 200) {
+    imdbSuggestCache.delete(imdbSuggestCache.keys().next().value);
+  }
+}
 
 // Поле q у suggestion — текстовый тип («feature», «TV series», …). Берём
 // только то, что можно посмотреть: полнометражки, ТВ-фильмы и сериалы.
@@ -269,7 +279,7 @@ async function imdbSearch(rawQuery, env) {
     const fallback = await omdbSearch(env, query);
     if (fallback?.length) {
       const localizedFallback = await localizeResults(env, fallback);
-      imdbSuggestCache.set(cacheKey, { at: Date.now(), results: localizedFallback });
+      cacheImdbResults(cacheKey, localizedFallback);
       return localizedFallback;
     }
     throw error instanceof HttpError
@@ -288,11 +298,7 @@ async function imdbSearch(rawQuery, env) {
   // Подсказки показываются пользователю — локализуем названия по TMDB
   // (если задан TMDB_API_KEY; без него остаются английские).
   const localizedResults = await localizeResults(env, results);
-  imdbSuggestCache.set(cacheKey, { at: Date.now(), results: localizedResults });
-  // Простая гигиена памяти изолята: при переполнении стираем самый старый ключ.
-  if (imdbSuggestCache.size > 200) {
-    imdbSuggestCache.delete(imdbSuggestCache.keys().next().value);
-  }
+  cacheImdbResults(cacheKey, localizedResults);
   return localizedResults;
 }
 
@@ -1103,6 +1109,8 @@ async function leavePair(env, member, requestUrl, ctx = null) {
         // после удаления movies/savings остались бы сироты.
         guard("DELETE FROM movie_ratings WHERE movie_id IN (SELECT id FROM movies WHERE pair_id=?)", member.id),
         guard("DELETE FROM savings_deposits WHERE saving_id IN (SELECT id FROM savings WHERE pair_id=?)", member.id),
+        guard("DELETE FROM movie_group_items WHERE pair_id=?", member.id),
+        guard("DELETE FROM movie_groups WHERE pair_id=?", member.id),
         guard("DELETE FROM movies WHERE pair_id=?", member.id),
         guard("DELETE FROM savings WHERE pair_id=?", member.id),
         env.DB.prepare("DELETE FROM pairs WHERE id=? AND user_a=? AND user_b=?").bind(...guardBinds)
@@ -1528,6 +1536,108 @@ function attachMovieRatings(movies, ratingRows, userId) {
   return movies;
 }
 
+// --- Группы фильмов/сериалов («Кино», migrations/0047) ---
+// Группа — визуальная стопка связанных записей: метаданные в movie_groups,
+// связи и ручной порядок в movie_group_items. Части остаются строками movies
+// со своими рейтингами, датами просмотра и деталями.
+const MOVIE_GROUP_TYPES = new Set(["franchise", "story", "versions", "collection"]);
+const MOVIE_GROUP_TITLE_MAX = 100;
+const MOVIE_GROUP_MAX_ITEMS = 100;
+const MOVIE_GROUP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function movieGroupType(value) {
+  return MOVIE_GROUP_TYPES.has(value) ? value : null;
+}
+
+async function movieGroupOr404(env, pairId, groupId) {
+  if (!MOVIE_GROUP_ID_RE.test(String(groupId || ""))) {
+    throw new HttpError(400, "Некорректный идентификатор группы", "INVALID_GROUP_ID");
+  }
+  const group = await env.DB.prepare("SELECT id,title,group_type,created_by,created_at,updated_at FROM movie_groups WHERE id=? AND pair_id=?")
+    .bind(groupId, pairId).first();
+  if (!group) throw new HttpError(404, "Группа не найдена", "NOT_FOUND");
+  return group;
+}
+
+// Сводки всех групп пары для /api/state: считаются по ВСЕЙ группе в базе,
+// а не по загруженной странице — карточка-стопка показывает честный прогресс.
+async function movieGroupSummaries(env, pairId) {
+  const rows = await env.DB.prepare(`SELECT g.id,g.title,g.group_type,g.created_at,g.updated_at,
+      gi.movie_id,gi.position,m.watched,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.genres,m.created_at AS movie_created_at,
+      (SELECT ROUND(AVG(r.rating),1) FROM movie_ratings r WHERE r.movie_id=m.id) AS pair_rating
+    FROM movie_groups g
+    JOIN movie_group_items gi ON gi.group_id=g.id AND gi.pair_id=g.pair_id
+    JOIN movies m ON m.id=gi.movie_id AND m.pair_id=g.pair_id
+    WHERE g.pair_id=? ORDER BY g.id, gi.position ASC, gi.movie_id ASC`).bind(pairId).all();
+  const groups = new Map();
+  for (const row of rows.results || []) {
+    let group = groups.get(row.id);
+    if (!group) {
+      group = { id: row.id, title: row.title, group_type: row.group_type, created_at: row.created_at, updated_at: row.updated_at, total_count: 0, open_count: 0, watched_count: 0, open_movie_count: 0, open_series_count: 0, watched_movie_count: 0, watched_series_count: 0, watched_percent: 0, last_added_at: 0, raofp_sum: 0, raofp_count: 0, movie_count: 0, series_count: 0, anchor: null };
+      groups.set(row.id, group);
+    }
+    group.total_count += 1;
+    if (row.kind === "series") group.series_count += 1; else group.movie_count += 1;
+    group.last_added_at = Math.max(group.last_added_at, Number(row.movie_created_at) || 0);
+    if (Number(row.watched) === 1) {
+      group.watched_count += 1;
+      if (row.kind === "series") group.watched_series_count += 1; else group.watched_movie_count += 1;
+      const pr = Number(row.pair_rating);
+      if (Number.isFinite(pr) && pr > 0) { group.raofp_sum += pr; group.raofp_count += 1; }
+    } else {
+      group.open_count += 1;
+      if (row.kind === "series") group.open_series_count += 1; else group.open_movie_count += 1;
+    }
+    // anchor — первая часть по ручному порядку: по ней группа сортируется
+    // в общем списке, даже когда сама часть за пределами первых 200 записей.
+    if (!group.anchor) {
+      group.anchor = { movie_id: row.movie_id, year: row.year, kind: row.kind, rating: row.rating, rating_source: row.rating_source, runtime: row.runtime, genres: row.genres, created_at: row.movie_created_at };
+    }
+  }
+  for (const group of groups.values()) {
+    group.watched_percent = group.total_count ? Math.round((group.watched_count * 100) / group.total_count) : 0;
+    // Сортировочные значения группы: «добавлено» — по самой свежей части,
+    // RAofP — среднее оценок просмотренных частей.
+    group.sort_added_at = group.last_added_at || group.created_at || 0;
+    group.sort_raofp = group.raofp_count ? Math.round((group.raofp_sum / group.raofp_count) * 10) / 10 : null;
+    delete group.last_added_at;
+    delete group.raofp_sum;
+    delete group.raofp_count;
+  }
+  return [...groups.values()];
+}
+
+// Полное содержимое группы: все части независимо от STATE_ACTIVE_LIMIT —
+// раскрытая стопка не должна зависеть от догруженного архива.
+async function movieGroupDetail(env, pair, groupId, userId) {
+  const group = await movieGroupOr404(env, pair.id, groupId);
+  const items = await env.DB.prepare(`SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,
+      m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,
+      gi.group_id AS group_id,gi.position AS group_position
+    FROM movie_group_items gi JOIN movies m ON m.id=gi.movie_id AND m.pair_id=gi.pair_id
+    WHERE gi.group_id=? AND gi.pair_id=? ORDER BY gi.position ASC, gi.movie_id ASC`)
+    .bind(groupId, pair.id).all();
+  const list = items.results || [];
+  const ratingRows = await env.DB.prepare(`SELECT r.movie_id,r.tg_id,r.rating FROM movie_ratings r
+    JOIN movies m ON m.id=r.movie_id WHERE m.pair_id=?`).bind(pair.id).all();
+  attachMovieRatings(list, ratingRows?.results, userId);
+  return { ...group, items: list };
+}
+
+// После удаления/переноса/отвязки: группа с менее чем двумя частями
+// расформировывается — оставшаяся запись становится обычной карточкой.
+async function disbandGroupIfSingleton(env, pairId, groupId) {
+  const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM movie_group_items WHERE group_id=? AND pair_id=?")
+    .bind(groupId, pairId).first();
+  const count = Number(countRow?.n || 0);
+  if (count >= 2) return false;
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND pair_id=?").bind(groupId, pairId),
+    env.DB.prepare("DELETE FROM movie_groups WHERE id=? AND pair_id=?").bind(groupId, pairId)
+  ]);
+  return true;
+}
+
 async function state(env, userId) {
   const user = await env.DB.prepare("SELECT * FROM users WHERE tg_id=?").bind(userId).first();
   const pair = await membership(env, userId);
@@ -1562,7 +1672,7 @@ async function state(env, userId) {
     env.DB.prepare("SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Кино — общая коллекция пары, как места: без приватности и архива.
     // Данные (рейтинг/жанр/длительность) — снимок IMDb на момент добавления.
-    env.DB.prepare("SELECT id,imdb_id,title,year,kind,rating,rating_source,rating_checked_at,genres,runtime,seasons,episodes,url,watched,watched_at,watched_by,created_by,created_at FROM movies WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Голоса RAofP всей пары одним запросом: у фильмов до 200 строк, оценки
     // приклеиваются в памяти — без подзапроса на каждую карточку.
     env.DB.prepare(`SELECT r.movie_id,r.tg_id,r.rating FROM movie_ratings r
@@ -1642,6 +1752,9 @@ async function state(env, userId) {
       // Выбранный акцент партнёра для раскраски его аватара на этом устройстве.
       partner_accent: partnerUser?.accent_color || null,
       timezone: pair.timezone,
+      // Активный рандом: общий для обоих участников до «Закрыть».
+      place_pick: pair.place_pick_id || null,
+      movie_pick: pair.movie_pick_id || null,
       partner_gender: partnerUser?.gender || null,
       // bot_name убран: env.BOT_NAME в wrangler.jsonc не задан, поле всегда
       // было «DuoPlan», клиент его не читает (использует только bot_username).
@@ -1661,6 +1774,7 @@ async function state(env, userId) {
       items: (goalItems.results || []).filter((item) => Number(item.goal_id) === Number(goal.id))
     })),
     movies: movies.results,
+    movieGroups: await movieGroupSummaries(env, pair.id),
     savings: savings.results,
     // Итоги пары (окно «Ваша история»): нули означают «пусто» — клиент такие
     // строки не показывает.
@@ -1803,13 +1917,43 @@ async function readJson(request) {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     throw new HttpError(413, "Тело запроса слишком большое", "PAYLOAD_TOO_LARGE");
   }
-  let body;
+  // Читаем поток и считаем ФАКТИЧЕСКИЕ байты UTF-8: text.length — это
+  // UTF-16 code units, и многоязычный JSON обходил лимит почти вдвое
+  // (аудит 2026-11-17, BUG-02). При переполнении stream отменяется —
+  // гигантское тело не буферизуется целиком в памяти изолята.
+  let text;
   try {
-    const text = await request.text();
-    if (text.length > MAX_BODY_BYTES) {
-      throw new HttpError(413, "Тело запроса слишком большое", "PAYLOAD_TOO_LARGE");
+    if (request.body && typeof request.body.getReader === "function") {
+      const reader = request.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > MAX_BODY_BYTES) {
+            try { await reader.cancel(); } catch {}
+            throw new HttpError(413, "Тело запроса слишком большое", "PAYLOAD_TOO_LARGE");
+          }
+          chunks.push(value);
+        }
+      } finally {
+        try { reader.releaseLock(); } catch {}
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      text = new TextDecoder().decode(bytes);
+    } else {
+      // Fallback для окружений без ReadableStream body (моки): после
+      // request.text() меряем уже закодированные байты, а не code units.
+      text = await request.text();
+      if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
+        throw new HttpError(413, "Тело запроса слишком большое", "PAYLOAD_TOO_LARGE");
+      }
     }
-    body = JSON.parse(text);
+    const body = JSON.parse(text);
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("not object");
     return body;
   } catch (error) {
@@ -1882,7 +2026,7 @@ async function ensureGoalVisible(env, pair, user, goalId, itemId = null) {
 }
 
 async function itemRoute(env, pair, user, method, pathname, body) {
-  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|trips|goals|goal_items|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|deposit))?$/);
+  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|trips|goals|goal_items|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|resume|deposit))?$/);
   if (!match) return false;
   const [, type, rawId, action] = match;
   const id = Number(rawId);
@@ -1903,8 +2047,22 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     ? await ensureGoalVisible(env, pair, user, type === "goals" ? id : null, id)
     : null;
   if (method === "DELETE") {
+    // Фильм из группы: до удаления запоминаем группу — после каскадного
+    // удаления связи singleton-группа обязана расформироваться.
+    let movieGroupId = null;
+    if (type === "movies") {
+      const link = await env.DB.prepare("SELECT group_id FROM movie_group_items WHERE movie_id=?").bind(id).first();
+      movieGroupId = link?.group_id || null;
+    }
     const result = await env.DB.prepare(`DELETE FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+    // Выпавшая в рандоме карточка удалённого элемента снимается у обоих.
+    if (type === "places") {
+      await env.DB.prepare("UPDATE pairs SET place_pick_id=NULL WHERE id=? AND place_pick_id=?").bind(pair.id, id).run();
+    } else if (type === "movies") {
+      await env.DB.prepare("UPDATE pairs SET movie_pick_id=NULL WHERE id=? AND movie_pick_id=?").bind(pair.id, id).run();
+    }
+    if (movieGroupId) await disbandGroupIfSingleton(env, pair.id, movieGroupId);
     return true;
   }
   if (method === "PATCH") {
@@ -2143,7 +2301,16 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         ? env.DB.prepare("UPDATE wishes SET done=1,done_at=? WHERE id=? AND pair_id=? AND owner_id=? AND done=0").bind(now(), id, pair.id, user.tg_id).run()
         : env.DB.prepare("UPDATE wishes SET done=0,done_at=NULL WHERE id=? AND pair_id=? AND owner_id=? AND done=1").bind(id, pair.id, user.tg_id).run();
     },
-    places: visitToggle,
+    places: async () => {
+      const result = await visitToggle();
+      // Отмеченное место выбывает из рандома — карточка «Вам выпало»
+      // снимается у обоих участников, как при «Закрыть».
+      if (action === "visited") {
+        await env.DB.prepare("UPDATE pairs SET place_pick_id=NULL,updated_at=? WHERE id=? AND place_pick_id=?")
+          .bind(now(), pair.id, id).run();
+      }
+      return result;
+    },
     trips: visitToggle,
     async goal_items() {
       // Отметка пункта цели — совместная, как посещение места: отметившего
@@ -2158,7 +2325,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     async movies() {
       // Просмотр — совместный, как посещение места: отметку ставит любой
       // партнёр, watched_by нужен только для подписи «кто отметил».
-      if (!["watched", "unwatched", "rate"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
+      if (!["watched", "unwatched", "rate", "resume"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
       const movie = await env.DB.prepare("SELECT id,watched FROM movies WHERE id=? AND pair_id=?")
         .bind(id, pair.id).first();
       if (!movie) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
@@ -2174,9 +2341,13 @@ async function itemRoute(env, pair, user, method, pathname, body) {
             .bind(id, user.tg_id, rating, stamp, stamp),
           // Первого отметившего не перезаписываем: повторный вызов (двойной
           // тап, гонка с партнёром) лишь обновляет его оценку.
-          env.DB.prepare("UPDATE movies SET watched=1,watched_at=COALESCE(watched_at,?),watched_by=COALESCE(watched_by,?) WHERE id=? AND pair_id=?")
+          env.DB.prepare("UPDATE movies SET watched=1,watched_at=COALESCE(watched_at,?),watched_by=COALESCE(watched_by,?),resume_position=NULL WHERE id=? AND pair_id=?")
             .bind(stamp, user.tg_id, id, pair.id)
         ]);
+        // Просмотренный фильм выбывает из рандома — «Вам выпало» снимается
+        // у обоих участников (отдельно от batch: не критично к транзакции).
+        await env.DB.prepare("UPDATE pairs SET movie_pick_id=NULL,updated_at=? WHERE id=? AND movie_pick_id=?")
+          .bind(stamp, pair.id, id).run();
         return true;
       }
       if (action === "rate") {
@@ -2187,6 +2358,25 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         await env.DB.prepare(`INSERT INTO movie_ratings(movie_id,tg_id,rating,created_at,updated_at) VALUES(?,?,?,?,?)
           ON CONFLICT(movie_id,tg_id) DO UPDATE SET rating=excluded.rating, updated_at=excluded.updated_at`)
           .bind(id, user.tg_id, rating, stamp, stamp).run();
+        return true;
+      }
+      if (action === "resume") {
+        // «Остановились»: свободный текст — у фильма время («1:23:45»),
+        // у сериала серия и/или момент («2 сезон, 5 серия · 34:12»).
+        // null/отсутствие значения — снять отметку.
+        const raw = body?.position;
+        let position = null;
+        if (raw !== null && raw !== undefined) {
+          if (typeof raw !== "string") throw new HttpError(400, "Точка просмотра должна быть строкой", "INVALID_POSITION");
+          const trimmed = raw.trim();
+          // Пустая/пробельная строка — то же снятие отметки, что и null.
+          if (trimmed && Array.from(trimmed).length > 120) {
+            throw new HttpError(400, "Некорректная отметка времени", "INVALID_POSITION");
+          }
+          position = trimmed || null;
+        }
+        await env.DB.prepare("UPDATE movies SET resume_position=? WHERE id=? AND pair_id=?")
+          .bind(position, id, pair.id).run();
         return true;
       }
       // Возврат в «Хотим посмотреть» сбрасывает оценки: после повторного
@@ -3307,6 +3497,34 @@ async function api(request, env, url, ctx = null) {
       .bind(clean(body.timezone), now(), pair.id).run();
     return json(await state(env, user.tg_id));
   }
+  // Рандом мест и фильмов: выпавшая карточка хранится в паре, поэтому оба
+  // участника видят один и тот же результат, пока кто-то не нажмёт
+  // «Закрыть» (id=null) или пока выбранная запись не уходит из выдачи
+  // (stale-проверка на клиенте тоже гасит карточку).
+  if (request.method === "POST" && url.pathname === "/api/pair/pick") {
+    const PICK_FIELDS = { place: ["place_pick_id", "places"], movie: ["movie_pick_id", "movies"] };
+    const sets = [];
+    const binds = [];
+    for (const [key, [column, table]] of Object.entries(PICK_FIELDS)) {
+      if (body?.[key] === undefined) continue;
+      let pickId = null;
+      if (body[key] !== null) {
+        pickId = Number(body[key]);
+        if (!Number.isInteger(pickId) || pickId <= 0) {
+          throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
+        }
+        const exists = await env.DB.prepare(`SELECT 1 AS ok FROM ${table} WHERE id=? AND pair_id=?`)
+          .bind(pickId, pair.id).first();
+        if (!exists) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+      }
+      sets.push(`${column}=?`);
+      binds.push(pickId);
+    }
+    if (!sets.length) throw new HttpError(400, "Нечего обновлять", "INVALID_PICK");
+    await env.DB.prepare(`UPDATE pairs SET ${sets.join(",")}, updated_at=? WHERE id=?`)
+      .bind(...binds, now(), pair.id).run();
+    return json(await state(env, user.tg_id));
+  }
   // Экспорт данных: бот запрашивающему партнёру высылается один TXT-файл —
   // человекочитаемый документ с выбранными разделами. Личные даты партнёра
   // не включаются — фильтры как в UI.
@@ -3521,6 +3739,208 @@ async function api(request, env, url, ctx = null) {
   }
   if (request.method === "POST" && url.pathname === "/api/movies") {
     return addMovie();
+  }
+  // --- Группы фильмов/сериалов ---
+  // Создание группы из существующих записей: атомарный batch — либо группа
+  // со всеми связями, либо ничего (половинчатой группы не остаётся).
+  if (request.method === "POST" && url.pathname === "/api/movie-groups") {
+    validateSchema(body, {
+      title: { type: "string", required: true, maxLength: MOVIE_GROUP_TITLE_MAX },
+      group_type: { type: "string" },
+      movie_ids: { type: "array", required: true }
+    });
+    const title = clean(body.title);
+    // Лимит — в кодовых точках, как у validateSchema.maxLength: эмодзи
+    // в названии не должны съедать лимит вдвое.
+    if (!title || [...title].length > MOVIE_GROUP_TITLE_MAX) {
+      throw new HttpError(400, "Введите название группы", "INVALID_TITLE");
+    }
+    const rawType = clean(body.group_type);
+    const groupType = rawType ? movieGroupType(rawType) : "collection";
+    if (!groupType) throw new HttpError(400, "Неизвестный тип группы", "INVALID_GROUP_TYPE");
+    if (!Array.isArray(body.movie_ids)) throw new HttpError(400, "Выберите хотя бы две части", "INVALID_ITEMS");
+    const ids = [...new Set(body.movie_ids.map((value) => Number(value)))];
+    if (ids.length < 2 || ids.length > MOVIE_GROUP_MAX_ITEMS || ids.some((id) => !positiveId(id))) {
+      throw new HttpError(400, "В группе должно быть от 2 до " + MOVIE_GROUP_MAX_ITEMS + " частей", "INVALID_ITEMS");
+    }
+    const placeholders = ids.map(() => "?").join(",");
+    const found = await env.DB.prepare(`SELECT id FROM movies WHERE pair_id=? AND id IN (${placeholders})`)
+      .bind(pair.id, ...ids).all();
+    if ((found.results || []).length !== ids.length) {
+      throw new HttpError(400, "Часть фильмов не найдена", "MOVIE_NOT_FOUND");
+    }
+    const grouped = await env.DB.prepare(`SELECT movie_id,group_id FROM movie_group_items WHERE movie_id IN (${placeholders})`)
+      .bind(...ids).all();
+    if ((grouped.results || []).length) {
+      const clash = grouped.results[0];
+      const clashGroup = await env.DB.prepare("SELECT title FROM movie_groups WHERE id=? AND pair_id=?")
+        .bind(clash.group_id, pair.id).first();
+      return json({
+        error: "Часть фильмов уже состоит в группе «" + (clashGroup?.title || "") + "»",
+        code: "ALREADY_GROUPED",
+        group_id: clash.group_id,
+        group_title: clashGroup?.title || null
+      }, 409);
+    }
+    const groupId = crypto.randomUUID();
+    const stamp = now();
+    try {
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO movie_groups(id,pair_id,title,group_type,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+          .bind(groupId, pair.id, title, groupType, user.tg_id, stamp, stamp),
+        ...ids.map((movieId, index) =>
+          env.DB.prepare("INSERT INTO movie_group_items(pair_id,group_id,movie_id,position,added_by,created_at) VALUES(?,?,?,?,?,?)")
+            .bind(pair.id, groupId, movieId, index, user.tg_id, stamp)
+        )
+      ]);
+    } catch (error) {
+      // Гонка: партнёр успел включить фильм в свою группу — UNIQUE(movie_id).
+      if (String(error?.message || "").includes("UNIQUE constraint failed")) {
+        throw new HttpError(409, "Часть фильмов уже состоит в группе", "ALREADY_GROUPED");
+      }
+      throw error;
+    }
+    return json(await state(env, user.tg_id));
+  }
+  const movieGroupMatch = url.pathname.match(/^\/api\/movie-groups\/([A-Za-z0-9_-]{1,64})(\/items(?:\/(\d+))?)?$/);
+  if (movieGroupMatch) {
+    const groupId = movieGroupMatch[1];
+    const subPath = movieGroupMatch[2] || "";
+    const itemMovieId = movieGroupMatch[3] !== undefined ? Number(movieGroupMatch[3]) : null;
+    if (request.method === "GET" && !subPath) {
+      return json(await movieGroupDetail(env, pair, groupId, user.tg_id));
+    }
+    if (request.method === "PATCH" && !subPath) {
+      await movieGroupOr404(env, pair.id, groupId);
+      const patch = {};
+      if (body.title !== undefined) {
+        const title = clean(body.title);
+        if (!title || [...title].length > MOVIE_GROUP_TITLE_MAX) {
+          throw new HttpError(400, "Введите название группы", "INVALID_TITLE");
+        }
+        patch.title = title;
+      }
+      if (body.group_type !== undefined) {
+        const type = movieGroupType(clean(body.group_type));
+        if (!type) throw new HttpError(400, "Неизвестный тип группы", "INVALID_GROUP_TYPE");
+        patch.group_type = type;
+      }
+      const stamp = now();
+      const ops = [];
+      if (body.order !== undefined) {
+        if (!Array.isArray(body.order)) throw new HttpError(400, "Некорректный порядок", "INVALID_ORDER");
+        const current = await env.DB.prepare("SELECT movie_id FROM movie_group_items WHERE group_id=? AND pair_id=?")
+          .bind(groupId, pair.id).all();
+        const currentIds = (current.results || []).map((row) => Number(row.movie_id));
+        const orderIds = body.order.map((value) => Number(value));
+        // Порядок обязан быть перестановкой текущего состава: без пропусков,
+        // повторов и посторонних записей.
+        const sortedCurrent = [...currentIds].sort((a, b) => a - b);
+        const sortedOrder = [...orderIds].sort((a, b) => a - b);
+        if (orderIds.length !== currentIds.length || sortedOrder.some((id, i) => id !== sortedCurrent[i]) || new Set(orderIds).size !== orderIds.length) {
+          throw new HttpError(400, "Порядок должен включать все части группы", "INVALID_ORDER");
+        }
+        for (const [index, movieId] of orderIds.entries()) {
+          ops.push(env.DB.prepare("UPDATE movie_group_items SET position=? WHERE group_id=? AND movie_id=? AND pair_id=?")
+            .bind(index, groupId, movieId, pair.id));
+        }
+      }
+      const sets = [];
+      const values = [];
+      if (patch.title !== undefined) { sets.push("title=?"); values.push(patch.title); }
+      if (patch.group_type !== undefined) { sets.push("group_type=?"); values.push(patch.group_type); }
+      if (!sets.length && body.order === undefined) throw new HttpError(400, "Нечего менять", "NOTHING_TO_UPDATE");
+      if (sets.length) {
+        sets.push("updated_at=?");
+        values.push(stamp, groupId, pair.id);
+        ops.push(env.DB.prepare(`UPDATE movie_groups SET ${sets.join(",")} WHERE id=? AND pair_id=?`).bind(...values));
+      }
+      // Порядок и метаданные — одним batch: частичного применения нет.
+      await env.DB.batch(ops);
+      return json(await state(env, user.tg_id));
+    }
+    if (request.method === "DELETE" && !subPath) {
+      await movieGroupOr404(env, pair.id, groupId);
+      // Расформирование: уходят только связи, фильмы остаются отдельными.
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND pair_id=?").bind(groupId, pair.id),
+        env.DB.prepare("DELETE FROM movie_groups WHERE id=? AND pair_id=?").bind(groupId, pair.id)
+      ]);
+      return json(await state(env, user.tg_id));
+    }
+    if (request.method === "POST" && subPath === "/items") {
+      await movieGroupOr404(env, pair.id, groupId);
+      const movieId = Number(body.movie_id);
+      if (!positiveId(movieId)) throw new HttpError(400, "Некорректный идентификатор фильма", "INVALID_ID");
+      const movie = await env.DB.prepare("SELECT id FROM movies WHERE id=? AND pair_id=?").bind(movieId, pair.id).first();
+      if (!movie) throw new HttpError(404, "Фильм не найден", "NOT_FOUND");
+      const existing = await env.DB.prepare("SELECT group_id FROM movie_group_items WHERE movie_id=?").bind(movieId).first();
+      const alreadyHere = existing && existing.group_id === groupId;
+      const moveFrom = clean(body.move_from_group_id) || null;
+      if (existing && !alreadyHere && moveFrom !== existing.group_id) {
+        const clashGroup = await env.DB.prepare("SELECT title FROM movie_groups WHERE id=? AND pair_id=?")
+          .bind(existing.group_id, pair.id).first();
+        return json({
+          error: "Фильм уже состоит в группе «" + (clashGroup?.title || "") + "»",
+          code: "ALREADY_GROUPED",
+          group_id: existing.group_id,
+          group_title: clashGroup?.title || null
+        }, 409);
+      }
+      if (alreadyHere) {
+        return json({ error: "Фильм уже в этой группе", code: "ALREADY_GROUPED", group_id: groupId }, 409);
+      }
+      // Перенос: исходная группа с двумя частями после изъятия одной
+      // расформировывается — уборку планируем в том же batch.
+      let sourceCleanup = null;
+      if (existing) {
+        await movieGroupOr404(env, pair.id, existing.group_id);
+        const sourceCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM movie_group_items WHERE group_id=? AND pair_id=?")
+          .bind(existing.group_id, pair.id).first();
+        if (Number(sourceCount?.n || 0) === 2) sourceCleanup = existing.group_id;
+      }
+      const posRow = await env.DB.prepare("SELECT COALESCE(MAX(position),-1)+1 AS next_pos FROM movie_group_items WHERE group_id=? AND pair_id=?")
+        .bind(groupId, pair.id).first();
+      const stamp = now();
+      const ops = [];
+      if (existing) {
+        ops.push(env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND movie_id=? AND pair_id=?")
+          .bind(existing.group_id, movieId, pair.id));
+      }
+      ops.push(env.DB.prepare("INSERT INTO movie_group_items(pair_id,group_id,movie_id,position,added_by,created_at) VALUES(?,?,?,?,?,?)")
+        .bind(pair.id, groupId, movieId, Number(posRow?.next_pos || 0), user.tg_id, stamp));
+      if (sourceCleanup) {
+        ops.push(env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND pair_id=?").bind(sourceCleanup, pair.id));
+        ops.push(env.DB.prepare("DELETE FROM movie_groups WHERE id=? AND pair_id=?").bind(sourceCleanup, pair.id));
+      }
+      try {
+        await env.DB.batch(ops);
+      } catch (error) {
+        if (String(error?.message || "").includes("UNIQUE constraint failed")) {
+          throw new HttpError(409, "Фильм уже состоит в группе", "ALREADY_GROUPED");
+        }
+        throw error;
+      }
+      if (existing && !sourceCleanup) await disbandGroupIfSingleton(env, pair.id, existing.group_id);
+      return json(await state(env, user.tg_id));
+    }
+    if (request.method === "DELETE" && itemMovieId !== null) {
+      await movieGroupOr404(env, pair.id, groupId);
+      if (!positiveId(itemMovieId)) throw new HttpError(400, "Некорректный идентификатор фильма", "INVALID_ID");
+      const item = await env.DB.prepare("SELECT movie_id FROM movie_group_items WHERE group_id=? AND movie_id=? AND pair_id=?")
+        .bind(groupId, itemMovieId, pair.id).first();
+      if (!item) throw new HttpError(404, "Часть не найдена в группе", "NOT_FOUND");
+      const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM movie_group_items WHERE group_id=? AND pair_id=?")
+        .bind(groupId, pair.id).first();
+      const ops = [env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND movie_id=? AND pair_id=?")
+        .bind(groupId, itemMovieId, pair.id)];
+      // Меньше двух частей — группа расформировывается, фильм остаётся.
+      if (Number(countRow?.n || 0) <= 2) {
+        ops.push(env.DB.prepare("DELETE FROM movie_groups WHERE id=? AND pair_id=?").bind(groupId, pair.id));
+      }
+      await env.DB.batch(ops);
+      return json(await state(env, user.tg_id));
+    }
   }
   // Новая копилка: личная (видна только автору) или общая (вся пара).
   if (request.method === "POST" && url.pathname === "/api/savings") {
@@ -4642,7 +5062,7 @@ const EXPORT_SQL = {
   // в выгрузку не входят (состав «private» дополнительно сужает до личных).
   plans: (scope) => `SELECT t.id,t.title,t.day,t.time,t.monthly,t.yearly,t.is_private,t.created_at,u.display_name AS author FROM tasks t
     LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=? AND t.status='open'${scope === "private" ? " AND t.is_private=1 AND t.created_by=?" : " AND (t.is_private=0 OR t.created_by=?)"} ORDER BY COALESCE(t.day,'9999-99-99') ASC, t.id ASC`,
-  movies: () => `SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.seasons,m.episodes,m.url,m.created_at,(SELECT ROUND(AVG(r.rating),1) FROM movie_ratings r WHERE r.movie_id=m.id) AS pair_rating,u.display_name AS author FROM movies m
+  movies: () => `SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.seasons,m.episodes,m.url,m.resume_position,m.created_at,(SELECT ROUND(AVG(r.rating),1) FROM movie_ratings r WHERE r.movie_id=m.id) AS pair_rating,u.display_name AS author,(SELECT g.title FROM movie_group_items i JOIN movie_groups g ON g.id=i.group_id AND g.pair_id=i.pair_id WHERE i.movie_id=m.id) AS group_title FROM movies m
     LEFT JOIN users u ON u.tg_id=m.created_by WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at ASC, m.id ASC`,
   dates: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
     LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.kind='date'${scope === "private" ? " AND d.is_private=1 AND d.created_by=?" : " AND (d.is_private=0 OR d.created_by=?)"} ORDER BY d.day ASC, d.id ASC`,
@@ -4799,6 +5219,8 @@ const EXPORT_ROW_MAPPERS = {
     seasons: row.seasons || null,
     episodes: row.episodes || null,
     url: row.url || null,
+    resume_position: clean(row.resume_position) || null,
+    group_title: clean(row.group_title) || null,
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   }),
@@ -4923,6 +5345,8 @@ const EXPORT_TXT_ROWS = {
       ["Сезоны", row.seasons],
       ["Эпизоды", row.episodes],
       ["Ссылка", row.url],
+      ["Остановились на", row.resume_position],
+      ["Группа", row.group_title],
       ["Добавил", row.author],
       ["Создан", exportTxtTime(row.created_at)]
     ]
@@ -6041,7 +6465,7 @@ async function cyclePartnerView(env, tgId, tz) {
   const ownerId = pair.user_a === tgId ? pair.user_b : pair.user_a;
   if (!ownerId || ownerId === tgId) return { shared: false };
   const row = await env.DB.prepare(
-    "SELECT p.share_enabled, p.share_level, p.share_sex, p.share_mood, p.share_sleep, p.share_bbt, p.share_confirmed, u.gender FROM cycle_profiles p JOIN users u ON u.tg_id=p.tg_id WHERE p.tg_id=?"
+    "SELECT p.share_enabled, p.share_level, p.share_sex, p.share_mood, p.share_sleep, p.share_bbt, p.share_confirmed, u.gender, u.timezone FROM cycle_profiles p JOIN users u ON u.tg_id=p.tg_id WHERE p.tg_id=?"
   ).bind(ownerId).first();
   if (!row || Number(row.share_enabled) !== 1 || row.gender !== "female") return { shared: false };
   const share = {
@@ -6050,7 +6474,11 @@ async function cyclePartnerView(env, tgId, tz) {
     categories: cycleShareCategories({ sex: row.share_sex, mood: row.share_mood, sleep: row.share_sleep, bbt: row.share_bbt }),
     confirmed: Number(row.share_confirmed) === 1
   };
-  return cycleViewForPartner(await cycleState(env, ownerId, tz), share);
+  // «Сегодня» календаря — по поясу ВЛАДЕЛИЦЫ, а не зрителя: записи Фло —
+  // календарные даты её пояса, и у партнёра в другом часовом поясе около
+  // полуночи сдвигал бы фазу/прогноз на день (аудит 2026-11-17, BUG-01).
+  const ownerTz = validTimeZone(row.timezone) || DEFAULT_TZ;
+  return cycleViewForPartner(await cycleState(env, ownerId, ownerTz), share);
 }
 
 // Экспорт владелицы: полный журнал без обрезки истории (в отличие от /api/cycle/state).
@@ -6953,7 +7381,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,is_private INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS goal_items (id INTEGER PRIMARY KEY AUTOINCREMENT,goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,done_by INTEGER,created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,rating_source TEXT,rating_checked_at INTEGER,details TEXT,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,rating_source TEXT,rating_checked_at INTEGER,details TEXT,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,resume_position TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS movie_ratings (movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,rating INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY (movie_id,tg_id))`,
     `CREATE TABLE IF NOT EXISTS savings (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,kind TEXT NOT NULL DEFAULT 'personal',title TEXT NOT NULL,target INTEGER NOT NULL,collected INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS savings_deposits (id INTEGER PRIMARY KEY AUTOINCREMENT,saving_id INTEGER NOT NULL REFERENCES savings(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,amount INTEGER NOT NULL,created_at INTEGER NOT NULL)`,
@@ -7000,6 +7428,12 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS telegram_action_tokens (token TEXT PRIMARY KEY,tg_id INTEGER NOT NULL,action_type TEXT NOT NULL,ref_id INTEGER NOT NULL,action_date TEXT,status TEXT,group_id TEXT,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed_at INTEGER)`,
     `CREATE INDEX IF NOT EXISTS idx_tg_action_tokens_tg ON telegram_action_tokens(tg_id,expires_at)`,
     `CREATE TABLE IF NOT EXISTS telegram_notification_widgets (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,kind TEXT NOT NULL,chat_data TEXT,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'active')`,
+    // Группы фильмов/сериалов (паритет с migrations/0047): стопка связанных
+    // записей «Кино». Группа — метаданные+связи; части остаются в movies.
+    `CREATE TABLE IF NOT EXISTS movie_groups (id TEXT PRIMARY KEY,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,group_type TEXT NOT NULL DEFAULT 'collection',created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(id,pair_id))`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_id_pair ON movies(id,pair_id)`,
+    `CREATE TABLE IF NOT EXISTS movie_group_items (pair_id INTEGER NOT NULL,group_id TEXT NOT NULL,movie_id INTEGER NOT NULL,position INTEGER NOT NULL DEFAULT 0,added_by INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY (group_id,movie_id),UNIQUE(movie_id),FOREIGN KEY (group_id,pair_id) REFERENCES movie_groups(id,pair_id) ON DELETE CASCADE,FOREIGN KEY (movie_id,pair_id) REFERENCES movies(id,pair_id) ON DELETE CASCADE)`,
+    `CREATE INDEX IF NOT EXISTS idx_movie_group_items_order ON movie_group_items(pair_id,group_id,position,movie_id)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_widgets_msg ON telegram_notification_widgets(chat_id,message_id)`,
     `CREATE INDEX IF NOT EXISTS idx_tg_widgets_tg ON telegram_notification_widgets(tg_id,status,expires_at)`,
     `CREATE INDEX IF NOT EXISTS idx_goal_items_goal ON goal_items(goal_id,done)`,
@@ -7079,7 +7513,12 @@ async function ensureSchema(env) {
     ["cycle_profiles", "share_bbt", "INTEGER NOT NULL DEFAULT 0"],
     ["cycle_profiles", "share_confirmed", "INTEGER NOT NULL DEFAULT 0"],
     ["cycle_profiles", "context", "TEXT"],
-    ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"]
+    ["rate_limits", "expires_at", "INTEGER NOT NULL DEFAULT 0"],
+    // «Остановились» — точка прерванного просмотра (migrations/0048).
+    ["movies", "resume_position", "TEXT"],
+    // Активный рандом места/фильма на пару (migrations/0049).
+    ["pairs", "place_pick_id", "INTEGER"],
+    ["pairs", "movie_pick_id", "INTEGER"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
     if (!info.results.some(row => row.name === column)) {

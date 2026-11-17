@@ -108,16 +108,25 @@ async def test_legacy_v12_database_gets_show_cycle_calendar(tmp_path):
     db = await connect_database(path)
     try:
         row = await db.one("PRAGMA user_version")
-        assert int(row["user_version"]) == SCHEMA_VERSION == 13
+        assert int(row["user_version"]) == SCHEMA_VERSION == 15
         cols = await db.query("PRAGMA table_info(users)")
         names = {c["name"] for c in cols}
         assert "show_cycle_calendar" in names, "миграция 13 не применилась"
+        # Миграция 14 (группы фильмов) и 15 (resume_position) тоже доехали
+        # по цепочке v12 → v15.
+        groups = await db.query(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('movie_groups','movie_group_items') ORDER BY name"
+        )
+        assert [r["name"] for r in groups] == ["movie_group_items", "movie_groups"]
+        movie_cols = await db.query("PRAGMA table_info(movies)")
+        assert "resume_position" in {c["name"] for c in movie_cols}, "миграция 15 не применилась"
         user = await db.one("SELECT display_name FROM users WHERE tg_id = 42")
         assert user["display_name"] == "Владелец", "данные пользователя потеряны"
         # Повторное открытие — идемпотентно, duplicate column не роняет старт.
         await db.close()
         db = await connect_database(path)
         row = await db.one("PRAGMA user_version")
-        assert int(row["user_version"]) == 13
+        assert int(row["user_version"]) == SCHEMA_VERSION
     finally:
         await db.close()

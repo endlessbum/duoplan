@@ -29,6 +29,10 @@
 
   const pad = (n) => String(n).padStart(2, "0");
   const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const keyToDate = (key) => {
+    const [y, m, d] = String(key).split("-").map(Number);
+    return new Date(y, m - 1, d);
+  };
   const fmtDM = (d) => `${pad(d.getDate())}.${pad(d.getMonth() + 1)}`;
   const WEEKDAYS = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
   const fmtShort = (d) => `${WEEKDAYS[d.getDay()]}, ${fmtDM(d)}`;
@@ -47,65 +51,211 @@
     const t = todayMidnight();
     return new Date(t.getFullYear(), t.getMonth(), t.getDate() + n);
   };
+  const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  const diffDays = (a, b) => Math.round((a.getTime() - b.getTime()) / 86400000);
   function nextSaturday() {
     const t = new Date();
     return offsetDate((6 - t.getDay() + 7) % 7 || 7);
   }
   const saturday = nextSaturday();
-  function daysUntil(month, day) {
+  // Ближайшее наступление месяца/дня (для ежегодных дат и дней рождения).
+  function nextOccurrenceMD(month, day) {
     const t = todayMidnight();
     const d = new Date(t.getFullYear(), month - 1, day);
     if (d.getTime() < t.getTime()) d.setFullYear(d.getFullYear() + 1);
-    return Math.round((d.getTime() - t.getTime()) / 86400000);
+    return d;
   }
-  // Подпись отсчёта — как nextDaysLabel()/dateItem в app.js.
+  // Подпись отсчёта — как nextDaysLabel() в app.js.
   const nextLabel = (n) =>
     n <= 0 ? "Сегодня" : n === 1 ? "Завтра" : `Через ${n} ${plural(n, "день", "дня", "дней")}`;
-  const untilDays = (month, day) => nextLabel(daysUntil(month, day));
+  const untilDays = (month, day) => nextLabel(diffDays(nextOccurrenceMD(month, day), todayMidnight()));
 
+  // ------------------------------------------------------------------
+  // Текст: esc + Telegram-разметка — дословный порт из app.js.
+  // ------------------------------------------------------------------
+  function esc(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  const RICH_TOKENS = [["**", "b", ""], ["__", "u", ""], ["||", "span", "rich-spoiler"], ["~~", "s", ""], ["_", "i", ""]];
+
+  function richInline(escaped) {
+    const out = [];
+    const stack = [];
+    let i = 0;
+    while (i < escaped.length) {
+      const token = RICH_TOKENS.find(([t]) => escaped.startsWith(t, i));
+      if (token) {
+        const [tok, tag, cls] = token;
+        const openIndex = stack.map(item => item.tok).lastIndexOf(tok);
+        if (openIndex !== -1) {
+          for (let s = stack.length - 1; s >= openIndex; s--) out.push(stack[s].cls ? "</span>" : `</${stack[s].tag}>`);
+          stack.length = openIndex;
+        } else {
+          out.push(cls ? `<span class="${cls}" data-spoiler>` : `<${tag}>`);
+          stack.push({ tok, tag, cls });
+        }
+        i += tok.length;
+        continue;
+      }
+      out.push(escaped[i++]);
+    }
+    while (stack.length) {
+      const top = stack.pop();
+      out.push(top.cls ? "</span>" : `</${top.tag}>`);
+    }
+    return out.join("");
+  }
+
+  function renderRichText(raw) {
+    const lines = esc(raw).split("\n");
+    const out = [];
+    let quote = null;
+    const flushQuote = () => {
+      if (!quote) return;
+      out.push(`<blockquote class="rich-quote">${quote.map(richInline).join("\n")}</blockquote>`);
+      quote = null;
+    };
+    for (const line of lines) {
+      if (line.startsWith("&gt; ")) { (quote ??= []).push(line.slice(5)); continue; }
+      if (line === "&gt;") { (quote ??= []).push(""); continue; }
+      flushQuote();
+      out.push(richInline(line));
+    }
+    flushQuote();
+    return out.join("\n");
+  }
+
+  // Даты всегда в виде дд.мм.гггг — как formatDay() в app.js.
+  function formatDay(value) {
+    if (value instanceof Date) {
+      return `${pad(value.getDate())}.${pad(value.getMonth() + 1)}.${value.getFullYear()}`;
+    }
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
+    return m ? `${m[3]}.${m[2]}.${m[1]}` : String(value ?? "");
+  }
+
+  // Unix timestamp (seconds) → дд.мм.гггг.
+  function formatTimestamp(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    const d = new Date(n * 1000);
+    return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+  }
+
+  // Год в дне рождения технический: показываем месяц и число.
+  function formatBirthday(day) {
+    const [, month, date] = String(day || "").split("-").map(Number);
+    if (!month || !date) return "";
+    const value = new Date(Date.UTC(2000, month - 1, date, 12));
+    return new Intl.DateTimeFormat("ru-RU", { timeZone: "UTC", day: "numeric", month: "long" }).format(value);
+  }
+
+  // ------------------------------------------------------------------
   // Иконки — дословно из app.js.
+  // ------------------------------------------------------------------
   const DONE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
   const EDIT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4.5L19.5 9a2.1 2.1 0 0 0-3-3L5.5 17 4 20Z"/><path d="M13.5 7.5 16.5 10.5"/></svg>';
   const DELETE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></svg>';
   const REOPEN_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 6"/><path d="M4 4v6h6"/></svg>';
   const FLAME_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c1.2 3-2.6 4.6-2.6 7.6a3.6 3.6 0 0 0 3.7 3.5c1.8-.1 2.9-1.7 2.6-3.8 1.9 1.5 3.1 3.6 3.1 5.8A6.8 6.8 0 0 1 5.2 15C5.2 9.4 10.4 8 12 3Z"/></svg>';
-  // Остальные иконки действий — дословно из app.js.
   const COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.2"/><path d="M5.5 15H4.8A1.8 1.8 0 0 1 3 13.2V4.8A1.8 1.8 0 0 1 4.8 3h8.4A1.8 1.8 0 0 1 15 4.8v.7"/></svg>';
   const PLUS_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>';
   const STAR_ICON = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none" aria-hidden="true"><path d="m12 3 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3Z"/></svg>';
   const CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5"/></svg>';
   const CHEVRON_RIGHT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
   const MOVIE_CHEVRON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+  const LINK_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 14.5a4.24 4.24 0 0 0 6 0l3.2-3.2a4.24 4.24 0 1 0-6-6L11.5 6.5"/><path d="M14.5 9.5a4.24 4.24 0 0 0-6 0l-3.2 3.2a4.24 4.24 0 1 0 6 6l1.2-1.2"/></svg>';
+  const RESUME_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5v13l11-6.5-11-6.5Z"/></svg>';
+  const FLO_HEART_ICON = '<svg class="cal-heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>';
 
-  // itemActionButton/itemActions — дословно из app.js.
+  // itemActionButton/itemActions — дословно из app.js: «⋮» в правом верхнем
+  // углу карточки, по тапу выпадает меню действий.
   function itemActionButton(opts) {
-    const { action, type, id, label, icon } = opts;
-    const typeAttr = type !== undefined ? ` data-type="${type}"` : "";
-    const idAttr = id !== undefined ? ` data-id="${id}"` : "";
-    return `<button class="icon-btn" type="button" data-action="${action}"${typeAttr}${idAttr} aria-label="${label}">${icon}</button>`;
+    const { action, type, id, url, label, icon } = opts;
+    const typeAttr = type !== undefined ? ` data-type="${esc(type)}"` : "";
+    const idAttr = id !== undefined ? ` data-id="${esc(id)}"` : "";
+    const urlAttr = url !== undefined ? ` data-url="${esc(url)}"` : "";
+    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
   }
-  const itemActions = (buttons) => (buttons ? `<div class="item-actions">${buttons}</div>` : "");
+
+  function itemActions(buttons) {
+    if (!buttons) return "";
+    return `<div class="item-actions">
+      <button class="item-menu-toggle" type="button" data-action="item-menu-toggle" aria-label="Действия" aria-haspopup="menu" aria-expanded="false">⋮</button>
+      <div class="item-menu" role="menu" hidden>${buttons}</div>
+    </div>`;
+  }
+
   const editDelete = (type, id) => itemActions([
     itemActionButton({ action: "edit-item", type, id, label: "Редактировать", icon: EDIT_ICON }),
     itemActionButton({ action: "delete-item", type, id, label: "Удалить", icon: DELETE_ICON })
   ].join("\n            "));
+
+  // Одно открытое меню максимум — как closeItemMenus() в app.js.
+  function closeItemMenus(except) {
+    document.querySelectorAll("#demo-view .item-actions.is-open").forEach((el) => {
+      if (el === except) return;
+      el.classList.remove("is-open");
+      const menu = el.querySelector(".item-menu");
+      if (menu) menu.hidden = true;
+      const toggle = el.querySelector(".item-menu-toggle");
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Чип отсчёта — упрощённый порт countdownChip() в app.js (один пояс,
+  // без 30-секундного тика: значения статичны на момент рендера).
+  // ------------------------------------------------------------------
+  function countdownChipFor(date, time) {
+    if (!date) return "";
+    const target = time ? new Date(date.getFullYear(), date.getMonth(), date.getDate(), ...time.split(":").map(Number)) : date;
+    const diff = target.getTime() - Date.now();
+    if (diff <= 0) return `<span class="day-chip is-overdue">Время пришло</span>`;
+    const days = diffDays(new Date(target.getFullYear(), target.getMonth(), target.getDate()), todayMidnight());
+    if (days === 0) {
+      const hours = Math.floor(diff / 3600000);
+      const mins = Math.max(1, Math.floor((diff % 3600000) / 60000));
+      const label = hours > 0 ? `Через ${hours} ч ${mins} мин` : `Через ${mins} мин`;
+      return `<span class="day-chip is-countdown">${esc(label)}</span>`;
+    }
+    if (days === 1) return `<span class="day-chip">Завтра</span>`;
+    return `<span class="day-chip">Через ${days} ${plural(days, "день", "дня", "дней")}</span>`;
+  }
+
+  // Чип для ежегодной даты/дня рождения — порт nextDaysLabel().
+  function recurringChip(month, day) {
+    const next = nextOccurrenceMD(month, day);
+    const days = diffDays(next, todayMidnight());
+    if (days <= 0) return { label: "Сегодня", cls: "" };
+    if (days === 1) return { label: "Завтра", cls: "" };
+    return { label: `Через ${days} ${plural(days, "день", "дня", "дней")}`, cls: "" };
+  }
 
   // ------------------------------------------------------------------
   // Карточки — структура скопирована из app.js.
   // ------------------------------------------------------------------
   function taskCard(t) {
     const whenText = t.isPrivate
-      ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span><span>${t.when}${t.time ? ` · ${t.time}` : ""}</span></div>`
-      : `<span>${t.when}${t.time ? ` · ${t.time}` : ""}</span>`;
+      ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span>${t.day ? `<span>${esc(formatDay(t.day))}${t.time ? ` · ${esc(t.time)}` : ""}</span>` : ""}</div>`
+      : t.day ? `<span>${esc(formatDay(t.day))}${t.time ? ` · ${esc(t.time)}` : ""}</span>` : "";
+    const calendarAttrs = t.day
+      ? ` role="button" tabindex="0" data-action="show-in-calendar" data-day="${dayKey(t.day)}" aria-label="Показать в календаре"`
+      : "";
     return `
-      <article class="card">
+      <article class="card"${calendarAttrs}>
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${t.title}</h3>
+            <h3 class="item-title">${renderRichText(t.title)}</h3>
             <div class="item-meta">
               <div class="item-when">
                 ${whenText}
-                <div class="item-when-row"><span class="day-chip${t.chipClass || ""}">${t.chip}</span></div>
+                <div class="item-when-row">${countdownChipFor(t.day, t.time)}</div>
               </div>
             </div>
           </div>
@@ -123,7 +273,7 @@
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title" style="text-decoration:line-through;">${t.title}</h3>
+            <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(t.title)}</h3>
             <div class="item-meta"><span class="day-chip is-muted">${t.meta}</span></div>
           </div>
           ${itemActions([
@@ -136,39 +286,49 @@
   }
 
   function dateCard(d) {
-    const whenText = d.isPrivate
-      ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span><span>${d.when}</span></div>`
-      : `<span>${d.when}</span>`;
+    const [month, day] = d.day.split("-").map(Number);
+    const chip = recurringChip(month, day);
+    const whenText = `<span>${esc(formatDay(d.day))}${d.time ? ` · ${esc(d.time)}` : ""}${d.recurs ? " · Ежегодно" : ""}</span>`;
     return `
-      <article class="card">
+      <article class="card" role="button" tabindex="0" data-action="show-in-calendar" data-day="${esc(d.day)}" aria-label="Показать в календаре">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${d.title}</h3>
+            <h3 class="item-title">${renderRichText(d.title)}</h3>
             <div class="item-meta">
               <div class="item-when">
-                ${whenText}
-                <div class="item-when-row"><span class="day-chip${d.chipClass || ""}">${d.chip}</span></div>
+                ${d.isPrivate ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span>${whenText}</div>` : whenText}
+                <div class="item-when-row">${chip.label ? `<span class="day-chip">${esc(chip.label)}</span>` : ""}</div>
               </div>
             </div>
           </div>
-          ${editDelete("dates", d.id)}
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "dates", id: d.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "dates", id: d.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>`;
   }
 
   function birthdayCard(b) {
+    const [month, day] = b.day.split("-").map(Number);
+    const chip = recurringChip(month, day);
+    const next = nextOccurrenceMD(month, day);
+    const targetDay = dayKey(next);
     return `
-      <article class="card birthday-card">
+      <article class="card birthday-card" role="button" tabindex="0" data-action="show-in-calendar" data-day="${esc(targetDay)}" aria-label="Показать в календаре">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${b.title}</h3>
+            <h3 class="item-title">${renderRichText(b.title)}</h3>
             <div class="item-meta">
               ${b.isPrivate ? `<span class="day-chip is-private">Личное</span>` : ""}
-              <span>${b.when}</span>
-              <span class="day-chip">${b.chip}</span>
+              <span>${esc(formatBirthday(b.day))}</span>
+              ${chip.label ? `<span class="day-chip">${esc(chip.label)}</span>` : ""}
             </div>
           </div>
-          ${editDelete("dates", b.id)}
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "dates", id: b.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "dates", id: b.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>`;
   }
@@ -178,14 +338,17 @@
       <article class="card memory-card" data-action="open-memory" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть запись дневника">
         <div class="item-row">
           <div class="item-main">
-            ${m.title ? `<h3 class="item-title">${m.title}</h3>` : ""}
-            <p class="memory-body">${m.body}</p>
+            ${m.title ? `<h3 class="item-title">${renderRichText(m.title)}</h3>` : ""}
+            <p class="memory-body">${renderRichText(m.body)}</p>
             <div class="item-meta">
-              <span class="memory-author">${m.author}</span>
-              <span>· ${m.date}</span>
+              <span class="memory-author">${esc(m.author)}</span>
+              <span>· ${esc(m.date)}</span>
             </div>
           </div>
-          ${editDelete("memories", m.id)}
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "memories", id: m.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "memories", id: m.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>`;
   }
@@ -194,11 +357,14 @@
     return `
       <article class="card quote-card">
         <span class="quote-mark" aria-hidden="true">&ldquo;</span>
-        <p class="quote-text">${q.text}</p>
-        ${q.source ? `<p class="quote-source">— ${q.source}</p>` : ""}
+        <p class="quote-text">${renderRichText(q.text)}</p>
+        ${q.source ? `<p class="quote-source">— ${esc(q.source)}</p>` : ""}
         <div class="item-row">
-          <div class="item-main"><div class="item-meta"><span>${q.date}</span></div></div>
-          ${editDelete("quotes", q.id)}
+          <div class="item-main"><div class="item-meta"><span>${esc(q.date)}</span></div></div>
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "quotes", id: q.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "quotes", id: q.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
         </div>
       </article>`;
   }
@@ -209,14 +375,15 @@
       <article class="card${visited ? " place-visited" : ""}">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${p.title}</h3>
-            ${p.note ? `<p class="place-note">${p.note}</p>` : ""}
-            ${visited ? `<div class="item-meta"><span class="day-chip">${p.visitedAt || "Посещено"}</span></div>` : ""}
+            <h3 class="item-title">${esc(p.title)}</h3>
+            ${p.note ? `<p class="place-note">${esc(p.note)}</p>` : ""}
+            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(p.visitedAt || "Посещено")}</span></div>` : ""}
           </div>
           ${itemActions([
             itemActionButton(visited
               ? { action: "place-unvisited", id: p.id, label: "Вернуть в список", icon: REOPEN_ICON }
               : { action: "place-visited", id: p.id, label: "Отметить посещённым", icon: DONE_ICON }),
+            ...(p.url ? [itemActionButton({ action: "open-url", url: p.url, label: "Ссылка", icon: LINK_ICON })] : []),
             itemActionButton({ action: "edit-item", type: "places", id: p.id, label: "Редактировать", icon: EDIT_ICON }),
             itemActionButton({ action: "delete-item", type: "places", id: p.id, label: "Удалить", icon: DELETE_ICON })
           ].join("\n            "))}
@@ -230,9 +397,9 @@
       <article class="card${visited ? " place-visited" : ""}">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${t.title}</h3>
-            ${t.note ? `<p class="place-note">${t.note}</p>` : ""}
-            ${visited ? `<div class="item-meta"><span class="day-chip">${t.visitedAt || "Съездили"}</span></div>` : ""}
+            <h3 class="item-title">${esc(t.title)}</h3>
+            ${t.note ? `<p class="place-note">${esc(t.note)}</p>` : ""}
+            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(t.visitedAt || "Съездили")}</span></div>` : ""}
           </div>
           ${itemActions([
             itemActionButton(visited
@@ -250,7 +417,7 @@
       <article class="card goal-card">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${g.title}</h3>
+            <h3 class="item-title">${esc(g.title)}</h3>
             ${g.isPrivate ? `<div class="item-meta"><span class="day-chip is-muted">Личная</span></div>` : ""}
           </div>
           ${itemActions(itemActionButton({ action: "delete-item", type: "goals", id: g.id, label: "Удалить цель", icon: DELETE_ICON }))}
@@ -259,7 +426,7 @@
           ${g.items.map((it) => `
             <div class="goal-item${it.done ? " is-done" : ""}">
               <button class="goal-item-check" type="button" data-action="${it.done ? "goal-item-reopen" : "goal-item-done"}" data-id="${it.id}" aria-label="${it.done ? "Вернуть пункт в работу" : "Отметить пункт выполненным"}">${it.done ? REOPEN_ICON : DONE_ICON}</button>
-              <span class="goal-item-title">${it.title}</span>
+              <span class="goal-item-title">${esc(it.title)}</span>
             </div>`).join("")}
         </div>
       </article>`;
@@ -272,65 +439,45 @@
     const cls = r < 4 ? "is-rating-gray" : r < 6 ? "is-rating-red" : r < 8 ? "is-rating-yellow" : "is-rating-green";
     return `<span class="day-chip ${cls}">${label} ${r.toFixed(1)}</span>`;
   }
-  const ratingPill = (rating) => scorePill("IMDb", rating);
+  const ratingPill = (m) => scorePill(m.rating_source === "tmdb" ? "TMDB" : "IMDb", m.rating);
   const raofpPill = (m) => scorePill("RAofP", m.pair_rating);
 
   function movieCard(m) {
     const watched = m.watched === true;
+    const genre = m.genre ? String(m.genre).split(",")[0].trim() : "";
+    const yearPill = m.year ? `<span class="day-chip is-muted">${esc(m.year)}</span>` : "";
     return `
-      <article class="card movie-card${watched ? " movie-watched" : ""}" data-action="open-movie" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть описание: ${m.title}">
+      <article class="card movie-card${watched ? " movie-watched" : ""}" data-action="open-movie" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(m.title)}">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${m.title}</h3>
-            ${m.genre || m.year ? `<div class="item-meta">${m.genre ? `<span class="day-chip is-muted">${m.genre}</span>` : ""}${m.year ? `<span class="day-chip is-muted">${m.year}</span>` : ""}</div>` : ""}
+            <h3 class="item-title">${esc(m.title)}</h3>
+            ${genre || m.year ? `<div class="item-meta">${genre ? `<span class="day-chip is-muted">${esc(genre)}</span>` : ""}${yearPill}</div>` : ""}
             <div class="item-meta">
-              ${ratingPill(m.rating)}
-              ${m.length ? `<span>${m.length}</span>` : ""}
+              ${ratingPill(m)}
+              ${m.length ? `<span>${esc(m.length)}</span>` : ""}
+              ${m.resume_position ? `<span class="day-chip is-resume" title="Точка, на которой остановились">▶ ${esc(m.resume_position)}</span>` : ""}
             </div>
             ${watched ? `<div class="item-meta">${raofpPill(m)}</div>` : ""}
-            ${watched ? `<div class="item-meta"><span class="day-chip">${m.watchedAt || "Просмотрено"}</span></div>` : ""}
+            ${watched ? `<div class="item-meta"><span class="day-chip">${esc(m.watchedAt || "Просмотрено")}</span></div>` : ""}
           </div>
           ${itemActions([
             itemActionButton(watched
               ? { action: "movie-unwatched", id: m.id, label: "Вернуть в список", icon: REOPEN_ICON }
               : { action: "movie-watched", id: m.id, label: "Просмотрено", icon: DONE_ICON }),
+            ...(m.url ? [itemActionButton({ action: "open-url", url: m.url, label: "Ссылка", icon: LINK_ICON })] : []),
+            ...(!watched ? [
+              itemActionButton({
+                action: "movie-resume",
+                id: m.id,
+                label: m.resume_position ? "Изменить точку просмотра" : "Остановились",
+                icon: RESUME_ICON
+              }),
+              ...(m.resume_position ? [itemActionButton({ action: "movie-resume-clear", id: m.id, label: "Сбросить точку просмотра", icon: DELETE_ICON })] : [])
+            ] : []),
             itemActionButton({ action: "delete-item", type: "movies", id: m.id, label: "Удалить", icon: DELETE_ICON })
           ].join("\n            "))}
         </div>
         ${watched && m.my_rating == null ? `<button class="secondary full card-action" type="button" data-action="rate-movie" data-id="${m.id}">Оценить</button>` : ""}
-      </article>`;
-  }
-
-  function medCard(m) {
-    const taken = m.taken === true;
-    return `
-      <article class="card">
-        <div class="item-row">
-          <div class="item-main">
-            <h3 class="item-title">${m.name}</h3>
-            <div class="item-meta">
-              <span class="day-chip is-muted">${m.form}</span>
-              <span>${m.dosage}</span>
-              ${taken ? `<span class="day-chip">Принято</span>` : ""}
-            </div>
-            <div class="item-meta"><span>${m.schedule}</span></div>
-          </div>
-          ${itemActions(itemActionButton({ action: "edit-item", type: "health_meds", id: m.id, label: "Редактировать", icon: EDIT_ICON }))}
-        </div>
-        <button class="primary full card-action" type="button" data-action="med-take" data-id="${m.id}">${taken ? "Отменить отметку" : "Принять · +отметка"}</button>
-      </article>`;
-  }
-
-  function contactCard(c) {
-    return `
-      <article class="card">
-        <div class="item-row">
-          <div class="item-main">
-            <h3 class="item-title">${c.name}</h3>
-            <div class="item-meta">${c.phones.map((p) => `<span class="day-chip is-muted">${p}</span>`).join("")}</div>
-          </div>
-          ${editDelete("contacts", c.id)}
-        </div>
       </article>`;
   }
 
@@ -349,12 +496,12 @@
       <article class="card">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${w.body}</h3>
-            ${w.comment ? `<div class="wish-comment">${w.comment}</div>` : ""}
+            <h3 class="item-title">${renderRichText(w.body)}</h3>
+            ${w.comment ? `<div class="wish-comment">${renderRichText(w.comment)}</div>` : ""}
           </div>
           ${itemActions(actions)}
         </div>
-        ${w.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${w.url}">Ссылка</button>` : ""}
+        ${w.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(w.url)}">Ссылка</button>` : ""}
       </article>`;
   }
 
@@ -369,13 +516,13 @@
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title" style="text-decoration:line-through;">${w.body}</h3>
-            ${w.comment ? `<div class="wish-comment">${w.comment}</div>` : ""}
-            <div class="item-meta"><span class="day-chip is-muted">${w.created}</span><span class="day-chip">${w.doneAt}</span></div>
+            <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(w.body)}</h3>
+            ${w.comment ? `<div class="wish-comment">${renderRichText(w.comment)}</div>` : ""}
+            <div class="item-meta"><span class="day-chip is-muted">${esc(w.created)}</span><span class="day-chip">${esc(w.doneAt)}</span></div>
           </div>
           ${itemActions(actions)}
         </div>
-        ${w.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${w.url}">Ссылка</button>` : ""}
+        ${w.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(w.url)}">Ссылка</button>` : ""}
       </article>`;
   }
 
@@ -394,10 +541,10 @@
         ].join("\n        ");
     return `
       <article class="card${full ? " saving-full" : ""}" data-action="open-saving" data-id="${s.id}"
-        role="button" tabindex="0" aria-label="История пополнений копилки «${s.title}»">
+        role="button" tabindex="0" aria-label="История пополнений копилки «${esc(s.title)}»">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${s.title}</h3>
+            <h3 class="item-title">${esc(s.title)}</h3>
             <div class="item-meta">
               ${s.kind === "shared" ? "" : `<span class="day-chip is-muted">Личная</span>`}
               <span>${formatAmount(s.collected)} из ${formatAmount(s.target)}</span>
@@ -429,17 +576,17 @@
     dates: { title: "Даты", sub: "Значимые дни и дни рождения" },
     places: { title: "Места", sub: "Куда сходить вместе" },
     memories: { title: "Дневник", sub: "Воспоминания и личное" },
-    pair: { title: "Наша пара", sub: "Профиль, желания и настройки" }
+    pair: { title: "Наша пара", sub: "Профиль, желания, копилка и Фло" }
   };
 
   // ------------------------------------------------------------------
   // Данные демо — «живые» даты считаются от сегодня посетителя.
   // ------------------------------------------------------------------
   const TASKS = [
-    { id: 1, title: "Выбрать фильм на вечер", when: "Сегодня", time: "20:00", chip: "Сегодня", chipClass: " is-countdown" },
-    { id: 2, title: "Забронировать столик", when: "Завтра", time: "19:30", chip: "Завтра", chipClass: " is-countdown" },
-    { id: 3, title: "Вечер вдвоём", when: fmtShort(saturday), chip: `Сб, ${fmtDM(saturday)}` },
-    { id: 4, title: "Собраться на дачу", when: fmtShort(offsetDate(7)), isPrivate: true, chip: `Через 7 ${plural(7, "день", "дня", "дней")}` }
+    { id: 1, title: "Выбрать фильм на вечер", day: todayMidnight(), time: "20:00", chip: "Сегодня", chipClass: " is-countdown" },
+    { id: 2, title: "Забронировать столик", day: offsetDate(1), time: "19:30", chip: "Завтра", chipClass: " is-countdown" },
+    { id: 3, title: "Вечер вдвоём", day: saturday },
+    { id: 4, title: "Собраться на дачу", day: offsetDate(7), isPrivate: true }
   ];
   const DONE_TASKS = [
     { id: 11, title: "Купить подарок маме", meta: "Выполнено 12 фев" },
@@ -460,21 +607,21 @@
   ];
   const MOVIES_OPEN = [
     { id: 31, title: "Дюна: Часть вторая", genre: "Фантастика", year: "2024", rating: "8.5", length: "2 ч 46 мин", kind: "movie", created: 305 },
-    { id: 32, title: "Оппенгеймер", genre: "Драма", year: "2023", rating: "8.4", length: "3 ч 0 мин", kind: "movie", created: 304 },
-    { id: 33, title: "Кролик Джоджо", genre: "Комедия", year: "2019", rating: "7.9", length: "1 ч 59 мин", kind: "series", created: 303 }
+    { id: 32, title: "Оппенгеймер", genre: "Драма", year: "2023", rating: "8.4", length: "3 ч 0 мин", kind: "movie", created: 304, resume_position: "1:23:45" },
+    { id: 33, title: "Кролик Джоджо", genre: "Комедия", year: "2019", rating: "7.9", length: "1 ч 59 мин", kind: "series", created: 303, resume_position: "2 сезон, 5 серия · 34:12" }
   ];
   const MOVIES_WATCHED = [
     { id: 34, title: "Паразиты", genre: "Триллер", year: "2019", rating: "8.6", length: "2 ч 12 мин", kind: "movie", created: 210, pair_rating: 9, my_rating: 9, watched: true, watchedAt: "Просмотрено 20 янв" },
     { id: 35, title: "Сто лет тому вперёд", genre: "Фантастика", year: "2023", rating: "7.6", length: "2 ч 18 мин", kind: "movie", created: 208, pair_rating: 0, my_rating: null, watched: true, watchedAt: "Просмотрено 2 фев" }
   ];
   const DATES = [
-    { id: 41, title: "Годовщина", when: "14 февраля · Ежегодно", chip: untilDays(2, 14) },
-    { id: 42, title: "День рождения дедушки", when: "28 февраля · Ежегодно", chip: untilDays(2, 28), isPrivate: true },
-    { id: 43, title: "Первая встреча", when: "3 марта · Ежегодно", chip: untilDays(3, 3) }
+    { id: 41, title: "Годовщина", day: "2027-02-14", time: "", recurs: true },
+    { id: 42, title: "День рождения дедушки", day: "2027-02-28", time: "", recurs: true, isPrivate: true },
+    { id: 43, title: "Первая встреча", day: "2027-03-03", time: "", recurs: true }
   ];
   const BIRTHDAYS = [
-    { id: 51, title: "День рождения Ани", when: "12 марта", chip: untilDays(3, 12) },
-    { id: 52, title: "День рождения Максима", when: "3 сентября", chip: untilDays(9, 3) }
+    { id: 51, title: "День рождения Ани", day: `${new Date().getFullYear() + 1}-03-12` },
+    { id: 52, title: "День рождения Максима", day: `${new Date().getFullYear() + 1}-09-03` }
   ];
   const MEMORIES = [
     { id: 61, title: "Прогулка под дождём", body: "Промокли насквозь, но никуда не хотели уходить. Потом грелись какао на кухне и смотрели старые фото.", author: "Аня", date: "8 февраля" },
@@ -486,14 +633,21 @@
     { id: 72, text: "Дом — это не место, а человек, с которым хочется возвращаться.", source: "Максим", date: "30 января" },
     { id: 73, text: "Маленькие моменты — это и есть большая жизнь.", source: "Аня · фильм «Дневник памяти»", date: "22 января" }
   ];
+  // Личный журнал препаратов — как renderHealthBody() в app.js.
   const MEDS = [
-    { id: 81, name: "Магний", form: "таблетка", dosage: "200 мг", schedule: "ежедневно · 08:00", taken: true },
-    { id: 82, name: "Витамин D3", form: "капсула", dosage: "2000 МЕ", schedule: "ежедневно · 09:00", taken: false }
+    { id: 81, name: "Магний", form: "tablet", dosage: "1 таблетка", schedule: "2 раза в день", start_date: "2026-09-01", end_date: "", status: "active", taken: 14, skipped: 1, today: "taken" },
+    { id: 82, name: "Витамин D3", form: "capsule", dosage: "1 капсула", schedule: "1 раз в день", start_date: "2026-10-15", end_date: "", status: "active", taken: 22, skipped: 0, today: null }
   ];
-  const CONTACTS = [
-    { id: 91, name: "Мама", phones: ["+7 9•• •••-••-12"] },
-    { id: 92, name: "Стоматология «Улыбка»", phones: ["+7 495 •••-••-34", "+7 495 •••-••-35"] },
-    { id: 93, name: "Кафе «Тихий двор»", phones: ["+7 495 •••-••-78"] }
+  const HEALTH_MED_FORMS = { tablet: "таблетка", capsule: "капсула", injection: "укол", patch: "пластырь", iud: "спираль", other: "прочее" };
+  const HEALTH_MED_STATUS_LABELS = { active: "активен", paused: "пауза", completed: "завершён" };
+  const CONTACTS_MINE = [
+    { id: 91, name: "Мама", surname: "Иванова", phones: ["+7 915 123 45 67"], comment: "" },
+    { id: 92, name: "Стоматология «Улыбка»", surname: "", phones: ["+7 495 123 45 67", "+7 495 765 43 21"], comment: "Запись раз в полгода" },
+    { id: 93, name: "Кафе «Тихий двор»", surname: "", phones: ["+7 495 987 65 43"], comment: "" }
+  ];
+  const CONTACTS_PARTNER = [
+    { id: 94, name: "Брат", surname: "Максимов", phones: ["+7 903 555 44 33"], comment: "" },
+    { id: 95, name: "Фитнес-клуб «Вектор»", surname: "", phones: ["+7 495 111 22 33"], comment: "Абонемент до марта" }
   ];
   const PLACES_VISIT = [
     { id: 101, title: "Кафе «Тихий двор»", note: "Уютное место у парка — берём столик у окна", visited: false },
@@ -551,231 +705,255 @@
     ["runtime", "Длительность"], ["genre", "Жанр"]
   ];
   const MOVIE_KIND_OPTIONS = [["all", "Все"], ["movie", "Фильмы"], ["series", "Сериалы"]];
-  const MOVIE_SORT_DIR = { added: "desc", year: "desc", rating: "desc", runtime: "desc", genre: "asc" };
 
-  const state = {
-    tab: "home",
-    views: {
-      tasks: "plans", plans: "open", goals: "open", movies: "open",
-      dates: "dates", places: "visit", memories: "memories",
-      pair: "profile", wishesView: "open", savingsView: "saving"
-    },
-    wishView: "mine",
-    movieSort: { open: { key: "added", dir: "desc" }, watched: { key: "added", dir: "desc" } },
-    movieKind: { open: "all", watched: "all" },
-    calOffset: 0,
-    calSelected: dayKey(todayMidnight()),
-    placePick: null,
-    moviePick: null,
-    ritualDone: false,
-    xp: 240,
-    togetherXp: 520
+  // ------------------------------------------------------------------
+  // Фло: статичная модель цикла, привязанная к «сегодня» посетителя.
+  // Упрощённый порт renderFloView()/renderFloToday()/renderFloCalendar().
+  // ------------------------------------------------------------------
+  const FLO_PHASE_LABELS = {
+    menstruation: "Менструация", follicular: "Фолликулярная", fertile: "Фертильное окно",
+    ovulation: "Овуляция", luteal: "Лютеиновая", delay: "Задержка", stale: "Данные устарели"
   };
+  const FLO_PERIOD_LEN = 5;
+  const FLO_CYCLE_LEN = 28;
+  const floLastStart = offsetDate(-14);          // прошлое начало месячных (14 дней назад)
+  const floNextStart = addDays(floLastStart, FLO_CYCLE_LEN);
+  const floOvulation = addDays(floNextStart, -14);
+  const floInRange = (d, a, b) => d >= a && d <= b;
+  const floDayKey = (d) => dayKey(d);
+  function floDayKind(key) {
+    const d = keyToDate(key);
+    if (floInRange(d, floLastStart, addDays(floLastStart, FLO_PERIOD_LEN - 1))) return "period";
+    if (floInRange(d, floNextStart, addDays(floNextStart, FLO_PERIOD_LEN - 1))) return "predicted";
+    if (d.getTime() === floOvulation.getTime()) return "ovulation";
+    if (floInRange(d, addDays(floOvulation, -4), addDays(floOvulation, -1))) return "fertile";
+    return "";
+  }
+  // Дневник выбранных дней — пара статичных записей.
+  const FLO_LOGS = (() => {
+    const map = new Map();
+    const periodDay = dayKey(offsetDate(-14));
+    map.set(periodDay, { flow: "medium", mood: "calm", symptoms: ["cramps", "fatigue"], sex: 0, note: "Первый день, обычные ощущения." });
+    const today = dayKey(todayMidnight());
+    map.set(today, { flow: null, mood: "happy", symptoms: ["good_sleep"], sex: 1, note: "Хороший день, вечером прогулка." });
+    return map;
+  })();
+  const FLO_SYMPTOMS = { cramps: "судороги", headache: "голова", bloating: "вздутие", fatigue: "усталость", good_sleep: "хороший сон", nausea: "тошнота", back_pain: "спина" };
+  const FLO_MOODS = { happy: "радость", calm: "спокойствие", sensitive: "чувствительность", irritable: "раздражительность", anxious: "тревожность", sad: "грусть" };
+  const FLO_FLOWS = { spotting: "мажь", light: "слабые", medium: "средние", heavy: "сильные" };
 
-  const view = document.getElementById("demo-view");
-  const nav = document.querySelector(".bottom-nav");
-  const clockEl = document.getElementById("demo-clock");
-  if (!view || !nav || !clockEl || !window.createLiquidNav) return;
-
-  // ------------------------------------------------------------------
-  // Тела списков по ключам сегментов (обновляются точечно, без ререндера).
-  // ------------------------------------------------------------------
-  function plansList() {
-    if (state.views.plans === "done") {
-      return `
-        <div class="section-head-inline"><h3>Завершённые · ${DONE_TASKS.length}</h3></div>
-        ${DONE_TASKS.map(doneTaskCard).join("")}`;
-    }
-    return `
-      <button class="primary full add-button" type="button" data-action="add-task">Добавить план</button>
-      ${TASKS.map(taskCard).join("")}`;
+  function floDayClasses(key, inMonth) {
+    const classes = [];
+    if (!inMonth) classes.push("is-outside");
+    if (key === dayKey(todayMidnight())) classes.push("is-today");
+    const kind = floDayKind(key);
+    if (kind === "period") classes.push("is-period");
+    if (kind === "predicted") classes.push("is-predicted");
+    if (kind === "fertile") classes.push("is-fertile");
+    if (kind === "ovulation") classes.push("is-ovulation");
+    if (FLO_LOGS.has(key)) classes.push("has-events");
+    if (key === state.floSelected) classes.push("is-selected");
+    return classes;
   }
 
-  function goalsList() {
-    // Цель «завершена», когда выполнены все её пункты — как completedGoals()
-    // в app.js; выполненные уходят в вид «Выполненные».
-    const open = GOALS.filter((g) => g.items.some((it) => !it.done));
-    const done = GOALS.filter((g) => !g.items.some((it) => !it.done));
-    if (state.views.goals === "done") {
-      if (!done.length) {
-        return `<section class="card"><h3>Пока ничего не достигнуто</h3><p>Отметьте все пункты цели — она переедет сюда</p></section>`;
-      }
-      return done.map(goalCard).join("");
+  function floDayDots(key) {
+    const kind = floDayKind(key);
+    const dots = [];
+    if (kind === "period" || kind === "predicted" || kind === "fertile" || kind === "ovulation") {
+      dots.push(`<i class="cal-dot is-${kind === "predicted" ? "predicted" : kind === "fertile" ? "fertile" : kind === "ovulation" ? "ovulation" : "period"}" aria-hidden="true"></i>`);
     }
-    if (!open.length) {
-      return `<section class="card"><h3>Пока пусто</h3>
-        <p>Опишите большую цель и разбейте её на шаги — отмечайте выполненные вместе</p>
-        <div style="margin-top:12px;"><button class="primary full" type="button" data-action="add-goal">Создать цель</button></div>
+    const log = FLO_LOGS.get(key);
+    if (log) {
+      dots.push(`<i class="cal-dot is-log" aria-hidden="true"></i>`);
+      for (let i = 0; i < Math.min(log.sex || 0, 3); i++) dots.push(`<span class="cal-heart" aria-hidden="true">♥</span>`);
+      if ((log.sex || 0) > 3) dots.push(`<span class="cal-sex-more">+${log.sex - 3}</span>`);
+    }
+    return dots.join("");
+  }
+
+  function floDayEventRows(key) {
+    const rows = [];
+    const kind = floDayKind(key);
+    const d = keyToDate(key);
+    if (kind === "period") rows.push({ icon: "period", title: "Месячные", meta: "факт · 5 дн. по истории" });
+    if (kind === "predicted") rows.push({ icon: "predicted", title: "Прогноз месячных", meta: "расчёт по истории циклов" });
+    if (kind === "fertile") rows.push({ icon: "fertile", title: "Фертильное окно", meta: "календарная оценка" });
+    if (kind === "ovulation") rows.push({ icon: "ovulation", title: "Овуляция", meta: "календарная оценка (старт минус 14 дней)" });
+    const log = FLO_LOGS.get(key);
+    if (log) {
+      if (log.flow) rows.push({ icon: "log", title: `Кровотечение: ${FLO_FLOWS[log.flow] || log.flow}`, meta: "запись дня" });
+      if (log.mood) rows.push({ icon: "log", title: `Настроение: ${FLO_MOODS[log.mood] || log.mood}`, meta: "запись дня" });
+      const syms = (log.symptoms || []).map(s => FLO_SYMPTOMS[s] || s);
+      if (syms.length) rows.push({ icon: "log", title: `Симптомы: ${syms.join(", ")}`, meta: "запись дня" });
+      if (log.sex) rows.push({ icon: "heart", title: `Секс ×${log.sex}`, meta: "отметка дня" });
+      if (log.note) rows.push({ icon: "log", title: log.note, meta: "заметка" });
+    }
+    return rows;
+  }
+
+  function calendarMonthTitle(year, month) {
+    return `${MONTHS_RU[month]} ${year}`;
+  }
+  function calendarLongDate(key) {
+    const d = keyToDate(key);
+    return `${WEEKDAYS[d.getDay()]}, ${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`;
+  }
+
+  function floForecastCard() {
+    const cycleDay = Math.max(1, diffDays(todayMidnight(), floLastStart) + 1);
+    let phase = "luteal";
+    if (cycleDay <= FLO_PERIOD_LEN) phase = "menstruation";
+    else if (cycleDay <= 13) phase = "follicular";
+    else if (cycleDay <= 18) phase = "fertile";
+    else if (cycleDay <= 20) phase = "ovulation";
+    const lines = [
+      `<b>День ${cycleDay} цикла</b> · ${esc(FLO_PHASE_LABELS[phase] || "")}`,
+      `Месячные ориентировочно ${esc(formatDay(floNextStart))} — ${esc(formatDay(addDays(floNextStart, FLO_PERIOD_LEN - 1)))}`,
+      `Ожидаемая продолжительность: ${FLO_PERIOD_LEN} дн.`,
+      `Предполагаемое окончание: ${esc(formatDay(addDays(floNextStart, FLO_PERIOD_LEN - 1)))}`,
+      `Расчёт по 6 завершённым циклам. Последнее начало месячных отмечено ${esc(formatDay(floLastStart))}.`,
+      `Овуляция — календарная оценка (старт минус 14 дней), не подтверждена наблюдениями.`
+    ];
+    return `
+      <section class="card flo-today">
+        ${lines.map(l => `<p class="flo-line">${l}</p>`).join("")}
+        <button type="button" class="primary full card-action" data-action="flo-period-start">Отметить месячные</button>
+        <button type="button" class="secondary full card-action" data-action="flo-record-today">Записать сегодня</button>
+        <p class="flo-sub">Свежесть данных</p>
+        <p class="flo-line">Месячные: ${esc(formatDay(floLastStart))} · Дневник: ${esc(dayKey(offsetDate(-1)))} · Измерения: нет записей · Препараты: нет записей</p>
+        <details class="flo-fold flo-forecast">
+          <summary class="flo-fold-title">Как считается прогноз?</summary>
+          <ul class="flo-explain">
+            <li>Прогноз строится по личной истории циклов: даты начал и длительность месячных.</li>
+            <li>Фертильное окно и овуляция — календарные оценки, не подтверждённые наблюдениями.</li>
+            <li>Календарные прогнозы не являются надёжным методом контрацепции.</li>
+          </ul>
+        </details>
+        <p class="flo-disclaimer">Прогноз не является медицинской рекомендацией. Календарные прогнозы не являются надёжным методом предотвращения беременности.</p>
       </section>`;
-    }
-    return `
-      <button class="primary full add-button" type="button" data-action="add-goal">Создать цель</button>
-      ${open.map(goalCard).join("")}`;
   }
 
-  function datesList() {
-    return state.views.dates === "birthdays"
-      ? `<button class="primary full add-button" type="button" data-action="add-birthday">Добавить день рождения</button>${BIRTHDAYS.map(birthdayCard).join("")}`
-      : `<button class="primary full add-button" type="button" data-action="add-date">Добавить дату</button>${DATES.map(dateCard).join("")}`;
-  }
-
-  // Карточка результата «Рандом» — порт renderPlacePick()/renderMoviePick().
-  function placePickCard() {
-    const p = [...PLACES_VISIT, ...PLACES_VISITED].find((x) => x.id === state.placePick);
-    if (!p) { state.placePick = null; return ""; }
+  function floCalendarCard() {
+    const base = new Date();
+    const viewDate = new Date(base.getFullYear(), base.getMonth() + state.floOffset, 1);
+    const year = viewDate.getFullYear();
+    const month = viewDate.getMonth();
+    const cells = calendarCells(year, month).map((cell) => {
+      const classes = ["cal-day", ...floDayClasses(cell.key, cell.inMonth)];
+      const dots = floDayDots(cell.key);
+      return `<button type="button" class="${classes.join(" ")}" data-action="flo-select-day" data-date="${cell.key}"
+        aria-label="${esc(calendarLongDate(cell.key))}${dots ? ", есть запись" : ""}">
+        <span class="cal-num">${cell.day}</span>
+        ${dots ? `<span class="cal-dots" aria-hidden="true">${dots}</span>` : ""}
+      </button>`;
+    }).join("");
+    const sel = state.floSelected || dayKey(todayMidnight());
+    const rows = floDayEventRows(sel);
     return `
-      <article class="card place-pick" aria-live="polite">
-        <p class="eyebrow">Вам выпало</p>
-        <h2 class="place-pick-title">${p.title}</h2>
-        ${p.note ? `<p class="place-pick-note">${p.note}</p>` : ""}
-        <div class="place-actions">
-          <button class="primary full" type="button" data-action="place-visited" data-id="${p.id}">Посетили</button>
-          <button class="secondary full" type="button" data-action="random-place">Следующее</button>
-          <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
+      <section class="card calendar-card">
+        <div class="cal-head">
+          <button type="button" class="cal-nav-btn" data-action="flo-month-prev" aria-label="Предыдущий месяц">${CHEVRON_LEFT}</button>
+          <h3 class="cal-title">${esc(calendarMonthTitle(year, month))}</h3>
+          <button type="button" class="cal-nav-btn" data-action="flo-month-next" aria-label="Следующий месяц">${CHEVRON_RIGHT}</button>
         </div>
-      </article>`;
+        <div class="cal-weekdays" aria-hidden="true">${WEEKDAYS_CAL.map(w => `<span>${w}</span>`).join("")}</div>
+        <div class="cal-grid">${cells}</div>
+        <div class="cal-legend">
+          <span><i class="cal-dot is-period" aria-hidden="true"></i>Месячные</span>
+          <span><i class="cal-dot is-predicted" aria-hidden="true"></i>Прогноз</span>
+          <span><i class="cal-dot is-fertile" aria-hidden="true"></i>Фертильно (расчёт)</span>
+          <span><i class="cal-dot is-ovulation" aria-hidden="true"></i>Овуляция (расчёт)</span>
+          <span><i class="cal-dot is-log" aria-hidden="true"></i>Запись</span>
+          <span><span class="cal-heart" aria-hidden="true">♥</span>Секс</span>
+        </div>
+        <div class="cal-events">
+          <p class="cal-events-date">${esc(calendarLongDate(sel))}</p>
+          ${rows.length ? rows.map(row => `
+            <div class="cal-event">
+              ${row.icon === "heart" ? `<span class="cal-heart" aria-hidden="true">♥</span>` : `<i class="cal-dot ${row.icon === "period" ? "is-period" : row.icon === "predicted" ? "is-predicted" : row.icon === "fertile" ? "is-fertile" : row.icon === "ovulation" ? "is-ovulation" : "is-log"}" aria-hidden="true"></i>`}
+              <div class="cal-event-body">
+                <span class="cal-event-title">${esc(row.title)}</span>
+                <span class="cal-event-meta">${esc(row.meta)}</span>
+              </div>
+            </div>`).join("") : `<p class="cal-empty">Записей нет.</p>`}
+        </div>
+      </section>`;
   }
 
-  function moviePickCard() {
-    const m = [...MOVIES_OPEN, ...MOVIES_WATCHED].find((x) => x.id === state.moviePick);
-    if (!m) { state.moviePick = null; return ""; }
-    return `
-      <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть описание: ${m.title}">
-        <p class="eyebrow">Вам выпало</p>
-        <h2 class="place-pick-title">${m.title}</h2>
-        <div class="item-meta">
-          ${ratingPill(m.rating)}
-          ${m.length ? `<span>${m.length}</span>` : ""}
-        </div>
-        <div class="place-actions">
-          <button class="primary full" type="button" data-action="movie-watched" data-id="${m.id}">Просмотрели</button>
-          <button class="secondary full" type="button" data-action="random-movie">Следующее</button>
-          <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
-        </div>
-      </article>`;
+  function floTodayBody() {
+    return `${floForecastCard()}${floCalendarCard()}`;
   }
 
-  function placesList() {
-    if (state.views.places === "trips") {
-      const open = TRIPS.filter((t) => !t.visited);
-      const visited = TRIPS.filter((t) => t.visited);
-      return `
-        <button class="primary full add-button" type="button" data-action="add-trip">Добавить путешествие</button>
-        ${open.map(tripCard).join("")}
-        <div class="section-head-inline"><h3>Съездили · ${visited.length}</h3></div>
-        ${visited.map(tripCard).join("")}`;
-    }
+  // Упрощённые под-вкладки «Фло»: история, статистика, препараты, настройки.
+  function floCycleBody() {
+    const rows = [
+      { start: offsetDate(-41), end: offsetDate(-36), len: 28 },
+      { start: offsetDate(-13), end: null, len: null },
+      { start: offsetDate(-69), end: offsetDate(-64), len: 27 },
+      { start: offsetDate(-97), end: offsetDate(-91), len: 29 }
+    ];
     return `
-      <section class="card place-hero">
-        <h3>Не знаете, куда пойти?</h3>
-        <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите</p>
-        <button class="secondary full card-action" type="button" data-action="random-place">Рандом</button>
+      <section class="card">
+        <p class="eyebrow flo-group">История циклов</p>
+        <h3>Циклы</h3>
+        ${rows.map(r => `
+          <p class="flo-line">${esc(formatDay(r.start))} — ${r.end ? esc(formatDay(r.end)) : "идут"}${r.len ? ` · ${r.len} дн.` : ""}</p>`).join("")}
+        <p class="flo-disclaimer">Длина цикла считается от начала месячных до начала следующих. Прогнозы опираются на эти записи.</p>
+      </section>`;
+  }
+
+  function floStatsBody() {
+    return `
+      <section class="card">
+        <p class="eyebrow flo-group">Статистика</p>
+        <h3>Ваш цикл в цифрах</h3>
+        <p class="flo-line"><b>Средняя длина цикла:</b> 28 дн.</p>
+        <p class="flo-line"><b>Средняя длительность месячных:</b> 5 дн.</p>
+        <p class="flo-line"><b>Регулярность:</b> стабильная (разброс ±1 день)</p>
+        <p class="flo-line"><b>Записей в дневнике:</b> 12 дней за 3 месяца</p>
+        <p class="flo-disclaimer">Статистика считается по вашим фактическим отметкам. Прогнозы не являются медицинской рекомендацией.</p>
+      </section>`;
+  }
+
+  function floMedsBody() {
+    return `
+      <button class="primary full add-button" type="button" data-action="flo-med-new">Добавить препарат</button>
+      <section class="card">
+        ${MEDS.map(m => `
+          <div class="flo-med-row">
+            <p class="item-title">${esc(m.name)}</p>
+            <p class="item-meta">${esc(HEALTH_MED_FORMS[m.form] || m.form)} · ${esc(m.dosage)} · ${esc(m.schedule)}</p>
+          </div>`).join("")}
+        <p class="flo-disclaimer">Состав и дозы — в «Моих препаратах» в настройках. Приложение не назначает и не отменяет приём</p>
+      </section>`;
+  }
+
+  function floSettingsBody() {
+    return `
+      <section class="card">
+        <p class="eyebrow flo-group">Отчёт и экспорт</p>
+        <button type="button" class="secondary full card-action" data-action="flo-report-open">Медицинский отчёт</button>
+        <p class="flo-disclaimer">Сохранение/Печать в PDF — через диалог печати браузера</p>
       </section>
-      ${placePickCard()}
-      <button class="primary full add-button" type="button" data-action="add-place">Добавить место</button>
-      <div class="section-head-inline"><h3>Хотим посетить · ${PLACES_VISIT.length}</h3></div>
-      ${PLACES_VISIT.map(placeCard).join("")}
-      <div class="section-head-inline"><h3>Посещённые · ${PLACES_VISITED.length}</h3></div>
-      ${PLACES_VISITED.map(placeCard).join("")}`;
+      <section class="card">
+        <p class="eyebrow flo-group">Шеринг</p>
+        <h3>Календарь для партнёра</h3>
+        <p class="flo-line">Партнёр видит только факт месячных — без симптомов, заметок и измерений.</p>
+        <p class="settings-hint">Доступ открывается после первого подтверждённого дня цикла с его стороны</p>
+      </section>`;
   }
 
-  function memoriesList() {
-    const v = state.views.memories;
-    if (v === "quotes") return `<button class="primary full add-button" type="button" data-action="add-quote">Добавить цитату</button>${QUOTES.map(quoteCard).join("")}`;
-    if (v === "health") {
-      return `
-        <section class="card">
-          <p class="eyebrow">Здоровье</p>
-          <h3>Личный журнал препаратов</h3>
-          <p>Бот напомнит о приёме в заданное время, пока курс активен</p>
-        </section>
-        ${MEDS.map(medCard).join("")}`;
-    }
-    if (v === "contacts") return `<button class="primary full add-button" type="button" data-action="add-contact">Добавить контакт</button>${CONTACTS.map(contactCard).join("")}`;
-    return `<button class="primary full add-button" type="button" data-action="add-memory">Записать</button>${MEMORIES.map(memoryCard).join("")}`;
+  const FLO_SECTIONS = { today: floTodayBody, cycle: floCycleBody, stats: floStatsBody, meds: floMedsBody, settings: floSettingsBody };
+  function floSection() {
+    return FLO_SECTIONS[state.views.flo]();
+  }
+  function floBody() {
+    return segSwitch("flo", state.views.flo, [["today", "Сегодня"], ["cycle", "Цикл"], ["stats", "Статистика"], ["meds", "Препараты"], ["settings", "Настройки"]], "is-sub")
+      + `<div class="seg-body" id="seg-body-flo">${floSection()}</div>`;
   }
 
   // ------------------------------------------------------------------
-  // Кино: сортировка и фильтр — упрощённый порт movieSortBar/sortMovies.
-  // ------------------------------------------------------------------
-  function movieLengthMinutes(m) {
-    const match = /(\d+)\s*ч(?:\s*(\d+)\s*мин)?/.exec(m.length || "");
-    return match ? Number(match[1]) * 60 + Number(match[2] || 0) : null;
-  }
-  function movieSortValue(m, key) {
-    if (key === "added") return m.created || 0;
-    if (key === "year") return Number(m.year) || null;
-    if (key === "rating") return Number(m.rating) > 0 ? Number(m.rating) : null;
-    if (key === "runtime") return movieLengthMinutes(m);
-    if (key === "genre") return (m.genre || "").toLowerCase() || null;
-    if (key === "raofp") return Number(m.pair_rating) > 0 ? Number(m.pair_rating) : null;
-    return null;
-  }
-  function sortMovies(list, view) {
-    const { key, dir } = state.movieSort[view];
-    const decorated = list.map((m) => ({ m, v: movieSortValue(m, key) }));
-    decorated.sort((a, b) => {
-      if (a.v === null && b.v === null) return a.m.id - b.m.id;
-      if (a.v === null) return 1;
-      if (b.v === null) return -1;
-      const cmp = typeof a.v === "string" ? a.v.localeCompare(b.v, "ru") : a.v - b.v;
-      return cmp === 0 ? a.m.id - b.m.id : dir === "asc" ? cmp : -cmp;
-    });
-    return decorated.map(({ m }) => m);
-  }
-  function movieSortBar(view, count) {
-    const sort = state.movieSort[view];
-    const kind = state.movieKind[view] || "all";
-    const opts = view === "watched" ? [...MOVIE_SORT_OPTIONS, ["raofp", "RAofP"]] : MOVIE_SORT_OPTIONS;
-    const field = (action, label, select, options, value) => `
-      <div class="movie-sort-field${action === "movie-filter-kind" ? " is-kind" : ""}">
-        <select data-action="${action}" aria-label="${label}">
-          ${options.map(([v, l]) => `<option value="${v}"${v === value ? " selected" : ""}>${l}</option>`).join("")}
-        </select>
-        ${MOVIE_CHEVRON}
-      </div>`;
-    return `
-      <div class="movie-sort">
-        ${field("movie-sort-key", "Сортировка фильмов", true, opts, sort.key)}
-        ${field("movie-filter-kind", "Показывать фильмы или сериалы", true, MOVIE_KIND_OPTIONS, kind)}
-        <button class="icon-btn movie-sort-dir${sort.dir === "asc" ? " is-asc" : ""}" type="button"
-          data-action="movie-sort-dir" aria-label="${sort.dir === "asc" ? "По возрастанию" : "По убыванию"}">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
-        </button>
-        <span class="day-chip is-muted movie-sort-count">${count}</span>
-      </div>`;
-  }
-  function filterMoviesByKind(list, view) {
-    const kind = state.movieKind[view] || "all";
-    return kind === "all" ? list : list.filter((m) => (m.kind === "series" ? "series" : "movie") === kind);
-  }
-  function moviesList() {
-    const view = state.views.movies;
-    if (view === "watched") {
-      const all = MOVIES_WATCHED;
-      if (!all.length) return `<section class="card"><h3>Пока ничего не просмотрено</h3><p>Отметьте фильм просмотренным в «В планах» — он появится здесь</p></section>`;
-      const filtered = filterMoviesByKind(all, "watched");
-      if (!filtered.length) return movieSortBar("watched", 0) + `<section class="card"><h3>Пусто</h3><p>Под фильтр ничего не попало — добавьте фильм или выберите «Все».</p></section>`;
-      return movieSortBar("watched", filtered.length) + sortMovies(filtered, "watched").map(movieCard).join("");
-    }
-    // «В планах»: hero-карточка «Не знаете, что посмотреть?» с «Рандом» —
-    // как renderOpenMovies() в app.js (отдельной кнопки под списком нет,
-    // она появляется только после первого рандома).
-    const open = filterMoviesByKind(MOVIES_OPEN, "open");
-    return `
-      <section class="card place-hero movie-hero">
-        <h3>Не знаете, что посмотреть?</h3>
-        <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров</p>
-        <button class="secondary full card-action" type="button" data-action="random-movie">Рандом</button>
-      </section>
-      ${moviePickCard()}
-      <button class="primary full add-button" type="button" data-action="add-movie">Найти кино</button>
-      ${movieSortBar("open", open.length)}
-      ${open.length ? sortMovies(open, "open").map(movieCard).join("") : `<section class="card"><h3>Пусто</h3><p>Под фильтр ничего не попало — добавьте фильм или выберите «Все».</p></section>`}`;
-  }
-
-  // ------------------------------------------------------------------
-  // «Наша пара»: профиль (календарь + настройки), желания, копилка.
+  // «Наша пара»: профиль (календарь + настройки), желания, копилка, Фло.
   // ------------------------------------------------------------------
   const MONTHS_RU = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
   const WEEKDAYS_CAL = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
@@ -835,8 +1013,8 @@
           <div class="cal-event">
             ${calDotHtml(ev)}
             <div class="cal-event-body">
-              <span class="cal-event-title">${ev.title}</span>
-              <span class="cal-event-meta">${CAL_KIND_LABEL[ev.kind]}${ev.isPrivate ? " · личное" : ""}${ev.note ? ` · ${ev.note}` : ""}${ev.time ? ` · ${ev.time}` : ""}</span>
+              <span class="cal-event-title">${esc(ev.title)}</span>
+              <span class="cal-event-meta">${CAL_KIND_LABEL[ev.kind]}${ev.isPrivate ? " · личное" : ""}${ev.note ? ` · ${esc(ev.note)}` : ""}${ev.time ? ` · ${esc(ev.time)}` : ""}</span>
             </div>
           </div>`).join("") : `<p class="cal-empty">На этот день событий нет.</p>`}
       </div>`;
@@ -862,7 +1040,8 @@
   }
 
   // Настройки — порт renderPairSettings() (значения статичные, как у нового
-  // пользователя: акцент berry, сводки включены).
+  // пользователя: акцент berry, сводки включены, владелица видит «Месячные
+  // в основном календаре» включёнными).
   const ACCENT_SWATCHES = [
     ["berry", "#b85464"], ["sage", "#55766a"], ["ocean", "#4a6f8f"],
     ["violet", "#7a5f9e"], ["amber", "#b06a2c"]
@@ -882,30 +1061,36 @@
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" checked> Отображение аватара</span>
         </label>
-        <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары</p>
+        <p class="settings-hint">Фото профиля Telegram вместо букв в кнопке пары. Если у пользователя фото нет, остаётся буква, пока аватар не появится</p>
+        <label class="settings-row">
+          <span class="settings-label"><input type="checkbox" checked> Месячные в основном календаре</span>
+        </label>
+        <p class="settings-hint">Отметки месячных в общем календаре — только фактические дни</p>
         <div class="settings-row">
           <span class="settings-label">Ваше имя</span>
-          <input type="text" maxlength="80" autocomplete="off" placeholder="Аня">
+          <input type="text" maxlength="80" autocomplete="off" placeholder="Аня" value="">
         </div>
-        <p class="settings-hint">Как ваше имя отображается у вас в приложении. Пусто — имя из Telegram</p>
+        <p class="settings-hint">Как ваше имя отображается у вас в приложении — например, если в Telegram у вас ник. Меняется только у вас. Пусто — имя из Telegram</p>
         <div class="settings-row">
           <span class="settings-label">Имя партнёра</span>
-          <input type="text" maxlength="80" autocomplete="off" placeholder="Максим">
+          <input type="text" maxlength="80" autocomplete="off" placeholder="Максим" value="">
         </div>
-        <p class="settings-hint">Каким вы видите имя партнёра в приложении. Пусто — имя из Telegram</p>
+        <p class="settings-hint">Каким вы видите имя партнёра в приложении — например, если в Telegram у него ник. Меняется только у вас. Пусто — имя партнёра из Telegram</p>
         <div class="settings-row">
           <span class="settings-label">Ваш часовой пояс</span>
-          <span class="day-chip is-muted">${tz}</span>
+          <span class="day-chip is-muted">${esc(tz)}</span>
         </div>
+        <p class="settings-hint">Определяется по устройству автоматически и следует за вами в поездках: сводки приходят по вашим часам, календарь показывает ваше «сегодня»</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" checked> Утренняя сводка</span>
           <input type="time" value="09:00">
         </label>
-        <p class="settings-hint">Планы и значимые даты на сегодня и завтра — личным сообщением от бота</p>
+        <p class="settings-hint">Планы и значимые даты на сегодня и завтра — личным сообщением от бота. Время — местное: сводка придёт в ваш часовой пояс</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox" checked> Даты за сутки</span>
           <input type="time" value="09:00">
         </label>
+        <p class="settings-hint">Напомнит о завтрашних датах накануне в выбранное время. Кроме сводок бот предупреждает о плане с точным временем за 3 часа и за час</p>
         <label class="settings-row">
           <span class="settings-label"><input type="checkbox"> Недельная сводка</span>
           <input type="time" value="09:00">
@@ -917,6 +1102,7 @@
             <option>Понедельник</option>
           </select>
         </div>
+        <p class="settings-hint">Планы и даты на предстоящую неделю (пн–вс) одним сообщением — чтобы строить планы наперёд. Придёт в выбранный день и время по вашим часам</p>
         <div class="settings-row">
           <span class="settings-label">Тема</span>
           <div class="theme-switch">
@@ -925,7 +1111,7 @@
             <button class="theme-option" type="button" data-action="set-theme" data-theme="light">Светлая</button>
           </div>
         </div>
-        <div style="margin-top:14px; display:grid; gap:8px;">
+        <div style="margin-top:18px; display:grid; gap:8px;">
           <button class="secondary full" type="button" data-action="save-settings">Сохранить настройки</button>
         </div>
       </section>`;
@@ -945,13 +1131,13 @@
 
   function pairTimezoneCard() {
     const current = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow";
-    const zones = [...new Set([current, "Europe/Moscow", "Europe/Kaliningrad", "Asia/Yekaterinburg", "Asia/Novosibirsk", "Europe/Kyiv", "Europe/Minsk", "Europe/Warsaw", "Europe/Berlin", "Asia/Almaty", "UTC"])];
+    const zones = [...new Set([current, "Europe/Moscow", "Europe/Kaliningrad", "Europe/Samara", "Asia/Yekaterinburg", "Asia/Novosibirsk", "Europe/Kyiv", "Europe/Minsk", "Europe/Warsaw", "Europe/Berlin", "Asia/Almaty", "UTC"])];
     return `
       <section class="card">
         <p class="eyebrow">Общее</p>
         <h3>Часовой пояс</h3>
-        <select class="settings-select">${zones.map((z) => `<option${z === current ? " selected" : ""}>${z.replace(/_/g, " ")}</option>`).join("")}</select>
-        <p class="settings-hint">Общий для календаря, ритуала дня, напоминаний и времени событий у обоих партнёров</p>
+        <select class="settings-select">${zones.map((z) => `<option${z === current ? " selected" : ""}>${esc(z.replace(/_/g, " "))}</option>`).join("")}</select>
+        <p class="settings-hint">Общий для календаря, ритуала дня, напоминаний и времени событий у обоих партнёров — события закреплены за этим поясом. Личное «сегодня» и время сводок — по вашему поясу устройства</p>
         <button class="secondary full card-action" type="button" data-action="save-pair-timezone">Сохранить пояс</button>
       </section>`;
   }
@@ -979,6 +1165,86 @@
       </div>`;
   }
 
+  // ------------------------------------------------------------------
+  // Здоровье («Дневник → Здоровье») — порт renderHealthBody().
+  // ------------------------------------------------------------------
+  function healthBody() {
+    if (!MEDS.length) {
+      return `<section class="card"><h3>Пока пусто</h3>
+        <p>Личный журнал: препараты и приём не видны партнёру</p>
+        <div style="margin-top:12px;"><button class="primary full card-action" type="button" data-action="health-med-new">Добавить препарат</button></div>
+      </section>`;
+    }
+    const rows = MEDS.map((m) => {
+      const statusLabel = HEALTH_MED_STATUS_LABELS[m.status] || m.status;
+      const meta = [m.dosage, m.schedule, HEALTH_MED_FORMS[m.form] || ""].filter(Boolean).join(" · ");
+      const chips = m.status === "active" ? `
+        <div class="health-intake">
+          <button type="button" class="primary full card-action${m.today === "taken" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="taken">Принят</button>
+          <button type="button" class="secondary full card-action${m.today === "skipped" ? " is-on" : ""}" data-action="health-intake" data-med="${m.id}" data-status="skipped">Пропущен</button>
+          ${m.today ? `<button type="button" class="flo-chip" data-action="health-intake-clear" data-med="${m.id}">Снять отметку</button>` : ""}
+        </div>` : "";
+      return `<div class="item-row">
+        <div class="item-main">
+          <h3 class="health-med-name">${esc(m.name)}</h3>
+          <div class="item-meta"><span class="day-chip is-muted">${esc(statusLabel)}</span><span>${esc(meta)}</span></div>
+          <div class="item-meta"><span>${esc(m.start_date || "")}${m.end_date ? ` — ${esc(m.end_date)}` : ""}</span><span>принято ${m.taken} · пропущено ${m.skipped}</span></div>
+          ${chips}
+        </div>
+        <button class="icon-btn" type="button" data-action="edit-item" data-type="health_meds" data-id="${m.id}" aria-label="Изменить">${EDIT_ICON}</button>
+      </div>`;
+    }).join("");
+    return `
+      <button class="primary full add-button" type="button" data-action="health-med-new">Добавить препарат</button>
+      <section class="card">
+        ${rows}
+        <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение</p>
+      </section>`;
+  }
+
+  // ------------------------------------------------------------------
+  // Контакты («Дневник → Контакты») — порт renderContactsBody()/
+  // renderContactsContent(): переключатель «Мои/Его», книга одной картой.
+  // ------------------------------------------------------------------
+  function contactsContentHtml() {
+    const isMine = state.contactsView === "mine";
+    const list = isMine ? CONTACTS_MINE : CONTACTS_PARTNER;
+    const addButton = `<button class="primary full card-action" type="button" data-action="add-contact">Добавить контакт</button>`;
+    if (!list.length) {
+      return isMine
+        ? `<section class="card"><h3>Пока пусто</h3>
+            <p>Имена и номера всегда под рукой — и ваши, и партнёра</p>
+            <div style="margin-top:12px;">${addButton}</div>
+          </section>`
+        : `<section class="card"><h3>Пока пусто</h3><p>У партнёра контактов пока пусто</p></section>`;
+    }
+    return `
+      ${isMine ? addButton : ""}
+      <section class="card contact-card">
+        ${list.map((c) => `
+          <div class="contact-item">
+            <button class="contact-name" type="button" data-action="contact-open" data-id="${c.id}">
+              ${esc(c.name)}${c.surname ? ` <span class="contact-surname">${esc(c.surname)}</span>` : ""}
+            </button>
+            <div class="contact-phones">
+              ${(c.phones || []).map((phone) => `
+                <button class="contact-phone" type="button" data-action="contacts-copy" data-phone="${esc(phone)}">${esc(phone)}</button>`).join("")}
+            </div>
+            ${c.comment ? `<p class="contact-comment">${esc(c.comment)}</p>` : ""}
+          </div>`).join("")}
+      </section>`;
+  }
+
+  function contactsBody() {
+    const isMine = state.contactsView === "mine";
+    return `
+      <div class="contacts-switch" role="tablist" aria-label="Чьи контакты показывать">
+        <button class="contacts-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="contacts-view" data-view="mine" data-tab="mine">Мои</button>
+        <button class="contacts-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="contacts-view" data-view="partner" data-tab="partner">Его</button>
+      </div>
+      <div class="seg-body" id="seg-body-contacts">${contactsContentHtml()}</div>`;
+  }
+
   // Желания: «Загадано/Исполнено» + «Мои/Его» — renderWishBlock()/renderWishLists().
   function wishLists() {
     const isMine = state.wishView === "mine";
@@ -993,6 +1259,15 @@
       return doneList.map(completedWishItem).join("");
     }
     if (isMine) {
+      if (!open.length) {
+        return `<section class="card">
+          <h3>Желание</h3>
+          <p>Поделитесь идеями подарков и маленькими мечтами</p>
+          <div style="margin-top:12px;">
+            <button class="primary full" type="button" data-action="add-wish">Добавить желание</button>
+          </div>
+        </section>`;
+      }
       return `<button class="primary full add-button" type="button" data-action="add-wish">Добавить желание</button>` + open.map(wishItem).join("");
     }
     return open.length
@@ -1037,11 +1312,12 @@
     const v = state.views.pair;
     if (v === "wishes") return wishBlock();
     if (v === "savings") return savingsBody();
+    if (v === "flo") return floBody();
     return pairProfileBody();
   }
 
   function pairBody() {
-    return segSwitch("pair", state.views.pair, [["profile", "Профиль"], ["wishes", "Желания"], ["savings", "Копилка"]])
+    return segSwitch("pair", state.views.pair, [["profile", "Профиль"], ["wishes", "Желания"], ["savings", "Копилка"], ["flo", "Фло"]])
       + `<div class="seg-body" id="seg-body-pair">${pairInner()}</div>`;
   }
 
@@ -1072,7 +1348,9 @@
     memories: memoriesList,
     pair: pairInner,
     wishesView: wishLists,
-    savings: savingsListHtml
+    savings: savingsListHtml,
+    flo: floSection,
+    contacts: contactsContentHtml
   };
 
   // ------------------------------------------------------------------
@@ -1090,8 +1368,9 @@
   function homeBody() {
     const action = dailyAction(DEMO_PAIR_ID, dayKey(new Date()));
     const done = state.ritualDone;
+    const partnerDone = false;
     return `
-      <section class="card hero-card">
+      <section class="card hero-card" role="button" tabindex="0" data-action="open-history" aria-label="История пары и рекорд серии">
         <p class="eyebrow">Ваша история</p>
         <h2>Аня и Максим</h2>
         <div class="stats-row">
@@ -1103,22 +1382,26 @@
 
       <section class="card${done ? " is-done" : ""}">
         <p class="eyebrow">Ритуал дня</p>
-        <h3>${action}</h3>
-        <p id="demo-ritual-copy">${done ? "Вы отметили ритуал +10 XP" : "Отметьте ритуал дня и получите +10 XP"}</p>
+        <h3>${esc(action)}</h3>
+        <p id="demo-ritual-copy">${done ? `Вы отметили ритуал +10 XP${partnerDone ? " · партнёр тоже отметил" : ""}` : (partnerDone ? "Партнёр уже отметил ритуал — отметьте и вы" : "Отметьте ритуал дня и получите +10 XP")}</p>
         ${done ? "" : `<div style="margin-top:18px;"><button class="primary full" type="button" id="demo-ritual">Выполнено +10 XP</button></div>`}
       </section>
 
+      ${TASKS.slice(0, 3).map(taskCard).join("") ? `
       <div class="section-head-inline"><h3>Ближайшие планы</h3></div>
-      ${TASKS.slice(0, 3).map(taskCard).join("")}
+      ${TASKS.slice(0, 3).map(taskCard).join("")}` : ""}
 
+      ${DATES.slice(0, 2).map(dateCard).join("") ? `
       <div class="section-head-inline"><h3>Значимые даты</h3></div>
-      ${DATES.slice(0, 2).map(dateCard).join("")}
+      ${DATES.slice(0, 2).map(dateCard).join("")}` : ""}
 
+      ${BIRTHDAYS.slice(0, 1).map(birthdayCard).join("") ? `
       <div class="section-head-inline"><h3>Дни рождения</h3></div>
-      ${BIRTHDAYS.slice(0, 1).map(birthdayCard).join("")}
+      ${BIRTHDAYS.slice(0, 1).map(birthdayCard).join("")}` : ""}
 
+      ${memoryCard(MEMORIES[0]) ? `
       <div class="section-head-inline"><h3>Из дневника</h3></div>
-      ${memoryCard(MEMORIES[0])}`;
+      ${memoryCard(MEMORIES[0])}` : ""}`;
   }
 
   function tasksBody() {
@@ -1142,6 +1425,13 @@
   }
 
   const BODIES = { home: homeBody, tasks: tasksBody, dates: datesBody, places: placesBody, memories: memoriesBody, pair: pairBody };
+
+  // DOM-контракты лендинга: экран демо, нижний бар с SVG-каплей и часы
+  // статусбара iPhone. Без них демо не запускаем.
+  const view = document.getElementById("demo-view");
+  const nav = document.querySelector(".demo-screen .bottom-nav");
+  const clockEl = document.getElementById("demo-clock");
+  if (!view || !nav || !clockEl || typeof window.createLiquidNav !== "function") return;
 
   // ------------------------------------------------------------------
   // Рендер и «жидкие» переключатели.
@@ -1230,7 +1520,7 @@
 
   // ------------------------------------------------------------------
   // Действия демо. Каждая видимая кнопка либо меняет demo-state в памяти
-  // (DEMО_ACTIONS), либо явно отвечает тостом с причиной (DEMO_INERT) —
+  // (DEMO_ACTIONS), либо явно отвечает тостом с причиной (DEMO_INERT) —
   // молча неработающих элементов нет. API не вызывается, данные не
   // сохраняются: всё живёт до перезагрузки страницы.
   // Полноту покрывает tests/test_demo_actions.test.mjs.
@@ -1267,7 +1557,7 @@
 
   const findById = (arr, id) => arr.find((x) => Number(x.id) === Number(id));
   const ALL_LISTS = [
-    TASKS, DONE_TASKS, DATES, BIRTHDAYS, MEMORIES, QUOTES, MEDS, CONTACTS,
+    TASKS, DONE_TASKS, DATES, BIRTHDAYS, MEMORIES, QUOTES, MEDS, CONTACTS_MINE, CONTACTS_PARTNER,
     PLACES_VISIT, PLACES_VISITED, TRIPS, MOVIES_OPEN, MOVIES_WATCHED,
     WISHES_OPEN_MINE, WISHES_OPEN_PARTNER, WISHES_DONE_MINE, WISHES_DONE_PARTNER,
     SAVINGS
@@ -1339,7 +1629,7 @@
     if (i < 0) return;
     const [m] = src.splice(i, 1);
     dst.push(watched
-      ? { ...m, watched: true, watchedAt: `Просмотрено ${todayDMLabel}`, my_rating: null }
+      ? { ...m, watched: true, watchedAt: `Просмотрено ${todayDMLabel}`, my_rating: null, resume_position: null }
       : { ...m, watched: false, my_rating: null });
     if (watched && state.moviePick === Number(id)) state.moviePick = null;
   }
@@ -1353,18 +1643,19 @@
 
   function pickRandomPlace() {
     const pool = PLACES_VISIT.filter((p) => p.id !== state.placePick);
-    if (!pool.length) { toast("Все места уже посещены — добавьте новое"); return; }
+    if (!pool.length) { toast("Откройте приложение в Telegram"); return; }
     state.placePick = pool[Math.floor(Math.random() * pool.length)].id;
   }
 
   function pickRandomMovie() {
     const pool = MOVIES_OPEN.filter((m) => m.id !== state.moviePick);
-    if (!pool.length) { toast("В планах ничего нет — добавьте фильм"); return; }
+    if (!pool.length) { toast("Откройте приложение в Telegram"); return; }
     state.moviePick = pool[Math.floor(Math.random() * pool.length)].id;
+    state.movieRandomUsed = true;
   }
 
-  const demoAddToast = () => toast("Добавление доступно в настоящем приложении");
-  const demoInertToast = (msg) => () => toast(msg);
+  const demoAddToast = () => toast("Откройте приложение в Telegram");
+  const demoInertToast = (msg) => () => toast("Откройте приложение в Telegram");
 
   // === DEMO_ACTIONS_BEGIN ===
   // Локальные действия: меняют только данные в памяти этой страницы.
@@ -1385,54 +1676,47 @@
       removeDemoItem(btn.dataset.type, btn.dataset.id);
       refreshAround(btn);
     },
-    "place-visited"(e, btn) { setPlaceVisited(btn.dataset.id, true); refreshAround(btn); },
-    "place-unvisited"(e, btn) { setPlaceVisited(btn.dataset.id, false); refreshAround(btn); },
-    "trip-visited"(e, btn) { setTripVisited(btn.dataset.id, true); refreshAround(btn); },
-    "trip-unvisited"(e, btn) { setTripVisited(btn.dataset.id, false); refreshAround(btn); },
-    "movie-watched"(e, btn) { setMovieWatched(btn.dataset.id, true); refreshAround(btn); },
-    "movie-unwatched"(e, btn) { setMovieWatched(btn.dataset.id, false); refreshAround(btn); },
-    "goal-item-done"(e, btn) { toggleGoalItem(btn.dataset.id, true); refreshAround(btn); },
-    "goal-item-reopen"(e, btn) { toggleGoalItem(btn.dataset.id, false); refreshAround(btn); },
-    "med-take"(e, btn) {
-      const m = findById(MEDS, btn.dataset.id);
-      if (m) m.taken = !m.taken;
-      refreshAround(btn);
-    },
-    "deposit-saving"(e, btn) {
-      const s = findById(SAVINGS, btn.dataset.id);
-      if (s) s.collected = Math.min(Number(s.target), Number(s.collected) + 10000);
-      refreshAround(btn);
-    },
-    "random-place"(e, btn) { pickRandomPlace(); refreshAround(btn); },
-    "random-movie"(e, btn) { pickRandomMovie(); refreshAround(btn); },
-    "close-pick"(e, btn) { state.placePick = null; state.moviePick = null; refreshAround(btn); },
-    "set-accent"(e, btn) {
-      const row = btn.closest(".swatch-row");
-      if (row) row.querySelectorAll(".swatch").forEach((s) => s.classList.toggle("is-active", s === btn));
-    },
     "add-task": demoAddToast, "add-date": demoAddToast, "add-birthday": demoAddToast,
     "add-goal": demoAddToast, "add-movie": demoAddToast, "add-place": demoAddToast,
     "add-trip": demoAddToast, "add-memory": demoAddToast, "add-quote": demoAddToast,
     "add-contact": demoAddToast, "add-wish": demoAddToast, "add-saving": demoAddToast,
+    "health-med-new": demoAddToast, "flo-med-new": demoAddToast,
     "share-wish"(e, btn) {
       const w = [...WISHES_OPEN_MINE, ...WISHES_OPEN_PARTNER, ...WISHES_DONE_MINE, ...WISHES_DONE_PARTNER]
         .find((x) => Number(x.id) === Number(btn.dataset.id));
       const text = w ? [w.body, w.comment, w.url].filter(Boolean).join("\n") : "";
       if (text && navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(
-          () => toast("Скопировано — в демо это пример"),
-          () => toast("Не удалось скопировать")
+          () => toast("Откройте приложение в Telegram"),
+          () => toast("Откройте приложение в Telegram")
         );
       } else {
-        toast("Скопируйте текст вручную — это демо");
+        toast("Откройте приложение в Telegram");
       }
     },
-    "save-settings": demoInertToast("Настройки сохраняются в настоящем приложении"),
-    "save-pair-timezone": demoInertToast("Часовой пояс сохраняется в настоящем приложении"),
-    "save-pin": demoInertToast("Пароль настраивается в настоящем приложении"),
-    "export-data": demoInertToast("Экспорт доступен в настоящем приложении"),
-    "leave-pair": demoInertToast("Выход из пространства — только в настоящем приложении"),
-    "set-theme": demoInertToast("Тема переключается в настоящем приложении")
+    "save-settings": demoInertToast("Откройте приложение в Telegram"),
+    "save-pair-timezone": demoInertToast("Откройте приложение в Telegram"),
+    "save-pin": demoInertToast("Откройте приложение в Telegram"),
+    "export-data": demoInertToast("Откройте приложение в Telegram"),
+    "leave-pair": demoInertToast("Откройте приложение в Telegram"),
+    "set-theme": demoInertToast("Откройте приложение в Telegram"),
+    "flo-report-open": demoInertToast("Откройте приложение в Telegram"),
+    "place-visited": demoInertToast("Откройте приложение в Telegram"),
+    "place-unvisited": demoInertToast("Откройте приложение в Telegram"),
+    "trip-visited": demoInertToast("Откройте приложение в Telegram"),
+    "trip-unvisited": demoInertToast("Откройте приложение в Telegram"),
+    "movie-watched": demoInertToast("Откройте приложение в Telegram"),
+    "movie-unwatched": demoInertToast("Откройте приложение в Telegram"),
+    "goal-item-done": demoInertToast("Откройте приложение в Telegram"),
+    "goal-item-reopen": demoInertToast("Откройте приложение в Telegram"),
+    "health-intake": demoInertToast("Откройте приложение в Telegram"),
+    "health-intake-clear": demoInertToast("Откройте приложение в Telegram"),
+    "random-place": demoInertToast("Откройте приложение в Telegram"),
+    "random-movie": demoInertToast("Откройте приложение в Telegram"),
+    "close-pick": demoInertToast("Откройте приложение в Telegram"),
+    "set-accent": demoInertToast("Откройте приложение в Telegram"),
+    "deposit-saving": demoInertToast("Откройте приложение в Telegram"),
+    "contacts-copy": demoInertToast("Откройте приложение в Telegram")
   };
   // === DEMO_ACTIONS_END ===
 
@@ -1440,27 +1724,62 @@
   // Действия без локальной реализации: кнопка отвечает тостом с причиной,
   // чтобы не выглядеть сломанной.
   const DEMO_INERT = {
-    "edit-item": "Редактирование недоступно в демо",
-    "edit-saving": "Редактирование недоступно в демо",
-    "rate-movie": "Оценка фильма — в настоящем приложении",
-    "open-url": "Ссылка откроется в настоящем приложении",
-    "open-movie": "Описание фильма — в настоящем приложении",
-    "open-memory": "Полный текст записи — в настоящем приложении",
-    "open-saving": "История пополнений — в настоящем приложении",
-    "open-history": "История пары — в настоящем приложении"
+    "edit-item": "Откройте приложение в Telegram",
+    "edit-saving": "Откройте приложение в Telegram",
+    "rate-movie": "Откройте приложение в Telegram",
+    "movie-resume": "Откройте приложение в Telegram",
+    "movie-resume-clear": "Откройте приложение в Telegram",
+    "open-url": "Откройте приложение в Telegram",
+    "open-movie": "Откройте приложение в Telegram",
+    "open-memory": "Откройте приложение в Telegram",
+    "open-saving": "Откройте приложение в Telegram",
+    "open-history": "Откройте приложение в Telegram",
+    "contact-open": "Откройте приложение в Telegram",
+    "flo-period-start": "Откройте приложение в Telegram",
+    "flo-period-end": "Откройте приложение в Telegram",
+    "flo-record-today": "Откройте приложение в Telegram",
+    "flo-day-start": "Откройте приложение в Telegram",
+    "flo-day-end": "Откройте приложение в Telegram"
   };
   // === DEMO_INERT_END ===
 
   // === DEMO_NATIVE_BEGIN ===
   // Обрабатываются отдельными ветками ниже (не через DEMO_ACTIONS):
   const DEMO_NATIVE_ACTIONS = [
-    "wish-view", "cal-prev", "cal-next", "cal-day",
-    "movie-sort-dir", "movie-sort-key", "movie-filter-kind"
+    "wish-view", "contacts-view", "cal-prev", "cal-next", "cal-day",
+    "flo-month-prev", "flo-month-next", "flo-select-day",
+    "movie-sort-dir", "movie-sort-key", "movie-filter-kind",
+    "item-menu-toggle", "show-in-calendar"
   ];
   // === DEMO_NATIVE_END ===
 
   // Тап по сегменту и по кнопкам действий.
   view.addEventListener("click", (e) => {
+    // Спойлеры разметки (||…||) раскрываются тапом — как в app.js.
+    const spoiler = e.target.closest("[data-spoiler]");
+    if (spoiler) {
+      spoiler.classList.toggle("is-revealed");
+      return;
+    }
+    // Тап по фону открытого меню (не по пункту) — закрыть.
+    if (e.target.closest(".item-menu") && !e.target.closest(".item-menu-item")) {
+      closeItemMenus();
+      return;
+    }
+    // «⋮» карточки: одно открытое меню за раз; повторный тап — закрыть.
+    const menuToggle = e.target.closest('[data-action="item-menu-toggle"]');
+    if (menuToggle) {
+      const wrap = menuToggle.closest(".item-actions");
+      const menu = wrap?.querySelector(".item-menu");
+      const wasOpen = wrap?.classList.contains("is-open");
+      closeItemMenus();
+      if (wrap && menu && !wasOpen) {
+        wrap.classList.add("is-open");
+        menu.hidden = false;
+        menuToggle.setAttribute("aria-expanded", "true");
+      }
+      return;
+    }
     const segBtn = e.target.closest(".seg-switch-btn[data-tab]");
     if (segBtn) {
       const container = segBtn.closest(".seg-switch[data-switch]");
@@ -1482,6 +1801,23 @@
       });
       return;
     }
+    // «Мои / Его» в контактах — тот же статичный переключатель.
+    const contactsBtn = e.target.closest('[data-action="contacts-view"]');
+    if (contactsBtn) {
+      state.contactsView = contactsBtn.dataset.view === "partner" ? "partner" : "mine";
+      const content = view.querySelector("#seg-body-contacts");
+      if (content) {
+        content.innerHTML = contactsContentHtml();
+        view.querySelectorAll(".contacts-switch-btn").forEach((btn) => {
+          const active = (btn.dataset.view === "partner") === (state.contactsView === "partner");
+          btn.classList.toggle("is-active", active);
+          btn.setAttribute("aria-selected", String(active));
+        });
+      } else {
+        refreshSegBody("contacts");
+      }
+      return;
+    }
     // Календарь пары: месяц и выбранный день.
     const calBtn = e.target.closest('[data-action^="cal-"]');
     if (calBtn) {
@@ -1493,12 +1829,51 @@
       refreshSegBody("pair");
       return;
     }
+    // Фло-календарь: месяц и выбранный день.
+    const floBtn = e.target.closest('[data-action^="flo-"]');
+    if (floBtn) {
+      const action = floBtn.dataset.action;
+      if (action === "flo-month-prev") state.floOffset -= 1;
+      else if (action === "flo-month-next") state.floOffset += 1;
+      else if (action === "flo-select-day") {
+        state.floSelected = floBtn.dataset.date;
+        const sd = keyToDate(floBtn.dataset.date);
+        const tm = todayMidnight();
+        state.floOffset = (sd.getFullYear() - tm.getFullYear()) * 12 + (sd.getMonth() - tm.getMonth());
+      }
+      else return;
+      refreshSegBody("flo");
+      return;
+    }
+    // Тап по карточке с датой открывает календарь пары на нужном дне.
+    const calOpen = e.target.closest('[data-action="show-in-calendar"]');
+    if (calOpen) {
+      const day = calOpen.dataset.day;
+      if (!day) return;
+      const d = keyToDate(day);
+      const tm = todayMidnight();
+      state.calSelected = day;
+      state.calOffset = (d.getFullYear() - tm.getFullYear()) * 12 + (d.getMonth() - tm.getMonth());
+      state.views.pair = "profile";
+      if (state.tab === "pair") {
+        // Уже в паре: setTab не сработает — повторяем его ветку для pair.
+        navItems.forEach((btn) => {
+          btn.classList.remove("is-active");
+          btn.removeAttribute("aria-current");
+        });
+        render();
+      } else {
+        setTab("pair");
+      }
+      return;
+    }
     // Кнопки действий: локальная demo-логика (DEMO_ACTIONS), тост с
     // причиной для нереализованных (DEMO_INERT) или отдельные ветки
     // (DEMO_NATIVE_ACTIONS). Молча неработающих кнопок нет.
     const actionBtn = e.target.closest("[data-action]");
     if (actionBtn) {
       const action = actionBtn.dataset.action;
+      closeItemMenus();
       const fn = DEMO_ACTIONS[action];
       if (fn) { fn(e, actionBtn); return; }
       if (action === "movie-sort-dir") {
@@ -1509,9 +1884,11 @@
       }
       const reason = DEMO_INERT[action];
       if (reason) { toast(reason); return; }
-      if (!DEMO_NATIVE_ACTIONS.includes(action)) toast("Действие недоступно в демо");
+      if (!DEMO_NATIVE_ACTIONS.includes(action)) toast("Откройте приложение в Telegram");
       return;
     }
+    // Любой другой тап закрывает открытые меню карточек.
+    closeItemMenus();
   });
 
   // Селекты сортировки/фильтра кино — change, не click.
@@ -1519,9 +1896,9 @@
     const sel = e.target.closest('select[data-action]');
     if (!sel) return;
     const action = sel.dataset.action;
-    const viewKey = state.views.movies;
-    if (action === "movie-sort-key") state.movieSort[viewKey].key = sel.value;
-    else if (action === "movie-filter-kind") state.movieKind[viewKey] = sel.value;
+    const viewKeyName = state.views.movies;
+    if (action === "movie-sort-key") state.movieSort[viewKeyName].key = sel.value;
+    else if (action === "movie-filter-kind") state.movieKind[viewKeyName] = sel.value;
     else return;
     refreshSegBody("movies");
   });
@@ -1627,6 +2004,245 @@
   tickClock();
   setInterval(tickClock, 1000);
 
+const state = {
+  tab: "home",
+  views: {
+    tasks: "plans", plans: "open", goals: "open", movies: "open",
+    dates: "dates", places: "visit", memories: "memories",
+    pair: "profile", wishesView: "open", savingsView: "saving",
+    flo: "today"
+  },
+  wishView: "mine",
+  contactsView: "mine",
+  movieSort: { open: { key: "added", dir: "desc" }, watched: { key: "added", dir: "desc" } },
+  movieKind: { open: "all", watched: "all" },
+  calOffset: 0,
+  calSelected: dayKey(todayMidnight()),
+  placePick: null,
+  moviePick: null,
+  movieRandomUsed: false,
+  ritualDone: false,
+  xp: 240,
+  togetherXp: 520,
+  floOffset: 0,
+  floSelected: dayKey(todayMidnight())
+};
+
   liquidNav.setActive("home", false);
   render();
+
+
+// ------------------------------------------------------------------
+// Списки по ключам сегментов.
+// ------------------------------------------------------------------
+function plansList() {
+  if (state.views.plans === "done") {
+    return `
+      <div class="section-head-inline"><h3>Завершённые · ${DONE_TASKS.length}</h3></div>
+      ${DONE_TASKS.map(doneTaskCard).join("")}`;
+  }
+  return `
+    <button class="primary full add-button" type="button" data-action="add-task">Добавить план</button>
+    ${TASKS.map(taskCard).join("")}`;
+}
+
+function goalsList() {
+  // Цель «завершена», когда выполнены все её пункты — как completedGoals()
+  // в app.js; выполненные уходят в вид «Выполненные».
+  const open = GOALS.filter((g) => g.items.some((it) => !it.done));
+  const done = GOALS.filter((g) => !g.items.some((it) => !it.done));
+  if (state.views.goals === "done") {
+    if (!done.length) {
+      return `<section class="card"><h3>Пока ничего не достигнуто</h3><p>Отметьте все пункты цели — она переедет сюда</p></section>`;
+    }
+    return done.map(goalCard).join("");
+  }
+  if (!open.length) {
+    return `<section class="card"><h3>Пока пусто</h3>
+      <p>Опишите большую цель и разбейте её на шаги — отмечайте выполненные вместе</p>
+      <div style="margin-top:12px;"><button class="primary full" type="button" data-action="add-goal">Создать цель</button></div>
+    </section>`;
+  }
+  return `
+    <button class="primary full add-button" type="button" data-action="add-goal">Создать цель</button>
+    ${open.map(goalCard).join("")}`;
+}
+
+function datesList() {
+  return state.views.dates === "birthdays"
+    ? `<button class="primary full add-button" type="button" data-action="add-birthday">Добавить день рождения</button>${BIRTHDAYS.map(birthdayCard).join("")}`
+    : `<button class="primary full add-button" type="button" data-action="add-date">Добавить дату</button>${DATES.map(dateCard).join("")}`;
+}
+
+// Карточка результата «Рандом» — порт renderPlacePick()/renderMoviePick().
+function placePickCard() {
+  const p = [...PLACES_VISIT, ...PLACES_VISITED].find((x) => x.id === state.placePick);
+  if (!p) { state.placePick = null; return ""; }
+  return `
+    <article class="card place-pick" aria-live="polite">
+      <p class="eyebrow">Вам выпало</p>
+      <h2 class="place-pick-title">${esc(p.title)}</h2>
+      ${p.note ? `<p class="place-pick-note">${esc(p.note)}</p>` : ""}
+      <div class="place-actions">
+        <button class="primary full" type="button" data-action="place-visited" data-id="${p.id}">Посетили</button>
+        <button class="secondary full" type="button" data-action="random-place">Следующее</button>
+        <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
+      </div>
+    </article>`;
+}
+
+function moviePickCard() {
+  const m = [...MOVIES_OPEN, ...MOVIES_WATCHED].find((x) => x.id === state.moviePick);
+  if (!m) { state.moviePick = null; return ""; }
+  return `
+    <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${m.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(m.title)}">
+      <p class="eyebrow">Вам выпало</p>
+      <h2 class="place-pick-title">${esc(m.title)}</h2>
+      <div class="item-meta">
+        ${ratingPill(m)}
+        ${m.length ? `<span>${esc(m.length)}</span>` : ""}
+      </div>
+      <div class="place-actions">
+        <button class="primary full" type="button" data-action="movie-watched" data-id="${m.id}">Просмотрели</button>
+        <button class="secondary full" type="button" data-action="random-movie">Следующее</button>
+        <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
+      </div>
+    </article>`;
+}
+
+function placesList() {
+  if (state.views.places === "trips") {
+    const open = TRIPS.filter((t) => !t.visited);
+    const visited = TRIPS.filter((t) => t.visited);
+    if (!open.length && !visited.length) {
+      return `<section class="card"><h3>Пока пусто</h3>
+        <p>Добавьте город или страну, куда мечтаете съездить вдвоём</p>
+        <button class="primary full card-action" type="button" data-action="add-trip">Добавить поездку</button>
+      </section>`;
+    }
+    return `
+      <button class="primary full add-button" type="button" data-action="add-trip">Добавить поездку</button>
+      ${open.length ? `<div class="section-head-inline"><h3>Хотим съездить · ${open.length}</h3></div>${open.map(tripCard).join("")}` : ""}
+      ${visited.length ? `<div class="section-head-inline"><h3>Съездили · ${visited.length}</h3></div>${visited.map(tripCard).join("")}` : ""}`;
+  }
+  const open = PLACES_VISIT;
+  const visited = PLACES_VISITED;
+  if (!open.length && !visited.length) {
+    return `<section class="card"><h3>Пока пусто</h3>
+      <p>Добавьте кафе, парк или другое место, куда давно хотели выбраться</p>
+      <button class="primary full card-action" type="button" data-action="add-place">Добавить место</button>
+    </section>`;
+  }
+  return `
+    <section class="card place-hero">
+      <h3>Не знаете, куда пойти?</h3>
+      <p>Приложение выберет случайное место из списка. Отметить посещение можно отдельно — уже после того, как сходите</p>
+      <button class="secondary full card-action" type="button" data-action="random-place">Рандом</button>
+    </section>
+    ${placePickCard()}
+    <button class="primary full add-button" type="button" data-action="add-place">Добавить место</button>
+    ${open.length ? `<div class="section-head-inline"><h3>Хотим посетить · ${open.length}</h3></div>${open.map(placeCard).join("")}` : ""}
+    ${visited.length ? `<div class="section-head-inline"><h3>Посещённые · ${visited.length}</h3></div>${visited.map(placeCard).join("")}` : ""}`;
+}
+
+function memoriesList() {
+  const v = state.views.memories;
+  if (v === "quotes") {
+    return `<button class="primary full add-button" type="button" data-action="add-quote">Добавить цитату</button>${QUOTES.map(quoteCard).join("")}`;
+  }
+  if (v === "health") return healthBody();
+  if (v === "contacts") return contactsBody();
+  return `<button class="primary full add-button" type="button" data-action="add-memory">Записать</button>${MEMORIES.map(memoryCard).join("")}`;
+}
+
+// ------------------------------------------------------------------
+// Кино: сортировка и фильтр — порт movieSortBar/sortMovies.
+// ------------------------------------------------------------------
+function movieLengthMinutes(m) {
+  const match = /(\d+)\s*ч(?:\s*(\d+)\s*мин)?/.exec(m.length || "");
+  return match ? Number(match[1]) * 60 + Number(match[2] || 0) : null;
+}
+function movieSortValue(m, key) {
+  if (key === "added") return m.created || 0;
+  if (key === "year") return Number(m.year) || null;
+  if (key === "rating") return Number(m.rating) > 0 ? Number(m.rating) : null;
+  if (key === "runtime") return movieLengthMinutes(m);
+  if (key === "genre") return (m.genre || "").toLowerCase() || null;
+  if (key === "raofp") return Number(m.pair_rating) > 0 ? Number(m.pair_rating) : null;
+  return null;
+}
+function sortMovies(list, view) {
+  const { key, dir } = state.movieSort[view];
+  const decorated = list.map((m) => ({ m, v: movieSortValue(m, key) }));
+  decorated.sort((a, b) => {
+    if (a.v === null && b.v === null) return a.m.id - b.m.id;
+    if (a.v === null) return 1;
+    if (b.v === null) return -1;
+    const cmp = typeof a.v === "string" ? a.v.localeCompare(b.v, "ru") : a.v - b.v;
+    return cmp === 0 ? a.m.id - b.m.id : dir === "asc" ? cmp : -cmp;
+  });
+  return decorated.map(({ m }) => m);
+}
+function movieSortBar(view, count) {
+  const sort = state.movieSort[view];
+  const kind = state.movieKind[view] || "all";
+  const opts = view === "watched" ? [...MOVIE_SORT_OPTIONS, ["raofp", "RAofP"]] : MOVIE_SORT_OPTIONS;
+  const field = (action, label, options, value) => `
+    <div class="movie-sort-field${action === "movie-filter-kind" ? " is-kind" : ""}">
+      <select data-action="${action}" aria-label="${label}">
+        ${options.map(([v, l]) => `<option value="${v}"${v === value ? " selected" : ""}>${l}</option>`).join("")}
+      </select>
+      ${MOVIE_CHEVRON}
+    </div>`;
+  return `
+    <div class="movie-sort">
+      ${field("movie-sort-key", "Сортировка фильмов", opts, sort.key)}
+      ${field("movie-filter-kind", "Показывать фильмы или сериалы", MOVIE_KIND_OPTIONS, kind)}
+      <button class="icon-btn movie-sort-dir${sort.dir === "asc" ? " is-asc" : ""}" type="button"
+        data-action="movie-sort-dir" aria-label="${sort.dir === "asc" ? "По возрастанию" : "По убыванию"}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+      </button>
+      <span class="day-chip is-muted movie-sort-count">${count}</span>
+    </div>`;
+}
+function filterMoviesByKind(list, view) {
+  const kind = state.movieKind[view] || "all";
+  return kind === "all" ? list : list.filter((m) => (m.kind === "series" ? "series" : "movie") === kind);
+}
+function movieEmptyByKind(view) {
+  const kindLabel = state.movieKind[view] === "series" ? "сериал" : "фильм";
+  return `<section class="card"><h3>Пусто</h3><p>Под фильтр ничего не попало — добавьте ${kindLabel} или выберите «Все».</p></section>`;
+}
+function moviesList() {
+  const view = state.views.movies;
+  if (view === "watched") {
+    const all = MOVIES_WATCHED;
+    if (!all.length) return `<section class="card"><h3>Пока ничего не просмотрено</h3><p>Отметьте фильм просмотренным в «В планах» — он появится здесь</p></section>`;
+    const filtered = filterMoviesByKind(all, "watched");
+    if (!filtered.length) return movieSortBar("watched", 0) + movieEmptyByKind("watched");
+    return movieSortBar("watched", filtered.length) + sortMovies(filtered, "watched").map(movieCard).join("");
+  }
+  // «В планах»: hero-карточка «Не знаете, что посмотреть?» с «Рандом» —
+  // как renderOpenMovies() в app.js (до первого рандома кнопка внутри
+  // информера, после — отдельная под «Найти кино»).
+  const all = MOVIES_OPEN;
+  const open = filterMoviesByKind(all, "open");
+  const heroUsed = state.movieRandomUsed === true;
+  let html = "";
+  if (!heroUsed) {
+    html += `
+      <section class="card place-hero movie-hero">
+        <h3>Не знаете, что посмотреть?</h3>
+        <p>Приложение выберет случайный фильм или сериал из избранного. Отметить просмотр можно отдельно — уже после титров</p>
+        <button class="secondary full card-action" type="button" data-action="random-movie">Рандом</button>
+      </section>`;
+  }
+  html += moviePickCard();
+  html += `<button class="primary full add-button" type="button" data-action="add-movie">Найти кино</button>`;
+  if (heroUsed) html += `<button class="secondary full place-random" type="button" data-action="random-movie">Рандом</button>`;
+  html += movieSortBar("open", open.length);
+  html += open.length ? sortMovies(open, "open").map(movieCard).join("") : movieEmptyByKind("open");
+  return html;
+}
+
 })();

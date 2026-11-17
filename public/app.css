@@ -1413,18 +1413,111 @@ select.settings-select {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  position: relative;
+}
+
+/* «⋮» в правом верхнем углу карточки: голые точки без кнопочной обводки —
+   меню действий откроется по тапу. */
+.item-menu-toggle {
+  border: 0;
+  background: none;
+  padding: 6px 4px 6px 10px;
+  margin: -6px -4px -6px 0;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.item-menu-toggle:hover,
+.item-menu-toggle:focus-visible {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.item-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 200px;
+  max-width: min(280px, 80vw);
+  padding: 6px;
+  border: 1px solid var(--glass-border, var(--line));
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item-menu[hidden] {
+  display: none;
+}
+
+.item-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.item-menu-item:hover,
+.item-menu-item:focus-visible {
+  background: var(--surface-2);
+}
+
+.item-menu-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.item-menu-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.item-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Чип «▶» с точкой прерванного просмотра в карточке фильма/сериала. */
+.day-chip.is-resume {
+  background: var(--surface-2);
+  color: var(--ink);
 }
 
 .icon-btn {
   width: 34px;
   height: 34px;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--surface-2);
-  color: var(--ink);
+  border: 0;
+  background: none;
+  color: var(--muted);
   display: grid;
   place-items: center;
   cursor: pointer;
+}
+
+.icon-btn:hover,
+.icon-btn:focus-visible {
+  color: var(--ink);
+  background: var(--surface-2);
 }
 
 .icon-btn svg {
@@ -3078,3 +3171,195 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
 }
 .flo-obs-main { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
 .flo-obs-meta { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); }
+
+/* ------------------------------------------------------------------
+   Группы фильмов: карточка-стопка и раскрытый состав
+------------------------------------------------------------------- */
+.movie-group {
+  margin-bottom: 14px;
+}
+
+/* Стопка: передняя карточка уже, чтобы справа были видны края задних
+   слоёв. Слои декоративные — без текста, без кликов, вне accessibility. */
+.movie-group-stack {
+  position: relative;
+  padding-right: 26px;
+}
+
+.movie-group-stack__layer {
+  position: absolute;
+  top: 8px;
+  right: calc(26px - var(--layer, 1) * 12px);
+  bottom: 10px;
+  left: 10px;
+  border-radius: 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow, 0 10px 24px rgba(20, 20, 40, 0.08));
+  transform: translateX(calc(var(--layer, 1) * 10px)) scale(calc(1 - var(--layer, 1) * 0.03));
+  transform-origin: bottom right;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.movie-group-card {
+  position: relative;
+  z-index: 1;
+}
+
+.movie-group.is-expanded .movie-group-stack {
+  padding-right: 0;
+}
+
+.movie-group.is-expanded .movie-group-stack__layer {
+  opacity: 0;
+  transform: translateX(14px) scale(0.98);
+}
+
+.movie-group-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+  margin: 10px 0 8px;
+}
+
+.movie-group-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--berry);
+  transition: width 240ms ease;
+}
+
+.movie-group-foot-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 10px;
+}
+
+.movie-group-shown {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.movie-group-members {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* Контейнер держит стабильный id для aria-controls даже в свёрнутом виде. */
+.movie-group-members[hidden] {
+  display: none;
+}
+
+.movie-group-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.movie-group-loading {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 16px;
+  text-align: center;
+}
+
+/* Чекбокс выбора фильмов при создании группы: круглая метка слева
+   от содержимого карточки, карточка сама по себе кликабельна. */
+.group-check {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+  padding: 0;
+}
+
+.group-check.is-on {
+  border-color: var(--berry);
+  background: var(--berry);
+  box-shadow: inset 0 0 0 4px var(--surface);
+}
+
+.movie-card:has(.group-check) .item-row {
+  padding-left: 30px;
+}
+
+.movie-group-select-bar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow, 0 10px 24px rgba(20, 20, 40, 0.12));
+  font-size: 14px;
+}
+
+.movie-group-select-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.movie-group-select-actions .secondary {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+/* Диалог управления группой: строки частей с кнопками порядка. */
+.mg-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.mg-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg, transparent);
+}
+
+.mg-member-title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mg-member-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.mg-footer {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .movie-group-progress-bar {
+    transition: none;
+  }
+}

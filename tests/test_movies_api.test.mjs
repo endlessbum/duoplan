@@ -47,6 +47,7 @@ function loadImdbSearch() {
       extractLine(workerSource, "const IMDB_TIMEOUT_MS = "),
       extractLine(workerSource, "const IMDB_SUGGEST_TTL_MS"),
       extractLine(workerSource, "const imdbSuggestCache = new Map();"),
+      extractBraced(workerSource, "function cacheImdbResults("),
       extractLine(workerSource, "const TMDB_RU_TTL_MS"),
       extractLine(workerSource, "const TMDB_GENRE_TTL_MS"),
       extractLine(workerSource, "const tmdbRuCache = new Map();"),
@@ -64,7 +65,7 @@ function loadImdbSearch() {
       extractBraced(workerSource, "async function imdbSuggestTitle("),
       extractBraced(workerSource, "function suggestKind("),
       extractBraced(workerSource, "async function movieInfo("),
-      "return { imdbSearch, imdbSuggestTitle, movieInfo, omdbTitle, suggestKind, tmdbLocalize };"
+      "return { imdbSearch, imdbSuggestTitle, movieInfo, omdbTitle, suggestKind, tmdbLocalize, imdbSuggestCache };"
     ].join("\n")
   )();
 }
@@ -257,6 +258,25 @@ test(
     const { imdbSearch } = loadImdbSearch();
     const results = await imdbSearch("дюна", { OMDB_API_KEY: "test-key" });
     deepStrictEqual(results, [{ imdb_id: "tt1160419", title: "Dune", year: 2021, kind: "movie" }]);
+  })
+);
+
+test(
+  "imdbSearch: OMDb-фолбэк ограничивает кэш 200 записями (BUG-03)",
+  withFetch(async (url) => {
+    url = String(url);
+    if (url.includes('sg.media-imdb.com')) throw new Error('imdb down');
+    const q = new URL(url).searchParams.get('s') || '';
+    return { ok: true, json: async () => ({ Response: 'True', Search: [
+      { imdbID: 'tt0000001', Title: 'T ' + q, Year: '2020', Type: 'movie' }
+    ] }) };
+  }, async () => {
+    const { imdbSearch, imdbSuggestCache } = loadImdbSearch();
+    for (let i = 0; i < 250; i++) {
+      await imdbSearch('фолбэк-запрос-' + i, { OMDB_API_KEY: 'test-key' });
+    }
+    ok(imdbSuggestCache.size <= 200, 'кэш не разросся: ' + imdbSuggestCache.size);
+    equal(imdbSuggestCache.size, 200);
   })
 );
 

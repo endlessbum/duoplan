@@ -15,6 +15,27 @@ cd "$(dirname "$0")/.."
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 mkdir -p backups
-npx wrangler d1 export duoplan --remote --output "backups/duoplan-$STAMP.sql"
-echo "Готово: backups/duoplan-$STAMP.sql"
-echo "Проверка целостности: sqlite3 backups/duoplan-$STAMP.sql 'PRAGMA integrity_check;' (импорт в отдельную базу см. в шапке файла)"
+DUMP_FILE="backups/duoplan-$STAMP.sql"
+npx wrangler d1 export duoplan --remote --output "$DUMP_FILE"
+echo "Готово: $DUMP_FILE"
+
+# SQL-дамп нельзя открывать как файл базы SQLite: sqlite3 в этом случае
+# проверяет не его содержимое, а мусор вместо БД. Импортируем дамп во временную базу,
+# проверяем уже её и удаляем временный файл в любом исходе.
+if command -v sqlite3 >/dev/null 2>&1; then
+  TMP_DB="$(mktemp "${TMPDIR:-/tmp}/duoplan-restore-XXXXXX")"
+  trap 'rm -f "$TMP_DB"' EXIT
+  sqlite3 "$TMP_DB" < "$DUMP_FILE"
+  CHECK="$(sqlite3 "$TMP_DB" 'PRAGMA integrity_check;')"
+  if [ "$CHECK" != "ok" ]; then
+    echo "Ошибка: целостность дампа не подтверждена: $CHECK" >&2
+    exit 1
+  fi
+  # Наличие ключевых таблиц: пустой дамп тоже проходит integrity_check.
+  for TABLE in users pairs movies movie_groups movie_group_items; do
+    sqlite3 "$TMP_DB" "SELECT count(*) FROM $TABLE;" >/dev/null
+  done
+  echo "Проверка целостности: ok (дамп импортирован во временную SQLite-базу)"
+else
+  echo "Проверка целостности пропущена: sqlite3 не найден. Восстановите дамп в отдельную D1-базу по инструкции в шапке файла — только после этого считайте копию проверенной."
+fi

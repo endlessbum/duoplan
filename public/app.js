@@ -128,6 +128,15 @@
   // Тот же рандом для «Кино» — своя колода, чтобы посещение места не
   // сбрасывало выбор фильмов и наоборот.
   let movieDeck = [];
+  // Группы фильмов: раскрытые стопки, кэш полного состава (части могут
+  // быть за пределами первых 200 записей и архива) и режим выбора при
+  // создании группы. При смене пары всё это сбрасывается вместе с архивом.
+  const expandedMovieGroups = new Set();
+  const movieGroupDetails = new Map(); // groupId -> { status: "loading"|"ready"|"error", items: [] }
+  const movieGroupPending = new Set();
+  let movieGroupSelection = null;    // Set<movie_id> — создание группы
+  let movieGroupSuggest = null;      // { groupId, movieId } — ждёт подтверждения
+  let movieGroupDraft = null;        // черновик диалога управления { groupId, order: [movie_id] }
   let moviePickId = null;
   // Календарь на вкладке «Наша пара»: месяц и выбранный день живут вне
   // рендера, иначе любой refresh возвращал бы пользователя на текущий месяц.
@@ -173,6 +182,14 @@
     if (archiveCachePairId === pairId) return;
     archiveCachePairId = pairId;
     resetArchiveCache();
+    // Групповые кэши привязаны к pair_id сервера — чужой состав не должен
+    // пережить выход/вход в другое пространство.
+    expandedMovieGroups.clear();
+    movieGroupDetails.clear();
+    movieGroupPending.clear();
+    movieGroupSelection = null;
+    movieGroupSuggest = null;
+    movieGroupDraft = null;
   }
   // Активная запись и её завершённая копия живут в разных кэшах — чистим оба,
   // id в таблицах D1 независимы, поэтому по типу идём строго по своим ключам.
@@ -320,7 +337,10 @@
   const PARTNER_LOCKED_ACTIONS = new Set([
     "add-goal-step", "edit-item", "delete-item", "reopen-item", "done-item",
     "remove-goal-step", "goal-item-done", "goal-item-reopen",
-    "movie-watched", "movie-unwatched", "rate-movie",
+    "movie-watched", "movie-unwatched", "rate-movie", "movie-resume", "movie-resume-clear",
+    "group-movie", "group-create", "movie-group-manage", "movie-group-menu",
+    "movie-group-add-part", "movie-group-disband",
+    "mg-up", "mg-down", "mg-remove", "group-suggest-add",
     "place-visited", "place-unvisited", "trip-visited", "trip-unvisited",
     "deposit-saving", "edit-saving", "daily-done"
   ]);
@@ -1731,21 +1751,42 @@
   // «копировать» — два перекрывающихся листа — вместо значка «поделиться»
   // из трёх кружков, который читался как шаринг, а не как копирование.
   const COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.2"/><path d="M5.5 15H4.8A1.8 1.8 0 0 1 3 13.2V4.8A1.8 1.8 0 0 1 4.8 3h8.4A1.8 1.8 0 0 1 15 4.8v.7"/></svg>';
+  // Закладка «Остановились»: место, с которого продолжат просмотр.
+  const RESUME_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4.2L5 21V4.5a1 1 0 0 1 1-1Z"/></svg>';
 
-  // Кнопки действий карточек собираются из одного шаблона: иконка, data-action
-  // и подпись. data-type/data-id/data-url добавляются только когда заданы —
-  // у deposit-saving и open-url своих атрибутов нет.
+  // Пункты меню действий карточек: иконка + текстовая подпись. data-type/
+  // data-id/data-url добавляются только когда заданы — у deposit-saving и
+  // open-url своих атрибутов нет.
   function itemActionButton(opts) {
     const { action, type, id, url, label, icon } = opts;
     const typeAttr = type !== undefined ? ` data-type="${esc(type)}"` : "";
     const idAttr = id !== undefined ? ` data-id="${esc(id)}"` : "";
     const urlAttr = url !== undefined ? ` data-url="${esc(url)}"` : "";
-    return `<button class="icon-btn" type="button" data-action="${action}"${typeAttr}${idAttr}${urlAttr} aria-label="${esc(label)}">${icon}</button>`;
+    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
   }
 
-  // Обёртка кнопок справа от карточки; пустой набор — без пустого div.
+  // Меню действий карточки: в правом верхнем углу — «⋮» без кнопочной
+  // обводки; по тапу выпадает список действий. Пункты — обычные
+  // data-action кнопки, их ловит общий делегированный обработчик.
   function itemActions(buttons) {
-    return buttons ? `<div class="item-actions">${buttons}</div>` : "";
+    if (!buttons) return "";
+    return `<div class="item-actions">
+      <button class="item-menu-toggle" type="button" data-action="item-menu-toggle" aria-label="Действия" aria-haspopup="menu" aria-expanded="false">⋮</button>
+      <div class="item-menu" role="menu" hidden>${buttons}</div>
+    </div>`;
+  }
+
+  // Открытое меню максимум одно: предыдущее закрывается при открытии
+  // следующего и при любом другом действии/тапе мимо.
+  function closeItemMenus(except) {
+    document.querySelectorAll(".item-actions.is-open").forEach((el) => {
+      if (el === except) return;
+      el.classList.remove("is-open");
+      const menu = el.querySelector(".item-menu");
+      if (menu) menu.hidden = true;
+      const toggle = el.querySelector(".item-menu-toggle");
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    });
   }
 
   // Монохромный огонёк серии: тонкий штрих в стиле иконок приложения вместо
@@ -6597,11 +6638,42 @@
     markRandomFlagUsed(PLACE_RANDOM_KEY);
   }
 
+  // Активный рандом общий для пары: выбранная карточка хранится на сервере
+  // (pairs.place_pick_id / movie_pick_id), поэтому партнёр видит тот же
+  // результат и после перезахода — пока кто-то не нажмёт «Закрыть»,
+  // «Следующее» или не отметит элемент просмотренным/посещённым.
+  function syncPairPicks() {
+    const pair = appState?.pair;
+    if (!pair) return;
+    placePickId = pair.place_pick ?? null;
+    moviePickId = pair.movie_pick ?? null;
+  }
+
+  async function savePairPick(fields) {
+    appState = await request("/api/pair/pick", { method: "POST", body: fields });
+  }
+
+  // Флаг «очистка уже летит»: устаревший pick (элемент удалён/отмечен в
+  // обход обработчиков) снимаем на сервере один раз, иначе каждый render
+  // будет слать повторный запрос.
+  const pickClearInFlight = { place: false, movie: false };
+  function clearStalePairPick(type) {
+    if (pickClearInFlight[type]) return;
+    pickClearInFlight[type] = true;
+    request("/api/pair/pick", { method: "POST", body: type === "place" ? { place: null } : { movie: null } })
+      .then((state) => { appState = state; render(); })
+      .catch(() => {})
+      .finally(() => { pickClearInFlight[type] = false; });
+  }
+
   // Текущий выпавший выбор. Если место успели удалить или отметить с другого
   // устройства, карточка тихо снимается — показывать нечего.
   function currentPlacePick() {
     const { pick, stale } = findLivePick(placeList(), placePickId, (place) => Number(place.visited) === 1);
-    if (stale) placePickId = null;
+    if (stale) {
+      placePickId = null;
+      if (appState?.pair?.place_pick != null) clearStalePairPick("place");
+    }
     return pick;
   }
 
@@ -6832,6 +6904,7 @@
       submitLabel: "Оценить",
       onSubmit: async (formData) => {
         const state = await request(path, { method: "POST", body: { rating: Number(formData.get("rating")) } });
+        if (movie?.group_id) movieGroupDetails.delete(movie.group_id);
         if (clearPick) moviePickId = null;
         // Архивная карточка фильма (201+) не входит в /api/state: перекачиваем
         // загруженные страницы, иначе my_rating/pair_rating остались бы старыми.
@@ -6839,6 +6912,35 @@
         haptic();
         showToast(toast);
         return state;
+      }
+    });
+  }
+
+  // «Остановились»: текстовая точка прерванного просмотра — у фильма время
+  // («1:23:45»), у сериала серия и/или момент («2 сезон, 5 серия · 34:12»).
+  // Пустое поле при сохранении снимает отметку (position: null).
+  function openMovieResumeDialog(movie) {
+    openDialog({
+      title: "Остановились",
+      fields: `
+        <label class="field"><span>На чём остановились</span>
+          <input name="position" type="text" data-fmt="none" maxlength="120" autocomplete="off" value="${esc(movie.resume_position || "")}" placeholder="Например: 1:23:45 или 2 сезон, 5 серия · 34:12"></label>
+        <p class="settings-hint">${movie.kind === "series"
+          ? "Для сериала удобно указать сезон, серию и время — например «2 сезон, 5 серия · 34:12»."
+          : "Укажите время, на котором остановились, — например «1:23:45»."} Отметка появится чипом в карточке.</p>
+      `,
+      submitLabel: "Сохранить",
+      onSubmit: async (formData) => {
+        const position = String(formData.get("position") || "").trim();
+        appState = await request(`/api/movies/${movie.id}/resume`, {
+          method: "POST",
+          body: { position: position || null }
+        });
+        if (movie.group_id) movieGroupDetails.delete(movie.group_id);
+        haptic();
+        showToast(position ? "Точка просмотра сохранена" : "Отметка снята");
+        revalidateArchiveCache();
+        return appState;
       }
     });
   }
@@ -6877,6 +6979,7 @@
     if (actors.length) facts.push(["В главных ролях", actors.join(", ")]);
     if (details.released) facts.push(["Премьера", formatDay(details.released)]);
     if (length) facts.push(["Длительность", length]);
+    if (movie.resume_position) facts.push(["Остановились на", movie.resume_position]);
     const status = MOVIE_STATUS_RU[details.status];
     if (status) facts.push(["Статус", status]);
     return `
@@ -6933,12 +7036,23 @@
 
   function movieItem(movie) {
     const watched = Number(movie.watched) === 1;
+    // Режим создания группы: чекбокс на каждой свободной записи. Групповые
+    // части не выбираются — один фильм не может быть в двух группах.
+    const selecting = movieGroupSelection && !movie.group_id;
+    const checkHtml = selecting
+      ? `<button class="group-check${movieGroupSelection.has(Number(movie.id)) ? " is-on" : ""}" type="button" data-action="group-toggle-movie" data-id="${movie.id}" role="checkbox" aria-checked="${movieGroupSelection.has(Number(movie.id))}" aria-label="Выбрать для группы: ${esc(movie.title)}"></button>`
+      : "";
+    // «Объединить в группу» — только у записей вне групп и вне режима выбора.
+    const groupAction = !selecting && !movie.group_id
+      ? itemActionButton({ action: "group-movie", id: movie.id, label: "Объединить в группу", icon: LINK_ICON })
+      : "";
     // В IMDb жанры приходят списком — для пилюли берём первый.
     const genre = movie.genres ? String(movie.genres).split(",")[0].trim() : "";
     const yearPill = movie.year ? `<span class="day-chip is-muted">${esc(movie.year)}</span>` : "";
     const length = formatMovieLength(movie);
     return `
       <article class="card movie-card${watched ? " movie-watched" : ""}" data-action="open-movie" data-id="${movie.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(movie.title)}">
+        ${checkHtml}
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${esc(movie.title)}</h3>
@@ -6946,6 +7060,7 @@
             <div class="item-meta">
               ${ratingPill(movie.rating, movie.rating_source)}
               ${length ? `<span>${esc(length)}</span>` : ""}
+              ${movie.resume_position ? `<span class="day-chip is-resume" title="Точка, на которой остановились">▶ ${esc(movie.resume_position)}</span>` : ""}
             </div>
             ${watched ? `<div class="item-meta">${raofpPill(movie)}</div>` : ""}
             ${watched ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(movie.watched_at) || "Просмотрено")}</span></div>` : ""}
@@ -6955,6 +7070,18 @@
               ? { action: "movie-unwatched", id: movie.id, label: "Вернуть в список", icon: REOPEN_ICON }
               : { action: "movie-watched", id: movie.id, label: "Просмотрено", icon: DONE_ICON }),
             ...(movie.url ? [itemActionButton({ action: "open-url", url: movie.url, label: "Ссылка", icon: LINK_ICON })] : []),
+            ...(groupAction ? [groupAction] : []),
+            // «Остановились» — только у просматриваемых: у просмотренных
+            // точка уже не нужна (сервер сбрасывает её при «Просмотрено»).
+            ...(!watched ? [
+              itemActionButton({
+                action: "movie-resume",
+                id: movie.id,
+                label: movie.resume_position ? "Изменить точку просмотра" : "Остановились",
+                icon: RESUME_ICON
+              }),
+              ...(movie.resume_position ? [itemActionButton({ action: "movie-resume-clear", id: movie.id, label: "Сбросить точку просмотра", icon: DELETE_ICON })] : [])
+            ] : []),
             itemActionButton({ action: "delete-item", type: "movies", id: movie.id, label: "Удалить", icon: DELETE_ICON })
           ].join("\n            "))}
         </div>
@@ -6967,7 +7094,10 @@
   // тихо снимается с карточки — показывать нечего.
   function currentMoviePick() {
     const { pick, stale } = findLivePick(movieList(), moviePickId, (movie) => Number(movie.watched) === 1);
-    if (stale) moviePickId = null;
+    if (stale) {
+      moviePickId = null;
+      if (appState?.pair?.movie_pick != null) clearStalePairPick("movie");
+    }
     return pick;
   }
 
@@ -7003,6 +7133,7 @@
         </div>
         <div class="place-actions">
           <button class="primary full" type="button" data-action="movie-watched" data-id="${movie.id}">Просмотрели</button>
+          <button class="secondary full" type="button" data-action="movie-resume" data-id="${movie.id}">${movie.resume_position ? "Изменить точку просмотра" : "Остановились"}</button>
           <button class="secondary full" type="button" data-action="random-movie">Следующее</button>
           <button class="secondary full" type="button" data-action="close-pick">Закрыть</button>
         </div>
@@ -7120,6 +7251,582 @@
     `;
   }
 
+  const MENU_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>';
+  const CHEVRON_UP = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg>';
+  const CHEVRON_DOWN = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 10 6 6 6-6"/></svg>';
+
+  // ------------------------------------------------------------------
+  // Группы фильмов: стопка связанных записей «Кино»
+  // ------------------------------------------------------------------
+  const MOVIE_GROUP_TYPE_LABELS = {
+    franchise: "Франшиза",
+    story: "Одна история",
+    versions: "Разные версии",
+    collection: "Подборка"
+  };
+
+  function movieGroupMap() {
+    const map = new Map();
+    for (const group of appState?.movieGroups || []) map.set(group.id, group);
+    return map;
+  }
+
+  // Существительное состава группы: «8 фильмов», «3 сериала», «8 частей».
+  function movieGroupNoun(group, count = group?.total_count) {
+    const total = Number(count) || 0;
+    if (Number(group?.series_count) === 0) return plural(total, "фильм", "фильма", "фильмов");
+    if (Number(group?.movie_count) === 0) return plural(total, "сериал", "сериала", "сериалов");
+    return plural(total, "часть", "части", "частей");
+  }
+
+  // Записи текущего списка → атомарные элементы: одиночные фильмы и группы.
+  // Члены группы уже отфильтрованы по статусу и типу вызывающим кодом.
+  function buildMovieEntries(movies) {
+    const groups = movieGroupMap();
+    const byGroup = new Map();
+    const entries = [];
+    for (const movie of movies) {
+      const gid = movie.group_id && groups.has(movie.group_id) ? movie.group_id : null;
+      if (!gid) {
+        entries.push({ type: "movie", movie });
+        continue;
+      }
+      if (!byGroup.has(gid)) byGroup.set(gid, []);
+      byGroup.get(gid).push(movie);
+    }
+    for (const [gid, members] of byGroup) {
+      // Внутри группы — всегда ручной порядок, а не общая сортировка списка.
+      members.sort((a, b) =>
+        (Number(a.group_position) || 0) - (Number(b.group_position) || 0) || byRowId(a.id, b.id));
+      entries.push({ type: "group", group: groups.get(gid), members });
+    }
+    return entries;
+  }
+
+  // Сортировочный псевдо-фильм группы: anchor — первая часть по ручному
+  // порядку; «добавлено» — по самой свежей части, RAofP — среднее просмотренных.
+  function movieEntrySortMovie(entry) {
+    if (entry.type === "movie") return entry.movie;
+    const anchor = entry.group.anchor || {};
+    return {
+      id: Number(anchor.movie_id) || 0,
+      created_at: entry.group.sort_added_at || entry.group.created_at || 0,
+      year: anchor.year,
+      rating: anchor.rating,
+      runtime: anchor.runtime,
+      genres: anchor.genres,
+      kind: anchor.kind,
+      pair_rating: entry.group.sort_raofp
+    };
+  }
+
+  function sortMovieEntries(entries, view) {
+    const { key, dir } = movieSort[view];
+    const decorated = entries.map((entry) => ({ entry, value: movieSortValue(movieEntrySortMovie(entry), key) }));
+    decorated.sort((a, b) => {
+      const av = a.value;
+      const bv = b.value;
+      if (av === null && bv === null) return byRowId(movieEntrySortMovie(a.entry).id, movieEntrySortMovie(b.entry).id);
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      const cmp = typeof av === "string" ? av.localeCompare(bv, "ru") : av - bv;
+      if (cmp === 0) return byRowId(movieEntrySortMovie(a.entry).id, movieEntrySortMovie(b.entry).id);
+      return dir === "asc" ? cmp : -cmp;
+    });
+    return decorated.map(({ entry }) => entry);
+  }
+
+  function movieEntriesHtml(entries, view) {
+    return entries.map((entry) => entry.type === "movie"
+      ? movieItem(entry.movie)
+      : renderMovieGroup(entry, view)).join("");
+  }
+
+  // Полный состав группы с сервера: нужен раскрытой стопке — части могут
+  // лежать за пределами первой страницы и загруженного архива.
+  async function loadMovieGroup(groupId) {
+    const cache = movieGroupDetails.get(groupId);
+    if (cache?.status === "ready" || cache?.status === "loading" || movieGroupPending.has(groupId)) return;
+    movieGroupPending.add(groupId);
+    movieGroupDetails.set(groupId, { status: "loading", items: [] });
+    try {
+      const data = await request(`/api/movie-groups/${encodeURIComponent(groupId)}`);
+      movieGroupDetails.set(groupId, { status: "ready", items: data.items || [] });
+    } catch {
+      movieGroupDetails.set(groupId, { status: "error", items: [] });
+    } finally {
+      movieGroupPending.delete(groupId);
+    }
+  }
+
+  function movieGroupDetailItems(groupId) {
+    return movieGroupDetails.get(groupId)?.items || [];
+  }
+
+  // После добавления/удаления/переноса части старый состав больше не актуален.
+  async function refreshMovieGroupDetails(...groupIds) {
+    for (const id of groupIds) {
+      if (!id) continue;
+      movieGroupDetails.delete(id);
+      await loadMovieGroup(id);
+    }
+  }
+
+  // Из менеджера группы диалог поиска закрывается — после успешного действия
+  // возвращаем пользователя обратно в менеджер, а не на общий список.
+  async function afterGroupPartAdded(groupId, returnToManager) {
+    await refreshMovieGroupDetails(groupId);
+    if (returnToManager && movieGroupMap().has(groupId)) {
+      await openMovieGroupManager(groupId);
+    } else {
+      render();
+    }
+  }
+
+  // Фильм ищется везде: активный список, архивные страницы и кэши раскрытых
+  // групп — часть может быть старше первых 200 записей.
+  function findMovieById(id) {
+    const numId = Number(id);
+    const direct = movieList().find((movie) => Number(movie.id) === numId);
+    if (direct) return direct;
+    const archived = (archiveCache.movies?.items || []).find((movie) => Number(movie.id) === numId);
+    if (archived) return archived;
+    for (const detail of movieGroupDetails.values()) {
+      const found = (detail.items || []).find((movie) => Number(movie.id) === numId);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  // Свёрнутая/раскрытая карточка-стопка. Виды стопки: 2 видимые части — один
+  // задний слой, 3+ — два, одна — без слоёв. Слои декоративные: aria-hidden,
+  // клики не перехватывают.
+  function renderMovieGroup(entry, view) {
+    const { group, members } = entry;
+    const expanded = expandedMovieGroups.has(group.id);
+    const total = Number(group.total_count) || members.length;
+    const watched = Number(group.watched_count) || 0;
+    const open = Number(group.open_count) || 0;
+    const percent = Math.min(100, Math.max(0, Number(group.watched_percent) || 0));
+    const noun = movieGroupNoun(group, total);
+    const typeLabel = MOVIE_GROUP_TYPE_LABELS[group.group_type] || MOVIE_GROUP_TYPE_LABELS.collection;
+    const visibleCount = members.length;
+    // Кнопка и стопка считаются по полной сводке сервера, а не по первой
+    // загруженной странице: часть может лежать глубже архива. Счётчики по
+    // статусу+типу приходят из movieGroupSummaries; если старый state их не
+    // отдаёт, подпись остаётся нейтральной («Показать части»).
+    const kind = movieKindFilter[view] || "all";
+    const wantWatched = view === "watched";
+    const rawAvailable = kind === "movie"
+      ? (wantWatched ? group.watched_movie_count : group.open_movie_count)
+      : kind === "series"
+        ? (wantWatched ? group.watched_series_count : group.open_series_count)
+        : (wantWatched ? watched : open);
+    const availableCount = rawAvailable === undefined || rawAvailable === null || !Number.isFinite(Number(rawAvailable))
+      ? null
+      : Number(rawAvailable);
+    const countForUi = availableCount ?? total;
+    const layers = countForUi >= 3 ? 2 : countForUi === 2 ? 1 : 0;
+    const membersDomId = `movie-group-members-${String(group.id).replace(/[^A-Za-z0-9_-]/g, "")}`;
+    const layerHtml = layers
+      ? Array.from({ length: layers }, (_, i) =>
+          `<div class="movie-group-stack__layer" style="--layer:${i + 1}" aria-hidden="true"></div>`).join("")
+      : "";
+    const metaChips = [
+      `<span class="day-chip is-muted">${esc(typeLabel)}</span>`,
+      `<span class="day-chip is-muted">${total} ${esc(noun)} · ${watched} из ${total} просмотрено</span>`
+    ].join("");
+    const shownNote = countForUi > visibleCount
+      ? `<span class="movie-group-shown">Показано ${visibleCount} из ${countForUi}</span>`
+      : "";
+    const statusNote = view === "open" && open > 0
+      ? `<span>${open} ${esc(plural(open, "часть", "части", "частей"))} ещё в планах</span>`
+      : "";
+    const toggleLabel = expanded
+      ? "Скрыть части"
+      : availableCount === null
+        ? "Показать части"
+        : `Показать ${availableCount} ${esc(plural(availableCount, "часть", "части", "частей"))}`;
+    let bodyInner = "";
+    if (expanded) {
+      const detail = movieGroupDetails.get(group.id);
+      if (!detail || detail.status === "loading") {
+        bodyInner = `<p class="movie-suggest-hint">Загружаем части группы…</p>`;
+      } else if (detail.status === "error") {
+        bodyInner = `
+          <p class="movie-suggest-hint">Не удалось загрузить части группы.</p>
+          <button class="secondary full" type="button" data-action="movie-group-retry" data-id="${esc(group.id)}">Повторить</button>`;
+      } else {
+        const items = (detail.items || []).filter((movie) => {
+          if ((Number(movie.watched) === 1) !== wantWatched) return false;
+          if (kind !== "all" && (movie.kind === "series" ? "series" : "movie") !== kind) return false;
+          return true;
+        });
+        bodyInner = items.length
+          ? items.map(movieItem).join("")
+          : `<p class="movie-suggest-hint">Под фильтр ничего не попало.</p>`;
+      }
+    }
+    // Контейнер существует всегда: aria-controls указывает на реальный id
+    // и в свёрнутом состоянии. Декоративные слои скрыты от скринридера.
+    const body = `<div class="movie-group-members" id="${membersDomId}"${expanded ? "" : " hidden"}>${bodyInner}</div>`;
+    return `
+      <div class="movie-group${expanded ? " is-expanded" : ""}" data-group-id="${esc(group.id)}">
+        <div class="movie-group-stack">
+          ${layerHtml}
+          <article class="card movie-group-card">
+            <div class="item-row">
+              <div class="item-main">
+                <h3 class="item-title">${esc(group.title)}</h3>
+                <div class="item-meta">${metaChips}</div>
+              </div>
+              ${itemActions(itemActionButton({ action: "movie-group-menu", id: group.id, label: "Управление группой", icon: MENU_ICON }))}
+            </div>
+            <div class="movie-group-progress" role="progressbar"
+              aria-label="Прогресс просмотра группы ${esc(group.title)}"
+              aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"
+              aria-valuetext="${watched} из ${total} просмотрено">
+              <div class="movie-group-progress-bar" style="width:${percent}%"></div>
+            </div>
+            <div class="item-meta movie-group-foot-meta">
+              ${statusNote}${shownNote}
+            </div>
+            <button class="secondary full card-action" type="button" data-action="movie-group-toggle" data-id="${esc(group.id)}"
+              aria-expanded="${expanded ? "true" : "false"}" aria-controls="${membersDomId}">${toggleLabel}</button>
+          </article>
+        </div>
+        ${body}
+        ${expanded ? `
+          <div class="movie-group-actions">
+            <button class="secondary full" type="button" data-action="movie-group-add-part" data-id="${esc(group.id)}">Добавить часть</button>
+            <button class="secondary full" type="button" data-action="movie-group-manage" data-id="${esc(group.id)}">Управлять группой</button>
+          </div>` : ""}
+      </div>
+    `;
+  }
+
+  // Режим выбора фильмов для создания группы: чекбоксы на подходящих
+  // карточках + нижняя панель с количеством и кнопками.
+  function movieGroupSelectionHtml() {
+    if (!movieGroupSelection) return "";
+    const count = movieGroupSelection.size;
+    return `
+      <div class="movie-group-select-bar">
+        <span>Выбрано: ${count}</span>
+        <span class="movie-group-select-actions">
+          <button class="secondary" type="button" data-action="group-create" ${count < 2 ? "disabled" : ""}>Создать группу</button>
+          <button class="secondary" type="button" data-action="group-cancel">Отмена</button>
+        </span>
+      </div>`;
+  }
+
+  // Управление группой: название, тип, ручной порядок («Выше/Ниже»),
+  // добавление части, отвязка частей и расформирование. Фильмы не удаляются.
+  function movieGroupManagerFields() {
+    const detail = movieGroupDetails.get(movieGroupDraft?.groupId);
+    const group = movieGroupMap().get(movieGroupDraft?.groupId);
+    if (!detail || detail.status !== "ready" || !movieGroupDraft) {
+      return `<p class="movie-suggest-hint">Загружаем группу…</p>`;
+    }
+    const items = detail.items || [];
+    const orderIndex = new Map(movieGroupDraft.order.map((id, i) => [Number(id), i]));
+    const sorted = [...items].sort((a, b) => (orderIndex.get(Number(a.id)) ?? 999) - (orderIndex.get(Number(b.id)) ?? 999));
+    const title = movieGroupDraft.title ?? group?.title ?? "";
+    const groupType = movieGroupDraft.group_type ?? group?.group_type ?? "collection";
+    const rows = sorted.map((movie, index) => `
+      <div class="mg-member">
+        <span class="mg-member-title">${esc(movie.title)}</span>
+        <span class="mg-member-actions">
+          <button class="icon-btn" type="button" data-action="mg-up" data-id="${movie.id}" ${index === 0 ? "disabled" : ""} aria-label="Выше">${CHEVRON_UP}</button>
+          <button class="icon-btn" type="button" data-action="mg-down" data-id="${movie.id}" ${index === sorted.length - 1 ? "disabled" : ""} aria-label="Ниже">${CHEVRON_DOWN}</button>
+          <button class="icon-btn" type="button" data-action="mg-remove" data-id="${movie.id}" aria-label="Убрать из группы">${DELETE_ICON}</button>
+        </span>
+      </div>`).join("");
+    return `
+      <label class="field"><span>Название группы</span><input name="mg_title" data-fmt="none" maxlength="100" required value="${esc(title)}"></label>
+      <label class="field"><span>Тип группы</span><select name="mg_type">
+        ${Object.entries(MOVIE_GROUP_TYPE_LABELS).map(([value, label]) =>
+          `<option value="${value}"${groupType === value ? " selected" : ""}>${esc(label)}</option>`).join("")}
+      </select></label>
+      <div class="field"><span>Части группы (порядок)</span><div class="mg-list">${rows}</div></div>
+      <div class="mg-footer">
+        <button class="secondary full" type="button" data-action="movie-group-add-part" data-id="${esc(movieGroupDraft.groupId)}">Добавить часть</button>
+        <button class="secondary full" type="button" data-action="movie-group-disband" data-id="${esc(movieGroupDraft.groupId)}">Расформировать группу</button>
+      </div>`;
+  }
+
+  // Черновик менеджера группы: название/тип/порядок до нажатия «Сохранить».
+  // Перед переходом к добавлению/удалению части изменения сохраняются —
+  // пользователь не должен терять перестановки из-за смены диалога.
+  function movieGroupDraftSnapshot(draft) {
+    return {
+      title: draft.title,
+      group_type: draft.group_type,
+      order: JSON.stringify(draft.order)
+    };
+  }
+
+  function readMovieGroupDraftForm() {
+    if (!movieGroupDraft) return;
+    const titleInput = dialogFields.querySelector('[name="mg_title"]');
+    const typeInput = dialogFields.querySelector('[name="mg_type"]');
+    if (titleInput) movieGroupDraft.title = String(titleInput.value || "").trim();
+    if (typeInput) movieGroupDraft.group_type = String(typeInput.value || "collection");
+  }
+
+  function movieGroupDraftChanged() {
+    const draft = movieGroupDraft;
+    if (!draft?.initial) return false;
+    return draft.title !== draft.initial.title
+      || draft.group_type !== draft.initial.group_type
+      || JSON.stringify(draft.order) !== draft.initial.order;
+  }
+
+  async function saveMovieGroupDraft() {
+    if (!movieGroupDraft) return false;
+    readMovieGroupDraftForm();
+    if (!movieGroupDraftChanged()) return false;
+    const groupId = movieGroupDraft.groupId;
+    const body = { order: [...movieGroupDraft.order] };
+    if (movieGroupDraft.title !== movieGroupDraft.initial.title) body.title = movieGroupDraft.title;
+    if (movieGroupDraft.group_type !== movieGroupDraft.initial.group_type) body.group_type = movieGroupDraft.group_type;
+    appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}`, {
+      method: "PATCH",
+      body
+    });
+    movieGroupDraft.title = body.title ?? movieGroupDraft.title;
+    movieGroupDraft.group_type = body.group_type ?? movieGroupDraft.group_type;
+    movieGroupDraft.initial = movieGroupDraftSnapshot(movieGroupDraft);
+    movieGroupDetails.delete(groupId);
+    await loadMovieGroup(groupId);
+    return true;
+  }
+
+  async function openMovieGroupManager(groupId, options) {
+    await loadMovieGroup(groupId);
+    const detail = movieGroupDetails.get(groupId);
+    if (!detail || detail.status !== "ready") {
+      showToast("Не удалось загрузить группу");
+      return;
+    }
+    const group = movieGroupMap().get(groupId);
+    const draft = {
+      groupId,
+      order: (detail.items || []).map((movie) => Number(movie.id)),
+      title: group?.title || "",
+      group_type: group?.group_type || "collection"
+    };
+    draft.initial = movieGroupDraftSnapshot(draft);
+    movieGroupDraft = draft;
+    openDialog({
+      title: "Управление группой",
+      fields: movieGroupManagerFields(),
+      submitLabel: "Сохранить",
+      cancelLabel: "Закрыть",
+      onSubmit: async () => {
+        await saveMovieGroupDraft();
+        movieGroupDraft = null;
+        showToast(options?.savedToast || "Группа обновлена");
+        return appState;
+      }
+    });
+    if (options?.toast) showToast(options.toast);
+  }
+
+  // Порядок частей новой группы — как на экране: сначала выбранные записи
+  // текущего вида в их сортировке, затем остальные (выбор мог собираться
+  // на обеих вкладках «В планах»/«Просмотрено») — в общем порядке списка.
+  function movieSelectionOrder() {
+    const view = moviesView === "watched" ? "watched" : "open";
+    const all = view === "watched" ? watchedMovies() : openMovies();
+    const entries = sortMovieEntries(buildMovieEntries(filterMoviesByKind(all, view)), view);
+    const ordered = [];
+    const push = (id) => {
+      const num = Number(id);
+      if (movieGroupSelection.has(num) && !ordered.includes(num)) ordered.push(num);
+    };
+    for (const entry of entries) {
+      if (entry.type === "movie") push(entry.movie.id);
+      else for (const member of entry.members) push(member.id);
+    }
+    for (const movie of movieList()) push(movie.id);
+    return ordered;
+  }
+
+  // Создание группы из выбранных карточек: название + тип, порядок —
+  // по порядку отображения списка на момент отправки.
+  function openMovieGroupCreateDialog() {
+    if (!movieGroupSelection || movieGroupSelection.size < 2) return;
+    const orderedIds = movieSelectionOrder();
+    openDialog({
+      title: "Новая группа",
+      fields: `
+        <label class="field"><span>Название группы</span><input name="title" data-fmt="none" maxlength="100" required placeholder="Гарри Поттер"></label>
+        <label class="field"><span>Тип группы</span><select name="group_type">
+          ${Object.entries(MOVIE_GROUP_TYPE_LABELS).map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("")}
+        </select></label>
+        <p class="settings-hint">Выбрано частей: ${orderedIds.length}. Внутри группы сохранится этот порядок.</p>
+      `,
+      submitLabel: "Создать",
+      onSubmit: async (formData) => {
+        appState = await request("/api/movie-groups", {
+          method: "POST",
+          body: {
+            title: formData.get("title"),
+            group_type: formData.get("group_type"),
+            movie_ids: orderedIds
+          }
+        });
+        movieGroupSelection = null;
+        showToast("Группа создана");
+        return appState;
+      }
+    });
+  }
+
+  // Цель «Добавить часть» живёт только в контексте конкретного открытия
+  // диалога. Закрытие/отмена выбрасывает dialogContext целиком, обычный
+  // поиск открывается без цели — отменённый поиск не может отравить следующее
+  // добавление фильма. Цель считывается и обнуляется ДО асинхронной операции.
+  function consumeMovieGroupTarget(context) {
+    const target = context?.targetGroupId || null;
+    if (context) context.targetGroupId = null;
+    return target;
+  }
+
+  // Диалог поиска IMDb: общий для «Найти кино» и «Добавить часть
+  // в группу». Без кнопки сохранения — фильм добавляется тапом по подсказке
+  // (механика в делегированном слушателе dialogFields). readOnly гасит
+  // нативный сабмит по Enter — диалог не закрывается.
+  // targetGroupId передаётся только режимом «Добавить часть»; в этом режиме
+  // дополнительно показываем локальный поиск по уже сохранённым карточкам.
+  function openMovieSearchDialog(title = "Найти кино", targetGroupId = null, options) {
+    openDialog({
+      title,
+      targetGroupId,
+      returnToManager: Boolean(options?.returnToManager),
+      submitLabel: null,
+      readOnly: true,
+      cancelLabel: "Закрыть",
+      fields: `
+        <label class="field"><span>Название на IMDb</span><input name="q" type="text" data-fmt="none" autocomplete="off" placeholder="Интерстеллар, Дюна, Во все тяжкие…"></label>
+        <div class="movie-suggest" aria-live="polite"><p class="movie-suggest-hint">Начните печатать — здесь появятся совпадения с IMDb.</p></div>
+        ${targetGroupId ? `
+          <div class="movie-local-block">
+            <p class="settings-hint">Фильм уже сохранён в DuoPlan? Присоедините его без дубликата.</p>
+            <label class="field"><span>Уже в вашем списке</span><input name="local_q" type="text" data-fmt="none" autocomplete="off" placeholder="Найти сохранённый фильм…"></label>
+            <div class="movie-local-suggest" aria-live="polite"><p class="movie-suggest-hint">Введите название — покажем фильмы и сериалы вашей пары.</p></div>
+          </div>` : ""}
+      `,
+      onSubmit: async () => appState
+    });
+  }
+
+  // Кандидаты «Уже в вашем списке»: ищем по сохранённым карточкам пары
+  // (активный список + загруженные архивные страницы + кэш раскрытых групп).
+  // Уже состоящие в целевой группе не предлагаем — сервер всё равно ответил
+  // бы 409. Для записи из другой группы сохраняем её ID и название: перенос
+  // требует явного подтверждения.
+  function movieGroupLocalCandidates(query, targetGroupId) {
+    const needle = normalizeMovieTitle(query);
+    if (needle.length < 2) return [];
+    const pool = [...movieList()];
+    for (const detail of movieGroupDetails.values()) pool.push(...(detail.items || []));
+    const groups = movieGroupMap();
+    const seen = new Set();
+    const result = [];
+    for (const movie of pool) {
+      const id = Number(movie?.id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      if (!normalizeMovieTitle(movie.title).includes(needle)) continue;
+      const sourceGroupId = movie.group_id ? String(movie.group_id) : null;
+      if (sourceGroupId && sourceGroupId === String(targetGroupId)) continue;
+      result.push({
+        id,
+        title: movie.title,
+        year: movie.year,
+        kind: movie.kind,
+        sourceGroupId,
+        sourceGroupTitle: sourceGroupId ? (groups.get(sourceGroupId)?.title || null) : null
+      });
+      if (result.length >= 20) break;
+    }
+    return result;
+  }
+
+  function renderMovieGroupLocalSuggestions(box, results) {
+    if (!results.length) {
+      box.innerHTML = `<p class="movie-suggest-hint">Совпадений нет — найдите фильм на IMDb выше.</p>`;
+      return;
+    }
+    box.innerHTML = results.map((movie) => {
+      const meta = movie.sourceGroupTitle
+        ? `в группе «${movie.sourceGroupTitle}»`
+        : movieSuggestMeta(movie);
+      return `<button class="movie-suggest-item" type="button" data-action="movie-group-local-pick"
+        data-movie-id="${movie.id}" data-title="${esc(movie.title)}"
+        data-source-group-id="${esc(movie.sourceGroupId || "")}"
+        data-source-group-title="${esc(movie.sourceGroupTitle || "")}">
+        <span class="movie-suggest-title">${esc(movie.title)}</span>
+        <span class="movie-suggest-meta">${esc(meta)}</span>
+      </button>`;
+    }).join("");
+  }
+
+  // Тело запроса для существующей записи: movie_id не создаёт дубликат,
+  // move_from_group_id уходит только после явного согласия на перенос.
+  function movieGroupAttachBody(movieId, sourceGroupId) {
+    const body = { movie_id: Number(movieId) };
+    if (sourceGroupId) body.move_from_group_id = sourceGroupId;
+    return body;
+  }
+
+  async function attachExistingMovieToGroup(groupId, movie, sourceGroupId) {
+    appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}/items`, {
+      method: "POST",
+      body: movieGroupAttachBody(movie.id, sourceGroupId)
+    });
+  }
+
+  async function finishGroupPartAdd(groupId, returnToManager, message, sourceGroupId) {
+    if (sourceGroupId) {
+      movieGroupDetails.delete(sourceGroupId);
+      expandedMovieGroups.delete(sourceGroupId);
+      if (movieGroupMap().has(sourceGroupId)) await loadMovieGroup(sourceGroupId);
+    }
+    await afterGroupPartAdded(groupId, returnToManager);
+    showToast(message);
+  }
+
+  // Подсказка «похоже на группу» после обычного добавления: только явное
+  // предложение, без автоматических объединений. Кандидат — единственная
+  // группа, чьё название совпадает с названием фильма (без учёта регистра
+  // и знаков препинания).
+  function normalizeMovieTitle(title) {
+    return String(title || "").toLowerCase().replace(/[^0-9a-zа-яё]+/gi, "");
+  }
+
+  function maybeSuggestMovieGroup(movie) {
+    if (!movie?.id) return;
+    const needle = normalizeMovieTitle(movie.title);
+    if (needle.length < 3) return;
+    const candidates = (appState?.movieGroups || []).filter((group) => {
+      const title = normalizeMovieTitle(group.title);
+      return title.length >= 3 && (title === needle || title.includes(needle) || needle.includes(title));
+    });
+    if (candidates.length !== 1) return;
+    const group = candidates[0];
+    movieGroupSuggest = { groupId: group.id, movieId: Number(movie.id) };
+    openDialog({
+      title: "Похоже на группу?",
+      fields: `<p style="margin:2px 0 10px;">Фильм «${esc(movie.title)}» может быть частью группы «${esc(group.title)}». Добавить его туда?</p><button class="primary full" type="button" data-action="group-suggest-add">Добавить в группу</button>`,
+      submitLabel: null,
+      readOnly: true,
+      cancelLabel: "Оставить отдельно"
+    });
+  }
+
   function renderMoviesBody() {
     return `
       ${renderSegment("movies", moviesView, [["open", "В планах"], ["watched", "Просмотрено"]], "is-sub")}
@@ -7145,7 +7852,9 @@
       // пользователь не смог бы вернуться к «Все» без смены вида.
       if (!watched.length) return movieSortBar("watched", 0) + movieEmptyByKind("watched")
         + archiveMoreHtml("movies", (appState.movies || []).length);
-      return movieSortBar("watched", watched.length) + sortMovies(watched, "watched").map(movieItem).join("")
+      const entries = sortMovieEntries(buildMovieEntries(watched), "watched");
+      return movieSortBar("watched", watched.length) + movieEntriesHtml(entries, "watched")
+        + movieGroupSelectionHtml()
         + archiveMoreHtml("movies", (appState.movies || []).length);
     }
     return renderOpenMovies();
@@ -7203,8 +7912,9 @@
       // На месте прежнего заголовка «Хотим посмотреть» — сортировка списка.
       html += movieSortBar("open", open.length);
       html += open.length
-        ? sortMovies(open, "open").map(movieItem).join("")
+        ? movieEntriesHtml(sortMovieEntries(buildMovieEntries(open), "open"), "open")
         : movieEmptyByKind("open");
+      html += movieGroupSelectionHtml();
     }
     return html + archiveMoreHtml("movies", (appState.movies || []).length);
   }
@@ -7269,6 +7979,9 @@
     // Акцент мог измениться (настройки/тема) — пере-применяем на каждом рендере.
     applyAccent();
     syncArchiveCachePair();
+    // Активный рандом живёт на сервере пары: локальные pickId подтягиваем
+    // из state, чтобы карточка «Вам выпало» была общей для обоих.
+    syncPairPicks();
     syncTopControls();
     if (!appUnlocked && storedPin()) {
       appEl.innerHTML = renderLock();
@@ -8113,7 +8826,19 @@
 
   dialogFields.addEventListener("input", (e) => {
     const target = e.target;
-    if (!(target instanceof HTMLInputElement) || target.name !== "q") return;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.name === "local_q") {
+      const box = dialogFields.querySelector(".movie-local-suggest");
+      if (!box) return;
+      const query = target.value.trim();
+      if (query.length < 2) {
+        box.innerHTML = `<p class="movie-suggest-hint">Введите название — покажем фильмы и сериалы вашей пары.</p>`;
+        return;
+      }
+      renderMovieGroupLocalSuggestions(box, movieGroupLocalCandidates(query, dialogContext?.targetGroupId));
+      return;
+    }
+    if (target.name !== "q") return;
     const box = dialogFields.querySelector(".movie-suggest");
     if (!box) return;
     clearTimeout(movieSuggestTimer);
@@ -8193,6 +8918,50 @@
       else removeContactPhoneRow(phoneBtn);
       return;
     }
+    // Уже сохранённый фильм: присоединяем существующую запись по movie_id,
+    // без POST /api/movies и без дубликата. Перенос из другой группы — только
+    // после явного подтверждения.
+    const localBtn = e.target.closest?.("[data-action='movie-group-local-pick']");
+    if (localBtn) {
+      if (!dialogContext || dialogSubmitting) return;
+      const groupId = dialogContext.targetGroupId;
+      if (!groupId) return;
+      const movie = {
+        id: Number(localBtn.dataset.movieId),
+        title: localBtn.dataset.title || "Фильм"
+      };
+      const sourceGroupId = localBtn.dataset.sourceGroupId || null;
+      const sourceTitle = localBtn.dataset.sourceGroupTitle || "";
+      const returnToManager = Boolean(dialogContext.returnToManager);
+      if (sourceGroupId) {
+        const targetTitle = movieGroupMap().get(groupId)?.title || "эту группу";
+        openDialog({
+          title: "Перенести из другой группы?",
+          fields: `<p style="margin:2px 0 0;">«${esc(movie.title)}» уже состоит в группе «${esc(sourceTitle || "другой группы")}». Перенести его в «${esc(targetTitle)}»? Если в исходной группе останется меньше двух частей, она расформируется, а фильмы станут отдельными карточками.</p>`,
+          submitLabel: "Перенести",
+          cancelLabel: "Отмена",
+          onSubmit: async () => {
+            await attachExistingMovieToGroup(groupId, movie, sourceGroupId);
+            return appState;
+          },
+          chain: () => finishGroupPartAdd(groupId, returnToManager, `Перенесено в группу: ${movie.title}`, sourceGroupId)
+        });
+        return;
+      }
+      dialogSubmitting = true;
+      consumeMovieGroupTarget(dialogContext);
+      dialog.close();
+      try {
+        await attachExistingMovieToGroup(groupId, movie, null);
+        await finishGroupPartAdd(groupId, returnToManager, `Добавлено в группу: ${movie.title}`, null);
+      } catch (error) {
+        showToast(error?.message || "Не удалось добавить фильм в группу");
+        render();
+      } finally {
+        dialogSubmitting = false;
+      }
+      return;
+    }
     const btn = e.target.closest?.(".movie-suggest-item");
     if (!btn || !dialogContext || dialogSubmitting) return;
     dialogSubmitting = true;
@@ -8202,9 +8971,36 @@
         method: "POST",
         body: { imdb_id: btn.dataset.imdbId, year: btn.dataset.year || undefined }
       });
+      const addedImdb = btn.dataset.imdbId;
+      const addedTitle = btn.dataset.title;
+      // Новый фильм — самый свежий в списке (created_at DESC): находим его id
+      // для привязки к группе или подсказки.
+      const addedMovie = (appState.movies || []).find((movie) => movie.imdb_id === addedImdb)
+        || (appState.movies || [])[0];
+      // Цель берём из контекста этого открытия и сразу обнуляем: ни повторный
+      // тап, ни ошибка API не должны оставить группу «на будущее».
+      const groupTarget = consumeMovieGroupTarget(dialogContext);
+      const returnToManager = Boolean(dialogContext?.returnToManager);
       dialog.close();
-      render();
-      showToast(`Добавлено: ${btn.dataset.title}`);
+      if (groupTarget && addedMovie) {
+        // «Добавить часть»: фильм уже создан обычным сценарием — теперь
+        // отдельный запрос привязывает его к группе. При ошибке привязки
+        // фильм НЕ удаляем: он остаётся отдельной карточкой (план 4.2).
+        try {
+          appState = await request(`/api/movie-groups/${encodeURIComponent(groupTarget)}/items`, {
+            method: "POST",
+            body: { movie_id: Number(addedMovie.id) }
+          });
+          showToast(`Добавлено в группу: ${addedTitle}`);
+        } catch (error) {
+          showToast(`«${addedTitle}» добавлен, но не вошёл в группу — попробуйте «Управлять группой»`);
+        }
+        await afterGroupPartAdded(groupTarget, returnToManager);
+      } else {
+        render();
+        showToast(`Добавлено: ${addedTitle}`);
+        maybeSuggestMovieGroup(addedMovie);
+      }
     } catch (error) {
       // 409 «уже в списке» и прочие ошибки показываем внутри диалога —
       // тост ушёл бы под top-layer и слился бы с блюром.
@@ -8405,6 +9201,7 @@
     return t.closest('[role="button"][tabindex]:not([tabindex="-1"])');
   };
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeItemMenus();
     if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
     const card = cardFromEvent(e);
     if (!card) return;
@@ -8425,9 +9222,21 @@
   });
 
   document.addEventListener("click", async (e) => {
+    // Тап по фону открытого меню (не по пункту) — закрыть, не проваливаясь
+    // в карточку: у карточки свой data-action, closest нашёл бы его.
+    if (e.target.closest(".item-menu") && !e.target.closest(".item-menu-item")) {
+      closeItemMenus();
+      return;
+    }
     const btn = e.target.closest("[data-action]");
-    if (!btn) return;
+    if (!btn) {
+      closeItemMenus();
+      return;
+    }
     const action = btn.dataset.action;
+    // Любое действие, кроме самого тоггла, закрывает открытые меню —
+    // пункт меню и так свой data-action, меню к моменту dispatch уже скрыто.
+    if (action !== "item-menu-toggle") closeItemMenus();
 
     try {
       if (["add-task", "add-goal", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-trip", "add-movie", "add-saving", "add-birthday", "add-contact"].includes(action) && partnerMissing()) {
@@ -8467,6 +9276,19 @@
         }
       } else if (["contacts-retry", "contact-open", "contacts-copy", "contacts-edit", "contacts-delete"].includes(action)) {
         await handleContactsAction(action, btn);
+      } else if (action === "item-menu-toggle") {
+        // «⋮» карточки: одно открытое меню за раз; повторный тап — закрыть.
+        const wrap = btn.closest(".item-actions");
+        const menu = wrap?.querySelector(".item-menu");
+        const wasOpen = wrap?.classList.contains("is-open");
+        // Закрываем все (включая этот): если тап был по открытому — на этом
+        // всё, если по закрытому — открываем его заново ниже.
+        closeItemMenus();
+        if (wrap && menu && !wasOpen) {
+          wrap.classList.add("is-open");
+          menu.hidden = false;
+          btn.setAttribute("aria-expanded", "true");
+        }
       } else if (action === "seg-switch") {
         // Переключение вида внутри вкладки: меняем только тело, капля и сам
         // переключатель остаются живыми.
@@ -8645,20 +9467,7 @@
           onSubmit: (fd) => request("/api/trips", { method: "POST", body: { title: fd.get("title"), note: fd.get("note") } })
         });
       } else if (action === "add-movie") {
-        // Диалог поиска: без кнопки сохранения — фильм добавляется тапом
-        // по подсказке (механика в делегированном слушателе dialogFields).
-        // readOnly гасит нативный сабмит по Enter — диалог не закрывается.
-        openDialog({
-          title: "Найти кино",
-          submitLabel: null,
-          readOnly: true,
-          cancelLabel: "Закрыть",
-          fields: `
-            <label class="field"><span>Название на IMDb</span><input name="q" type="text" data-fmt="none" autocomplete="off" placeholder="Интерстеллар, Дюна, Во все тяжкие…"></label>
-            <div class="movie-suggest" aria-live="polite"><p class="movie-suggest-hint">Начните печатать — здесь появятся совпадения с IMDb.</p></div>
-          `,
-          onSubmit: async () => appState
-        });
+        openMovieSearchDialog();
       } else if (action === "add-saving") {
         openDialog({
           title: "Новая копилка",
@@ -8805,10 +9614,15 @@
           btn.disabled = false;
         }
       } else if (action === "close-pick") {
-        // «Закрыть» на карточке результата рандома: выбор сбрасывается,
-        // hero-информер и кнопка «Рандом» остаются как были.
+        // «Закрыть» на карточке результата рандома: выбор сбрасывается у обоих
+        // участников, hero-информер и кнопка «Рандом» остаются как были.
         placePickId = null;
         moviePickId = null;
+        try {
+          await savePairPick({ place: null, movie: null });
+        } catch {
+          // Сеть мигнула — локально выбор уже снят, рассинхрон добьёт тик.
+        }
         render();
       } else if (action === "random-place") {
         if (!drawPlace()) {
@@ -8817,6 +9631,15 @@
           showToast(placeList().length
             ? "Все места уже посещены — добавьте новое"
             : "Сначала добавьте места");
+          return;
+        }
+        try {
+          // Выбор уходит на сервер до рендера: партнёр увидит ту же карточку.
+          await savePairPick({ place: placePickId });
+        } catch (error) {
+          showToast(error?.message || "Не удалось сохранить выбор");
+          placePickId = null;
+          render();
           return;
         }
         // Первый успешный запуск гасит hero-информер на этом устройстве.
@@ -8828,10 +9651,142 @@
           behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
           block: "nearest"
         });
+      } else if (action === "group-movie") {
+        // «Объединить в группу» из меню карточки: режим выбора, этот фильм
+        // уже отмечен. Отмена ничего не меняет в базе.
+        const id = Number(btn.dataset.id);
+        if (findMovieById(id)?.group_id) {
+          showToast("Фильм уже состоит в группе");
+          return;
+        }
+        movieGroupSelection = new Set([id]);
+        render();
+      } else if (action === "group-toggle-movie") {
+        const id = Number(btn.dataset.id);
+        if (movieGroupSelection.has(id)) movieGroupSelection.delete(id);
+        else movieGroupSelection.add(id);
+        render();
+      } else if (action === "group-cancel") {
+        movieGroupSelection = null;
+        render();
+      } else if (action === "group-create") {
+        openMovieGroupCreateDialog();
+      } else if (action === "movie-group-toggle") {
+        const id = btn.dataset.id;
+        if (expandedMovieGroups.has(id)) {
+          expandedMovieGroups.delete(id);
+        } else {
+          expandedMovieGroups.add(id);
+          loadMovieGroup(id).then(() => {
+            // Ответ мог прийти после сворачивания/ухода — перерисовываем
+            // только если группа всё ещё раскрыта.
+            if (expandedMovieGroups.has(id) && currentTab === "tasks") render();
+          });
+        }
+        render();
+      } else if (action === "movie-group-retry") {
+        movieGroupDetails.delete(btn.dataset.id);
+        loadMovieGroup(btn.dataset.id).then(() => render());
+      } else if (action === "movie-group-menu" || action === "movie-group-manage") {
+        openMovieGroupManager(btn.dataset.id);
+      } else if (action === "movie-group-add-part") {
+        // Из диалога управления — закрываем его, иначе два top-layer
+        // диалога конфликтуют (новый showModal поверх старого недопустим).
+        const groupId = btn.dataset.id;
+        const fromManager = Boolean(movieGroupDraft && String(movieGroupDraft.groupId) === String(groupId));
+        if (fromManager) {
+          try {
+            await saveMovieGroupDraft();
+          } catch (error) {
+            showDialogError(error);
+            return;
+          }
+        }
+        if (dialog?.open) dialog.close();
+        openMovieSearchDialog("Добавить часть в группу", groupId, { returnToManager: fromManager });
+      } else if (action === "mg-up" || action === "mg-down") {
+        if (!movieGroupDraft) return;
+        // Сохраняем текст полей до перерисовки списка — иначе правки
+        // названия/типа пропадали вместе со старой разметкой.
+        readMovieGroupDraftForm();
+        const id = Number(btn.dataset.id);
+        const index = movieGroupDraft.order.indexOf(id);
+        const swap = action === "mg-up" ? index - 1 : index + 1;
+        if (index < 0 || swap < 0 || swap >= movieGroupDraft.order.length) return;
+        [movieGroupDraft.order[index], movieGroupDraft.order[swap]] = [movieGroupDraft.order[swap], movieGroupDraft.order[index]];
+        dialogFields.innerHTML = movieGroupManagerFields();
+      } else if (action === "mg-remove") {
+        if (!movieGroupDraft) return;
+        const groupId = movieGroupDraft.groupId;
+        const movieId = Number(btn.dataset.id);
+        const movie = findMovieById(movieId);
+        // Несохранённый порядок/название ушли бы вместе с менеджером.
+        try {
+          await saveMovieGroupDraft();
+        } catch (error) {
+          showDialogError(error);
+          return;
+        }
+        const groupStillExists = () => (appState?.movieGroups || []).some((g) => String(g.id) === String(groupId));
+        openDialog({
+          title: "Убрать из группы?",
+          fields: `<p style="margin:2px 0 0;">«${esc(movie?.title || "Фильм")}» станет отдельной карточкой — сам фильм не удалится.</p>`,
+          submitLabel: "Убрать",
+          onSubmit: async () => {
+            appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}/items/${movieId}`, { method: "DELETE" });
+            movieGroupDetails.delete(groupId);
+            expandedMovieGroups.delete(groupId);
+            if (!groupStillExists()) movieGroupDraft = null;
+            return appState;
+          },
+          chain: () => {
+            if (!groupStillExists()) {
+              showToast("Группа расформирована — оба фильма остались в списке отдельно");
+              render();
+              return;
+            }
+            openMovieGroupManager(groupId, { toast: "Часть убрана из группы" });
+          }
+        });
+      } else if (action === "movie-group-disband") {
+        const groupId = btn.dataset.id;
+        const group = movieGroupMap().get(groupId);
+        openDialog({
+          title: "Расформировать группу?",
+          fields: `<p style="margin:2px 0 0;">Группа «${esc(group?.title || "")}" расформируется, но все фильмы и сериалы сохранятся отдельными карточками.</p>`,
+          submitLabel: "Расформировать",
+          onSubmit: async () => {
+            appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}`, { method: "DELETE" });
+            movieGroupDetails.delete(groupId);
+            expandedMovieGroups.delete(groupId);
+            movieGroupDraft = null;
+            showToast("Группа расформирована — фильмы остались в списке");
+            return appState;
+          }
+        });
+      } else if (action === "group-suggest-add") {
+        if (!movieGroupSuggest) { dialog.close(); return; }
+        const { groupId, movieId } = movieGroupSuggest;
+        movieGroupSuggest = null;
+        dialog.close();
+        try {
+          appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}/items`, {
+            method: "POST",
+            body: { movie_id: movieId }
+          });
+          showToast("Фильм добавлен в группу");
+          render();
+        } catch (error) {
+          showToast(error?.message || "Не удалось добавить в группу — фильм остался отдельным");
+          render();
+        }
+      } else if (action === "group-suggest-skip") {
+        movieGroupSuggest = null;
+        dialog.close();
       } else if (action === "movie-watched") {
         // Оценка обязательна: без неё сервер не переведёт карточку
         // в «Просмотренные», а RAofP не из чего считать.
-        const movie = movieList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        const movie = findMovieById(btn.dataset.id);
         if (!movie) return;
         openRatingDialog(movie, {
           path: `/api/movies/${movie.id}/watched`,
@@ -8841,10 +9796,11 @@
         });
       } else if (action === "movie-unwatched") {
         const id = btn.dataset.id;
-        const movie = movieList().find((item) => Number(item.id) === Number(id));
+        const movie = findMovieById(id);
         btn.disabled = true;
         try {
           appState = await request(`/api/movies/${id}/unwatched`, { method: "POST", body: {} });
+          if (movie?.group_id) movieGroupDetails.delete(movie.group_id);
           haptic();
           showToast(movie ? `«${movie.title}» снова в списке` : "Фильм вернулся в список");
           revalidateArchiveCache();
@@ -8852,9 +9808,25 @@
         } finally {
           btn.disabled = false;
         }
+      } else if (action === "movie-resume") {
+        const movie = findMovieById(btn.dataset.id);
+        if (movie) openMovieResumeDialog(movie);
+      } else if (action === "movie-resume-clear") {
+        const id = btn.dataset.id;
+        const movie = findMovieById(id);
+        btn.disabled = true;
+        try {
+          appState = await request(`/api/movies/${id}/resume`, { method: "POST", body: { position: null } });
+          haptic();
+          showToast("Отметка «Остановились» снята");
+          revalidateArchiveCache();
+          render();
+        } finally {
+          btn.disabled = false;
+        }
       } else if (action === "rate-movie") {
         // Второй партнёр: кнопка «Оценить» в карточке «Просмотренные».
-        const movie = movieList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        const movie = findMovieById(btn.dataset.id);
         if (!movie) return;
         openRatingDialog(movie, {
           path: `/api/movies/${movie.id}/rate`,
@@ -8865,13 +9837,22 @@
         // Тап по карточке: описание и детали в окне. Кнопки внутри карточки
         // (просмотрено/ссылка/удалить/оценить) ловятся раньше — у них свой
         // data-action, closest находит кнопку, а не карточку.
-        const movie = movieList().find((item) => Number(item.id) === Number(btn.dataset.id));
+        const movie = findMovieById(btn.dataset.id);
         if (movie) openMovieDetails(movie);
       } else if (action === "random-movie") {
         if (!drawMovie()) {
           showToast(movieList().length
             ? "Всё из списка уже просмотрено"
             : "Сначала добавьте фильм или сериал");
+          return;
+        }
+        try {
+          // Выбор уходит на сервер до рендера: партнёр увидит ту же карточку.
+          await savePairPick({ movie: moviePickId });
+        } catch (error) {
+          showToast(error?.message || "Не удалось сохранить выбор");
+          moviePickId = null;
+          render();
           return;
         }
         // Первый успешный запуск гасит hero-информер на этом устройстве.
@@ -8979,6 +9960,7 @@
           submitLabel: "Удалить",
           onSubmit: async () => {
             appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
+            if (btn.dataset.type === "movies" && item?.group_id) movieGroupDetails.delete(item.group_id);
             // Из appState удалённая запись уходит сразу, но в кэше архива она
             // осталась бы и продолжала отображаться (и повторное удаление дало бы 404).
             removeFromArchiveCache(btn.dataset.type, btn.dataset.id);

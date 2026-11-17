@@ -59,8 +59,12 @@ TABLES = {
     "movies": (
         "id, pair_id, created_by, imdb_id, title, year, kind, rating, rating_source, "
         "rating_checked_at, details, genres, runtime, seasons, episodes, url, "
-        "watched, watched_at, watched_by, created_at"
+        "watched, watched_at, watched_by, resume_position, created_at"
     ),
+    # Группы фильмов: родители (movies, movie_groups) раньше связей —
+    # movie_group_items держится FK на обе таблицы.
+    "movie_groups": "id, pair_id, title, group_type, created_by, created_at, updated_at",
+    "movie_group_items": "pair_id, group_id, movie_id, position, added_by, created_at",
     "movie_ratings": "movie_id, tg_id, rating, created_at, updated_at",
     "savings": "id, pair_id, created_by, kind, title, target, collected, created_at",
     "savings_deposits": "id, saving_id, tg_id, amount, created_at",

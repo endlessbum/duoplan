@@ -174,12 +174,12 @@ console.log(`[stand] BOT_TOKEN из .dev.vars: ${TOKEN.slice(0, 12)}…`);
 
 if (!args.includes("--no-migrate")) {
   console.log("[stand] применяю миграции к локальной D1…");
-  const r = spawnSync("npx", ["--yes", "wrangler@4", "d1", "migrations", "apply", "duoplan", "--local"], { cwd: root, shell: SHELL, stdio: "inherit" });
+  const r = spawnSync("npm", ["exec", "--", "wrangler", "d1", "migrations", "apply", "duoplan", "--local"], { cwd: root, shell: SHELL, stdio: "inherit" });
   if (r.status !== 0) { console.error("[stand] миграции не применились"); process.exit(1); }
 }
 
 console.log(`[stand] запускаю wrangler dev на :${UP_PORT}…`);
-const wrangler = spawn("npx", ["--yes", "wrangler@4", "dev", "--local", "--port", String(UP_PORT), "--ip", UP_HOST], {
+const wrangler = spawn("npm", ["exec", "--", "wrangler", "dev", "--local", "--port", String(UP_PORT), "--ip", UP_HOST], {
   cwd: root, shell: SHELL, stdio: "inherit"
 });
 wrangler.on("exit", (code) => { console.error(`[stand] wrangler завершился (${code})`); process.exit(code ?? 1); });

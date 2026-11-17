@@ -161,7 +161,7 @@ function makeEnv({ gender = null, body = {}, method = "POST", periods = [], medE
     (data, status = 200) => ({ data, status }),
     async () => {},
     async () => ({ id: 777, first_name: "Тест" }),
-    () => "Europe/Moscow",
+    (v) => (v ? String(v) : "Europe/Moscow"),
     async () => ({ tg_id: 777, gender }),
     async () => {},
     async () => body,
@@ -1152,4 +1152,25 @@ test("PATCH /api/cycle/share: главный выключатель без ка�
   await api(request, env, new URL("https://duoplan.test/api/cycle/share"));
   const update = writes.find(w => w.sql.includes("UPDATE cycle_profiles SET"));
   ok(!update.sql.includes("share_confirmed=?"), "выключение не сбрасывает подтверждение");
+});
+
+test("GET /api/cycle/partner: «сегодня» по поясу владелицы, не зрителя (BUG-01)", async () => {
+  let seenTz = null;
+  const { api, env, request } = makeEnv({
+    gender: "male", method: "GET",
+    membershipPair: { user_a: 1, user_b: 777 },
+    shareRow: {
+      share_enabled: 1, share_level: "phases",
+      share_sex: 0, share_mood: 0, share_sleep: 0, share_bbt: 0, share_confirmed: 1,
+      gender: "female", timezone: "Europe/Berlin"
+    },
+    stateMock: async (e, ownerId, tz) => {
+      seenTz = tz;
+      return { today: "2026-11-17", disclaimer: "d", forecast: { empty: true }, periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
+    }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/cycle/partner"));
+  // Зритель — Europe/Moscow (мок validTimeZone), владелица — Europe/Berlin:
+  // cycleState обязан получить пояс владельца календаря.
+  equal(seenTz, "Europe/Berlin");
 });

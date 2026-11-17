@@ -80,3 +80,14 @@ test("изменение содержимого ассета без измене
   }
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 });
+test("лендинг index.html использует актуальную версию ассетов (CACHE-01)", () => {
+  const indexHtml = readFileSync(join(root, "public", "index.html"), "utf8");
+  const workerSource = readFileSync(join(root, "worker.js"), "utf8");
+  const version = workerSource.match(/const APP_VERSION = "([^"]+)";/)?.[1];
+  ok(version, "APP_VERSION в worker.js не найден");
+  const refs = [...indexHtml.matchAll(/[?&]v=([0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+)/g)];
+  ok(refs.length > 0, "в index.html нет версионированных ссылок");
+  for (const ref of refs) {
+    equal(ref[1], version, "index.html: ?v=" + ref[1] + " устарел, актуально " + version);
+  }
+});

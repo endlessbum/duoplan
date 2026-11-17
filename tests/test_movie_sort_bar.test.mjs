@@ -38,7 +38,8 @@ function loadRender({ view, watched, kind }) {
   )({ open: "all", watched: kind });
   return new Function(
     "moviesView", "watchedMovies", "filterMoviesByKind", "movieSortBar",
-    "sortMovies", "movieItem", "renderOpenMovies", "movieKindFilter",
+    "sortMovieEntries", "buildMovieEntries", "movieEntriesHtml",
+    "movieGroupSelectionHtml", "renderOpenMovies", "movieKindFilter",
     [
       "const appState = { movies: [] };",
       "const archiveMoreHtml = () => \"\";",
@@ -51,8 +52,10 @@ function loadRender({ view, watched, kind }) {
     () => watched,
     filterMoviesByKind,
     () => SORT_BAR,
-    (list) => list,
-    () => ITEM,
+    (entries) => entries,
+    (movies) => movies.map((movie) => ({ type: "movie", movie })),
+    (entries) => entries.map((entry) => entry.type === "movie" ? ITEM : "<GROUP>").join(""),
+    () => "",
     () => "<OPEN>",
     { open: "all", watched: kind }
   );
@@ -69,7 +72,8 @@ function loadOpenRender({ open, watched, kind }) {
   return new Function(
     "openMovies", "watchedMovies", "filterMoviesByKind", "partnerMissing",
     "currentMoviePick", "movieRandomUsed", "movieEmptyByKind", "movieSortBar",
-    "sortMovies", "movieItem",
+    "sortMovieEntries", "buildMovieEntries", "movieEntriesHtml",
+    "movieGroupSelectionHtml",
     [
       "const appState = { movies: [] };",
       "const archiveMoreHtml = () => \"\";",
@@ -85,8 +89,10 @@ function loadOpenRender({ open, watched, kind }) {
     () => true,
     movieEmptyByKindStub,
     () => SORT_BAR,
-    (list) => list,
-    () => ITEM
+    (entries) => entries,
+    (movies) => movies.map((movie) => ({ type: "movie", movie })),
+    (entries) => entries.map((entry) => entry.type === "movie" ? ITEM : "<GROUP>").join(""),
+    () => ""
   );
 }
 

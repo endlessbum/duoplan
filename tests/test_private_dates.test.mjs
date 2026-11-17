@@ -45,7 +45,7 @@ function extractLine(prefix) {
 // ------------------------------------------------------------------
 const buildApi = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
-  "rateLimit", "readJson", "state", "membership", "ownerIds",
+  "rateLimit", "readJson", "state", "membership", "ownerIds", "syncWidgetAccents",
   [
     extractBraced("class HttpError"),
     extractLine("const now = "),
@@ -83,7 +83,9 @@ function makeApiEnv({ pair = null, body = {} } = {}) {
     async () => {},
     async () => body,
     async () => ({ user: { tg_id: 777 }, pair }),
-    async () => pair
+    async () => pair,
+    async () => {},
+    async () => {}
   );
   return { api, env: { DB: db }, queries, request };
 }
@@ -199,6 +201,7 @@ const loadState = new Function(
     extractBraced("function attachMovieRatings"),
     extractLine("const AUTHOR_NAME_TYPES"),
     extractBraced("function applyAuthorNameOverrides"),
+    extractBraced("async function movieGroupSummaries"),
     extractBraced("async function state"),
     extractBraced("async function archivePage")
   ].join("\n") +
@@ -315,6 +318,7 @@ const loadItemRoute = new Function(
     extractBraced("async function ensureWishOwner"),
     extractBraced("async function ensureDateVisible"),
     extractBraced("async function ensureTaskVisible"),
+    extractBraced("async function disbandGroupIfSingleton"),
     extractBraced("async function itemRoute"),
     "return itemRoute;"
   ].join("\n")

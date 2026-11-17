@@ -38,6 +38,14 @@ const load = new Function(
   [
     "let appState = null;",
     "let archiveCachePairId = null;",
+    // Групповые кэши сбрасываются syncArchiveCachePair вместе с архивом.
+    "const expandedMovieGroups = new Set();",
+    "const movieGroupDetails = new Map();",
+    "const movieGroupPending = new Set();",
+    "let movieGroupSelection = null;",
+    "let movieGroupAddTarget = null;",
+    "let movieGroupSuggest = null;",
+    "let movieGroupDraft = null;",
     extractBraced("function emptyArchiveEntry"),
     "const archiveCache = { tasks: emptyArchiveEntry(), dates: emptyArchiveEntry(), wishes: emptyArchiveEntry(), memories: emptyArchiveEntry(), done_tasks: emptyArchiveEntry(), done_wishes: emptyArchiveEntry(), movies: emptyArchiveEntry(), quotes: emptyArchiveEntry(), places: emptyArchiveEntry(), trips: emptyArchiveEntry(), goals: emptyArchiveEntry(), savings: emptyArchiveEntry() };",
     "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'], movies: ['movies'], quotes: ['quotes'], places: ['places'], trips: ['trips'], goals: ['goals'], savings: ['savings'] };",
@@ -402,6 +410,14 @@ function loadRefreshState({ request, revalidateArchiveCache, render, handleReque
       "let appState = null;",
       // Доступ партнёрши к календарю месячных живёт отдельно от /api/state.
       "let floPartner = undefined;",
+      // Групповые кэши фильмов — syncArchiveCachePair сбрасывает их при смене пары.
+      "const expandedMovieGroups = new Set();",
+      "const movieGroupDetails = new Map();",
+      "const movieGroupPending = new Set();",
+      "let movieGroupSelection = null;",
+      "let movieGroupAddTarget = null;",
+      "let movieGroupSuggest = null;",
+      "let movieGroupDraft = null;",
       "async function loadFloPartner() { const v = await __partnerLoader(); if (v !== undefined) floPartner = v; }",
       // Капли (нижняя панель и переключатели видов): refreshState пропускает
       // тик, пока идёт жест по любой из них.

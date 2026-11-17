@@ -128,6 +128,7 @@ const stateFn = new Function(
     "const applyAuthorNameOverrides = () => {};",
     "const withPartnerOverride = () => ({ name1: 'Один', name2: 'Два' });",
     "const dailyFor = async () => null;",
+    extractBraced(workerSource, "async function movieGroupSummaries"),
     extractBraced(workerSource, "async function state"),
     "return state;"
   ].join("\n")

@@ -55,6 +55,7 @@ const buildApi = new Function(
     extractBraced("async function ensureWishOwner"),
     extractBraced("async function ensureDateVisible"),
     extractBraced("async function ensureTaskVisible"),
+    extractBraced("async function disbandGroupIfSingleton"),
     extractBraced("async function itemRoute"),
     extractBraced("function ownerIds"),
     extractBraced("async function api"),

@@ -328,7 +328,32 @@
     .demo-screen .day-chip.is-countdown { background: var(--amber-bg); color: var(--amber-ink); }
     .demo-screen .day-chip.is-overdue { background: var(--cherry-soft); color: var(--cherry); }
     .demo-screen .day-chip.is-private { background: var(--surface-2); color: var(--muted); }
-    .demo-screen .item-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+    .demo-screen .item-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; position: relative; }
+    .demo-screen .item-menu-toggle {
+      border: 0; background: none; padding: 6px 4px 6px 10px; margin: -6px -4px -6px 0;
+      color: var(--muted); font-size: 20px; line-height: 1; letter-spacing: 1px;
+      cursor: pointer; border-radius: 8px;
+    }
+    .demo-screen .item-menu-toggle:hover,
+    .demo-screen .item-menu-toggle:focus-visible {
+      color: var(--ink); background: var(--surface-2);
+    }
+    .demo-screen .item-menu {
+      position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+      min-width: 200px; max-width: min(280px, 80vw); padding: 6px;
+      border: 1px solid var(--glass-border, var(--line)); border-radius: 14px;
+      background: var(--surface); box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .demo-screen .item-menu[hidden] { display: none; }
+    .demo-screen .item-menu-item {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+      border-radius: 10px; border: none; background: none; color: var(--ink);
+      font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+    }
+    .demo-screen .item-menu-item:hover { background: var(--surface-2); }
+    .demo-screen .item-menu-icon { flex: none; color: var(--muted); }
+    .demo-screen .item-menu-label { flex: 1; }
     .demo-screen .icon-btn {
       width: 30px; height: 30px; border-radius: 999px; border: 1px solid var(--line);
       background: var(--surface-2); color: var(--ink); display: grid; place-items: center; cursor: pointer;
@@ -505,10 +530,17 @@
     .demo-screen .cal-dot.is-private { background: #948d86; }
     .demo-screen .cal-dot.is-birthday { background: #8a6bb8; }
     .demo-screen .cal-dot.is-cycle { background: #b06a2c; }
+    .demo-screen .cal-dot.is-period { background: #d16a5a; }
+    .demo-screen .cal-dot.is-predicted { background: #d16a5a; opacity: 0.6; }
+    .demo-screen .cal-dot.is-fertile { background: #7ba3b8; }
+    .demo-screen .cal-dot.is-ovulation { background: #c295b8; }
+    .demo-screen .cal-dot.is-log { background: #948d86; }
     .demo-screen .cal-dot-pair { display: inline-flex; align-items: center; flex: none; }
     .demo-screen .cal-dot-pair .cal-dot + .cal-dot { margin-left: -2px; box-shadow: 0 0 0 1px var(--surface); }
     .demo-screen .cal-day.is-selected .cal-dot-pair .cal-dot + .cal-dot { box-shadow: 0 0 0 1px var(--berry-soft); }
     .demo-screen .cal-star { font-size: 9.5px; line-height: 1; color: #a16207; display: inline-block; }
+    .demo-screen .cal-heart { width: 9px; height: 9px; color: #d16a5a; display: inline-block; flex: none; }
+    .demo-screen .cal-sex-more { font-size: 8px; color: var(--muted); margin-left: 1px; }
     .demo-screen .cal-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 10.5px; color: var(--muted); }
     .demo-screen .cal-legend > span { display: inline-flex; align-items: center; gap: 5px; }
     .demo-screen .cal-events { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
@@ -952,7 +984,7 @@
     </section>
   </main>
 
-  <script src="nav.js?v=2026.11.16.59" defer></script>
+  <script src="nav.js?v=2026.11.17.76" defer></script>
   <script src="demo.js" defer></script>
   <footer class="footer">
     <div class="container footer-inner">

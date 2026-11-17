@@ -37,6 +37,7 @@ const itemRoute = new Function(
     extractLine("const positiveId = "),
     extractBraced("class HttpError"),
     extractBraced("function movieRatingValue"),
+    extractBraced("async function disbandGroupIfSingleton"),
     extractBraced("async function itemRoute"),
     "return itemRoute;"
   ].join("\n")
@@ -78,11 +79,12 @@ function makeMovieDb({ movie = { id: 5, watched: 0 } } = {}) {
 test("«Просмотрено» требует оценку и пишет её вместе с watched", async () => {
   const { db, calls } = makeMovieDb();
   equal(await itemRoute({ DB: db }, PAIR, USER, "POST", "/api/movies/5/watched", { rating: 8 }), true);
-  equal(calls.length, 2);
+  equal(calls.length, 3);
   ok(calls[0].sql.includes("INSERT INTO movie_ratings"), "оценка не записана");
   deepStrictEqual(calls[0].args, [5, 777, 8, 1700000000, 1700000000]);
   ok(calls[1].sql.startsWith("UPDATE movies SET watched=1"), "фильм не отмечен просмотренным");
   deepStrictEqual(calls[1].args, [1700000000, 777, 5, 3]);
+  ok(calls[2].sql.includes("movie_pick_id=NULL"), "рандом-пик просмотренного фильма не снят");
 });
 
 test("«Просмотрено» без оценки — 400, карточка не меняется", async () => {
@@ -163,7 +165,7 @@ test("attachMovieRatings: один голос — RAofP равен ему", () =
 });
 
 test("маршрут rate зарегистрирован, таблица и миграция на месте", () => {
-  ok(source.includes("watched|unwatched|rate|deposit"), "rate нет в regex itemRoute");
+  ok(source.includes("watched|unwatched|rate|resume|deposit"), "rate/resume нет в regex itemRoute");
   ok(source.includes("CREATE TABLE IF NOT EXISTS movie_ratings"), "нет таблицы movie_ratings");
   ok(source.includes("idx_movie_ratings_movie"), "нет индекса оценок");
   const migration = readFileSync(join(root, "migrations", "0022_movie_ratings.sql"), "utf8");

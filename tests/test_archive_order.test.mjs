@@ -29,9 +29,12 @@ test("выборки с LIMIT сортируются детерминирова�
 test("state и архив используют один и тот же порядок", () => {
   // wishes и done_wishes делят один ORDER BY: по два запроса на каждый
   // (state + страница архива) — итого четыре.
+  // «m.created_at DESC, m.id DESC» совпадает у воспоминаний и фильмов
+  // (у фильмов алиас m появился с JOIN movie_group_items — created_at
+  // стал неоднозначным): по два запроса на каждый — итого четыре.
   for (const [order, expected] of [
     ["w.created_at DESC, w.id DESC", 4],
-    ["m.created_at DESC, m.id DESC", 2],
+    ["m.created_at DESC, m.id DESC", 4],
     ["completed_at DESC, id DESC", 2]
   ]) {
     const count = orders.filter((item) => item === order).length;

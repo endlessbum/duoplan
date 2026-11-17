@@ -45,6 +45,7 @@ const RENDER_DEPS = [
     extractLine("  const EDIT_ICON"),
     extractLine("  const DELETE_ICON"),
     extractLine("  const COPY_ICON"),
+    extractLine("  const RESUME_ICON"),
     extractBraced("function esc"),
       extractBraced("function itemActionButton"),
       extractBraced("function itemActions"),
@@ -318,6 +319,7 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       extractLine("  const DONE_ICON"),
       extractLine("  const EDIT_ICON"),
       extractLine("  const DELETE_ICON"),
+      extractLine("  const RESUME_ICON"),
       extractBraced("function esc"),
       extractBraced("function itemActionButton"),
       extractBraced("function itemActions"),
@@ -329,6 +331,10 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       extractBraced("function ratingPill"),
       extractBraced("function raofpPill"),
       extractBraced("function formatMovieLength"),
+      // movieItem читает режим группового выбора и иконку ссылки — без них
+      // карточка упала бы на ReferenceError ещё до рендера.
+      "let movieGroupSelection = null;",
+      extractLine("  const LINK_ICON"),
       extractBraced("function movieItem"),
       "return { formatMovieLength, movieItem };"
     ].join("\n")

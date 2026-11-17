@@ -123,10 +123,10 @@ test("гонка isolate: duplicate column name обрабатывается п�
   deepStrictEqual(log.alters.sort(), [
     "accent_color", "awaiting_return", "bleeding_details", "clots", "comment", "context", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
     "details", "digest_enabled", "digest_time", "done_at", "end_unknown", "energy", "expires_at", "gender", "is_private",
-    "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "mucus",
+    "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "movie_pick_id", "mucus",
     "notify_diary",
-    "pain_locations", "pain_score", "partner_custom_name", "photo_url",
-    "rating_checked_at", "rating_source", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "pain_locations", "pain_score", "partner_custom_name", "photo_url", "place_pick_id",
+    "rating_checked_at", "rating_source", "resume_position", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -154,7 +154,9 @@ test("чистый проход миграции без гонки записы�
   // + share_sex/share_mood/share_sleep/share_bbt/share_confirmed
   //   (cycle_profiles, переработка P0: категории шеринга)
   // + show_cycle_calendar (users, «Месячные в основном календаре» — migrations/0045)
-  deepStrictEqual(log.alters.length, 61);
+  // + resume_position (movies, «Остановились» — migrations/0048)
+  // + place_pick_id/movie_pick_id (pairs, общий рандом — migrations/0049)
+  deepStrictEqual(log.alters.length, 64);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

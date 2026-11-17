@@ -125,7 +125,7 @@ SCHEMA: list[str] = [
         "kind TEXT NOT NULL DEFAULT 'movie', rating REAL, rating_source TEXT, "
         "rating_checked_at INTEGER, details TEXT, genres TEXT, runtime INTEGER, seasons INTEGER, "
         "episodes INTEGER, url TEXT, watched INTEGER NOT NULL DEFAULT 0, watched_at INTEGER, "
-        "watched_by INTEGER, created_at INTEGER NOT NULL)"
+        "watched_by INTEGER, resume_position TEXT, created_at INTEGER NOT NULL)"
     ),
     (
         "CREATE TABLE IF NOT EXISTS movie_ratings (movie_id INTEGER NOT NULL REFERENCES "
@@ -133,6 +133,22 @@ SCHEMA: list[str] = [
         "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (movie_id, tg_id))"
     ),
     (
+        "CREATE TABLE IF NOT EXISTS movie_groups (id TEXT PRIMARY KEY, "
+        "pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, "
+        "title TEXT NOT NULL, group_type TEXT NOT NULL DEFAULT 'collection', "
+        "created_by INTEGER NOT NULL, created_at INTEGER NOT NULL, "
+        "updated_at INTEGER NOT NULL, UNIQUE(id, pair_id))"
+    ),
+    (
+        "CREATE TABLE IF NOT EXISTS movie_group_items (pair_id INTEGER NOT NULL, "
+        "group_id TEXT NOT NULL, movie_id INTEGER NOT NULL, "
+        "position INTEGER NOT NULL DEFAULT 0, added_by INTEGER NOT NULL, "
+        "created_at INTEGER NOT NULL, PRIMARY KEY (group_id, movie_id), "
+        "UNIQUE(movie_id), FOREIGN KEY (group_id, pair_id) "
+        "REFERENCES movie_groups(id, pair_id) ON DELETE CASCADE, "
+        "FOREIGN KEY (movie_id, pair_id) "
+        "REFERENCES movies(id, pair_id) ON DELETE CASCADE)"
+    ),    (
         "CREATE TABLE IF NOT EXISTS savings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, "
         "created_by INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'personal', title TEXT NOT NULL, "
@@ -178,7 +194,8 @@ SCHEMA: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_goal_items_goal ON goal_items(goal_id, done)",
     "CREATE INDEX IF NOT EXISTS idx_movies_pair ON movies(pair_id, watched)",
     "CREATE INDEX IF NOT EXISTS idx_movie_ratings_movie ON movie_ratings(movie_id)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_pair_imdb ON movies(pair_id, imdb_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_id_pair ON movies(id, pair_id)",
+    "CREATE INDEX IF NOT EXISTS idx_movie_group_items_order ON movie_group_items(pair_id, group_id, position, movie_id)",    "CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_pair_imdb ON movies(pair_id, imdb_id)",
     "CREATE INDEX IF NOT EXISTS idx_savings_pair ON savings(pair_id, kind)",
     (
         "CREATE INDEX IF NOT EXISTS idx_savings_deposits_saving ON savings_deposits(saving_id, "

@@ -45,7 +45,7 @@ function extractLine(prefix) {
 
 const buildApi = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
-  "rateLimit", "readJson", "state", "membership", "ownerIds",
+  "rateLimit", "readJson", "state", "membership", "ownerIds", "syncWidgetAccents",
   [
     extractBraced("class HttpError"),
     extractLine("const ACCENT_KEYS"),
@@ -60,6 +60,7 @@ const buildApi = new Function(
 
 function makeEnv({ pair = null, body = {} } = {}) {
   const queries = [];
+  const calls = { accentSync: 0 };
   const db = {
     prepare(sql) {
       return {
@@ -80,9 +81,11 @@ function makeEnv({ pair = null, body = {} } = {}) {
     async () => {},
     async () => body,
     async () => ({ user: { tg_id: 777 }, pair }),
-    async () => pair
+    async () => pair,
+    async () => {},
+    async () => { calls.accentSync += 1; }
   );
-  return { api, env: { DB: db }, queries, request };
+  return { api, env: { DB: db }, queries, request, calls };
 }
 
 test("POST /api/gender сохраняет пол пользователю без пары (гейт до онбординга)", async () => {
@@ -128,9 +131,10 @@ test("ожидающее пространство: мутация контент
 });
 
 test("ожидающее пространство: личные настройки доступны (allowlist)", async () => {
-  const { api, env, request } = makeEnv({ pair: { id: 1, awaiting_return: 1 }, body: { accent_color: "berry" } });
+  const { api, env, request, calls } = makeEnv({ pair: { id: 1, awaiting_return: 1 }, body: { accent_color: "berry" } });
   const response = await api(request, env, new URL("https://duoplan.test/api/settings"));
   deepStrictEqual(response.data.user.tg_id, 777, "настройки сохранились, state вернулся");
+  equal(calls.accentSync, 1, "синхронизация акцента виджета должна вызываться без TypeError");
 });
 
 test("свежая пара без партнёра не заморожена (awaiting_return=0)", async () => {
