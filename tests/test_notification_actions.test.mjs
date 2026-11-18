@@ -16,6 +16,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const source = readFileSync(join(root, "worker.js"), "utf8");
 const appSource = readFileSync(join(root, "public", "app.js"), "utf8");
+const cssSource = readFileSync(join(root, "public", "app.css"), "utf8");
 
 // Весь блок «кнопки действий» в worker.js идёт подряд: от ACCENT_HEX до
 // deliverNotification. Вырезаем его целиком и поднимаем в Function с
@@ -103,13 +104,13 @@ const api = new Function(`telegramImpl`, `membershipImpl`, `ensureTaskVisibleImp
   ${block}
   return { buildActionWidgetHtml, createActionToken, consumeActionToken, callbackPayloadFor,
     handleNotificationWidgetQuery, handleNotificationCallback, sendActionNotification,
-    executeTaskDone, executeHealthMedStatus, ACCENT_HEX, syncWidgetAccents, runActionOperation };
+    executeTaskDone, executeHealthMedStatus, ACCENT_HEX, BUTTON_COLOR_HEX, buttonStyle, syncWidgetAccents, runActionOperation };
 `)( (...args) => telegramImpl(...args), (...args) => membershipImpl(...args), (...args) => ensureTaskVisibleImpl(...args) );
 
 const {
   buildActionWidgetHtml, createActionToken, consumeActionToken, callbackPayloadFor,
   handleNotificationWidgetQuery, handleNotificationCallback, sendActionNotification,
-  executeTaskDone, executeHealthMedStatus, ACCENT_HEX, syncWidgetAccents, runActionOperation
+  executeTaskDone, executeHealthMedStatus, ACCENT_HEX, BUTTON_COLOR_HEX, buttonStyle, syncWidgetAccents, runActionOperation
 } = api;
 
 function reset() {
@@ -136,6 +137,22 @@ test("ACCENT_HEX зеркалит ACCENT_PALETTES из app.js", () => {
   }
 });
 
+test("BUTTON_COLOR_HEX зеркалит цвета календаря и Фло из app.css", () => {
+  const vars = {
+    task: "--cal-task", date: "--cal-date", birthday: "--cal-birthday",
+    wish: "--cal-wish",
+    flo_period: "--flo-period", flo_fertile: "--flo-fertile"
+  };
+  for (const [key, cssVar] of Object.entries(vars)) {
+    const hex = cssSource.match(new RegExp(`${cssVar}:\\s*(#[0-9a-fA-F]{6})`))?.[1];
+    ok(hex, `${cssVar} не найден в app.css`);
+    equal(BUTTON_COLOR_HEX[key].light.toLowerCase(), hex.toLowerCase(), `${key}: цвет события`);
+  }
+  equal(buttonStyle("task"), "success");
+  equal(buttonStyle("date"), "danger");
+  equal(buttonStyle("neutral"), null, "вторичная кнопка — серый стиль по умолчанию");
+});
+
 // ---------- Widget HTML ----------
 
 test("Widget HTML: компактный, без форм и сети, с request/chatData", () => {
@@ -148,6 +165,8 @@ test("Widget HTML: компактный, без форм и сети, с request
   match(html, /colorScheme/);
   // JSON.stringify(ACCENT_HEX) уже внутри шаблона — инъекции нет.
   ok(html.includes('"berry"'), "палитра не встроена");
+  ok(html.includes('"task"') && html.includes('"flo_fertile"'), "палитра событий не встроена");
+  match(html, /a\[2\]/, "цвет кнопки не берётся из chat_data");
 });
 
 // ---------- nonce ----------
@@ -191,7 +210,7 @@ test("widget_query: валидный nonce выполняет действие �
     if (kind === "run" && sql.includes("UPDATE tasks SET status='done'")) return { meta: { changes: 1 } };
     if (kind === "first" && sql.includes("SELECT status FROM tasks")) return null;
     if (kind === "first" && sql.includes("SELECT chat_data FROM telegram_notification_widgets")) {
-      return { chat_data: JSON.stringify({ a: "berry", acts: [["tok1", "✅ Выполнено"]] }) };
+      return { chat_data: JSON.stringify({ a: "berry", acts: [["tok1", "Выполнено"]] }) };
     }
     return null;
   };
@@ -322,6 +341,64 @@ test("callback_query: подделанная подпись и чужой tg_id 
 
 // ---------- deliverNotification fallback ----------
 
+test("sendActionNotification: цвет события уходит в chat_data каждой кнопки", async () => {
+  reset();
+  dbRouter = (kind, sql) => {
+    if (kind === "first" && sql.includes("SELECT accent_color")) return { accent_color: "ocean" };
+    if (kind === "run" && sql.includes("INSERT INTO telegram_action_tokens")) return { meta: { changes: 1 } };
+    return null;
+  };
+  await sendActionNotification(env, 42, "kind", "Текст", {
+    mode: "direct_action",
+    buttons: [
+      { text: "Принят", color: "flo_fertile", action: { type: "health_med", refId: 9, status: "taken" } },
+      { text: "Пропущен", color: "neutral", action: { type: "health_med", refId: 9, status: "skipped" } }
+    ]
+  }, { origin: "" });
+  const widget = calls.find(c => c.method === "sendWidget");
+  ok(widget, "Widget отправлен");
+  const state = JSON.parse(widget.payload.chat_data);
+  deepStrictEqual(state.acts.map(a => a[2]), ["flo_fertile", "neutral"]);
+});
+
+test("sendActionNotification fallback: цвет кнопки → style, вторичная без style", async () => {
+  reset();
+  telegramImpl = async (e, method, payload) => {
+    calls.push({ method, payload });
+    if (method === "sendWidget") {
+      const err = new Error("Bad Request: widget not supported");
+      err.isTelegramApi = true;
+      throw err;
+    }
+    return { message_id: 778 };
+  };
+  dbRouter = (kind, sql) => {
+    if (kind === "first" && sql.includes("SELECT accent_color")) return { accent_color: "ocean" };
+    if (kind === "run" && sql.includes("INSERT INTO telegram_action_tokens")) return { meta: { changes: 1 } };
+    return null;
+  };
+  await sendActionNotification(env, 42, "kind", "Текст", {
+    mode: "direct_action",
+    buttons: [
+      { text: "Выполнено", color: "task", action: { type: "task_done", refId: 9 } },
+      { text: "Пропущен", color: "neutral", action: { type: "health_med", refId: 9, status: "skipped" } }
+    ]
+  }, { origin: "" });
+  const msg = calls.find(c => c.method === "sendMessage");
+  const kb = msg.payload.reply_markup.inline_keyboard.flat();
+  equal(kb[0].style, "success", "план — зелёная кнопка");
+  equal(kb[1].style, undefined, "вторичная кнопка — серый стиль по умолчанию");
+});
+
+test("вызовы уведомлений задают цвет события и серый для вторичных", () => {
+  ok(/color: "task"/.test(source), "напоминание о плане не задаёт зелёный цвет события");
+  ok(!/is_private.*\?\s*"private"/.test(source), "приватность не должна менять цвет кнопки");
+  ok(!BUTTON_COLOR_HEX.private, "серый цвет личного события больше не используется");
+  ok(/text: "Принят", color: "flo_fertile"/.test(source), "приём препарата — цвет Фло");
+  ok(/text: "Пропущен", color: "neutral"/.test(source), "пропуск — серый");
+  ok(/buttonText: "Записать день", color: "flo_fertile"/.test(source), "дневник Фло — цвет Фло");
+});
+
 test("sendActionNotification: отказ sendWidget → нативная клавиатура", async () => {
   reset();
   telegramImpl = async (e, method, payload) => {
@@ -340,7 +417,7 @@ test("sendActionNotification: отказ sendWidget → нативная кла�
   };
   await sendActionNotification(env, 42, "kind", "Текст", {
     mode: "direct_action",
-    buttons: [{ text: "✅ Выполнено", action: { type: "task_done", refId: 9 } }]
+    buttons: [{ text: "Выполнено", action: { type: "task_done", refId: 9 } }]
   }, { origin: "" });
   const msg = calls.find(c => c.method === "sendMessage");
   ok(msg, "отправлен обычный sendMessage");
@@ -380,11 +457,12 @@ test("navigation: одна web_app-кнопка с dp_*-ссылкой без п
     return null;
   };
   await sendActionNotification(env, 42, "kind", "Текст", {
-    mode: "navigation", buttonText: "📝 Записать день", target: { type: "cycle_diary", day: "2026-11-16" }
+    mode: "navigation", buttonText: "Записать день", color: "flo_fertile", target: { type: "cycle_diary", day: "2026-11-16" }
   }, { origin: "https://worker.example" });
   const msg = calls.find(c => c.method === "sendMessage");
   const btn = msg.payload.reply_markup.inline_keyboard[0][0];
   ok(btn.web_app, "web_app-кнопка");
+  equal(btn.style, "primary", "Фло-кнопка использует доступный синий стиль");
   const url = new URL(btn.web_app.url);
   equal(url.searchParams.get("dp_target"), "cycle_diary");
   equal(url.searchParams.get("dp_day"), "2026-11-16");

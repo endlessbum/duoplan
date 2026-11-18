@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DuoPlan — ASCII harness</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; background: #1c1917; color: #e7e5e4; }
+  #ascii { font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.15;
+           white-space: pre; overflow: auto; background: #0c0a09; padding: 12px; border-radius: 8px; }
+  select, button { font: inherit; padding: 6px 10px; margin: 4px 4px 4px 0; }
+  #status { color: #a8a29e; min-height: 1.4em; }
+  #status.err { color: #f87171; }
+  .row { margin: 8px 0; }
+</style>
+</head>
+<body>
+<h2>ASCII converter harness</h2>
+<p>Локальная проверка <code>ascii-converter.js</code> без сервера и без отправки файлов.
+Выберите фото — оно обработается только в этом браузере.</p>
+
+<div class="row">
+  <input type="file" id="file" accept="image/*">
+  <select id="palette">
+    <option value="detail">detail</option>
+    <option value="classic">classic</option>
+    <option value="blocks">blocks</option>
+  </select>
+</div>
+<div class="row">
+  <label>Яркость <input type="range" id="brightness" min="-100" max="100" value="0"></label>
+  <label>Контраст <input type="range" id="contrast" min="-100" max="100" value="10"></label>
+  <label><input type="checkbox" id="invert"> Инверсия</label>
+  <button id="reset">Сбросить</button>
+</div>
+<p id="status"></p>
+<pre id="ascii"></pre>
+
+<script src="../public/ascii-converter.js"></script>
+<script>
+const fileInput = document.getElementById("file");
+const paletteSel = document.getElementById("palette");
+const brightness = document.getElementById("brightness");
+const contrast = document.getElementById("contrast");
+const invert = document.getElementById("invert");
+const statusEl = document.getElementById("status");
+const asciiEl = document.getElementById("ascii");
+
+let lastFile = null;
+let busy = false;
+
+function options() {
+  return {
+    palette: paletteSel.value,
+    brightness: Number(brightness.value),
+    contrast: Number(contrast.value),
+    invert: invert.checked
+  };
+}
+
+async function convert() {
+  if (!lastFile || busy) return;
+  busy = true;
+  statusEl.className = "";
+  statusEl.textContent = "Обработка…";
+  const t0 = performance.now();
+  try {
+    const art = await AsciiConverter.fileToAscii(lastFile, options());
+    asciiEl.textContent = art;
+    const rows = art.split("\n").length;
+    statusEl.textContent =
+      `Готово за ${(performance.now() - t0).toFixed(0)} мс — ${rows} строк, ` +
+      `${Math.max(...art.split("\n").map((r) => [...r].length))} столбцов, ` +
+      `${[...art].length} символов.`;
+  } catch (e) {
+    statusEl.className = "err";
+    statusEl.textContent = "Ошибка: " + (e.code || e.message || e);
+  } finally {
+    busy = false;
+  }
+}
+
+fileInput.addEventListener("change", () => {
+  lastFile = fileInput.files?.[0] || null;
+  convert();
+});
+for (const el of [paletteSel, brightness, contrast, invert]) {
+  el.addEventListener("change", convert);
+  el.addEventListener("input", convert);
+}
+document.getElementById("reset").addEventListener("click", () => {
+  paletteSel.value = "detail"; brightness.value = 0; contrast.value = 10; invert.checked = false;
+  convert();
+});
+</script>
+</body>
+</html>

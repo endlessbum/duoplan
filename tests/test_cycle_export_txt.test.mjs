@@ -30,6 +30,7 @@ const build = new Function(
   "CYCLE_SLEEP_QUALITY_LABELS", "CYCLE_STRESS_LABELS", "CYCLE_SEX_LABELS", "cycleMucusLabel",
   [
     extractLine("const clean = "),
+    extractBraced("function exportTxtDay"),
     extractBraced("function exportTxtTime"),
     extractBraced("const EXPORT_LABELS = {"),
     extractBraced("function exportMemoryRow"),
@@ -91,19 +92,21 @@ test("итоговый TXT печатает измерения/препарат�
   const mapped = rows.map(build.EXPORT_ROW_MAPPERS.cycle);
   const txt = build.exportTxtDoc("тест", { cycle: mapped });
 
-  ok(txt.includes("Месячные с 2026-11-01"), "нет периода");
+  ok(txt.includes("Месячные с 01.11.2026"), "нет периода");
+  ok(txt.includes("Конец: 05.11.2026"), "конец периода в формате приложения");
+  ok(txt.includes("День 01.11.2026"), "нет дневниковой записи");
   ok(txt.includes("Смен в день: 4"), "нет смен в день");
   ok(txt.includes("Пропитывание: среднее"), "нет пропитывания");
   ok(txt.includes("Ночная смена: отмечено"), "нет ночной смены");
   ok(txt.includes("заметка | с вертикальной чертой"),
     "вертикальная черта в пользовательском тексте должна сохраниться");
-  ok(txt.includes("Базальная температура — 2026-11-02"), "измерение напечатано как День ...");
+  ok(txt.includes("Базальная температура — 02.11.2026"), "измерение напечатано как День ...");
   ok(txt.includes("Значение: 36.6°C"), "нет значения измерения");
   ok(txt.includes("Препарат: Витамин | D3"), "нет названия препарата");
   ok(txt.includes("Категория: БАД"), "нет категории");
   ok(txt.includes("Статус: принят"), "нет статуса приёма");
   ok(txt.includes("Фактическая доза: 1 капс."), "нет фактической дозы");
-  ok(!txt.includes("День 2026-11-02"), "measurement не должен быть дневниковой записью");
+  ok(!txt.includes("День 02.11.2026"), "measurement не должен быть дневниковой записью");
   equal((txt.match(/^\d+\. /gm) || []).length, 5, "в TXT должно быть ровно 5 записей");
 });
 

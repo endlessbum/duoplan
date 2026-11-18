@@ -76,8 +76,8 @@ SCHEMA: list[str] = [
     (
         "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, "
-        "author_id INTEGER NOT NULL, title TEXT, body TEXT NOT NULL, day TEXT NOT NULL, "
-        "created_at INTEGER NOT NULL)"
+        "author_id INTEGER NOT NULL, title TEXT, body TEXT NOT NULL, ascii_art TEXT, "
+        "day TEXT NOT NULL, created_at INTEGER NOT NULL)"
     ),
     (
         "CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT, "

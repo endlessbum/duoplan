@@ -8,6 +8,13 @@
   --berry: #b85464;
   --berry-dark: #963f4e;
   --berry-soft: rgba(184, 84, 100, 0.14);
+  /* Текст на акцентной заливке (.primary и родственные элементы):
+     светлая тема — белый на тёмных акцентах (≥4.5:1). applyAccent
+     переопределяет --primary-fg под выбранную палитру. */
+  --primary-fg: #fff;
+  /* Текст на фиксированном cherry (.primary.is-danger): в светлой теме
+     залиовка тёмная — белый; в тёмной светлеет — нужен тёмный текст. */
+  --danger-fg: #fff;
   --sage: #55766a;
   --sage-soft: rgba(85, 118, 106, 0.14);
   /* Семантика календаря: планы — зелёные, значимые даты — красные.
@@ -69,6 +76,10 @@
   --amber-bg: rgba(226, 163, 92, 0.16);
   --cherry: #ef6b6b;
   --cherry-soft: rgba(239, 107, 107, 0.18);
+  /* Тёмная тема: акценты светлые — текст на них тёмный (ink светлой темы).
+     applyAccent уточняет --primary-fg под конкретную палитру. */
+  --primary-fg: #292524;
+  --danger-fg: #292524;
 
   /* Жидкое стекло Telegram (Dark) */
   --glass-bg: rgba(34, 31, 30, 0.66);
@@ -758,7 +769,7 @@ html.dialog-locked {
 .primary {
   border: 0;
   background: var(--berry);
-  color: #fff;
+  color: var(--primary-fg);
 }
 
 .secondary {
@@ -779,6 +790,7 @@ html.dialog-locked {
 
 .primary.is-danger {
   background: var(--cherry);
+  color: var(--danger-fg);
 }
 
 .full {
@@ -1972,7 +1984,7 @@ input[type="checkbox"]:active {
 .rating-option input:checked + span {
   border-color: var(--berry);
   background: var(--berry);
-  color: #fff;
+  color: var(--primary-fg);
 }
 
 /* Карточка «Кино» открывает окно с описанием — тап по всей площади.
@@ -1985,6 +1997,24 @@ input[type="checkbox"]:active {
 
 .movie-card {
   position: relative;
+}
+
+/* Открытие карточки фильма — отдельная кнопка в заголовке: сама карточка
+   содержит другие кнопки и не может быть role="button" (вложенный
+   интерактив). Вид — как обычный заголовок, фокус-кольцо даёт общий
+   button:focus-visible. Тап по фону карточки по-прежнему работает. */
+.movie-title-open {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  word-break: break-word;
 }
 
 /* Окно карточки фильма: слоган, рейтинги, жанры, описание, факты. */
@@ -3187,47 +3217,60 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
 .flo-obs-meta { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); }
 
 /* ------------------------------------------------------------------
-   Группы фильмов: карточка-стопка и раскрытый состав
+   Группы фильмов: карточка-стопка и окно со списком частей
 ------------------------------------------------------------------- */
 .movie-group {
   margin-bottom: 14px;
 }
 
-/* Стопка: передняя карточка уже, чтобы справа были видны края задних
-   слоёв. Слои декоративные — без текста, без кликов, вне accessibility. */
+/* Стопка: передняя карточка — самая крупная, задние слои идут друг за
+   другом вправо и уменьшаются и по ширине, и по высоте. Весь запас под
+   слои лежит внутри ширины контента страницы, поэтому стопка не вылезает
+   за её границы. Слои декоративные — без текста, без кликов, вне a11y. */
 .movie-group-stack {
+  --stack-peek: 8px;   /* сколько видно слоя справа */
+  --stack-step: 14px;  /* сдвиг левого края слоя вправо */
+  --stack-inset: 6px;  /* вертикальный отступ слоя */
+  --stack-reserve: calc(var(--stack-peek) * 2 + 4px);
   position: relative;
-  padding-right: 26px;
+  padding-right: var(--stack-reserve);
+}
+
+/* Две части — один задний слой: запас уменьшается до одного peek,
+   передняя карточка занимает освободившееся место и стопка уходит в край
+   макета — справа нет пустой полосы. */
+.movie-group-stack[data-layers="1"] {
+  --stack-reserve: calc(var(--stack-peek) + 4px);
+}
+
+/* Одна часть — слоёв нет, карточка на полную ширину контента. */
+.movie-group-stack[data-layers="0"] {
+  --stack-reserve: 0px;
+}
+
+.movie-group-stack .movie-group-card {
+  margin-bottom: 0;
 }
 
 .movie-group-stack__layer {
   position: absolute;
-  top: 8px;
-  right: calc(26px - var(--layer, 1) * 12px);
-  bottom: 10px;
-  left: 10px;
+  top: calc(var(--layer, 1) * var(--stack-inset));
+  bottom: calc(var(--layer, 1) * var(--stack-inset));
+  left: calc(var(--layer, 1) * var(--stack-step));
+  right: calc(var(--stack-reserve) - var(--layer, 1) * var(--stack-peek));
   border-radius: 22px;
   background: var(--surface);
   border: 1px solid var(--line);
-  box-shadow: var(--shadow, 0 10px 24px rgba(20, 20, 40, 0.08));
-  transform: translateX(calc(var(--layer, 1) * 10px)) scale(calc(1 - var(--layer, 1) * 0.03));
-  transform-origin: bottom right;
-  pointer-events: none;
+  box-shadow: 0 8px 26px rgba(41, 37, 36, 0.04);
+  /* Все слои имеют одинаковый z-index: порядок в DOM задаёт глубину,
+     ближайший к карточке слой рисуется последним и лежит сверху. */
   z-index: 0;
+  pointer-events: none;
 }
 
 .movie-group-card {
   position: relative;
   z-index: 1;
-}
-
-.movie-group.is-expanded .movie-group-stack {
-  padding-right: 0;
-}
-
-.movie-group.is-expanded .movie-group-stack__layer {
-  opacity: 0;
-  transform: translateX(14px) scale(0.98);
 }
 
 .movie-group-progress {
@@ -3245,41 +3288,11 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   transition: width 240ms ease;
 }
 
-.movie-group-foot-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  margin-bottom: 10px;
-}
-
-.movie-group-shown {
-  color: var(--muted);
-  font-size: 12px;
-}
-
+/* Список частей внутри окна: те же карточки movie-card, что и в основном
+   списке, просто с одинаковым зазором между ними. */
 .movie-group-members {
   display: grid;
   gap: 12px;
-  margin-top: 12px;
-}
-
-/* Контейнер держит стабильный id для aria-controls даже в свёрнутом виде. */
-.movie-group-members[hidden] {
-  display: none;
-}
-
-.movie-group-actions {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.movie-group-loading {
-  margin-top: 12px;
-  padding: 14px;
-  border: 1px dashed var(--line);
-  border-radius: 16px;
-  text-align: center;
 }
 
 /* Чекбокс выбора фильмов при создании группы: крупная круглая метка слева
@@ -3306,8 +3319,8 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   content: "";
   width: 10px;
   height: 6px;
-  border-left: 2px solid #fff;
-  border-bottom: 2px solid #fff;
+  border-left: 2px solid var(--primary-fg);
+  border-bottom: 2px solid var(--primary-fg);
   transform: rotate(-45deg) translate(1px, -1px);
   opacity: 0;
 }
@@ -3414,3 +3427,98 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
     transition: none;
   }
 }
+
+/* ASCII-вложение записи дневника: оригинал фото не хранится, в базе —
+   только моноширинный текст. pre сохраняет пробелы (white-space: pre). */
+.memory-ascii-art {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.15;
+  color: var(--text);
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.18));
+  border-radius: 10px;
+}
+
+.memory-ascii-peek {
+  margin: 8px 0 0;
+  max-height: 4.6em;
+  overflow: hidden;
+  white-space: pre;
+  font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.15;
+  color: var(--muted, inherit);
+  opacity: 0.85;
+}
+
+.ascii-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line, rgba(127, 127, 127, 0.25));
+}
+
+.ascii-note {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted, inherit);
+  opacity: 0.8;
+}
+
+.ascii-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.ascii-palette {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+  background: var(--surface, transparent);
+  color: inherit;
+}
+
+.ascii-quality {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+  background: var(--surface, transparent);
+  color: inherit;
+}
+
+.memory-ascii-preview {
+  margin: 8px 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre;
+  font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.15;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.18));
+  border-radius: 10px;
+}
+
+.ascii-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted, inherit);
+  opacity: 0.85;
+}
+
+.ascii-status.is-error { color: var(--danger, #d33); opacity: 1; }
+.ascii-status.is-warn { color: var(--muted, inherit); }

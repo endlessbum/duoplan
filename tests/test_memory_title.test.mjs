@@ -44,6 +44,7 @@ const buildApi = new Function(
     extractLine("const ACCENT_KEYS"),
     extractBraced("function validateSchema"),
     extractBraced("function textField"),
+    extractBraced("function validateAsciiArt"),
     extractBraced("function validDate"),
     extractBraced("function optionalDay"),
     extractBraced("function optionalTime"),
@@ -93,9 +94,11 @@ test("POST /api/memories пишет title рядом с телом записи"
   });
   await api(request, env, new URL("https://duoplan.test/api/memories"));
   const insert = queries.find((q) => q.sql.startsWith("INSERT INTO memories"));
-  equal(insert.args.length, 6);
+  equal(insert.args.length, 7);
   equal(insert.args[2], "Тёплый вечер");
   equal(insert.args[3], "Текст воспоминания");
+  // ascii_art — пятая колонка INSERT (nullable, без вложения — NULL).
+  equal(insert.args[4], null);
 });
 
 test("POST /api/memories без title пишет NULL — у записи не будет заголовка", async () => {
@@ -122,7 +125,7 @@ test("PATCH /api/memories обновляет title вместе с телом", 
 });
 
 test("state() и архив отдают title вместе с телом записи", () => {
-  deepStrictEqual(source.includes("m.id,m.title,m.body,m.day"), true, "state(): m.title в выборке");
+  deepStrictEqual(source.includes("m.id,m.title,m.body,m.ascii_art,m.day"), true, "state(): m.title в выборке");
   const archive = source.slice(source.indexOf("memories: {"), source.indexOf("memories: {") + 400);
-  deepStrictEqual(archive.includes("m.title"), true, "ARCHIVE_QUERIES.memories без m.title");
+  deepStrictEqual(archive.includes("m.ascii_art"), true, "ARCHIVE_QUERIES.memories без m.title");
 });

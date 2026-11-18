@@ -29,9 +29,9 @@ function extractBraced(declaration) {
 const SORT_BAR = "<SORTBAR>";
 const ITEM = "<ITEM>";
 
-// Собираем renderMoviesList с реальными movieEmptyByKind/filterMoviesByKind
-// и заглушками остальных зависимостей.
-function loadRender({ view, watched, kind }) {
+// Собираем renderMoviesList с реальными movieEmptyByKind/filterMoviesByKind/
+// movieGroupSelectionHtml и заглушками остальных зависимостей.
+function loadRender({ view, watched, kind, selection = null }) {
   const filterMoviesByKind = new Function(
     "movieKindFilter",
     [extractBraced("function filterMoviesByKind"), "return filterMoviesByKind;"].join("\n")
@@ -39,11 +39,12 @@ function loadRender({ view, watched, kind }) {
   return new Function(
     "moviesView", "watchedMovies", "filterMoviesByKind", "movieSortBar",
     "sortMovieEntries", "buildMovieEntries", "movieEntriesHtml",
-    "movieGroupSelectionHtml", "renderOpenMovies", "movieKindFilter",
+    "renderOpenMovies", "movieKindFilter", "movieGroupSelection",
     [
       "const appState = { movies: [] };",
       "const archiveMoreHtml = () => \"\";",
       extractBraced("function movieEmptyByKind"),
+      extractBraced("function movieGroupSelectionHtml"),
       extractBraced("function renderMoviesList"),
       "return renderMoviesList;"
     ].join("\n")
@@ -55,16 +56,16 @@ function loadRender({ view, watched, kind }) {
     (entries) => entries,
     (movies) => movies.map((movie) => ({ type: "movie", movie })),
     (entries) => entries.map((entry) => entry.type === "movie" ? ITEM : "<GROUP>").join(""),
-    () => "",
     () => "<OPEN>",
-    { open: "all", watched: kind }
+    { open: "all", watched: kind },
+    selection
   );
 }
 
-// Собираем renderOpenMovies с реальными filterMoviesByKind/movieEmptyByKind
-// и заглушками остальных зависимостей — для регрессии «двойного пустого
-// состояния» в «В планах».
-function loadOpenRender({ open, watched, kind }) {
+// Собираем renderOpenMovies с реальными filterMoviesByKind/movieEmptyByKind/
+// movieGroupSelectionHtml и заглушками остальных зависимостей — для
+// регрессии «двойного пустого состояния» в «В планах».
+function loadOpenRender({ open, watched, kind, selection = null }) {
   const filterMoviesByKind = new Function(
     "movieKindFilter",
     [extractBraced("function filterMoviesByKind"), "return filterMoviesByKind;"].join("\n")
@@ -73,10 +74,11 @@ function loadOpenRender({ open, watched, kind }) {
     "openMovies", "watchedMovies", "filterMoviesByKind", "partnerMissing",
     "currentMoviePick", "movieRandomUsed", "movieEmptyByKind", "movieSortBar",
     "sortMovieEntries", "buildMovieEntries", "movieEntriesHtml",
-    "movieGroupSelectionHtml",
+    "movieGroupSelection",
     [
       "const appState = { movies: [] };",
       "const archiveMoreHtml = () => \"\";",
+      extractBraced("function movieGroupSelectionHtml"),
       extractBraced("function renderOpenMovies"),
       "return renderOpenMovies;"
     ].join("\n")
@@ -92,7 +94,7 @@ function loadOpenRender({ open, watched, kind }) {
     (entries) => entries,
     (movies) => movies.map((movie) => ({ type: "movie", movie })),
     (entries) => entries.map((entry) => entry.type === "movie" ? ITEM : "<GROUP>").join(""),
-    () => ""
+    selection
   );
 }
 
@@ -153,4 +155,43 @@ test("open + фильтр «Сериалы» при одних сериалах:
   const html = loadOpenRender({ open: openMovies, watched: [], kind: "series" })();
   ok(html.includes(ITEM), "отфильтрованный список не отрендерился");
   ok(!html.includes("Пока пусто"), "лишняя пустая карточка");
+});
+
+// P2-01: пока активен режим выбора группы, панель «Выбрано / Создать /
+// Отмена» обязана оставаться на экране в любом виде и пустом состоянии —
+// иначе пользователь теряет способ отменить выбор.
+const SELECTION = new Set([1, 2]);
+
+test("P2-01: выбор в «В планах» → пустое «Просмотрено»: панель и отмена видны", () => {
+  const html = loadRender({ view: "watched", watched: [], kind: "all", selection: SELECTION })();
+  ok(html.includes("movie-group-select-bar"), "панель выбора потеряна в пустом «Просмотрено»");
+  ok(html.includes("group-cancel"), "нет кнопки «Отмена»");
+  ok(html.includes("Выбрано: 2"), "счётчик выбранных потерян");
+});
+
+test("P2-01: выбор в «Просмотрено» → пустой результат фильтра: панель видна", () => {
+  const html = loadRender({ view: "watched", watched: ONLY_MOVIES, kind: "series", selection: SELECTION })();
+  ok(html.includes("movie-group-select-bar") && html.includes("group-cancel"),
+    "панель выбора потеряна при пустом фильтре «Просмотрено»");
+});
+
+test("P2-01: выбор в «Просмотрено» → пустое «В планах»: панель и отмена видны", () => {
+  const html = loadOpenRender({ open: [], watched: ONLY_MOVIES, kind: "all", selection: SELECTION })();
+  ok(html.includes("movie-group-select-bar"), "панель выбора потеряна в пустом «В планах»");
+  ok(html.includes("group-cancel"), "нет кнопки «Отмена»");
+});
+
+test("P2-01: выбор в «В планах» → пустой результат фильтра типа: панель видна", () => {
+  const openMovies = [
+    { id: 1, title: "Фильм", kind: "movie", watched: 0 },
+    { id: 2, title: "Ещё фильм", kind: "movie", watched: 0 }
+  ];
+  const html = loadOpenRender({ open: openMovies, watched: [], kind: "series", selection: SELECTION })();
+  ok(html.includes("movie-group-select-bar") && html.includes("group-cancel"),
+    "панель выбора потеряна при пустом фильтре «В планах»");
+});
+
+test("P2-01: без активного выбора панель не рендерится", () => {
+  const html = loadRender({ view: "watched", watched: ONLY_MOVIES, kind: "all", selection: null })();
+  ok(!html.includes("movie-group-select-bar"), "панель показана без режима выбора");
 });

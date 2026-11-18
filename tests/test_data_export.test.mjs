@@ -145,6 +145,7 @@ const buildApi = new Function(
     extractBraced("function exportMemoryRow"),
     extractBraced("function exportDateRow"),
     extractBraced("const EXPORT_ROW_MAPPERS = {"),
+    extractBraced("function exportTxtDay"),
     extractBraced("function exportTxtTime"),
     extractBraced("const EXPORT_TXT_ROWS = {"),
     extractBraced("function exportTxtRecord"),
@@ -246,16 +247,17 @@ test("маршрут: фильтры приватности по состава�
   equal(doc.name, "Экспорт.txt");
   const txt = await doc.text();
   ok(txt.startsWith("Общий дневник — экспорт данных\n"), "шапка документа");
-  ok(/Дата выгрузки: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/.test(txt), "метка времени в шапке");
+  ok(/Дата выгрузки: \d{2}\.\d{2}\.\d{4}$/m.test(txt), "дата выгрузки дд.мм.гггг");
   match(txt, new RegExp(`Версия: ${APP_VERSION}`));
   // Пустые секции не печатаются, заполненные — с заголовком и записями.
   ok(!txt.includes("Места —") && !txt.includes("Желания —"), "пустые секции пропущены");
   ok(txt.includes("Планы — 1"), "заголовок секции планов с количеством");
   ok(txt.includes("1. Поездка"), "план: главная строка");
-  ok(txt.includes("Когда: 2026-12-01"), "план: дата");
+  ok(txt.includes("Когда: 01.12.2026"), "план: дата в формате приложения");
   ok(txt.includes("Добавил: Аня"), "автор записи");
   ok(txt.includes("Кино — 1") && txt.includes("1. Оппенгеймер") && txt.includes("Рейтинг: 8.4 (IMDb)"), "кино-секция");
   ok(txt.includes("Дневник — 1") && txt.includes("1. Выходные") && txt.includes("Текст: Текст"), "секция дневника");
+  ok(txt.includes("День: 31.10.2026"), "день дневника в формате приложения");
   // Личные флаги попадают в файл только когда есть что показывать.
   ok(!txt.includes("Личный"), "общий план не помечен личным");
   deepStrictEqual(response.data, {
@@ -289,6 +291,7 @@ test("маршрут: состав «all» общих коллекций — о�
   const txt = await doc.text();
   ok(txt.includes("Дни рождения — 1"), "заголовок секции дней рождения");
   ok(txt.includes("1. День рождения Маши"), "запись дня рождения");
+  ok(txt.includes("День: 03.12.1996"), "день рождения в формате приложения");
   deepStrictEqual(response.data.counts, { places: 0, memories: 1, quotes: 0, wishes: 0, birthdays: 1 });
 });
 
@@ -316,4 +319,18 @@ test("маршрут без выбранных секций — 400 и без з
     (error) => error.status === 400 && error.code === "INVALID_EXPORT"
   );
   equal(env0.queries.length, 0, "до SQL-запросов дело не доходит");
+});
+
+test("TXT: ISO-даты и таймстемпы печатаются как дд.мм.гггг", () => {
+  const helpers = new Function([
+    extractBraced("function exportTxtDay"),
+    extractBraced("function exportTxtTime"),
+    "return { exportTxtDay, exportTxtTime };"
+  ].join("\n"))();
+  equal(helpers.exportTxtDay("2026-11-05"), "05.11.2026");
+  equal(helpers.exportTxtDay(""), "");
+  equal(helpers.exportTxtDay(null), "");
+  equal(helpers.exportTxtDay("не дата"), "не дата");
+  equal(helpers.exportTxtTime(Math.floor(Date.UTC(2026, 0, 2, 23, 30) / 1000)), "02.01.2026");
+  equal(helpers.exportTxtTime(0), null);
 });

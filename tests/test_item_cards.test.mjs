@@ -45,6 +45,7 @@ const RENDER_DEPS = [
     extractLine("  const EDIT_ICON"),
     extractLine("  const DELETE_ICON"),
     extractLine("  const COPY_ICON"),
+    extractLine("  const LINK_TEXT_ICON"),
     extractLine("  const RESUME_ICON"),
     extractBraced("function esc"),
       extractBraced("function itemActionButton"),
@@ -392,6 +393,16 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
   setSelection(null);
   ok(movieItem({ id: 30, title: "Оппенгеймер", watched: 0 }).includes('data-action="open-movie"'),
     "после выхода из режима выбора карточка снова открывает описание");
+
+  // P2-03: карточка — контейнер, а не role="button": внутри живут
+  // самостоятельные кнопки (просмотрено/ссылка/удалить/оценить), вложенный
+  // интерактив недопустим. Открытие — отдельная кнопка в заголовке.
+  ok(!card.includes('role="button"'), "карточка не должна быть role=button");
+  ok(!card.includes('tabindex="0"'), "у карточки не должно быть tabindex");
+  ok(card.includes('class="movie-title-open"'), "нет кнопки открытия в заголовке");
+  ok(card.includes('aria-label="Открыть описание: Оппенгеймер"'),
+    "кнопка открытия без понятного имени");
+  ok(picked.includes('class="movie-title-open"'), "в режиме выбора заголовок не кликабелен");
 
   // Метка позиционируется внутри карточки, а ⋮ при наведении — круглая.
   ok(/^\.movie-card,\s*\.movie-pick \{[\s\S]*?\}\s*\.movie-card \{\s*position: relative;\s*\}/m.test(cssSource),

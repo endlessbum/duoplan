@@ -38,6 +38,7 @@ const loadWishItem = new Function(
     "const EDIT_ICON = " + appSource.match(/const EDIT_ICON = ('.*');/)?.[1] + ";",
     "const DELETE_ICON = " + appSource.match(/const DELETE_ICON = ('.*');/)?.[1] + ";",
     "const COPY_ICON = " + appSource.match(/const COPY_ICON = ('.*');/)?.[1] + ";",
+    "const LINK_TEXT_ICON = " + appSource.match(/const LINK_TEXT_ICON = ('.*');/)?.[1] + ";",
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function itemActionButton"),
     extractBraced(appSource, "function itemActions"),
@@ -45,10 +46,11 @@ const loadWishItem = new Function(
     extractBraced(appSource, "function renderRichText"),
     extractBraced(appSource, "function wishItem"),
     extractBraced(appSource, "function wishShareText"),
-    "return { wishItem, wishShareText };"
+    extractBraced(appSource, "function wishSharePart"),
+    "return { wishItem, wishShareText, wishSharePart, COPY_ICON, LINK_TEXT_ICON };"
   ].join("\n")
 );
-const { wishItem, wishShareText } = loadWishItem({ user: { tg_id: 2 } });
+const { wishItem, wishShareText, wishSharePart, COPY_ICON, LINK_TEXT_ICON } = loadWishItem({ user: { tg_id: 2 } });
 
 const PARTNER_WISH = { id: 7, body: "**Плед** и какао", owner_id: 2, display_name: "Аня" };
 const WISH_WITH_URL = { id: 8, body: "**Плед** и какао", owner_id: 2, display_name: "Аня", url: "https://example.com/gifts" };
@@ -125,6 +127,45 @@ test("wishShareText: название, уточнение и ссылка иду
   );
   equal(wishShareText({ body: "Плед", comment: "  ", url: "" }), "Плед");
   equal(wishShareText({ body: "Плед", comment: "Серый" }), "Плед\nСерый");
+});
+
+// --------------------------------- меню «Поделиться» в карточке (2026-11-18)
+
+test("меню ⋮ без ссылки: только «Скопировать название»", () => {
+  const html = wishItem(PARTNER_WISH, false);
+  equal(html.includes("Скопировать название"), true);
+  equal(html.includes("Скопировать ссылку"), false);
+  equal(html.includes("Скопировать все"), false);
+  equal((html.match(/data-action="share-wish"/g) || []).length, 1);
+  equal(html.includes('data-part="name"'), true);
+});
+
+test("меню ⋮ со ссылкой: название, ссылку и все — три пункта", () => {
+  const html = wishItem(WISH_WITH_URL, false);
+  for (const label of ["Скопировать название", "Скопировать ссылку", "Скопировать все"]) {
+    ok(html.includes(label), `нет пункта «${label}»`);
+  }
+  equal((html.match(/data-action="share-wish"/g) || []).length, 3);
+  for (const part of ["name", "url", "all"]) {
+    ok(html.includes(`data-part="${part}"`), `нет data-part="${part}"`);
+  }
+});
+
+test("иконки: «Скопировать все» — прежний COPY_ICON, остальные — LINK_TEXT_ICON", () => {
+  const html = wishItem(WISH_WITH_URL, false);
+  const copyCount = (html.match(new RegExp(COPY_ICON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
+  equal(copyCount, 1, "COPY_ICON должна быть ровно у одного пункта — «Скопировать все»");
+  const linkTextCount = (html.match(new RegExp(LINK_TEXT_ICON.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
+  equal(linkTextCount, 2, "LINK_TEXT_ICON должна быть у «название» и «ссылка»");
+});
+
+test("wishSharePart: name без ссылки, url — только ссылка, all — всё", () => {
+  const wish = { body: "Плед", comment: "Серый", url: "https://example.com" };
+  equal(wishSharePart(wish, "name"), "Плед\nСерый");
+  equal(wishSharePart(wish, "url"), "https://example.com");
+  equal(wishSharePart(wish, "all"), "Плед\nСерый\nhttps://example.com");
+  equal(wishSharePart(wish, "other"), "Плед\nСерый\nhttps://example.com");
+  equal(wishSharePart({ body: "Плед" }, "name"), "Плед");
 });
 
 test("формы создания и редактирования желания работают с полем comment", () => {

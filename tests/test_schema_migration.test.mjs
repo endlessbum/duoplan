@@ -121,7 +121,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
   // users.timezone упал с "duplicate column name" и был отработан,
   // pairs.timezone добавлен этим isolate штатно.
   deepStrictEqual(log.alters.sort(), [
-    "accent_color", "awaiting_return", "bleeding_details", "clots", "comment", "context", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
+    "accent_color", "ascii_art", "awaiting_return", "bleeding_details", "clots", "comment", "context", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
     "details", "digest_enabled", "digest_time", "done_at", "end_unknown", "energy", "expires_at", "gender", "is_private",
     "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "movie_pick_id", "mucus",
     "notify_diary",
@@ -156,7 +156,8 @@ test("чистый проход миграции без гонки записы�
   // + show_cycle_calendar (users, «Месячные в основном календаре» — migrations/0045)
   // + resume_position (movies, «Остановились» — migrations/0048)
   // + place_pick_id/movie_pick_id (pairs, общий рандом — migrations/0049)
-  deepStrictEqual(log.alters.length, 64);
+  // + ascii_art (memories, ASCII-вложение дневника — migrations/0050)
+  deepStrictEqual(log.alters.length, 65);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

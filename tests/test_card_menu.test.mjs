@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { ok } from "node:assert/strict";
+import { deepStrictEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -121,4 +121,72 @@ test("карточка группы и карточки разделов исп�
   // Все пункты меню — с текстовой подписью (визуальный список действий).
   const menuCalls = source.match(/itemActionButton\(\{[^}]*label:/g) || [];
   ok(menuCalls.length > 20, `ожидалось много пунктов меню, найдено ${menuCalls.length}`);
+});
+
+// «Остановились»: фильм — одно поле времени, сериал — сезон/серия из
+// resume-options и необязательное время. Хелперы извлекаются как есть.
+const resumeHelpers = new Function(
+  [
+    extractBraced("function esc"),
+    extractBraced("function plural"),
+    extractBraced("function movieResumeParse"),
+    extractBraced("function movieResumeEpisodeOptions"),
+    extractBraced("function movieResumeEpisodeControl"),
+    extractBraced("function movieResumeSeriesFields"),
+    extractBraced("function movieResumeCompose"),
+    "return { movieResumeParse, movieResumeEpisodeOptions, movieResumeSeriesFields, movieResumeCompose };"
+  ].join("\n")
+)();
+const { movieResumeParse, movieResumeEpisodeOptions, movieResumeSeriesFields, movieResumeCompose } = resumeHelpers;
+
+test("movieResumeParse: разбирает старую свободную отметку", () => {
+  deepStrictEqual(movieResumeParse("2 сезон, 5 серия · 34:12"), { season: 2, episode: 5, time: "34:12" });
+  deepStrictEqual(movieResumeParse("1 сезон, 1 серия"), { season: 1, episode: 1, time: "" });
+  deepStrictEqual(movieResumeParse("1:23:45"), { season: null, episode: null, time: "1:23:45" });
+});
+
+test("movieResumeCompose: фильм — время, сериал — сезон/серия/время", () => {
+  const fd = (values) => ({ get: (name) => (name in values ? values[name] : null) });
+  equal(movieResumeCompose({ kind: "movie" }, fd({ position: " 1:23:45 " })), "1:23:45");
+  equal(movieResumeCompose({ kind: "movie" }, fd({ position: "   " })), null);
+  equal(movieResumeCompose({ kind: "series" }, fd({ season: "2", episode: "5", position: "34:12" })), "2 сезона, 5 серий · 34:12");
+  equal(movieResumeCompose({ kind: "series" }, fd({ season: "1", episode: "1", position: "" })), "1 сезон, 1 серия");
+  // Запасной текстовый вариант без полей season/episode.
+  equal(movieResumeCompose({ kind: "series" }, fd({ position: "2 сезон, 5 серия" })), "2 сезон, 5 серия");
+});
+
+test("movieResumeSeriesFields: сезон из состава, серии выбранного сезона, время необязательно", () => {
+  const html = movieResumeSeriesFields(
+    { kind: "series", resume_position: "2 сезон, 5 серия · 34:12" },
+    { kind: "series", seasons: [{ season: 1, episodes: 8 }, { season: 2, episodes: 10 }] },
+    movieResumeParse("2 сезон, 5 серия · 34:12")
+  );
+  ok(html.includes(">Сезон</span>"), "нет поля «Сезон»");
+  ok(html.includes(">Серия</span>"), "нет поля «Серия»");
+  ok(html.includes("Время остановки (не обязательно)"), "нет необязательного времени");
+  ok(html.includes('name="season"') && html.includes('name="episode"') && html.includes('name="position"'), "потеряны name полей");
+  ok(html.includes('value="2" selected'), "сезон 2 не выбран");
+  ok(html.includes('value="5" selected'), "серия 5 не выбрана");
+  ok(!html.includes('value="11"'), "серии выходят за число серий сезона 2");
+  ok(html.includes('value="34:12"'), "время не подставлено");
+
+  const episodes = movieResumeEpisodeOptions(3, null);
+  ok(episodes.includes("Выберите серию") && episodes.includes('value="3"'), "серии не от 1 до episode_count");
+  const fallback = movieResumeSeriesFields({ kind: "series", resume_position: "1:00" }, { kind: "series", seasons: [] }, movieResumeParse("1:00"));
+  ok(fallback.includes('name="position"') && !fallback.includes('name="season"'), "без состава нужен текстовый ввод");
+  // Сезон известен, а число серий — нет: «Серия» становится числовым вводом,
+  // иначе обязательный пустой select блокировал бы сохранение.
+  const unknownEpisodes = movieResumeSeriesFields(
+    { kind: "series" },
+    { kind: "series", seasons: [{ season: 1, episodes: null }], episodes_total: null },
+    movieResumeParse("1 сезон")
+  );
+  ok(unknownEpisodes.includes('name="episode" type="number"'), "без episode_count «Серия» должна быть числом");
+});
+
+test("диалог «Остановились» выбирает поля по kind и грузит resume-options", () => {
+  ok(source.includes("movie.kind !== \"series\""), "фильм не отделён от сериала");
+  ok(source.includes("/api/movies/${movie.id}/resume-options"), "нет запроса состава сериала");
+  ok(source.includes("Время остановки (не обязательно)"), "нет строки необязательного времени");
+  ok(source.includes("data-resume-season") && source.includes("data-resume-episode"), "нет связи сезон → серии");
 });

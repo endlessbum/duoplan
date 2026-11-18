@@ -25,6 +25,11 @@ function extractBraced(declaration) {
   }
   throw new Error(`незакрытый блок: ${declaration}`);
 }
+function extractLine(prefix) {
+  const start = source.indexOf(prefix);
+  if (start === -1) throw new Error(`${prefix} не найдено`);
+  return source.slice(start, source.indexOf("\n", start));
+}
 
 // Цепочка: weeklyDigestText → maskTitle → richToHtml → richInline → escapeHtml,
 // плюс dateOccursOnDay/monthlyOccursOnDay и капы. Всё чистое.
@@ -35,8 +40,7 @@ const bundle = [
   "const RICH_TOKENS = [];",
   extractBraced("function richInline("),
   extractBraced("function richToHtml("),
-  "const RICH_MASKED = '<tg-spoiler>Скрытый</tg-spoiler>';",
-  "const maskTitle = (item) => (Number(item.is_private) === 1 ? RICH_MASKED : richToHtml(item.title));",
+  extractLine("const maskTitle"),
   "const DIGEST_MAX_ITEMS = 18;",
   "const DIGEST_MAX_CHARS = 3400;",
   extractBraced("function monthlyOccursOnDay("),
@@ -112,8 +116,7 @@ test("weeklyDigestText: дни рождения отдельным абзаце�
   ok(text.includes("Дни рождения"), "нет абзаца дней рождения");
   ok(text.includes("richToHtml") === false, "текст leaked");
   ok(/• Чт 12\.03 — Аня/.test(text), "день рождения без имени не найден");
-  ok(text.includes("<tg-spoiler>Скрытый</tg-spoiler>"), "приватный план не замаскирован");
-  ok(!text.includes("Секретный план"), "приватный заголовок утёк в сводку");
+  ok(text.includes("<tg-spoiler>Секретный план</tg-spoiler>"), "приватный заголовок не показан под спойлером");
   // Порядок абзацев: Дни рождения → Значимые даты → Планы.
   ok(text.indexOf("Дни рождения") < text.indexOf("Значимые даты"), "порядок абзацев нарушен");
 });

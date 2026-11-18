@@ -108,7 +108,7 @@ async def test_legacy_v12_database_gets_show_cycle_calendar(tmp_path):
     db = await connect_database(path)
     try:
         row = await db.one("PRAGMA user_version")
-        assert int(row["user_version"]) == SCHEMA_VERSION == 15
+        assert int(row["user_version"]) == SCHEMA_VERSION
         cols = await db.query("PRAGMA table_info(users)")
         names = {c["name"] for c in cols}
         assert "show_cycle_calendar" in names, "миграция 13 не применилась"

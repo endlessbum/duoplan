@@ -519,9 +519,33 @@ test(
   }
 );
 
+test("tmdbSeriesSeasons: specials исключены, серии отсортированы по сезонам", async () => {
+  const tmdbSeriesSeasons = new Function(
+    "tmdbLocalize", "tmdbFetch",
+    [
+      extractLine(workerSource, "const TMDB_SEASONS_TTL_MS"),
+      extractLine(workerSource, "const tmdbSeasonsCache = new Map();"),
+      extractBraced(workerSource, "async function tmdbSeriesSeasons"),
+      "return tmdbSeriesSeasons;"
+    ].join("\n")
+  )(
+    async () => ({ id: 99, kind: "tv" }),
+    async () => ({ seasons: [
+      { season_number: 0, episode_count: 5 },
+      { season_number: 2, episode_count: 10 },
+      { season_number: 1, episode_count: 8 }
+    ] })
+  );
+  deepStrictEqual(await tmdbSeriesSeasons({ TMDB_API_KEY: "k" }, "tt1"), [
+    { season: 1, episodes: 8 },
+    { season: 2, episodes: 10 }
+  ]);
+});
+
 test("маршруты movies зарегистрированы в воркере (itemRoute + коллекция)", () => {
   ok(workerSource.includes("places|trips|goals|goal_items|movies|savings)"), "movies нет в itemRoute regex");
   ok(workerSource.includes('"/api/movies/search"'), "нет маршрута поиска");
+  ok(workerSource.includes("/resume-options"), "нет маршрута состава сериала для «Остановились»");
   ok(workerSource.includes('"UPDATE movies SET watched=1'), "нет действия watched");
   ok(workerSource.includes('"UPDATE movies SET watched=0'), "нет действия unwatched");
   ok(workerSource.includes('movies: "movies"'), "movies нет в таблице itemRoute");

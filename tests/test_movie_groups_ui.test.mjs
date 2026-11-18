@@ -9,6 +9,7 @@ import { test } from "node:test";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const source = readFileSync(join(root, "public", "app.js"), "utf8");
+const css = readFileSync(join(root, "public", "app.css"), "utf8");
 
 function extractBraced(declaration) {
   const start = source.indexOf(declaration);
@@ -39,7 +40,7 @@ const GROUP = {
 };
 
 const { buildMovieEntries, sortMovieEntries, renderMovieGroup, movieGroupMap } = new Function(
-  "appState", "movieGroupDetails", "expandedMovieGroups", "movieKindFilter", "movieItem", "loadMovieGroup",
+  "appState", "movieGroupDetails", "movieKindFilter", "movieItem", "loadMovieGroup",
   [
     extractBraced("const MOVIE_GROUP_TYPE_LABELS"),
     extractBraced("function plural"),
@@ -61,7 +62,6 @@ const { buildMovieEntries, sortMovieEntries, renderMovieGroup, movieGroupMap } =
 )(
   { movieGroups: [GROUP], movies: [] },
   new Map(),
-  new Set(),
   { open: "all", watched: "all" },
   (movie) => `<MOVIE:${movie.id}>`,
   async () => {}
@@ -93,7 +93,7 @@ test("buildMovieEntries: фильм с group_id, которого нет в movi
   equal(entries[0].type, "movie");
 });
 
-test("свёрнутая стопка: счётчики, прогресс, тип, слои по полной сводке группы", () => {
+test("карточка стопки: счётчики, прогресс, тип, слои и кнопка окна", () => {
   const group = { ...GROUP, open_count: 2 };
   const html = renderMovieGroup({
     type: "group", group, members: [member(11, { group_position: 0 }), member(12, { group_position: 1 })]
@@ -103,12 +103,16 @@ test("свёрнутая стопка: счётчики, прогресс, ти�
   ok(html.includes("3 части"), "нет общего числа частей");
   ok(html.includes("2 из 3 просмотрено"), "нет прогресса");
   ok(html.includes('aria-valuenow="67"'), "нет aria-значения прогресса");
-  ok(html.includes("movie-group-stack__layer"), "нет заднего слоя стопки");
-  ok(!html.includes("<MOVIE:"), "свёрнутая стопка не должна показывать карточки частей");
-  ok(html.includes("Показать 2 части"), "нет кнопки раскрытия");
-  ok(html.includes('aria-expanded="false"'), "нет aria-expanded");
-  ok(html.includes('aria-controls="movie-group-members-g1"'), "кнопка не связана с контейнером");
-  ok(html.includes('id="movie-group-members-g1" hidden'), "контейнер должен существовать и в свёрнутом виде");
+  ok(html.includes('data-layers="1"'), "две части — один задний слой и расширенная передняя карточка");
+  equal((html.match(/movie-group-stack__layer/g) || []).length, 1, "должен быть ровно один задний слой");
+  ok(!html.includes("<MOVIE:"), "карточка не должна показывать части");
+  ok(html.includes("Показать 2 части"), "нет кнопки просмотра частей");
+  ok(html.includes('data-action="movie-group-open"'), "кнопка не открывает окно состава");
+  ok(html.includes('data-view="open"'), "кнопка не передаёт вид списка");
+  ok(html.includes('aria-haspopup="dialog"'), "кнопка не объявляет окно");
+  ok(!html.includes("ещё в планах"), "под шкалой осталась подпись о планах");
+  ok(!html.includes("Показано "), "под шкалой осталась подпись о загрузке");
+  ok(!html.includes("movie-group-members"), "состав не должен разворачиваться в списке");
   ok(html.includes('aria-label="Прогресс просмотра группы Сага"'), "нет доступного имени прогресс-бара");
   ok(html.includes('aria-valuetext="2 из 3 просмотрено"'), "нет текстового значения прогресса");
 });
@@ -117,15 +121,50 @@ test("UI-05: кнопка и слои стопки считаются по вс�
   const group = { ...GROUP, id: "g8", total_count: 8, open_count: 8, watched_count: 0, watched_percent: 0 };
   const html = renderMovieGroup({ type: "group", group, members: [member(11)] }, "open");
   ok(html.includes("Показать 8 частей"), "кнопка показывает только загруженную страницу");
-  ok(html.includes("Показано 1 из 8"), "нет пометки о неполной загрузке");
+  ok(!html.includes("Показано "), "дубль счётчика под шкалой больше не нужен");
   equal((html.match(/movie-group-stack__layer/g) || []).length, 2, "стопка не показывает два задних слоя");
+  ok(html.includes('data-layers="2"'), "3+ части — два задних слоя");
 });
 
-test("UI-05/A11Y-06: фильтр типа использует счётчики статуса+типа, раскрытие обновляет aria", () => {
+test("одна часть в группе: сплошная карточка без задних слоёв", () => {
+  const group = { ...GROUP, id: "g1one", total_count: 1, open_count: 1, watched_count: 0, watched_percent: 0 };
+  const html = renderMovieGroup({ type: "group", group, members: [member(11)] }, "open");
+  ok(html.includes('data-layers="0"'), "один слой — карточка на полную ширину");
+  ok(!html.includes("movie-group-stack__layer"), "у одной части не должно быть задних слоёв");
+});
+
+test("Просмотрено: стопка растёт как в «В планах», максимум три карточки", () => {
+  const watched = (id) => member(id, { watched: 1 });
+  const one = { ...GROUP, id: "gw1", total_count: 1, open_count: 0, open_movie_count: 0, watched_count: 1, watched_movie_count: 1, watched_percent: 100 };
+  const h1 = renderMovieGroup({ type: "group", group: one, members: [watched(11)] }, "watched");
+  ok(h1.includes('data-layers="0"'), "один просмотренный фильм — карточка на полную ширину");
+  ok(!h1.includes("movie-group-stack__layer"), "у одного просмотренного нет задних слоёв");
+  ok(h1.includes("Показать 1 часть"), "кнопка считает просмотренные, а не всю группу");
+
+  const two = { ...GROUP, id: "gw2", total_count: 2, open_count: 0, open_movie_count: 0, watched_count: 2, watched_movie_count: 2, watched_percent: 100 };
+  const h2 = renderMovieGroup({ type: "group", group: two, members: [watched(11), watched(12)] }, "watched");
+  ok(h2.includes('data-layers="1"'), "два просмотренных — один задний слой");
+  equal((h2.match(/movie-group-stack__layer/g) || []).length, 1, "ровно одна выглядывающая карточка");
+
+  const four = { ...GROUP, id: "gw4", total_count: 4, open_count: 0, open_movie_count: 0, watched_count: 4, watched_movie_count: 4, watched_percent: 100 };
+  const h4 = renderMovieGroup({ type: "group", group: four, members: [watched(11), watched(12), watched(13), watched(14)] }, "watched");
+  ok(h4.includes('data-layers="2"'), "четыре просмотренных — максимум три карточки");
+  equal((h4.match(/movie-group-stack__layer/g) || []).length, 2, "четвёртая карточка не добавляется");
+});
+
+test("стили стопки: запас под слои зависит от их числа", () => {
+  ok(/data-layers="1"[\s\S]{0,160}--stack-reserve:\s*calc\(var\(--stack-peek\) \+ 4px\)/.test(css),
+    "два фильма — запас на один слой");
+  ok(/data-layers="0"[\s\S]{0,160}--stack-reserve:\s*0px/.test(css),
+    "один фильм — карточка на полную ширину");
+  ok(css.includes("right: calc(var(--stack-reserve) - var(--layer, 1) * var(--stack-peek))"),
+    "правый край слоя считается от фактического запаса");
+});
+
+test("UI-05/A11Y-06: фильтр типа считает части для окна, слои скрыты от скринридера", () => {
   const group = { ...GROUP, id: "gs", total_count: 8, open_count: 7, watched_count: 1, open_series_count: 5 };
-  const expanded = new Set();
   const kindRender = new Function(
-    "appState", "movieGroupDetails", "expandedMovieGroups", "movieKindFilter", "movieItem", "loadMovieGroup",
+    "appState", "movieGroupDetails", "movieKindFilter", "movieItem", "loadMovieGroup",
     [
       extractBraced("const MOVIE_GROUP_TYPE_LABELS"),
       extractBraced("function plural"),
@@ -147,22 +186,18 @@ test("UI-05/A11Y-06: фильтр типа использует счётчики
   )(
     { movieGroups: [group], movies: [] },
     new Map([["gs", { status: "ready", items: [] }]]),
-    expanded,
     { open: "series", watched: "all" },
     (movie) => `<MOVIE:${movie.id}>`,
     async () => {}
   );
   const html = kindRender({ type: "group", group, members: [member(11)] }, "open");
   ok(html.includes("Показать 5 частей"), "фильтр «Сериалы» должен считать по open_series_count");
-  ok(html.includes('aria-expanded="false"'), "свёрнутая кнопка не обновила aria-expanded");
-  expanded.add("gs");
-  const openHtml = kindRender({ type: "group", group, members: [member(11)] }, "open");
-  ok(openHtml.includes('aria-expanded="true"'), "раскрытая кнопка не обновила aria-expanded");
-  ok(openHtml.includes('id="movie-group-members-gs">'), "раскрытый контейнер не доступен по aria-controls");
-  ok(/aria-hidden="true"/.test(openHtml), "декоративные слои должны быть скрыты от скринридера");
+  ok(html.includes('data-action="movie-group-open"'), "кнопка не открывает окно состава");
+  ok(html.includes('data-view="open"'), "окно не получит вид «В планах»");
+  ok(/aria-hidden="true"/.test(html), "декоративные слои должны быть скрыты от скринридера");
 });
 
-test("раскрытая стопка: части грузятся с сервера и рендерятся по фильтру вида", () => {
+test("окно состава: части фильтруются по статусу и типу текущего вида", () => {
   const details = new Map([["g1", {
     status: "ready",
     items: [
@@ -171,84 +206,100 @@ test("раскрытая стопка: части грузятся с серве
       { ...member(13, { group_position: 2, watched: 1, kind: "series" }), group_id: "g1" }
     ]
   }]]);
-  const expanded = new Set(["g1"]);
-  const render = new Function(
-    "appState", "movieGroupDetails", "expandedMovieGroups", "movieKindFilter", "movieItem", "loadMovieGroup",
-    [
-      extractBraced("const MOVIE_GROUP_TYPE_LABELS"),
-      extractBraced("function plural"),
-      extractBraced("function esc"),
-      extractBraced("function byRowId"),
-      extractBraced("function movieGroupMap"),
-      extractBraced("function movieGroupNoun"),
-      extractBraced("function buildMovieEntries"),
-      extractBraced("function movieEntrySortMovie"),
-      extractBraced("const movieSort"),
-      extractBraced("function movieSortValue"),
-      extractBraced("function sortMovieEntries"),
-      extractLine("  const MENU_ICON"),
-      extractBraced("function itemActionButton"),
-      extractBraced("function itemActions"),
-      extractBraced("function renderMovieGroup"),
-      "return renderMovieGroup;"
-    ].join("\n")
-  )(
-    { movieGroups: [GROUP], movies: [] },
-    details,
-    expanded,
-    { open: "all", watched: "all" },
-    (movie) => `<MOVIE:${movie.id}:${movie.watched}>`,
-    async () => {}
-  );
-  const entries = buildMovieEntries([member(11)]);
+  const partItems = new Function("movieGroupDetails", "movieKindFilter", [
+    extractBraced("function movieGroupPartItems"),
+    "return movieGroupPartItems;"
+  ].join("\n"))(details, { open: "all", watched: "all" });
   // Вид «В планах»: только непросмотренные части.
-  const openHtml = render(entries[0], "open");
-  ok(openHtml.includes("<MOVIE:11:0>"), "нет открытой части");
-  ok(!openHtml.includes("<MOVIE:12"), "просмотренная часть попала в «В планах»");
+  deepStrictEqual(partItems("g1", "open").map((m) => m.id), [11]);
   // Вид «Просмотрено»: обе просмотренные, включая сериал.
-  const watchedHtml = render(entries[0], "watched");
-  ok(watchedHtml.includes("<MOVIE:12:1>") && watchedHtml.includes("<MOVIE:13:1>"), "нет просмотренных частей");
-  ok(watchedHtml.includes("Скрыть части"), "нет кнопки сворачивания");
+  deepStrictEqual(partItems("g1", "watched").map((m) => m.id), [12, 13]);
 });
 
-test("раскрытая стопка без кэша показывает загрузку, при ошибке — повтор", () => {
-  const render = new Function(
-    "appState", "movieGroupDetails", "expandedMovieGroups", "movieKindFilter", "movieItem", "loadMovieGroup",
+test("окно состава: загрузка, ошибка с повтором и карточки через movieItem", () => {
+  const details = new Map([["g1", { status: "ready", items: [member(11)] }]]);
+  const fields = { innerHTML: "" };
+  const dialog = { open: true };
+  const context = {};
+  const partItems = (groupId, view) => details.get(groupId).items;
+  const renderParts = new Function(
+    "dialogContext", "dialog", "dialogFields", "esc", "movieGroupDetails", "movieGroupPartItems", "movieItem",
     [
-      extractBraced("const MOVIE_GROUP_TYPE_LABELS"),
-      extractBraced("function plural"),
-      extractBraced("function esc"),
-      extractBraced("function byRowId"),
-      extractBraced("function movieGroupMap"),
-      extractBraced("function movieGroupNoun"),
-      extractBraced("function buildMovieEntries"),
-      extractBraced("function movieEntrySortMovie"),
-      extractBraced("const movieSort"),
-      extractBraced("function movieSortValue"),
-      extractBraced("function sortMovieEntries"),
-      extractLine("  const MENU_ICON"),
-      extractBraced("function itemActionButton"),
-      extractBraced("function itemActions"),
-      extractBraced("function renderMovieGroup"),
-      "return renderMovieGroup;"
+      extractBraced("function renderMovieGroupParts"),
+      "return renderMovieGroupParts;"
     ].join("\n")
-  )(
-    { movieGroups: [GROUP], movies: [] },
-    new Map([["g1", { status: "error", items: [] }]]),
-    new Set(["g1"]),
-    { open: "all", watched: "all" },
-    () => "",
+  )(context, dialog, fields, (s) => s, details, partItems, (m) => `<MOVIE:${m.id}>`);
+  details.set("g1", { status: "loading", items: [] });
+  renderParts("g1", "open", context);
+  ok(fields.innerHTML.includes("Загружаем части группы"), "нет состояния загрузки");
+  details.set("g1", { status: "error", items: [] });
+  renderParts("g1", "open", context);
+  ok(fields.innerHTML.includes("Повторить"), "нет кнопки повтора при ошибке загрузки");
+  ok(fields.innerHTML.includes('data-action="movie-group-retry"'), "retry без data-action");
+  ok(fields.innerHTML.includes('data-view="open"'), "retry потерял вид списка");
+  details.set("g1", { status: "ready", items: [member(11)] });
+  renderParts("g1", "open", context);
+  ok(fields.innerHTML.includes('<div class="movie-group-members">'), "нет списка карточек в окне");
+  ok(fields.innerHTML.includes("<MOVIE:11>"), "карточка части не отрисована через movieItem");
+  // Устаревший ответ не должен затирать другое открытое окно.
+  fields.innerHTML = "<b>другое окно</b>";
+  renderParts("g1", "open", {});
+  equal(fields.innerHTML, "<b>другое окно</b>", "старый ответ перезаписал другое окно");
+});
+
+test("окно состава открывается через общий openDialog и грузит полный список", async () => {
+  const calls = [];
+  const rendered = [];
+  const parts = new Function("calls", "rendered", "movieGroupMap", "loadMovieGroup", [
+    "let dialogContext;",
+    "const openDialog = (config) => { calls.push(config); dialogContext = { ...config }; };",
+    extractBraced("async function openMovieGroupParts"),
+    "const renderMovieGroupParts = (groupId, view, context) => rendered.push({ groupId, view, context });",
+    "return openMovieGroupParts;"
+  ].join("\n"))(
+    calls, rendered,
+    () => new Map([["g1", GROUP]]),
     async () => {}
   );
-  const html = render({ type: "group", group: GROUP, members: [member(11)] }, "open");
-  ok(html.includes("Повторить"), "нет кнопки повтора при ошибке загрузки");
-  ok(html.includes('data-action="movie-group-retry"'), "retry без data-action");
+  await parts("g1", "watched");
+  equal(calls.length, 1, "окно должно открываться один раз");
+  equal(calls[0].title, "Сага", "в заголовке окна нет названия группы");
+  equal(calls[0].submitLabel, null, "окно просмотра не должно быть формой сохранения");
+  equal(calls[0].readOnly, true, "окно просмотра должно быть read-only");
+  deepStrictEqual(calls[0].groupParts, { groupId: "g1", view: "watched" });
+  ok(calls[0].fields.includes("Загружаем части группы"), "нет заглушки до ответа сервера");
+  equal(rendered.length, 1, "после загрузки окно не заполнено");
+  equal(rendered[0].groupId, "g1");
+  equal(rendered[0].view, "watched");
+  deepStrictEqual(rendered[0].context.groupParts, { groupId: "g1", view: "watched" });
 });
 
-test("сортировка: группа встаёт по anchor первой части и sort_raofp", () => {
-  const GROUP2 = { ...GROUP, id: "g2", title: "Вторая", anchor: { movie_id: 50, year: 2020, kind: "movie", rating: 5, runtime: 90, genres: "", created_at: 50 }, sort_added_at: 50, sort_raofp: 5 };
-  const state = { movieGroups: [GROUP, GROUP2], movies: [] };
-  const sort = new Function(
+// P2-04: группа участвует в сортировке через псевдо-фильм якоря — год,
+// рейтинг, длительность (у сериала — число серий), жанр, RAofp и «добавлено»
+// должны реально менять её позицию, а не только проверять added desc.
+const SORT_GROUPS = [
+  { ...GROUP, id: "gHigh", title: "Высокая",
+    anchor: { movie_id: 501, year: 2020, kind: "movie", rating: 9, runtime: 200, episodes: null, genres: "Драма", created_at: 1 },
+    sort_added_at: 100, sort_raofp: 9 },
+  { ...GROUP, id: "gLow", title: "Низкая",
+    anchor: { movie_id: 502, year: 1990, kind: "movie", rating: 5, runtime: 80, episodes: null, genres: "Комедия", created_at: 2 },
+    sort_added_at: 200, sort_raofp: 5 },
+  { ...GROUP, id: "gSeries", title: "Сериаловая",
+    anchor: { movie_id: 503, year: 2015, kind: "series", rating: 7, runtime: null, episodes: 300, genres: "Фантастика", created_at: 3 },
+    sort_added_at: 300, sort_raofp: 7 }
+];
+const SORT_MOVIES = [
+  { id: 1, title: "Альфа", year: 2010, kind: "movie", rating: 7, runtime: 150, genres: "Боевик", created_at: 400, pair_rating: 8, watched: 0 },
+  { id: 2, title: "Бета", year: 1980, kind: "movie", rating: 8.5, runtime: 250, genres: "Ужасы", created_at: 50, pair_rating: 6, watched: 0 }
+];
+const SORT_MEMBERS = [
+  { id: 601, group_id: "gHigh", group_position: 0, watched: 0 },
+  { id: 602, group_id: "gLow", group_position: 0, watched: 0 },
+  { id: 603, group_id: "gSeries", group_position: 0, watched: 0 }
+];
+
+function loadMovieSort(groups) {
+  return new Function(
     "appState",
     [
       extractBraced("const MOVIE_GROUP_TYPE_LABELS"),
@@ -262,24 +313,66 @@ test("сортировка: группа встаёт по anchor первой �
       extractBraced("const movieSort"),
       extractBraced("function movieSortValue"),
       extractBraced("function sortMovieEntries"),
-      "return { buildMovieEntries, sortMovieEntries };"
+      "return { buildMovieEntries, sortMovieEntries, movieSort };"
     ].join("\n")
-  )(state);
-  // Ключ «rating» по возрастанию: anchor.rating 5 (g2) раньше 8 (g1).
-  sort.sortMovieEntries; // film
+  )({ movieGroups: groups, movies: [] });
+}
+
+test("P2-04: группа сортируется по anchor/сводке для каждого ключа", () => {
+  const sort = loadMovieSort(SORT_GROUPS);
+  const order = (view = "open") => sort.sortMovieEntries(
+    sort.buildMovieEntries([...SORT_MOVIES, ...SORT_MEMBERS]), view
+  ).map((e) => e.type === "group" ? e.group.id : `m${e.movie.id}`);
+  const setSort = (view, key, dir) => { sort.movieSort[view].key = key; sort.movieSort[view].dir = dir; };
+
+  // «Добавлено»: по самой свежей части группы (sort_added_at), не по anchor.
+  setSort("open", "added", "desc");
+  deepStrictEqual(order(), ["m1", "gSeries", "gLow", "gHigh", "m2"]);
+
+  // Год — из anchor первой части.
+  setSort("open", "year", "desc");
+  deepStrictEqual(order(), ["gHigh", "gSeries", "m1", "gLow", "m2"]);
+
+  // Рейтинг IMDb/TMDB — из anchor; равные значения разводит id (m1=1 < 503).
+  setSort("open", "rating", "desc");
+  deepStrictEqual(order(), ["gHigh", "m2", "m1", "gSeries", "gLow"]);
+
+  // Длительность: фильм — runtime, сериал — число серий (episodes якоря).
+  // gSeries с 300 сериями обгоняет все фильмы — без episodes в anchor
+  // группа ушла бы в конец.
+  setSort("open", "runtime", "desc");
+  deepStrictEqual(order(), ["gSeries", "m2", "gHigh", "m1", "gLow"]);
+
+  // Жанр — первая часть genres якоря, по алфавиту (русская коллация:
+  // боевик < драма < комедия < ужасы < фантастика).
+  setSort("open", "genre", "asc");
+  deepStrictEqual(order(), ["m1", "gHigh", "gLow", "m2", "gSeries"]);
+
+  // RAofP — только вид «Просмотрено», значение sort_raofp сводки группы.
+  setSort("watched", "raofp", "desc");
+  deepStrictEqual(order("watched"), ["gHigh", "m1", "gSeries", "m2", "gLow"]);
+});
+
+test("P2-04: пустые значения сортировки уходят в конец, тай-брейк по id", () => {
+  const groups = [
+    { ...GROUP, id: "gNoRating", title: "Без рейтинга",
+      anchor: { movie_id: 510, year: null, kind: "movie", rating: null, runtime: null, genres: "", created_at: 9 },
+      sort_added_at: 900, sort_raofp: null }
+  ];
+  const sort = loadMovieSort(groups);
+  sort.movieSort.open.key = "rating";
+  sort.movieSort.open.dir = "asc";
   const entries = sort.buildMovieEntries([
-    { id: 1, title: "Одиночный", rating: 6, created_at: 10 },
-    member(11, { group_position: 0 }),
-    { ...member(21, { group_id: "g2", group_position: 0 }), id: 21 }
+    { id: 7, title: "Нет оценки", rating: null, created_at: 10 },
+    { id: 3, title: "Низкая", rating: 5, created_at: 20 },
+    { id: 9, title: "Тоже низкая", rating: 5, created_at: 30 },
+    { id: 4, title: "Высокая", rating: 9, created_at: 40 },
+    { id: 601, group_id: "gNoRating", group_position: 0, watched: 0 }
   ]);
-  // Подменяем movieSort на asc/rating через eval-окружение нельзя —
-  // проверяем, что группа вообще участвует в сортировке по anchor:
-  // movieEntrySortMovie(g1).rating === 8, (g2) === 5.
-  const sorted = sort.sortMovieEntries(entries, "open");
-  ok(sorted.length === 3, "элементы потерялись при сортировке");
-  const titles = sorted.map((e) => e.type === "group" ? e.group.id : `m${e.movie.id}`);
-  // Дефолтная сортировка «added desc»: g1.sort_added_at=300, g2=50, одиночный=10.
-  deepStrictEqual(titles, ["g1", "g2", "m1"]);
+  const order = sort.sortMovieEntries(entries, "open")
+    .map((e) => e.type === "group" ? e.group.id : `m${e.movie.id}`);
+  // rating asc: 5 (id 3), 5 (id 9), 9, затем null-ы по id: m7, gNoRating(510).
+  deepStrictEqual(order, ["m3", "m9", "m4", "m7", "gNoRating"]);
 });
 
 // BUG-01: цель «Добавить часть» больше не живёт в глобальной переменной —

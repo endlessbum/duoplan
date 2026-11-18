@@ -56,6 +56,7 @@ function makeLoader() {
       extractLine("  const EDIT_ICON"),
       extractLine("  const DELETE_ICON"),
       extractLine("  const COPY_ICON"),
+      extractLine("  const LINK_TEXT_ICON"),
       extractBraced("function richInline"),
       extractBraced("function renderRichText"),
       extractBraced("function partnerMissing"),

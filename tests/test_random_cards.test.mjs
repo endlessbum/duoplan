@@ -54,6 +54,10 @@ test("карточки результата имеют кнопку «Закры
     ok(body.includes('data-action="close-pick"'), `${name}: нет data-action="close-pick"`);
     ok(body.includes(">Закрыть</button>"), `${name}: нет видимой кнопки «Закрыть»`);
   }
+  // P2-03: внутри movie-pick четыре кнопки действий — карточка не может
+  // быть role="button" (вложенный интерактив); открытие — кнопка в заголовке.
+  ok(!moviePick.includes('role="button"'), "movie-pick не должен быть role=button");
+  ok(moviePick.includes('class="movie-title-open"'), "у movie-pick нет кнопки открытия в заголовке");
 });
 
 test("close-pick сбрасывает оба выбора и перерисовывает экран", () => {

@@ -34,7 +34,7 @@ function extractBraced(declaration) {
 }
 
 const load = new Function(
-  "request", "render", "STATE_RECENT_LIMIT", "STATE_ACTIVE_LIMIT", "ARCHIVE_PAGE_SIZE",
+  "request", "render", "STATE_RECENT_LIMIT", "STATE_ACTIVE_LIMIT", "ARCHIVE_PAGE_SIZE", "ARCHIVE_FETCH_CONCURRENCY",
   [
     "let appState = null;",
     "let archiveCachePairId = null;",
@@ -60,15 +60,21 @@ const load = new Function(
     "let archiveRenderTimer = null;",
     extractBraced("function renderArchiveSafe"),
     extractBraced("async function loadArchivePage"),
+    extractBraced("async function fetchArchiveEverything"),
+    // Предзагрузка групп в sandbox фиксируется, но сеть не дёргает.
+    "const preloadGroupCalls = [];",
+    "async function loadMovieGroup(id) { preloadGroupCalls.push('load:' + id); }",
+    "async function refreshMovieGroupDetails(id) { preloadGroupCalls.push('refresh:' + id); }",
+    extractBraced("async function preloadAllArchives"),
     extractBraced("async function revalidateArchiveCache"),
     extractBraced("function mergedArchive"),
     extractBraced("function archiveMoreHtml"),
-    "return { setAppState: (v) => { appState = v; }, archiveCache, syncArchiveCachePair, mergedArchive, archiveMoreHtml, removeFromArchiveCache, patchArchiveItem, loadArchivePage, revalidateArchiveCache };"
+    "return { setAppState: (v) => { appState = v; }, archiveCache, syncArchiveCachePair, mergedArchive, archiveMoreHtml, removeFromArchiveCache, patchArchiveItem, loadArchivePage, fetchArchiveEverything, preloadAllArchives, preloadGroupCalls, revalidateArchiveCache };"
   ].join("\n")
 );
 
 function makeCtx(requestMock = async () => ({ items: [], hasMore: false }), renderMock = () => {}) {
-  return load(requestMock, renderMock, 10, 200, 20);
+  return load(requestMock, renderMock, 10, 200, 20, 4);
 }
 
 test("смена пары сбрасывает кэш, та же пара — нет", () => {
@@ -389,6 +395,79 @@ test("загружаемый сейчас тип (loading) перезагруз�
   // loading-тип пропущен: перезагрузка не дублирует запрос летящей страницы.
   equal(calls.length, 1);
   equal(ctx.archiveCache.memories.items.length, 1);
+});
+
+// ------------------------------------------------------------------
+// Предзагрузка: весь набор в памяти до первого рендера
+// ------------------------------------------------------------------
+test("fetchArchiveEverything: все страницы по remaining, дубли убираются", async () => {
+  const pages = {
+    0: { items: [{ id: 1 }, { id: 2 }], hasMore: true, remaining: 3, page: 0 },
+    1: { items: [{ id: 3 }, { id: 4 }, { id: 5 }, { id: 1 }], hasMore: false, remaining: 0, page: 1 }
+  };
+  const calls = [];
+  const ctx = makeCtx(async (path) => {
+    const page = Number(new URL(path, "http://x").searchParams.get("page"));
+    calls.push(page);
+    return pages[page];
+  });
+  const full = await ctx.fetchArchiveEverything("movies");
+  deepStrictEqual(calls, [0, 1]);
+  deepStrictEqual(full.items.map((x) => x.id), [1, 2, 3, 4, 5]);
+  equal(full.page, 1);
+  equal(full.hasMore, false);
+  equal(full.remaining, 0);
+});
+
+test("preloadAllArchives: все типы и состав групп готовы до старта", async () => {
+  const calls = [];
+  const ctx = makeCtx(async (path) => {
+    const url = new URL(path, "http://x");
+    const type = url.searchParams.get("type");
+    const page = Number(url.searchParams.get("page"));
+    calls.push(`${type}:${page}`);
+    if (type === "movies") {
+      return page === 0
+        ? { items: Array.from({ length: 20 }, (_, i) => ({ id: i + 1 })), hasMore: true, remaining: 2, page: 0 }
+        : { items: [{ id: 21 }, { id: 22 }], hasMore: false, remaining: 0, page };
+    }
+    return { items: [{ id: 1 }], hasMore: false, remaining: 0, page };
+  });
+  ctx.setAppState({ pair: { id: 7 }, movieGroups: [{ id: "g1" }, { id: "g2" }] });
+  ctx.syncArchiveCachePair();
+  await ctx.preloadAllArchives();
+  for (const type of Object.keys(ctx.archiveCache)) {
+    equal(ctx.archiveCache[type].page >= 0, true, `тип ${type} не предзагружен`);
+    equal(ctx.archiveCache[type].hasMore, false, `тип ${type} всё ещё просит «Показать ещё»`);
+  }
+  equal(ctx.archiveCache.movies.items.length, 22, "не все фильмы/сериалы загружены");
+  equal(ctx.archiveMoreHtml("movies", 200), "", "кнопка догрузки осталась после полной загрузки");
+  deepStrictEqual(ctx.preloadGroupCalls, ["load:g1", "load:g2"]);
+  equal(calls.filter((c) => c.startsWith("movies:")).length, 2);
+});
+
+test("preloadAllArchives: сбой одного типа не срывает запуск остальных", async () => {
+  const ctx = makeCtx(async (path) => {
+    if (path.includes("type=memories")) throw new Error("network down");
+    return { items: [{ id: 1 }], hasMore: false, remaining: 0, page: 0 };
+  });
+  ctx.setAppState({ pair: { id: 7 }, movieGroups: [{ id: "g1" }] });
+  ctx.syncArchiveCachePair();
+  await ctx.preloadAllArchives();
+  equal(ctx.archiveCache.memories.page, -1, "упавший тип должен догрузиться при открытии");
+  equal(ctx.archiveCache.movies.page, 0, "остальные типы должны загрузиться");
+  deepStrictEqual(ctx.preloadGroupCalls, ["load:g1"]);
+});
+
+test("инициализация ждёт полной предзагрузки до первого render", () => {
+  const initStart = source.indexOf("async function initApp()");
+  const renderAt = source.indexOf("render();", initStart);
+  const preloadAt = source.indexOf("preloadAllArchives()", initStart);
+  ok(initStart >= 0 && renderAt > initStart && preloadAt > initStart && preloadAt < renderAt,
+    "preloadAllArchives должен завершиться до первого render()");
+  const beforeRender = source.slice(initStart, renderAt);
+  equal((beforeRender.match(/request\("\/api\/state"\)/g) || []).length, 2,
+    "до старта нужны состояние и его повторная сверка");
 });
 
 // ------------------------------------------------------------------

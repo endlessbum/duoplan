@@ -133,10 +133,9 @@
   // Тот же рандом для «Кино» — своя колода, чтобы посещение места не
   // сбрасывало выбор фильмов и наоборот.
   let movieDeck = [];
-  // Группы фильмов: раскрытые стопки, кэш полного состава (части могут
-  // быть за пределами первых 200 записей и архива) и режим выбора при
-  // создании группы. При смене пары всё это сбрасывается вместе с архивом.
-  const expandedMovieGroups = new Set();
+  // Группы фильмов: кэш полного состава (части могут быть за пределами
+  // первых 200 записей и архива) и режим выбора при создании группы.
+  // При смене пары всё это сбрасывается вместе с архивом.
   const movieGroupDetails = new Map(); // groupId -> { status: "loading"|"ready"|"error", items: [] }
   // Незавершённые загрузки: groupId -> { seq, promise }. seq отсекает
   // устаревшие ответы, promise позволяет повторному вызову дождаться
@@ -160,6 +159,9 @@
   const STATE_ACTIVE_LIMIT = 200;
   // Размер страницы /api/archive: для счётчика «Показать ещё (N из M)».
   const ARCHIVE_PAGE_SIZE = 20;
+  // Предзагрузка тянет страницы параллельно, но не сразу все: 4 запроса
+  // за раз не роняют WebView и не упираются в лимит соединений.
+  const ARCHIVE_FETCH_CONCURRENCY = 4;
   const archiveCache = {
     tasks: emptyArchiveEntry(),
     dates: emptyArchiveEntry(),
@@ -193,7 +195,6 @@
     resetArchiveCache();
     // Групповые кэши привязаны к pair_id сервера — чужой состав не должен
     // пережить выход/вход в другое пространство.
-    expandedMovieGroups.clear();
     movieGroupDetails.clear();
     movieGroupPending.clear();
     movieGroupSelection = null;
@@ -271,38 +272,106 @@
     }
   }
 
-  // Партнёр мог удалить запись, завершить план или сделать дату личной, пока
-  // кэш страниц архива жил в памяти. По изменившемуся состоянию фоновый
-  // refreshState молча перезагружает загруженные страницы: список остаётся
-  // раскрытым, но содержимое — всегда серверная истина. Сбой сети сбрасывает
-  // тип: лучше схлопнувшийся список, чем устаревшие записи партнёра.
-  async function revalidateArchiveCache() {
-    for (const type of Object.keys(archiveCache)) {
-      const cache = archiveCache[type];
-      if (cache.page < 0 || cache.loading) continue;
-      const lastPage = cache.page;
-      cache.page = -1;
-      cache.items = [];
-      cache.hasMore = null;
-      for (let page = 0; page <= lastPage; page++) {
-        cache.loading = true;
-        try {
-          const next = await request(`/api/archive?type=${encodeURIComponent(type)}&page=${page}`);
-          const seen = new Set(cache.items.map((x) => Number(x.id)));
-          cache.items.push(...(next.items || []).filter((x) => !seen.has(Number(x.id))));
-          cache.page = page;
-          cache.hasMore = Boolean(next.hasMore);
-          cache.remaining = Number.isFinite(next.remaining) ? Number(next.remaining) : null;
-          // Сервер сказал, что дальше пусто — не тянем страницы до lastPage.
-          if (!next.hasMore) break;
-        } catch {
-          archiveCache[type] = emptyArchiveEntry();
-          return;
-        } finally {
-          cache.loading = false;
+  // Полная выгрузка типа: первая страница сообщает остаток, поэтому дальше
+  // страницы идут параллельно пакетами. Результат — весь набор с нуля, без
+  // «Показать ещё». При смене пары возвращаем null, чтобы чужой набор не попал в кэш.
+  async function fetchArchiveEverything(type) {
+    const pairIdAtStart = archiveCachePairId;
+    const fetchPage = (page) => request(`/api/archive?type=${encodeURIComponent(type)}&page=${page}`);
+    const first = await fetchPage(0);
+    if (archiveCachePairId !== pairIdAtStart) return null;
+    const items = [...(first.items || [])];
+    let page = 0;
+    let hasMore = Boolean(first.hasMore);
+    const remainingRaw = Number(first.remaining);
+    const remaining = Number.isFinite(remainingRaw) ? remainingRaw : null;
+    if (hasMore) {
+      if (remaining !== null) {
+        const pages = Math.max(0, Math.ceil(remaining / ARCHIVE_PAGE_SIZE));
+        for (let start = 1; start <= pages; start += ARCHIVE_FETCH_CONCURRENCY) {
+          const batch = Array.from(
+            { length: Math.min(ARCHIVE_FETCH_CONCURRENCY, pages - start + 1) },
+            (_, i) => fetchPage(start + i)
+          );
+          const responses = await Promise.all(batch);
+          if (archiveCachePairId !== pairIdAtStart) return null;
+          for (const response of responses) items.push(...(response.items || []));
+        }
+        page = pages;
+      } else {
+        // Старый сервер без remaining: идём по hasMore, с потолком на случай
+        // бесконечной выдачи.
+        while (hasMore && page < 1000) {
+          const response = await fetchPage(++page);
+          if (archiveCachePairId !== pairIdAtStart) return null;
+          items.push(...(response.items || []));
+          hasMore = Boolean(response.hasMore);
         }
       }
+      hasMore = false;
     }
+    // Сервер мог сдвинуть запись между страницами — убираем возможные дубли.
+    const seen = new Set();
+    const unique = items.filter((item) => {
+      const id = Number(item.id);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    return { items: unique, page, hasMore: false, remaining: 0 };
+  }
+
+  // Всё, что вкладки просили бы по одному, грузится до первого render():
+  // архивы всех типов (включая все фильмы и сериалы) и полный состав каждой
+  // группы. При сбое сети тип остаётся незагруженным и догрузится при открытии.
+  async function preloadAllArchives() {
+    await Promise.all(Object.keys(archiveCache).map(async (type) => {
+      const cache = archiveCache[type];
+      if (cache.loading) return;
+      cache.loading = true;
+      try {
+        const full = await fetchArchiveEverything(type);
+        if (!full) return;
+        cache.items = full.items;
+        cache.page = full.page;
+        cache.hasMore = full.hasMore;
+        cache.remaining = full.remaining;
+      } catch {
+        // Ошибка сети — не блокируем запуск приложения.
+      } finally {
+        cache.loading = false;
+      }
+    }));
+    // Окно частей группы открывается без запроса: состав уже в памяти.
+    await Promise.all((appState?.movieGroups || []).map((group) => loadMovieGroup(group.id)));
+  }
+
+  // Партнёр мог удалить запись, завершить план или сделать дату личной, пока
+  // кэш жил в памяти. По изменившемуся состоянию фоновый refreshState молча
+  // перезагружает все загруженные типы целиком — параллельно, чтобы сверка
+  // не растягивалась на десятки последовательных запросов. Сбой сети сбрасывает
+  // тип: лучше схлопнувшийся список, чем устаревшие записи партнёра.
+  async function revalidateArchiveCache() {
+    const pairIdAtStart = archiveCachePairId;
+    await Promise.all(Object.keys(archiveCache).map(async (type) => {
+      const cache = archiveCache[type];
+      if (cache.page < 0 || cache.loading) return;
+      cache.loading = true;
+      try {
+        const full = await fetchArchiveEverything(type);
+        if (!full || archiveCachePairId !== pairIdAtStart) return;
+        cache.items = full.items;
+        cache.page = full.page;
+        cache.hasMore = full.hasMore;
+        cache.remaining = full.remaining;
+      } catch {
+        archiveCache[type] = emptyArchiveEntry();
+      } finally {
+        cache.loading = false;
+      }
+    }));
+    // Состав групп тоже мог измениться — обновляем только уже загруженные.
+    await Promise.all([...movieGroupDetails.keys()].map((id) => refreshMovieGroupDetails(id)));
   }
 
   function mergedArchive(type, recent) {
@@ -389,7 +458,7 @@
     sage: { light: "#55766a", dark: "#7ba394" },
     ocean: { light: "#4a6f8f", dark: "#7fa3c0" },
     violet: { light: "#7a5f9e", dark: "#a48cc9" },
-    amber: { light: "#b06a2c", dark: "#d3924e" }
+    amber: { light: "#9a5a24", dark: "#d3924e" }
   };
 
   function hexRgb(hex) {
@@ -404,6 +473,32 @@
     const rgb = hexRgb(hex);
     if (!rgb) return hex;
     return `rgb(${rgb.map(c => Math.max(0, Math.min(255, Math.round(c * factor)))).join(", ")})`;
+  }
+
+  // Текст на акцентной заливке (.primary, отмеченный рейтинг, галочка
+  // чекбокса группы): WCAG AA требует 4.5:1. В тёмной теме акценты светлые,
+  // поэтому белый текст на них не читается — подбираем тёмный вариант.
+  // CSS-дефолт --primary-fg задан по теме; здесь он уточняется под палитру.
+  const PRIMARY_FG_LIGHT = "#fff";
+  const PRIMARY_FG_DARK = "#292524";
+
+  function hexLuminance(hex) {
+    const rgb = hexRgb(hex);
+    if (!rgb) return null;
+    const channel = (v) => {
+      const s = v / 255;
+      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+  }
+
+  function accentPrimaryFg(hex) {
+    const lum = hexLuminance(hex);
+    if (lum === null) return PRIMARY_FG_LIGHT;
+    const lumDark = hexLuminance(PRIMARY_FG_DARK) ?? 0.02;
+    const contrastLight = 1.05 / (lum + 0.05);
+    const contrastDark = (lum + 0.05) / (lumDark + 0.05);
+    return contrastLight >= contrastDark ? PRIMARY_FG_LIGHT : PRIMARY_FG_DARK;
   }
 
   function applyAccent() {
@@ -425,7 +520,7 @@
       const palette = ACCENT_PALETTES[el.dataset.accent];
       if (palette) el.style.background = palette[dark ? "dark" : "light"];
     });
-    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-border", "--droplet-halo"];
+    const names = ["--berry", "--berry-dark", "--berry-soft", "--droplet-border", "--droplet-halo", "--primary-fg"];
     const hex = ACCENT_PALETTES[key]?.[dark ? "dark" : "light"];
     // Палитра капли (цвет подписей) читается из CSS-переменных только в
     // refresh(): хук обязан сработать ПОСЛЕ установки переменных, иначе бары
@@ -440,6 +535,7 @@
     const rgba = (alpha) => `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
     root.style.setProperty("--berry", hex);
     root.style.setProperty("--berry-dark", shadeHex(hex, 0.82));
+    root.style.setProperty("--primary-fg", accentPrimaryFg(hex));
     root.style.setProperty("--berry-soft", rgba(dark ? 0.18 : 0.14));
     root.style.setProperty("--droplet-border", dark ? "rgba(255, 255, 255, 0.16)" : rgba(0.24));
     root.style.setProperty("--droplet-halo", rgba(dark ? 0.30 : 0.22));
@@ -1673,6 +1769,160 @@
     `;
   }
 
+  // ASCII-вложение дневника: фото конвертируется локально (ascii-converter.js),
+  // на сервер уходит только готовый текст в memories.ascii_art. Состояние
+  // диалога — dialogContext.ascii: mode "none"|"set"|"delete"|"keep",
+  // art — сгенерированная строка, file — исходник для перегенерации палитры.
+  function asciiPaletteSelectHtml(selected) {
+    const conv = globalThis.AsciiConverter;
+    const keys = conv?.PALETTE_KEYS || ["detail", "classic", "blocks"];
+    const names = { detail: "Детальная", classic: "Классическая", blocks: "Блоки" };
+    return `<select class="ascii-palette" data-ascii-palette aria-label="Палитра ASCII">${keys.map((k) =>
+      `<option value="${k}"${k === selected ? " selected" : ""}>${names[k] || k}</option>`).join("")}</select>`;
+  }
+
+  function asciiQualitySelectHtml(selected) {
+    const conv = globalThis.AsciiConverter;
+    const presets = conv?.QUALITY_PRESETS || {
+      standard: { label: "Обычное" }, high: { label: "Детальное" }, max: { label: "Максимум" }
+    };
+    return `<select class="ascii-quality" data-ascii-quality aria-label="Детализация ASCII">${Object.keys(presets).map((k) =>
+      `<option value="${k}"${k === selected ? " selected" : ""}>${presets[k].label || k}</option>`).join("")}</select>`;
+  }
+
+  // Адаптивный размер шрифта ASCII: чем плотнее сетка, тем мельче символы —
+  // картинка остаётся в ширине экрана без горизонтальной прокрутки.
+  // Моноширинный глиф ~0.6em по ширине; целевая ширина ~320px.
+  function asciiFontSizeFor(art) {
+    const cols = Math.max(1, ...String(art || "").split("\n").map((r) => [...r].length));
+    return Math.max(3, Math.min(11, Math.floor(320 / (cols * 0.6))));
+  }
+
+  // HTML внутреннего содержимого блока .ascii-block по текущему состоянию.
+  function asciiBlockInnerHtml(state) {
+    const st = state || { mode: "none" };
+    const note = `<p class="ascii-note">Исходное фото не загружается. В дневнике сохранится только ASCII-версия — её увидят оба участника пары.</p>`;
+    const hiddenFile = `<input type="file" accept="image/*" data-ascii-file hidden>`;
+    const peekOf = (art) => String(art || "").split("\n").slice(0, 4).join("\n");
+    if (st.mode === "preview") {
+      return note + hiddenFile + `
+        <div class="ascii-preview" data-ascii-preview><pre class="memory-ascii-preview" data-ascii-art-pre></pre></div>
+        <div class="ascii-toolbar">
+          ${asciiPaletteSelectHtml(st.palette || "detail")}
+          ${asciiQualitySelectHtml(st.quality || "high")}
+          <button type="button" class="btn ghost" data-ascii-action="ascii-apply">Применить</button>
+          <button type="button" class="btn ghost" data-ascii-action="ascii-repick">Другое фото</button>
+          <button type="button" class="btn ghost" data-ascii-action="ascii-cancel-preview">Отмена</button>
+        </div>
+        <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
+    }
+    if (st.mode === "set" || st.mode === "keep") {
+      return note + hiddenFile + `
+        <pre class="memory-ascii-peek" data-ascii-peek style="font-size:${asciiFontSizeFor(st.art)}px">${esc(peekOf(st.art))}</pre>
+        <div class="ascii-toolbar">
+          <button type="button" class="btn ghost" data-ascii-action="ascii-replace">Заменить изображение</button>
+          <button type="button" class="btn ghost" data-ascii-action="ascii-delete">Удалить изображение</button>
+        </div>
+        <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
+    }
+    if (st.mode === "delete") {
+      return note + hiddenFile + `
+        <p class="ascii-status is-warn">Изображение будет удалено при сохранении записи.</p>
+        <div class="ascii-toolbar">
+          <button type="button" class="btn ghost" data-ascii-action="ascii-undo-delete">Вернуть изображение</button>
+          <button type="button" class="btn ghost" data-ascii-action="ascii-replace">Выбрать другое фото</button>
+        </div>
+        <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
+    }
+    return note + hiddenFile + `
+      <div class="ascii-toolbar">
+        <button type="button" class="btn ghost" data-ascii-action="ascii-pick">Добавить фото → ASCII</button>
+      </div>
+      <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
+  }
+
+  // Перерисовка только блока ASCII внутри открытого диалога: поля формы
+  // (title/body) не трогаем, иначе слетал бы ввод пользователя.
+  function renderAsciiBlock() {
+    const block = dialogFields.querySelector("[data-ascii-block]");
+    if (!block || !dialogContext?.ascii) return;
+    block.innerHTML = asciiBlockInnerHtml(dialogContext.ascii);
+    const pre = block.querySelector("[data-ascii-art-pre]");
+    if (pre && dialogContext.ascii.mode === "preview") {
+      pre.textContent = dialogContext.ascii.art || "";
+      pre.style.fontSize = asciiFontSizeFor(dialogContext.ascii.art) + "px";
+    }
+  }
+
+  function asciiStatus(text, isError) {
+    const block = dialogFields.querySelector("[data-ascii-block]");
+    const el = block?.querySelector("[data-ascii-status]");
+    if (!el) return;
+    el.textContent = text || "";
+    el.classList.toggle("is-error", Boolean(isError));
+  }
+
+  // Снимок состояния до входа в preview: нужен, чтобы «Отмена» предпросмотра
+  // и ошибка конвертации возвращали именно прежний режим и прежний art
+  // (fix-plan P0.5), а не подменённый новым файлом.
+  function asciiBackupState(ctx) {
+    if (ctx.ascii.mode !== "preview" || !ctx.ascii.backup) {
+      ctx.ascii.backup = { mode: ctx.ascii.mode, art: ctx.ascii.art };
+    }
+  }
+
+  function asciiRestoreBackup(ctx) {
+    const b = ctx.ascii.backup;
+    if (b) {
+      ctx.ascii.mode = b.mode;
+      ctx.ascii.art = b.art;
+      ctx.ascii.backup = null;
+    } else {
+      ctx.ascii.mode = ctx.ascii.hadArt ? "keep" : "none";
+    }
+  }
+
+  async function asciiConvertSelected(ctx, file) {
+    const conv = globalThis.AsciiConverter;
+    if (!conv?.fileToAscii) {
+      asciiStatus("Конвертер недоступен в этом WebView", true);
+      return;
+    }
+    // convId — защита от гонок (fix-plan P0.4): каждая новая конвертация
+    // инвалидирует предыдущую; результат устаревшей операции и операция
+    // из уже закрытого/заменённого диалога отбрасываются.
+    const convId = (ctx.ascii.convId || 0) + 1;
+    ctx.ascii.convId = convId;
+    ctx.ascii.busy = true;
+    asciiStatus("Обработка фото…");
+    const stale = () => dialogContext !== ctx || ctx.ascii.convId !== convId;
+    try {
+      const art = await conv.fileToAscii(file, { palette: ctx.ascii.palette || "detail", quality: ctx.ascii.quality || "high" });
+      // stale() проверяем ДО любых изменений состояния: устаревшая
+      // операция не имеет права сбрасывать busy актуальной (fix-plan P2).
+      if (stale()) return;
+      ctx.ascii.busy = false;
+      ctx.ascii.art = art;
+      ctx.ascii.mode = "preview";
+      renderAsciiBlock();
+    } catch (error) {
+      const code = error?.code || "";
+      const msg = code === "too-large" ? "Файл слишком большой (максимум 25 МБ)"
+        : code === "decode" ? "Не удалось прочитать изображение — попробуйте JPEG, PNG или WebP"
+        : code === "empty" ? "Изображение пустое или повреждено"
+        : "Не удалось обработать фото";
+      // Сначала восстанавливаем состояние и перерисовываем блок — иначе
+      // сообщение об ошибке сотрётся заменой innerHTML (fix-plan P0.2).
+      if (!stale()) {
+        ctx.ascii.busy = false;
+        asciiRestoreBackup(ctx);
+        renderAsciiBlock();
+        // Сообщение выводим ПОСЛЕ перерисовки: status-элемент пересоздан.
+        asciiStatus(msg, true);
+      }
+    }
+  }
+
   function memoryItem(item) {
     // Карточка кликабельна целиком (open-memory): в списке видно несколько
     // строк (line-clamp в CSS), полный текст — в диалоге чтения.
@@ -1682,6 +1932,7 @@
           <div class="item-main">
             ${item.title ? `<h3 class="item-title">${renderRichText(item.title)}</h3>` : ""}
             <p class="memory-body">${renderRichText(item.body)}</p>
+            ${item.ascii_art ? `<pre class="memory-ascii-peek">${esc(String(item.ascii_art).split("\n").slice(0, 3).join("\n"))}</pre>` : ""}
             <div class="item-meta">
               <span class="memory-author">${esc(item.display_name || "Партнёр")}</span>
               <span>· ${esc(formatDay(item.day))}</span>
@@ -1700,8 +1951,20 @@
     const canEdit = editable && item.owner_id === appState.user.tg_id;
     // «Скопировать» — чтение, доступно обоим партнёрам: мутации (исполнено/
     // правка/удаление) остаются только владельцу, копирование — всем.
+    // Без ссылки в меню только «Скопировать название»; со ссылкой —
+    // название, ссылка и всё вместе (прежнее поведение одним пунктом).
+    const hasUrl = Boolean(String(item.url || "").trim());
+    const shareButtons = hasUrl
+      ? [
+          itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "name", label: "Скопировать название", icon: LINK_TEXT_ICON }),
+          itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "url", label: "Скопировать ссылку", icon: LINK_TEXT_ICON }),
+          itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "all", label: "Скопировать все", icon: COPY_ICON })
+        ]
+      : [
+          itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "name", label: "Скопировать название", icon: LINK_TEXT_ICON })
+        ];
     const actions = [
-      itemActionButton({ action: "share-wish", type: "wishes", id: item.id, label: "Скопировать название и ссылку", icon: COPY_ICON }),
+      ...shareButtons,
       ...(canEdit ? [
         itemActionButton({ action: "done-item", type: "wishes", id: item.id, label: "Исполнено", icon: DONE_ICON }),
         itemActionButton({ action: "edit-item", type: "wishes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
@@ -1729,6 +1992,17 @@
     const body = String(wish?.body || "").trim();
     const comment = String(wish?.comment || "").trim();
     const url = String(wish?.url || "").trim();
+    return [body, comment, url].filter(Boolean).join("\n");
+  }
+
+  // Части «Поделиться» из меню ⋮: name — название с уточнением без ссылки,
+  // url — только ссылка, all — всё вместе (прежний wishShareText целиком).
+  function wishSharePart(wish, part) {
+    const body = String(wish?.body || "").trim();
+    const comment = String(wish?.comment || "").trim();
+    const url = String(wish?.url || "").trim();
+    if (part === "name") return [body, comment].filter(Boolean).join("\n");
+    if (part === "url") return url;
     return [body, comment, url].filter(Boolean).join("\n");
   }
 
@@ -1760,6 +2034,10 @@
   // «копировать» — два перекрывающихся листа — вместо значка «поделиться»
   // из трёх кружков, который читался как шаринг, а не как копирование.
   const COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.2"/><path d="M5.5 15H4.8A1.8 1.8 0 0 1 3 13.2V4.8A1.8 1.8 0 0 1 4.8 3h8.4A1.8 1.8 0 0 1 15 4.8v.7"/></svg>';
+  // Частичное копирование желания: «название» и «ссылка» получают составную
+  // иконку «звено цепочки + строки текста» — она отличается от классического
+  // значка копирования, который остаётся только у «Скопировать все».
+  const LINK_TEXT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><g transform="translate(4.4 -0.4) scale(0.62)"><path d="M9.5 14.5a4.24 4.24 0 0 0 6 0l3.2-3.2a4.24 4.24 0 1 0-6-6L11.5 6.5"/><path d="M14.5 9.5a4.24 4.24 0 0 0-6 0l-3.2 3.2a4.24 4.24 0 1 0 6 6l1.2-1.2"/></g><path d="M4.5 15.5h15M4.5 18.5h10M4.5 21h13"/></svg>';
   // Закладка «Остановились»: место, с которого продолжат просмотр.
   const RESUME_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4.2L5 21V4.5a1 1 0 0 1 1-1Z"/></svg>';
 
@@ -1767,11 +2045,12 @@
   // data-id/data-url добавляются только когда заданы — у deposit-saving и
   // open-url своих атрибутов нет.
   function itemActionButton(opts) {
-    const { action, type, id, url, label, icon } = opts;
+    const { action, type, id, url, label, icon, part } = opts;
     const typeAttr = type !== undefined ? ` data-type="${esc(type)}"` : "";
     const idAttr = id !== undefined ? ` data-id="${esc(id)}"` : "";
     const urlAttr = url !== undefined ? ` data-url="${esc(url)}"` : "";
-    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
+    const partAttr = part !== undefined ? ` data-part="${esc(part)}"` : "";
+    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}${partAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
   }
 
   // Меню действий карточки: в правом верхнем углу — «⋮» без кнопочной
@@ -6925,33 +7204,135 @@
     });
   }
 
-  // «Остановились»: текстовая точка прерванного просмотра — у фильма время
-  // («1:23:45»), у сериала серия и/или момент («2 сезон, 5 серия · 34:12»).
-  // Пустое поле при сохранении снимает отметку (position: null).
+  // «Остановились»: у фильма — одна строка времени («1:23:45»), у сериала —
+  // сезон и серия из состава TMDB плюс необязательное время. Пустое время у
+  // фильма снимает отметку (position: null); у сериала сброс — отдельной кнопкой.
+  function movieResumeParse(position) {
+    const text = String(position || "").trim();
+    const season = /(\d+)\s*сезон(?:а|ов)?/i.exec(text);
+    const episode = /(\d+)\s*сер(?:ия|ии|ий)/i.exec(text);
+    const time = /\d{1,3}:\d{2}(?::\d{2})?/.exec(text)?.[0] || "";
+    return {
+      season: season ? Number(season[1]) : null,
+      episode: episode ? Number(episode[1]) : null,
+      time: time || (!season && !episode ? text : "")
+    };
+  }
+
+  function movieResumeEpisodeOptions(count, selected) {
+    const total = Math.max(0, Math.floor(Number(count) || 0));
+    if (!total) return `<option value="" selected disabled>Нет данных о сериях</option>`;
+    const options = [];
+    if (selected == null) options.push(`<option value="" selected disabled>Выберите серию</option>`);
+    for (let episode = 1; episode <= Math.min(total, 500); episode += 1) {
+      options.push(`<option value="${episode}"${episode === selected ? " selected" : ""}>${episode}</option>`);
+    }
+    return options.join("");
+  }
+
+  // Серия — выпадающий список, когда TMDB отдал episode_count сезона; без него
+  // остаётся числовой ввод, иначе обязательный пустой select блокировал бы
+  // сохранение точки просмотра.
+  function movieResumeEpisodeControl(count, selected) {
+    const total = Math.max(0, Math.floor(Number(count) || 0));
+    if (total > 0) {
+      return `<select name="episode" required data-resume-episode>${movieResumeEpisodeOptions(total, selected)}</select>`;
+    }
+    return `<input name="episode" type="number" min="1" step="1" inputmode="numeric" required data-fmt="none" data-resume-episode value="${Number.isInteger(selected) ? selected : ""}" placeholder="Номер серии">`;
+  }
+
+  function movieResumeSeriesFields(movie, options, parsed) {
+    const seasons = (options?.seasons || []).filter((season) => Number(season?.season) > 0);
+    // Без состава TMDB и без числа сезонов в карточке остаётся старый свободный
+    // ввод — иначе точку просмотра для такого сериала было бы не сохранить.
+    if (!seasons.length) {
+      return `<label class="field"><span>Время остановки</span>
+        <input name="position" type="text" data-fmt="none" maxlength="60" autocomplete="off" value="${esc(movie.resume_position || "")}" placeholder="Например: 2 сезон, 5 серия · 34:12"></label>
+        <p class="settings-hint">Не удалось получить состав сериала — укажите точку просмотра текстом.</p>`;
+    }
+    const selectedSeason = seasons.some((season) => Number(season.season) === parsed.season) ? parsed.season : null;
+    const seasonOption = seasons.find((season) => Number(season.season) === selectedSeason) || null;
+    const episodeCount = seasonOption?.episodes ?? (seasonOption ? options?.episodes_total : null);
+    const episodeSelected = selectedSeason && parsed.episode && Number(parsed.episode) <= Number(episodeCount) ? parsed.episode : null;
+    const seasonOptions = seasons.map((season) => `<option value="${Number(season.season)}"${Number(season.season) === selectedSeason ? " selected" : ""}>Сезон ${Number(season.season)}</option>`).join("");
+    const episodeControl = selectedSeason
+      ? movieResumeEpisodeControl(episodeCount, episodeSelected)
+      : `<select name="episode" required data-resume-episode><option value="" selected disabled>Сначала выберите сезон</option></select>`;
+    return `
+      <label class="field"><span>Сезон</span>
+        <select name="season" required data-resume-season>
+          <option value="" disabled${selectedSeason ? "" : " selected"}>Выберите сезон</option>
+          ${seasonOptions}
+        </select></label>
+      <label class="field"><span>Серия</span>${episodeControl}</label>
+      <label class="field"><span>Время остановки (не обязательно)</span>
+        <input name="position" type="text" data-fmt="none" maxlength="60" autocomplete="off" value="${esc((parsed.time || "").slice(0, 60))}" placeholder="Например: 34:12"></label>
+      <p class="settings-hint">Отметка появится чипом в карточке.</p>
+    `;
+  }
+
+  function movieResumeCompose(movie, formData) {
+    const time = String(formData.get("position") || "").trim();
+    if (movie?.kind !== "series") return time || null;
+    // Запасной текстовый вариант: полей season/episode в форме нет.
+    if (formData.get("season") == null || formData.get("episode") == null) return time || null;
+    const season = Number(formData.get("season"));
+    const episode = Number(formData.get("episode"));
+    if (!Number.isInteger(season) || season <= 0 || !Number.isInteger(episode) || episode <= 0) {
+      throw new Error("Выберите сезон и серию");
+    }
+    const label = `${season} ${plural(season, "сезон", "сезона", "сезонов")}, ${episode} ${plural(episode, "серия", "серии", "серий")}`;
+    return time ? `${label} · ${time}` : label;
+  }
+
   function openMovieResumeDialog(movie) {
-    openDialog({
+    const parsed = movieResumeParse(movie.resume_position);
+    const save = async (position) => {
+      appState = await request(`/api/movies/${movie.id}/resume`, {
+        method: "POST",
+        body: { position }
+      });
+      if (movie.group_id) movieGroupDetails.delete(movie.group_id);
+      haptic();
+      showToast(position ? "Точка просмотра сохранена" : "Отметка снята");
+      revalidateArchiveCache();
+      return appState;
+    };
+    if (movie.kind !== "series") {
+      openDialog({
+        title: "Остановились",
+        fields: `<label class="field"><span>Время остановки</span>
+          <input name="position" type="text" data-fmt="none" maxlength="60" autocomplete="off" value="${esc(movie.resume_position || "")}" placeholder="Например: 1:23:45"></label>
+          <p class="settings-hint">Отметка появится чипом в карточке.</p>`,
+        submitLabel: "Сохранить",
+        onSubmit: async (formData) => save(movieResumeCompose(movie, formData))
+      });
+      return;
+    }
+    const config = {
       title: "Остановились",
-      fields: `
-        <label class="field"><span>На чём остановились</span>
-          <input name="position" type="text" data-fmt="none" maxlength="120" autocomplete="off" value="${esc(movie.resume_position || "")}" placeholder="Например: 1:23:45 или 2 сезон, 5 серия · 34:12"></label>
-        <p class="settings-hint">${movie.kind === "series"
-          ? "Для сериала удобно указать сезон, серию и время — например «2 сезон, 5 серия · 34:12»."
-          : "Укажите время, на котором остановились, — например «1:23:45»."} Отметка появится чипом в карточке.</p>
-      `,
+      fields: `<p class="movie-details-empty">Загружаем сезоны и серии…</p>`,
       submitLabel: "Сохранить",
+      resumeOptions: null,
       onSubmit: async (formData) => {
-        const position = String(formData.get("position") || "").trim();
-        appState = await request(`/api/movies/${movie.id}/resume`, {
-          method: "POST",
-          body: { position: position || null }
-        });
-        if (movie.group_id) movieGroupDetails.delete(movie.group_id);
-        haptic();
-        showToast(position ? "Точка просмотра сохранена" : "Отметка снята");
-        revalidateArchiveCache();
-        return appState;
+        if (!config.resumeOptions) throw new Error("Дождитесь загрузки сезонов и серий");
+        return save(movieResumeCompose(movie, formData));
       }
-    });
+    };
+    openDialog(config);
+    dialogSubmit.disabled = true;
+    const context = dialogContext;
+    request(`/api/movies/${movie.id}/resume-options`)
+      .then((data) => {
+        if (dialogContext !== context || !dialog.open) return;
+        config.resumeOptions = data || {};
+        dialogFields.innerHTML = movieResumeSeriesFields(movie, config.resumeOptions, parsed);
+        dialogSubmit.disabled = false;
+      })
+      .catch((error) => {
+        if (dialogContext !== context || !dialog.open) return;
+        dialogFields.innerHTML = `<p class="movie-details-empty">${esc(error?.message || "Не удалось загрузить состав сериала")}</p>`;
+      });
   }
 
   // Статусы TMDB — по-русски; неизвестные не показываем.
@@ -7060,12 +7441,20 @@
     const genre = movie.genres ? String(movie.genres).split(",")[0].trim() : "";
     const yearPill = movie.year ? `<span class="day-chip is-muted">${esc(movie.year)}</span>` : "";
     const length = formatMovieLength(movie);
+    // Карточка — обычный контейнер: внутри неё живут самостоятельные кнопки
+    // (просмотрено, ссылка, удалить…), поэтому role="button" на <article>
+    // вложил бы интерактив в интерактив. Тап по фону по-прежнему работает
+    // через data-action, а клавиатурное открытие даёт кнопка в заголовке.
+    const openAction = selecting ? "group-toggle-movie" : "open-movie";
+    const openLabel = selecting
+      ? (selected ? "Снять выбор" : "Выбрать для группы")
+      : "Открыть описание";
     return `
-      <article class="card movie-card${watched ? " movie-watched" : ""}${selecting ? " is-selecting" : ""}${selected ? " is-selected" : ""}" data-action="${selecting ? "group-toggle-movie" : "open-movie"}" data-id="${movie.id}" role="button" tabindex="0" aria-label="${selecting ? (selected ? "Снять выбор" : "Выбрать для группы") : "Открыть описание"}: ${esc(movie.title)}">
+      <article class="card movie-card${watched ? " movie-watched" : ""}${selecting ? " is-selecting" : ""}${selected ? " is-selected" : ""}" data-action="${openAction}" data-id="${movie.id}">
         ${checkHtml}
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${esc(movie.title)}</h3>
+            <h3 class="item-title"><button class="movie-title-open" type="button" data-action="${openAction}" data-id="${movie.id}" aria-label="${openLabel}: ${esc(movie.title)}">${esc(movie.title)}</button></h3>
             ${genre || movie.year ? `<div class="item-meta">${genre ? `<span class="day-chip is-muted">${esc(genre)}</span>` : ""}${yearPill}</div>` : ""}
             <div class="item-meta">
               ${ratingPill(movie.rating, movie.rating_source)}
@@ -7134,9 +7523,9 @@
   function renderMoviePick(movie) {
     const length = formatMovieLength(movie);
     return `
-      <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${movie.id}" role="button" tabindex="0" aria-label="Открыть описание: ${esc(movie.title)}">
+      <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${movie.id}">
         <p class="eyebrow">Вам выпало</p>
-        <h2 class="place-pick-title">${esc(movie.title)}</h2>
+        <h2 class="place-pick-title"><button class="movie-title-open" type="button" data-action="open-movie" data-id="${movie.id}" aria-label="Открыть описание: ${esc(movie.title)}">${esc(movie.title)}</button></h2>
         <div class="item-meta">
           ${ratingPill(movie.rating, movie.rating_source)}
           ${length ? `<span>${esc(length)}</span>` : ""}
@@ -7324,6 +7713,7 @@
       year: anchor.year,
       rating: anchor.rating,
       runtime: anchor.runtime,
+      episodes: anchor.episodes,
       genres: anchor.genres,
       kind: anchor.kind,
       pair_rating: entry.group.sort_raofp
@@ -7432,19 +7822,26 @@
     return null;
   }
 
-  // Свёрнутая/раскрытая карточка-стопка. Виды стопки: 2 видимые части — один
-  // задний слой, 3+ — два, одна — без слоёв. Слои декоративные: aria-hidden,
+  // Действия карточек в окне состава группы. Они ведут себя как в обычном
+  // списке, но открывают своё окно — нативный <dialog> не умеет вложенный
+  // showModal, поэтому окно состава закрывается перед переходом.
+  const MOVIE_CARD_DIALOG_ACTIONS = new Set([
+    "open-movie", "movie-watched", "movie-unwatched", "movie-resume",
+    "movie-resume-clear", "delete-item", "rate-movie", "open-url"
+  ]);
+
+  // Карточка-стопка группы. Состав открывается окном поверх списка, сама
+  // карточка всегда свёрнута. Виды стопки: 2 видимые части — один задний
+  // слой, 3+ — два, одна — без слоёв. Слои декоративные: aria-hidden,
   // клики не перехватывают.
   function renderMovieGroup(entry, view) {
-    const { group, members } = entry;
-    const expanded = expandedMovieGroups.has(group.id);
-    const total = Number(group.total_count) || members.length;
+    const { group } = entry;
+    const total = Number(group.total_count) || entry.members.length;
     const watched = Number(group.watched_count) || 0;
     const open = Number(group.open_count) || 0;
     const percent = Math.min(100, Math.max(0, Number(group.watched_percent) || 0));
     const noun = movieGroupNoun(group, total);
     const typeLabel = MOVIE_GROUP_TYPE_LABELS[group.group_type] || MOVIE_GROUP_TYPE_LABELS.collection;
-    const visibleCount = members.length;
     // Кнопка и стопка считаются по полной сводке сервера, а не по первой
     // загруженной странице: часть может лежать глубже архива. Счётчики по
     // статусу+типу приходят из movieGroupSummaries; если старый state их не
@@ -7461,52 +7858,26 @@
       : Number(rawAvailable);
     const countForUi = availableCount ?? total;
     const layers = countForUi >= 3 ? 2 : countForUi === 2 ? 1 : 0;
-    const membersDomId = `movie-group-members-${String(group.id).replace(/[^A-Za-z0-9_-]/g, "")}`;
+    // Слои перечислены от самого глубокого (последнего) к ближайшему
+    // к передней карточке: при одинаковом z-index DOM-порядок решает, кто
+    // сверху, и передний слой остаётся первым видимым краем справа.
+    // --layer задаёт геометрию: чем больше номер, тем сильнее сдвиг вправо
+    // и тем меньше слой, то есть размеры убывают от первой карточки к последней.
     const layerHtml = layers
-      ? Array.from({ length: layers }, (_, i) =>
-          `<div class="movie-group-stack__layer" style="--layer:${i + 1}" aria-hidden="true"></div>`).join("")
+      ? Array.from({ length: layers }, (_, i) => layers - i)
+          .map((layer) =>
+            `<div class="movie-group-stack__layer" style="--layer:${layer}" aria-hidden="true"></div>`).join("")
       : "";
     const metaChips = [
       `<span class="day-chip is-muted">${esc(typeLabel)}</span>`,
       `<span class="day-chip is-muted">${total} ${esc(noun)} · ${watched} из ${total} просмотрено</span>`
     ].join("");
-    const shownNote = countForUi > visibleCount
-      ? `<span class="movie-group-shown">Показано ${visibleCount} из ${countForUi}</span>`
-      : "";
-    const statusNote = view === "open" && open > 0
-      ? `<span>${open} ${esc(plural(open, "часть", "части", "частей"))} ещё в планах</span>`
-      : "";
-    const toggleLabel = expanded
-      ? "Скрыть части"
-      : availableCount === null
-        ? "Показать части"
-        : `Показать ${availableCount} ${esc(plural(availableCount, "часть", "части", "частей"))}`;
-    let bodyInner = "";
-    if (expanded) {
-      const detail = movieGroupDetails.get(group.id);
-      if (!detail || detail.status === "loading") {
-        bodyInner = `<p class="movie-suggest-hint">Загружаем части группы…</p>`;
-      } else if (detail.status === "error") {
-        bodyInner = `
-          <p class="movie-suggest-hint">Не удалось загрузить части группы.</p>
-          <button class="secondary full" type="button" data-action="movie-group-retry" data-id="${esc(group.id)}">Повторить</button>`;
-      } else {
-        const items = (detail.items || []).filter((movie) => {
-          if ((Number(movie.watched) === 1) !== wantWatched) return false;
-          if (kind !== "all" && (movie.kind === "series" ? "series" : "movie") !== kind) return false;
-          return true;
-        });
-        bodyInner = items.length
-          ? items.map(movieItem).join("")
-          : `<p class="movie-suggest-hint">Под фильтр ничего не попало.</p>`;
-      }
-    }
-    // Контейнер существует всегда: aria-controls указывает на реальный id
-    // и в свёрнутом состоянии. Декоративные слои скрыты от скринридера.
-    const body = `<div class="movie-group-members" id="${membersDomId}"${expanded ? "" : " hidden"}>${bodyInner}</div>`;
+    const buttonLabel = availableCount === null
+      ? "Показать части"
+      : `Показать ${availableCount} ${esc(plural(availableCount, "часть", "части", "частей"))}`;
     return `
-      <div class="movie-group${expanded ? " is-expanded" : ""}" data-group-id="${esc(group.id)}">
-        <div class="movie-group-stack">
+      <div class="movie-group" data-group-id="${esc(group.id)}">
+        <div class="movie-group-stack" data-layers="${layers}">
           ${layerHtml}
           <article class="card movie-group-card">
             <div class="item-row">
@@ -7522,21 +7893,65 @@
               aria-valuetext="${watched} из ${total} просмотрено">
               <div class="movie-group-progress-bar" style="width:${percent}%"></div>
             </div>
-            <div class="item-meta movie-group-foot-meta">
-              ${statusNote}${shownNote}
-            </div>
-            <button class="secondary full card-action" type="button" data-action="movie-group-toggle" data-id="${esc(group.id)}"
-              aria-expanded="${expanded ? "true" : "false"}" aria-controls="${membersDomId}">${toggleLabel}</button>
+            <button class="secondary full card-action" type="button" data-action="movie-group-open" data-id="${esc(group.id)}"
+              data-view="${esc(view)}" aria-haspopup="dialog">${buttonLabel}</button>
           </article>
         </div>
-        ${body}
-        ${expanded ? `
-          <div class="movie-group-actions">
-            <button class="secondary full" type="button" data-action="movie-group-add-part" data-id="${esc(group.id)}">Добавить часть</button>
-            <button class="secondary full" type="button" data-action="movie-group-manage" data-id="${esc(group.id)}">Управлять группой</button>
-          </div>` : ""}
       </div>
     `;
+  }
+
+  // Части группы для текущего вида: фильтруются по тому же статусу и типу,
+  // что и сам список, — окно показывает ровно то, что обещала кнопка.
+  function movieGroupPartItems(groupId, view) {
+    const kind = movieKindFilter[view] || "all";
+    const wantWatched = view === "watched";
+    const items = movieGroupDetails.get(groupId)?.items || [];
+    return items.filter((movie) => {
+      if ((Number(movie.watched) === 1) !== wantWatched) return false;
+      if (kind !== "all" && (movie.kind === "series" ? "series" : "movie") !== kind) return false;
+      return true;
+    });
+  }
+
+  // Заполняет уже открытое окно составом группы: загрузка, ошибка с повтором
+  // или карточки частей через общий movieItem. Ответ игнорируется, если окно
+  // успели закрыть или заменить другим (как в openMovieDetails).
+  function renderMovieGroupParts(groupId, view, context) {
+    if (dialogContext !== context || !dialog.open) return;
+    const detail = movieGroupDetails.get(groupId);
+    if (!detail || detail.status === "loading") {
+      dialogFields.innerHTML = `<p class="movie-suggest-hint">Загружаем части группы…</p>`;
+      return;
+    }
+    if (detail.status === "error") {
+      dialogFields.innerHTML = `
+        <p class="movie-suggest-hint">Не удалось загрузить части группы.</p>
+        <button class="secondary full" type="button" data-action="movie-group-retry" data-id="${esc(groupId)}" data-view="${esc(view)}">Повторить</button>`;
+      return;
+    }
+    const items = movieGroupPartItems(groupId, view);
+    dialogFields.innerHTML = items.length
+      ? `<div class="movie-group-members">${items.map(movieItem).join("")}</div>`
+      : `<p class="movie-suggest-hint">Под фильтр ничего не попало.</p>`;
+  }
+
+  // Окно со списком частей: те же openDialog/movieItem, что и у обычных
+  // карточек. Полный состав грузится с сервера — часть может лежать за
+  // пределами первой страницы и загруженного архива.
+  async function openMovieGroupParts(groupId, view = "open") {
+    const group = movieGroupMap().get(groupId);
+    openDialog({
+      title: group?.title || "Части группы",
+      fields: `<p class="movie-suggest-hint">Загружаем части группы…</p>`,
+      submitLabel: null,
+      readOnly: true,
+      cancelLabel: "Закрыть",
+      groupParts: { groupId, view }
+    });
+    const context = dialogContext;
+    await loadMovieGroup(groupId);
+    renderMovieGroupParts(groupId, view, context);
   }
 
   // Режим выбора фильмов для создания группы: чекбоксы на подходящих
@@ -7848,7 +8263,6 @@
   async function finishGroupPartAdd(groupId, returnToManager, message, sourceGroupId) {
     if (sourceGroupId) {
       movieGroupDetails.delete(sourceGroupId);
-      expandedMovieGroups.delete(sourceGroupId);
       if (movieGroupMap().has(sourceGroupId)) await loadMovieGroup(sourceGroupId);
     }
     await afterGroupPartAdded(groupId, returnToManager, message);
@@ -7900,21 +8314,24 @@
   }
 
   function renderMoviesList() {
+    // Панель выбора для группы живёт вне веток списков: режим выбора может
+    // быть активен и при пустом «Просмотрено»/пустом результате фильтра —
+    // иначе «Отмена» пропадает, а выбор остаётся в памяти.
+    const archive = archiveMoreHtml("movies", (appState.movies || []).length);
     if (moviesView === "watched") {
       const all = watchedMovies();
       if (!all.length) {
         return `<section class="card"><h3>Пока ничего не просмотрено</h3><p>Отметьте фильм просмотренным в «В планах» — он появится здесь</p></section>`
-          + archiveMoreHtml("movies", (appState.movies || []).length);
+          + movieGroupSelectionHtml() + archive;
       }
       const watched = filterMoviesByKind(all, "watched");
       // Пустой результат фильтра не прячет панель сортировки — иначе
       // пользователь не смог бы вернуться к «Все» без смены вида.
       if (!watched.length) return movieSortBar("watched", 0) + movieEmptyByKind("watched")
-        + archiveMoreHtml("movies", (appState.movies || []).length);
+        + movieGroupSelectionHtml() + archive;
       const entries = sortMovieEntries(buildMovieEntries(watched), "watched");
       return movieSortBar("watched", watched.length) + movieEntriesHtml(entries, "watched")
-        + movieGroupSelectionHtml()
-        + archiveMoreHtml("movies", (appState.movies || []).length);
+        + movieGroupSelectionHtml() + archive;
     }
     return renderOpenMovies();
   }
@@ -7973,8 +8390,10 @@
       html += open.length
         ? movieEntriesHtml(sortMovieEntries(buildMovieEntries(open), "open"), "open")
         : movieEmptyByKind("open");
-      html += movieGroupSelectionHtml();
     }
+    // Панель выбора показываем и при пустом списке «В планах»: иначе при
+    // активном режиме выбора пользователь теряет кнопку «Отмена».
+    html += movieGroupSelectionHtml();
     return html + archiveMoreHtml("movies", (appState.movies || []).length);
   }
 
@@ -8670,6 +9089,9 @@
       // submitLabel === null — режим чтения (просмотр дневника): без кнопки
       // сохранения, только «Закрыть».
       dialogSubmit.hidden = config.submitLabel === null;
+      // Диалоги, которые грузят данные перед сабмитом («Остановились» у сериала),
+      // могут оставить кнопку выключенной — следующее окно обязано стартовать чистым.
+      dialogSubmit.disabled = false;
     }
     if (dialogCancel) dialogCancel.textContent = config.cancelLabel ?? "Отмена";
     hideDialogError();
@@ -8784,6 +9206,19 @@
       const other = form?.querySelector(`input[name="${target.dataset.excludes}"]`);
       if (other && target.checked) other.checked = false;
     }
+  });
+
+  // «Остановились» у сериала: сезон определяет список серий в следующем поле.
+  // Слушатель один на постоянный #dialog-fields — как input-обработчик выше.
+  dialogFields.addEventListener("change", (e) => {
+    const seasonSelect = e.target.closest?.("select[data-resume-season]");
+    if (!seasonSelect || !dialogContext?.resumeOptions) return;
+    const episodeControl = dialogFields.querySelector("[data-resume-episode]");
+    if (!episodeControl) return;
+    const season = Number(seasonSelect.value);
+    const seasonOption = (dialogContext.resumeOptions.seasons || []).find((item) => Number(item?.season) === season);
+    const count = seasonOption?.episodes ?? dialogContext.resumeOptions.episodes_total;
+    episodeControl.outerHTML = movieResumeEpisodeControl(count, null);
   });
 
   // ------------------------------------------------------------------
@@ -8963,6 +9398,36 @@
   }
 
   dialogFields.addEventListener("click", async (e) => {
+    // ASCII-блок дневника: выбор файла, превью, применение/отмена.
+    const asciiBtn = e.target.closest?.("[data-ascii-action]");
+    if (asciiBtn && dialogContext?.ascii) {
+      const ctx = dialogContext;
+      const action = asciiBtn.dataset.asciiAction;
+      if (ctx.ascii.busy) return;
+      if (action === "ascii-pick" || action === "ascii-replace") {
+        // mode/art/hadArt не трогаем до фактического выбора файла: отмена
+        // picker обязана оставить прежнее вложение как есть (fix-plan P0.1).
+        const input = dialogFields.querySelector("[data-ascii-file]");
+        input?.click();
+      } else if (action === "ascii-apply") {
+        ctx.ascii.mode = "set";
+        ctx.ascii.hadArt = true;
+        renderAsciiBlock();
+      } else if (action === "ascii-repick") {
+        const input = dialogFields.querySelector("[data-ascii-file]");
+        input?.click();
+      } else if (action === "ascii-cancel-preview") {
+        asciiRestoreBackup(ctx);
+        renderAsciiBlock();
+      } else if (action === "ascii-delete") {
+        ctx.ascii.mode = "delete";
+        renderAsciiBlock();
+      } else if (action === "ascii-undo-delete") {
+        ctx.ascii.mode = "keep";
+        renderAsciiBlock();
+      }
+      return;
+    }
     const stepBtn = e.target.closest?.("[data-action='add-goal-step'], [data-action='remove-goal-step']");
     if (stepBtn) {
       if (stepBtn.dataset.action === "add-goal-step") addGoalStepRow();
@@ -9080,12 +9545,50 @@
       operation.context.busy = false;
     }
   });
+  // Выбор файла и смена палитры внутри ASCII-блока дневника.
+  dialogFields.addEventListener("change", async (e) => {
+    if (!dialogContext?.ascii) return;
+    const ctx = dialogContext;
+    if (e.target.matches?.("[data-ascii-file]")) {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      if (ctx.ascii.busy) return; // параллельная конвертация запрещена (P0.4)
+      ctx.ascii.file = file;
+      asciiBackupState(ctx);
+      await asciiConvertSelected(ctx, file);
+      return;
+    }
+    if (e.target.matches?.("[data-ascii-palette]") || e.target.matches?.("[data-ascii-quality]")) {
+      const isQuality = e.target.matches("[data-ascii-quality]");
+      const key = isQuality ? "quality" : "palette";
+      const fallback = isQuality ? "high" : "detail";
+      if (ctx.ascii.busy) {
+        // Пока идёт конвертация, смена параметров отклоняется — иначе старый
+        // запрос вернул бы результат не под те настройки (P0.4).
+        e.target.value = ctx.ascii[key] || fallback;
+        return;
+      }
+      ctx.ascii[key] = e.target.value || fallback;
+      // Перегенерируем из сохранённого File: исходник на сервер не уходил,
+      // поэтому он ещё доступен, пока диалог открыт.
+      if (ctx.ascii.mode === "preview" && ctx.ascii.file) {
+        await asciiConvertSelected(ctx, ctx.ascii.file);
+      }
+    }
+  });
   dialogForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!dialogContext || dialogSubmitting) return;
     // Диалог-«пикер» (поиск фильмов, история копилки): без кнопки сохранения,
     // Enter и прочие нативные сабмиты не должны его закрывать.
     if (dialogContext.readOnly) return;
+    // ASCII-конвертация ещё идёт: сохранять нельзя — иначе запись уйдёт без
+    // ожидаемого вложения (fix-plan P0.3).
+    if (dialogContext.ascii?.busy) {
+      asciiStatus("Дождитесь окончания обработки изображения", true);
+      return;
+    }
     // Страховка к нативной проверке: required/type=date должны остановить
     // отправку до запроса к API. reportValidity показывает то же сообщение
     // браузера и работает, даже если атрибут novalidate когда-нибудь вернут.
@@ -9307,6 +9810,9 @@
     // Любое действие, кроме самого тоггла, закрывает открытые меню —
     // пункт меню и так свой data-action, меню к моменту dispatch уже скрыто.
     if (action !== "item-menu-toggle") closeItemMenus();
+    // Карточка в окне состава ведёт себя как обычная карточка кино.
+    // Закрываем состав перед открытием нового окна — вложенный showModal недопустим.
+    if (dialog?.open && dialogContext?.groupParts && MOVIE_CARD_DIALOG_ACTIONS.has(action)) dialog.close();
 
     try {
       if (["add-task", "add-goal", "add-date", "add-memory", "add-wish", "add-quote", "add-place", "add-trip", "add-movie", "add-saving", "add-birthday", "add-contact"].includes(action) && partnerMissing()) {
@@ -9495,10 +10001,16 @@
         });
       } else if (action === "add-memory") {
         openDialog({
+          ascii: { mode: "none", art: null, file: null, palette: "detail", quality: "high", busy: false, hadArt: false },
           title: "Запись в дневник",
           fields: `<label class="field"><span>Заголовок</span><input name="title" data-fmt="none" maxlength="180" required placeholder="Тёплый вечер у реки"></label>
-           <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required placeholder="Сегодня был тёплый вечер…"></textarea></label>`,
-          onSubmit: (fd) => request("/api/memories", { method: "POST", body: { title: fd.get("title"), body: fd.get("body") } })
+           <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required placeholder="Сегодня был тёплый вечер…"></textarea></label>
+           <div class="ascii-block" data-ascii-block>${asciiBlockInnerHtml({ mode: "none" })}</div>`,
+          onSubmit: (fd) => {
+            const body = { title: fd.get("title"), body: fd.get("body") };
+            if (dialogContext?.ascii?.mode === "set" && dialogContext.ascii.art) body.ascii_art = dialogContext.ascii.art;
+            return request("/api/memories", { method: "POST", body });
+          }
         });
       } else if (action === "add-wish") {
         openDialog({
@@ -9744,22 +10256,16 @@
         render();
       } else if (action === "group-create") {
         openMovieGroupCreateDialog();
-      } else if (action === "movie-group-toggle") {
-        const id = btn.dataset.id;
-        if (expandedMovieGroups.has(id)) {
-          expandedMovieGroups.delete(id);
-        } else {
-          expandedMovieGroups.add(id);
-          loadMovieGroup(id).then(() => {
-            // Ответ мог прийти после сворачивания/ухода — перерисовываем
-            // только если группа всё ещё раскрыта.
-            if (expandedMovieGroups.has(id) && currentTab === "tasks") render();
-          });
-        }
-        render();
+      } else if (action === "movie-group-open") {
+        openMovieGroupParts(btn.dataset.id, btn.dataset.view || "open");
       } else if (action === "movie-group-retry") {
-        movieGroupDetails.delete(btn.dataset.id);
-        loadMovieGroup(btn.dataset.id).then(() => render());
+        // Повтор внутри уже открытого окна: перезапрашиваем состав с сервера
+        // и заполняем то же окно, не открывая второй modal-диалог.
+        const groupId = btn.dataset.id;
+        const view = btn.dataset.view || "open";
+        const context = dialogContext;
+        movieGroupDetails.delete(groupId);
+        loadMovieGroup(groupId, { force: true }).then(() => renderMovieGroupParts(groupId, view, context));
       } else if (action === "movie-group-menu" || action === "movie-group-manage") {
         openMovieGroupManager(btn.dataset.id);
       } else if (action === "movie-group-add-part") {
@@ -9808,7 +10314,6 @@
           onSubmit: async () => {
             appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}/items/${movieId}`, { method: "DELETE" });
             movieGroupDetails.delete(groupId);
-            expandedMovieGroups.delete(groupId);
             if (!groupStillExists()) movieGroupDraft = null;
             return appState;
           },
@@ -9831,7 +10336,6 @@
           onSubmit: async () => {
             appState = await request(`/api/movie-groups/${encodeURIComponent(groupId)}`, { method: "DELETE" });
             movieGroupDetails.delete(groupId);
-            expandedMovieGroups.delete(groupId);
             movieGroupDraft = null;
             showToast("Группа расформирована — фильмы остались в списке");
             return appState;
@@ -10053,6 +10557,7 @@
           title: "Запись дневника",
           fields: `
             ${item.title ? `<h3 class="memory-view-title">${renderRichText(item.title)}</h3>` : ""}
+            ${item.ascii_art ? `<pre class="memory-ascii-art" style="font-size:${asciiFontSizeFor(item.ascii_art)}px">${esc(item.ascii_art)}</pre>` : ""}
             <div class="memory-view-body">${renderRichText(item.body || "")}</div>
             <div class="item-meta" style="margin-top:12px;">
               <span>${esc(item.display_name || "Партнёр")}</span>
@@ -10147,12 +10652,29 @@
             }
           });
         } else if (type === "memories") {
+          const hasAscii = Boolean(item.ascii_art);
           openDialog({
             title: "Редактировать запись",
+            ascii: {
+              mode: hasAscii ? "keep" : "none",
+              art: item.ascii_art || null,
+              file: null,
+              palette: "detail",
+              quality: "high",
+              busy: false,
+              hadArt: hasAscii
+            },
             fields: `<label class="field"><span>Заголовок</span><input name="title" data-fmt="none" maxlength="180" placeholder="Без заголовка" value="${esc(item.title || "")}"></label>
-             <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required>${esc(item.body || "")}</textarea></label>`,
+             <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required>${esc(item.body || "")}</textarea></label>
+             <div class="ascii-block" data-ascii-block>${asciiBlockInnerHtml({ mode: hasAscii ? "keep" : "none", art: item.ascii_art || "" })}</div>`,
             onSubmit: async (fd) => {
               const body = { body: fd.get("body"), title: fd.get("title") };
+              // ascii_art шлём только когда пользователь его менял: отсутствие
+              // поля в PATCH сохраняет прежнее вложение (совместимость со
+              // старыми клиентами), null/"" — явное удаление.
+              const mode = dialogContext?.ascii?.mode;
+              if (mode === "set" && dialogContext.ascii.art) body.ascii_art = dialogContext.ascii.art;
+              else if (mode === "delete") body.ascii_art = null;
               const state = await request(`/api/memories/${id}`, { method: "PATCH", body });
               patchArchiveItem("memories", id, body);
               return state;
@@ -10264,7 +10786,11 @@
         // второго в пространстве (в PARTNER_LOCKED_ACTIONS не входит).
         const wish = findItem("wishes", btn.dataset.id);
         if (!wish) return;
-        const text = wishShareText(wish);
+        const text = wishSharePart(wish, btn.dataset.part || "all");
+        if (!text) {
+          showToast("Нечего копировать");
+          return;
+        }
         let copied = false;
         if (navigator.clipboard?.writeText) {
           try {
@@ -10595,18 +11121,30 @@
       appState = await request("/api/state");
       // Пока на экране «Открываем ваше пространство…», прогружаем всё, что
       // вкладки запросили бы позже по одному: аватары пары, состояние Фло
-      // (красные капли в календаре сразу после входа), здоровье и контакты.
-      // silent-варианты не перерисовывают экран и не показывают ошибок —
-      // render() ниже нарисует уже готовые данные; при сбое предзагрузки
-      // вкладка просто догрузит их при первом открытии, как раньше.
+      // (красные капли в календаре сразу после входа), здоровье, контакты,
+      // полные архивы (все фильмы/сериалы) и состав групп. silent-варианты не
+      // перерисовывают экран и не показывают ошибок — render() ниже нарисует
+      // уже готовые данные; при сбое предзагрузки вкладка догрузит их сама.
+      // Параллельно идёт повторная сверка /api/state: если партнёр изменил
+      // карточку, пока грузились архивы, подхватываем правку до старта.
+      let stateCheck = null;
       await Promise.all([
         preloadPairAvatars(),
         appState?.user?.gender === "female" && appState?.pair
           ? loadFloState({ silent: true })
           : Promise.resolve(),
         loadHealth({ silent: true }),
-        appState?.pair?.user_b ? loadContacts({ silent: true }) : Promise.resolve()
+        appState?.pair?.user_b ? loadContacts({ silent: true }) : Promise.resolve(),
+        preloadAllArchives(),
+        request("/api/state").then((next) => { stateCheck = next; }).catch(() => {})
       ]);
+      if (stateCheck && !deepEqual(stateCheck, appState)) {
+        const pairChanged = (stateCheck?.pair?.id ?? null) !== (appState?.pair?.id ?? null);
+        appState = stateCheck;
+        syncArchiveCachePair();
+        if (pairChanged) await preloadAllArchives();
+        else await revalidateArchiveCache();
+      }
       applyDeepLink();
       render();
       updateDroplet("home", false);

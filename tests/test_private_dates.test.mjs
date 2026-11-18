@@ -446,7 +446,6 @@ const loadDigest = new Function(
     'const DEFAULT_TZ = "Europe/Moscow";',
     extractLine("const DIGEST_MAX_ITEMS"),
     extractLine("const DIGEST_MAX_CHARS"),
-    extractLine("const RICH_MASKED"),
     extractLine("const maskTitle"),
     "const RICH_TOKENS = " + source.match(/const RICH_TOKENS = (\[\[.*\]\]);/)?.[1] + ";",
     extractBraced("function validTimeZone"),
@@ -463,10 +462,10 @@ const loadDigest = new Function(
     extractBraced("function dateOccursOnDay"),
     extractBraced("function digestText"),
     extractBraced("function datesDigestText"),
-    "return { dateOccursOnDay, digestText, datesDigestText, richToHtml };"
+    "return { dateOccursOnDay, digestText, datesDigestText, richToHtml, maskTitle };"
   ].join("\n")
 );
-const { dateOccursOnDay, digestText, datesDigestText, richToHtml } = loadDigest();
+const { dateOccursOnDay, digestText, datesDigestText, richToHtml, maskTitle } = loadDigest();
 
 test("dateOccursOnDay: ежегодная совпадает по месяцу-дню, обычная — только точным днём", () => {
   equal(dateOccursOnDay({ day: "2021-06-12", recurs: 1 }, "2026-06-12"), true);
@@ -480,6 +479,12 @@ test("dateOccursOnDay: ежегодная совпадает по месяцу-�
 test("digestText не принимает неиспользуемый timeZone", () => {
   // Параметр был мёртвым: часовой пояс и так берётся из даты наступления.
   match(source, /function digestText\(today, tomorrow, dates, tasks\)/);
+});
+
+test("maskTitle: внутри спойлера настоящее название, вложенные эффекты сняты", () => {
+  equal(maskTitle({ is_private: 1, title: "Позвонить ||маме||" }), "<tg-spoiler>Позвонить маме</tg-spoiler>");
+  equal(maskTitle({ is_private: 1, title: "> цитата\n**жирное**" }), "<tg-spoiler>цитата\n<b>жирное</b></tg-spoiler>");
+  equal(maskTitle({ is_private: 0, title: "**Общее**" }), "<b>Общее</b>");
 });
 
 test("digestText: два абзаца — даты и планы, внутри каждого сегодня/завтра", () => {
@@ -617,8 +622,7 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractLine("const RICH_TOKENS"),
       extractBraced("function richInline"),
       extractBraced("function richToHtml"),
-      extractLine("const RICH_MASKED"),
-      extractLine("const maskTitle"),
+        extractLine("const maskTitle"),
       extractLine("const DIGEST_MAX_ITEMS"),
       extractLine("const DIGEST_MAX_CHARS"),
       extractBraced("function validTimeZone"),
@@ -678,12 +682,12 @@ test("утренняя сводка: каждый видит только сво
     equal(s.text.includes("• Сегодня — Общая дата (10:00)"), true);
     equal(s.text.includes("• Завтра — Завтрашняя общая (18:00)"), true);
   }
-  equal(digests[0].text.includes("Личная первого"), false);
+  // Каждый видит только свой личный план: у другого партнёра его нет вовсе.
   equal(digests[0].text.includes("Личная второго"), false);
-  equal(digests[1].text.includes("Личная второго"), false);
   equal(digests[1].text.includes("Личная первого"), false);
   // Свой личный план виден, но под спойлером: с экрана блокировки не читается.
-  for (const s of digests) equal(s.text.includes("<tg-spoiler>Скрытый</tg-spoiler>"), true);
+  equal(digests[0].text.includes("<tg-spoiler>Личная первого</tg-spoiler>"), true);
+  equal(digests[1].text.includes("<tg-spoiler>Личная второго</tg-spoiler>"), true);
 });
 
 test("участник без событий в дайджесте не получает пустое сообщение", async () => {
@@ -792,14 +796,11 @@ test("сводка планов: личный план автора под сп�
   const digests = h.sent.filter(s => s.text.startsWith("Доброе утро!"));
   deepStrictEqual(digests.map(s => s.chatId), [111, 222]);
   for (const s of digests) equal(s.text.includes("• Сегодня — Общий план"), true);
-  equal(digests[0].text.includes("Секрет первого"), false);
-  equal(digests[1].text.includes("Секрет первого"), false);
   equal(digests[0].text.includes("Секрет второго"), false);
-  equal(digests[1].text.includes("Секрет второго"), false);
-  // Каждый видит ровно один скрытый план — свой.
-  for (const s of digests) {
-    equal(s.text.split("<tg-spoiler>Скрытый</tg-spoiler>").length - 1, 1);
-  }
+  equal(digests[1].text.includes("Секрет первого"), false);
+  // Каждый видит ровно один свой скрытый план — с настоящим названием внутри.
+  equal(digests[0].text.includes("<tg-spoiler>Секрет первого</tg-spoiler>"), true);
+  equal(digests[1].text.includes("<tg-spoiler>Секрет второго</tg-spoiler>"), true);
 });
 
 test("сводка о датах за сутки: личная завтрашняя дата скрыта спойлером", async () => {
@@ -814,19 +815,18 @@ test("сводка о датах за сутки: личная завтрашн�
   const msg = h.sent.find(s => s.text.startsWith("Напоминаю: завтра значимые даты:"));
   equal(Boolean(msg), true);
   equal(msg.text.includes("• Годовщина (19:00)"), true);
-  equal(msg.text.includes("Сюрприз"), false);
-  equal(msg.text.includes("• <tg-spoiler>Скрытый</tg-spoiler>"), true);
+  equal(msg.text.includes("• <tg-spoiler>Сюрприз</tg-spoiler>"), true);
+  equal(h.sent.some(s => s.chatId === 222 && s.text.includes("Сюрприз")), false);
 });
 
-test("напоминание о личном плане: только автору и со скрытым заголовком", async () => {
+test("напоминание о личном плане: только автору, название внутри спойлера", async () => {
   const h = notificationHarness({
     tasks: [{ id: 31, title: "Купить кольцо", day: PAIR_TODAY, time: "14:00", is_private: 1, created_by: 111 }]
   });
   await h.run();
   const reminders = h.sent.filter(s => s.text.startsWith("Через 3 часа"));
   deepStrictEqual(reminders.map(s => s.chatId), [111]);
-  equal(reminders[0].text.includes("Купить кольцо"), false);
-  equal(reminders[0].text.includes("Через 3 часа: <tg-spoiler>Скрытый</tg-spoiler> (14:00)"), true);
+  equal(reminders[0].text.includes("Через 3 часа: <tg-spoiler>Купить кольцо</tg-spoiler> (14:00)"), true);
 });
 
 test("публичный план с разметкой уходит в Telegram как HTML", async () => {

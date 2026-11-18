@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.17.79";
+const APP_VERSION = "2026.11.18.96";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.17.79";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.17.79";
+const DB_SCHEMA_VERSION = "2026.11.18.96";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -61,7 +61,7 @@ const STATE_RECENT_LIMIT = 10;
 const ARCHIVE_PAGE_SIZE = 20;
 const ARCHIVE_QUERIES = {
   memories: {
-    sql: `SELECT m.id,m.author_id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
+    sql: `SELECT m.id,m.author_id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`
   },
   done_tasks: {
@@ -177,6 +177,49 @@ function textField(body, key, max, label) {
   const value = clean(body?.[key]);
   if (!value) throw new HttpError(400, `Заполните поле «${label}»`, "VALIDATION_ERROR");
   if (Array.from(value).length > max) throw new HttpError(400, `«${label}»: не больше ${max} символов`, "VALIDATION_ERROR");
+  return value;
+}
+
+// ASCII-вложение записи дневника (migrations/0050): готовый моноширинный
+// текст, сгенерированный в браузере. Оригинал фото сюда не попадает и не
+// хранится — в базе только итоговый рисунок.
+//
+// НЕ пропускать через clean()/textField(): trim() срезал бы завершающие
+// пробелы строк, которые для рисунка значимы (план ASCII-дневника, §4.2).
+// Контракт v1: <=48 символов в строке, <=40 строк, <=2000 кодовых точек,
+// переводы строк только LF, управляющие символы запрещены, пустое значение
+// (null/"") — «вложения нет». Пробелы по краям строки сохраняются.
+const ASCII_ART_MAX_COLUMNS = 144;
+const ASCII_ART_MAX_ROWS = 120;
+const ASCII_ART_MAX_LENGTH = 18000;
+function validateAsciiArt(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") throw new HttpError(400, "ASCII-изображение должно быть строкой", "INVALID_ASCII_ART");
+  const rows = value.split("\n");
+  if (rows.length > ASCII_ART_MAX_ROWS) {
+    throw new HttpError(400, `ASCII-изображение: не больше ${ASCII_ART_MAX_ROWS} строк`, "INVALID_ASCII_ART");
+  }
+  for (const row of rows) {
+    if (Array.from(row).length > ASCII_ART_MAX_COLUMNS) {
+      throw new HttpError(400, `ASCII-изображение: не больше ${ASCII_ART_MAX_COLUMNS} символов в строке`, "INVALID_ASCII_ART");
+    }
+  }
+  if (Array.from(value).length > ASCII_ART_MAX_LENGTH) {
+    throw new HttpError(400, `ASCII-изображение: не больше ${ASCII_ART_MAX_LENGTH} символов`, "INVALID_ASCII_ART");
+  }
+  let hasInk = false;
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    // Управляющие символы (CR, TAB, NUL, ESC и пр.) запрещены; LF проверен
+    // разбиением выше и сюда не попадает — кроме него, допустимы только
+    // печатные символы и пробел.
+    // LF — единственный допустимый управляющий символ (перевод строки).
+    if (char !== "\n" && (code < 0x20 || code === 0x7F)) {
+      throw new HttpError(400, "ASCII-изображение содержит недопустимые символы", "INVALID_ASCII_ART");
+    }
+    if (char !== " " && char !== "\n") hasInk = true;
+  }
+  if (!hasInk) throw new HttpError(400, "ASCII-изображение пустое", "INVALID_ASCII_ART");
   return value;
 }
 
@@ -406,6 +449,8 @@ const TMDB_RU_TTL_MS = 30 * 86400 * 1000;
 const TMDB_GENRE_TTL_MS = 86400 * 1000;
 const tmdbRuCache = new Map();    // tt-id → { title, genreIds } | null
 const tmdbGenreCache = new Map(); // "movie"/"tv" → { at, map: id → название }
+const TMDB_SEASONS_TTL_MS = 6 * 3600 * 1000;
+const tmdbSeasonsCache = new Map(); // imdbId → { at, seasons } | null
 
 async function tmdbFetch(env, path, params) {
   const key = env?.TMDB_API_KEY;
@@ -467,6 +512,28 @@ async function tmdbGenreName(env, kind, genreId) {
     tmdbGenreCache.set(listKind, genres);
   }
   return genres.map[genreId] || null;
+}
+
+// Состав сериала для диалога «Остановились»: сезон → число серий. Берём из
+// /tv/{id} (payload.seasons уже содержит episode_count), specials (season 0)
+// пропускаем. Кеш на полдня — серии выходят не каждый час, а диалог не должен
+// дёргать TMDB на каждый тап.
+async function tmdbSeriesSeasons(env, imdbId) {
+  if (!env?.TMDB_API_KEY) return null;
+  const cached = tmdbSeasonsCache.get(imdbId);
+  if (cached && Date.now() - cached.at < TMDB_SEASONS_TTL_MS) return cached.value;
+  const localized = await tmdbLocalize(env, imdbId);
+  if (!localized?.id || localized.kind !== "tv") return null;
+  const payload = await tmdbFetch(env, `/tv/${localized.id}`, "");
+  if (!payload) return null;
+  const seasons = (payload.seasons || [])
+    .map((season) => ({ season: Number(season.season_number), episodes: Number(season.episode_count) || 0 }))
+    .filter((season) => season.season > 0)
+    .sort((a, b) => a.season - b.season);
+  const value = seasons.length ? seasons : null;
+  tmdbSeasonsCache.set(imdbId, { at: Date.now(), value });
+  if (tmdbSeasonsCache.size > 200) tmdbSeasonsCache.delete(tmdbSeasonsCache.keys().next().value);
+  return value;
 }
 
 // Карточка фильма: основной источник — OMDb с ключом OMDB_API_KEY (одним
@@ -603,6 +670,24 @@ async function movieDetailsFor(env, pairId, id) {
       .bind(JSON.stringify(details), id, pairId).run();
   } catch { /* кеш не критичен */ }
   return details;
+}
+
+// Варианты точки просмотра для диалога «Остановились». Фильму состав не нужен;
+// сериалу отдаём сезоны с числом серий из TMDB, а при его недоступности —
+// хотя бы количество сезонов из карточки (эпизоды тогда подскажет общее число).
+async function movieResumeOptionsFor(env, pairId, id) {
+  const row = await env.DB.prepare("SELECT id,kind,imdb_id,seasons,episodes FROM movies WHERE id=? AND pair_id=?")
+    .bind(id, pairId).first();
+  if (!row) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+  if (row.kind !== "series") return { kind: "movie", seasons: [] };
+  const tmdbSeasons = await tmdbSeriesSeasons(env, row.imdb_id);
+  if (tmdbSeasons?.length) return { kind: "series", seasons: tmdbSeasons };
+  const seasonCount = Math.min(100, Math.max(0, Number(row.seasons) || 0));
+  return {
+    kind: "series",
+    seasons: Array.from({ length: seasonCount }, (_, index) => ({ season: index + 1, episodes: null })),
+    episodes_total: Number(row.episodes) || null
+  };
 }
 
 // Оценки перепроверяются при открытии приложения, но не чаще раза в сутки на
@@ -1563,7 +1648,7 @@ async function movieGroupOr404(env, pairId, groupId) {
 // а не по загруженной странице — карточка-стопка показывает честный прогресс.
 async function movieGroupSummaries(env, pairId) {
   const rows = await env.DB.prepare(`SELECT g.id,g.title,g.group_type,g.created_at,g.updated_at,
-      gi.movie_id,gi.position,m.watched,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.genres,m.created_at AS movie_created_at,
+      gi.movie_id,gi.position,m.watched,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.episodes,m.genres,m.created_at AS movie_created_at,
       (SELECT ROUND(AVG(r.rating),1) FROM movie_ratings r WHERE r.movie_id=m.id) AS pair_rating
     FROM movie_groups g
     JOIN movie_group_items gi ON gi.group_id=g.id AND gi.pair_id=g.pair_id
@@ -1591,7 +1676,7 @@ async function movieGroupSummaries(env, pairId) {
     // anchor — первая часть по ручному порядку: по ней группа сортируется
     // в общем списке, даже когда сама часть за пределами первых 200 записей.
     if (!group.anchor) {
-      group.anchor = { movie_id: row.movie_id, year: row.year, kind: row.kind, rating: row.rating, rating_source: row.rating_source, runtime: row.runtime, genres: row.genres, created_at: row.movie_created_at };
+      group.anchor = { movie_id: row.movie_id, year: row.year, kind: row.kind, rating: row.rating, rating_source: row.rating_source, runtime: row.runtime, episodes: row.episodes, genres: row.genres, created_at: row.movie_created_at };
     }
   }
   for (const group of groups.values()) {
@@ -1656,7 +1741,7 @@ async function state(env, userId) {
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
     env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
-    env.DB.prepare(`SELECT m.id,m.author_id,m.title,m.body,m.day,m.created_at,u.display_name FROM memories m
+    env.DB.prepare(`SELECT m.id,m.author_id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
       LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
@@ -2075,7 +2160,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     const patchSchemas = {
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
       dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
-      memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 } },
+      memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" } },
       wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" }, comment: { type: "string", maxLength: 500 } },
       quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
       places: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } },
@@ -2184,6 +2269,12 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       }
       if (body.title !== undefined) {
         field("title", clean(body.title) || null);
+      }
+      // ascii_art — отдельный валидатор без trim(): пробелы в конце строк
+      // рисунка значимы. null/"" удаляют вложение, отсутствие поля его
+      // сохраняет (PATCH частичный).
+      if (body.ascii_art !== undefined) {
+        field("ascii_art", validateAsciiArt(body.ascii_art));
       }
     }
     function patchQuoteFields() {
@@ -3462,6 +3553,14 @@ async function api(request, env, url, ctx = null) {
     if (!positiveId(movieId)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
     return json({ details: await movieDetailsFor(env, pair.id, movieId) });
   }
+  // Состав сериала для диалога «Остановились»: сезоны и серии из TMDB.
+  const movieResumeOptionsMatch = request.method === "GET" && url.pathname.match(/^\/api\/movies\/(\d+)\/resume-options$/);
+  if (movieResumeOptionsMatch) {
+    const movieId = Number(movieResumeOptionsMatch[1]);
+    if (!positiveId(movieId)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
+    await rateLimit(env, `mr:${user.tg_id}`, 30, 60);
+    return json(await movieResumeOptionsFor(env, pair.id, movieId));
+  }
   // История пополнений копилки: открывается тапом по карточке. Имя автора
   // подставляем с учётом личного имени партнёра просматривающего.
   const savingHistoryMatch = request.method === "GET" && url.pathname.match(/^\/api\/savings\/(\d+)\/history$/);
@@ -3590,13 +3689,15 @@ async function api(request, env, url, ctx = null) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
-    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 }, title: { type: "string", maxLength: 180 } });
+    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" } });
     const text = textField(body, "body", 2000, "Воспоминание");
     // Заголовок необязателен на сервере (у старых записей и записей из бота
-    // его нет), но клиент запрашивает его при создании.
+    // его нет), но клиент запрашивает его при создании. ascii_art — тоже
+    // необязателен; валидируется отдельно, без trim (см. validateAsciiArt).
     const title = clean(body.title) || null;
-    await env.DB.prepare("INSERT INTO memories(pair_id,author_id,title,body,day,created_at) VALUES(?,?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, title, text, localDay(pair.timezone), now()).run();
+    const asciiArt = validateAsciiArt(body.ascii_art);
+    await env.DB.prepare("INSERT INTO memories(pair_id,author_id,title,body,ascii_art,day,created_at) VALUES(?,?,?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, title, text, asciiArt, localDay(pair.timezone), now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/wishes") {
@@ -4072,10 +4173,11 @@ async function openApp(env, chatId, requestUrl, text) {
 
 // ------------------------------------------------------------------
 // Кнопки действий в уведомлениях (план duoplan_notification_actions, v2).
-// direct_action — HTML Widget (Bot API 10.4): цвет кнопки — персональный
-// акцент users.accent_color, действие — widget_query с одноразовым nonce
-// из telegram_action_tokens. Fallback при отказе sendWidget — нативная
-// inline-клавиатура с HMAC-подписанным callback_data (callback_query).
+// direct_action — HTML Widget (Bot API 10.4): цвет каждой кнопки — цвет её
+// события (календарь/Фло), для вторичных — серый; действие — widget_query
+// с одноразовым nonce из telegram_action_tokens. Fallback при отказе
+// sendWidget — нативная inline-клавиатура с HMAC-подписанным callback_data,
+// где доступны только red/green/blue (gray = стиль по умолчанию).
 // form_action/navigation — одна контекстная web_app-кнопка с dp_*-ссылкой.
 // ------------------------------------------------------------------
 
@@ -4088,8 +4190,35 @@ const ACCENT_HEX = {
   sage: { light: "#55766a", dark: "#7ba394" },
   ocean: { light: "#4a6f8f", dark: "#7fa3c0" },
   violet: { light: "#7a5f9e", dark: "#a48cc9" },
-  amber: { light: "#b06a2c", dark: "#d3924e" }
+  amber: { light: "#9a5a24", dark: "#d3924e" }
 };
+
+// Цвета событий — зеркало CSS-переменных приложения (--cal-* и --flo-*).
+// Кнопка действия красится в цвет своего события, а не в персональный
+// акцент: так зелёный план, красная дата и бирюзовый Фло узнаваемы в чате.
+// neutral — серый для вторичных кнопок подтверждения; приватность события
+// цвет не меняет: личный план остаётся зелёным, личная дата — красной.
+const BUTTON_COLOR_HEX = {
+  ...ACCENT_HEX,
+  task: { light: "#4f8a5f", dark: "#86c79a" },
+  date: { light: "#c25550", dark: "#e88a84" },
+  birthday: { light: "#8a6bb8", dark: "#b39ddb" },
+  wish: { light: "#a16207", dark: "#f0c24e" },
+  flo_period: { light: "#d64545", dark: "#f2766f" },
+  flo_fertile: { light: "#2e9c8d", dark: "#55c3b2" },
+  neutral: { light: "#948d86", dark: "#9d958c" }
+};
+// Нативная клавиатура Telegram умеет только red/green/blue и «по умолчанию».
+const BUTTON_STYLE = {
+  task: "success",
+  date: "danger",
+  flo_period: "danger",
+  birthday: "primary",
+  wish: "primary",
+  flo_fertile: "primary",
+  neutral: null
+};
+const buttonStyle = (key) => BUTTON_STYLE[key] ?? null;
 
 const WIDGET_TOKEN_TTL = 3 * 86400000;   // nonce живёт 3 дня
 const WIDGET_REGISTRY_TTL = 7 * 86400000; // реестр — 7 дней (акцент-синк)
@@ -4109,7 +4238,7 @@ button[disabled]{opacity:.55;cursor:default}
 </style></head><body><div id="w"></div><div id="st"></div><script>
 (function(){
 var W=window.TelegramWidget;if(!W)return;
-var A=${JSON.stringify(ACCENT_HEX)};
+var A=${JSON.stringify(BUTTON_COLOR_HEX)};
 function lum(h){var n=parseInt(h.slice(1),16);var r=(n>>16&255)/255,g=(n>>8&255)/255,b=(n&255)/255;
 function f(c){return c<=0.03928?c/12.92:Math.pow((c+0.055)/1.055,2.4)}
 return 0.2126*f(r)+0.7152*f(g)+0.0722*f(b)}
@@ -4121,7 +4250,9 @@ document.documentElement.style.setProperty("--acc",bg);
 document.documentElement.style.setProperty("--on",onC(bg));
 var box=document.getElementById("w");box.innerHTML="";
 (s.acts||[]).forEach(function(a){
+var c=A[a[2]]||p;var cb=W.colorScheme==="dark"?c.dark:c.light;
 var b=document.createElement("button");b.type="button";b.textContent=a[1];
+b.style.setProperty("--acc",cb);b.style.setProperty("--on",onC(cb));
 if(s.d){b.disabled=true}
 b.onclick=function(){if(s.d)return;
 // TelegramWidget: один запрос за раз — блокируем все кнопки до ответа,
@@ -4187,7 +4318,7 @@ function actionTargetUrl(env, requestUrl, target) {
   return url.toString();
 }
 
-// Отправка direct_action: Widget с персональным акцентом; при отказе
+// Отправка direct_action: Widget с цветами событий на кнопках; при отказе
 // Bot API (isTelegramApi) — нативная клавиатура с HMAC-callback без общей
 // ссылки. Сетевые ошибки и потерянный ответ НЕ запускают fallback вслепую:
 // сообщение могло уже уйти, а дедуп notification_log не даст повторить.
@@ -4207,7 +4338,11 @@ async function sendActionNotification(env, member, kind, text, action, requestUr
     }));
     const tokens = [];
     for (const spec of specs) tokens.push(await createActionToken(env, spec));
-    const chatData = JSON.stringify({ a: accent, d: null, acts: action.buttons.map((b, i) => [tokens[i], b.text]) });
+    const chatData = JSON.stringify({
+      a: accent,
+      d: null,
+      acts: action.buttons.map((b, i) => [tokens[i], b.text, b.color || action.color || null])
+    });
     try {
       const sent = await telegram(env, "sendWidget", {
         chat_id: member,
@@ -4235,9 +4370,11 @@ async function sendActionNotification(env, member, kind, text, action, requestUr
     // Fallback: нативная клавиатура, по кнопке на действие, без web_app.
     const rows = [];
     for (const b of action.buttons) {
+      const style = buttonStyle(b.color || action.color);
       rows.push([{
         text: b.text,
-        callback_data: await callbackPayloadFor(env, member, b.action)
+        callback_data: await callbackPayloadFor(env, member, b.action),
+        ...(style ? { style } : {})
       }]);
     }
     await telegram(env, "sendMessage", {
@@ -4250,11 +4387,12 @@ async function sendActionNotification(env, member, kind, text, action, requestUr
   }
   // form_action / navigation: ровно одна контекстная web_app-кнопка.
   const url = actionTargetUrl(env, requestUrl, action.target);
+  const style = buttonStyle(action.color);
   await telegram(env, "sendMessage", {
     chat_id: member,
     text,
     parse_mode: "HTML",
-    reply_markup: { inline_keyboard: [[{ text: action.buttonText, web_app: { url } }]] }
+    reply_markup: { inline_keyboard: [[{ text: action.buttonText, web_app: { url }, ...(style ? { style } : {}) }]] }
   });
   return true;
 }
@@ -4280,7 +4418,7 @@ async function callbackPayloadFor(env, tgId, actionSpec) {
 // Обе поверхности вызывают их с уже проверенными сервером параметрами:
 // Widget — из строки nonce, callback — из подписанного payload.
 
-// «✅ Выполнено» для плана: та же семантика, что POST /api/tasks/:id/done —
+// «Выполнено» для плана: та же семантика, что POST /api/tasks/:id/done —
 // условный UPDATE по status='open', проверки пары и приватности перед ним.
 async function executeTaskDone(env, tgId, taskId) {
   const user = await env.DB.prepare("SELECT tg_id FROM users WHERE tg_id=?").bind(tgId).first();
@@ -4301,7 +4439,7 @@ async function executeTaskDone(env, tgId, taskId) {
   return current?.status === "done" ? "already" : "unavailable";
 }
 
-// «✅ Принят» / «⏭ Пропущен» для препарата: один итог за день, дата — из
+// «Принят» / «Пропущен» для препарата: один итог за день, дата — из
 // nonce/payload уведомления, не текущая. Противоположная существующая
 // отметка не перезаписывается — только предложение исправить в приложении.
 async function executeHealthMedStatus(env, tgId, medId, actionDate, status) {
@@ -4858,10 +4996,10 @@ function richToHtml(raw) {
   }
 }
 
-// Личные события в уведомлениях автора: заголовок скрыт под спойлером,
-// чтобы план-сюрприз не читался с экрана блокировки.
-const RICH_MASKED = "<tg-spoiler>Скрытый</tg-spoiler>";
-const maskTitle = (item) => (Number(item.is_private) === 1 ? RICH_MASKED : richToHtml(item.title));
+// Личные события в уведомлениях автора: заголовок остаётся под спойлером,
+// но внутри — настоящее название: по тапу спойлер показывает, что за событие.
+// Вложенные спойлеры и цитаты снимаем — Telegram не рисует их внутри tg-spoiler.
+const maskTitle = (item) => (Number(item.is_private) !== 1 ? richToHtml(item.title) : `<tg-spoiler>${richToHtml(item.title).replace(/<\/?tg-spoiler>/g, "").replace(/<\/?blockquote>/g, "")}</tg-spoiler>`);
 
 // Утренняя сводка: два абзаца — значимые даты и планы, внутри каждого
 // сегодня/завтра. Один Telegram-месседж (parse_mode HTML в openApp), поэтому
@@ -5072,7 +5210,7 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=p.created_by WHERE p.pair_id=?${scope === "mine" ? " AND p.created_by=?" : ""} ORDER BY p.created_at ASC, p.id ASC`,
   trips: (scope) => `SELECT t.id,t.title,t.note,t.visited,t.visited_at,t.created_at,u.display_name AS author FROM trips t
     LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=?${scope === "mine" ? " AND t.created_by=?" : ""} ORDER BY t.created_at ASC, t.id ASC`,
-  memories: (scope) => `SELECT m.id,m.title,m.body,m.day,m.created_at,u.display_name AS author FROM memories m
+  memories: (scope) => `SELECT m.id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name AS author FROM memories m
     LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=?${scope === "mine" ? " AND m.author_id=?" : ""} ORDER BY m.created_at ASC, m.id ASC`,
   quotes: (scope) => `SELECT q.id,q.body,q.source,q.created_at,u.display_name AS author FROM quotes q
     LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=?${scope === "mine" ? " AND q.author_id=?" : ""} ORDER BY q.created_at ASC, q.id ASC`,
@@ -5175,6 +5313,7 @@ function exportMemoryRow(row) {
     author: clean(row.author) || "Партнёр",
     title: clean(row.title) || null,
     body: row.body ?? "",
+    ascii_art: row.ascii_art ?? null,
     created_at: row.created_at
   };
 }
@@ -5315,11 +5454,18 @@ const EXPORT_ROW_MAPPERS = {
 // пустые поля пропускаются, многострочные значения печатаются с отступом.
 // ------------------------------------------------------------------
 
-// unix-секунды → «2026-11-05 12:34 UTC» (время всегда в UTC — без пояса пары,
-// чтобы выгрузка не зависела от того, откуда её открыли).
+// Как formatDay в приложении: ISO-дата → дд.мм.гггг, не ISO — как есть.
+function exportTxtDay(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : String(value ?? "");
+}
+
+// unix-секунды → дд.мм.гггг (дата берётся в UTC — как и раньше, чтобы
+// выгрузка не зависела от того, откуда её открыли; время в TXT не печатаем,
+// как и в карточках приложения).
 function exportTxtTime(unix) {
   if (!unix) return null;
-  return `${new Date(unix * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return exportTxtDay(new Date(unix * 1000).toISOString().slice(0, 10));
 }
 
 // Главная строка и поля каждой записи. Поля — пары [метка, значение].
@@ -5327,7 +5473,7 @@ const EXPORT_TXT_ROWS = {
   plans: (row) => ({
     head: row.title,
     fields: [
-      ["Когда", [row.day, row.time].filter(Boolean).join(" ")],
+      ["Когда", [exportTxtDay(row.day), row.time].filter(Boolean).join(" ")],
       ["Повтор", row.monthly ? "ежемесячный" : row.yearly ? "ежегодный" : null],
       ["Личный", row.is_private ? "да" : null],
       ["Добавил", row.author],
@@ -5354,7 +5500,7 @@ const EXPORT_TXT_ROWS = {
   dates: (row) => ({
     head: row.title,
     fields: [
-      ["День", [row.day, row.time].filter(Boolean).join(" ")],
+      ["День", [exportTxtDay(row.day), row.time].filter(Boolean).join(" ")],
       ["Повторяется", row.recurs ? "да" : null],
       ["Ежемесячная", row.monthly ? "да" : null],
       ["Личная", row.is_private ? "да" : null],
@@ -5386,8 +5532,11 @@ const EXPORT_TXT_ROWS = {
   }),
   memories: (row) => ({
     head: row.title || "(без заголовка)",
+    // ascii_art возвращается отдельным свойством: exportTxtRecord рисует его
+    // блоком без отступов и без trim — геометрия рисунка не должна меняться.
+    ascii_art: row.ascii_art || null,
     fields: [
-      ["День", row.day],
+      ["День", exportTxtDay(row.day)],
       ["Текст", row.body],
       ["Добавил", row.author],
       ["Создан", exportTxtTime(row.created_at)]
@@ -5414,8 +5563,8 @@ const EXPORT_TXT_ROWS = {
   cycle: (row) => {
     if (row.kind === "period") {
       return {
-        head: `Месячные с ${row.start_date}`,
-        fields: [["Конец", row.end_date || (row.end_unknown ? "неизвестно" : null)], ["Создана", exportTxtTime(row.created_at)]]
+        head: `Месячные с ${exportTxtDay(row.start_date)}`,
+        fields: [["Конец", exportTxtDay(row.end_date) || (row.end_unknown ? "неизвестно" : null)], ["Создана", exportTxtTime(row.created_at)]]
       };
     }
     if (row.kind === "measurement") {
@@ -5425,7 +5574,7 @@ const EXPORT_TXT_ROWS = {
         ? (row.m_value !== null && row.m_value !== undefined ? `${row.m_value}${row.m_unit === "F" ? "°F" : "°C"}` : null)
         : (row.m_result ? ({ negative: "отрицательный", positive: "положительный", unclear: "неясно" })[row.m_result] || row.m_result : null);
       return {
-        head: `${label} — ${row.date}`,
+        head: `${label} — ${exportTxtDay(row.date)}`,
         fields: [["Время", row.m_time], ["Значение", value], ["Заметка", row.note], ["Записано", exportTxtTime(row.created_at)]]
       };
     }
@@ -5438,7 +5587,7 @@ const EXPORT_TXT_ROWS = {
           ["Форма", row.form ? ({ tablet: "таблетка", capsule: "капсула", injection: "инъекция", patch: "пластырь", iud: "спираль", other: "прочее" })[row.form] || row.form : null],
           ["Приём", row.schedule],
           ["Статус", statusLabel],
-          ["Окончание курса", row.end_date],
+          ["Окончание курса", exportTxtDay(row.end_date)],
           ["Создан", exportTxtTime(row.created_at)]
         ]
       };
@@ -5446,7 +5595,7 @@ const EXPORT_TXT_ROWS = {
     if (row.kind === "med_log") {
       const statusLabel = row.status === "taken" ? "принят" : row.status === "skipped" ? "пропущен" : row.status;
       return {
-        head: `${row.med_name || "Препарат"} — ${row.date}`,
+        head: `${row.med_name || "Препарат"} — ${exportTxtDay(row.date)}`,
         fields: [
           ["Время", row.time],
           ["Статус", statusLabel],
@@ -5457,7 +5606,7 @@ const EXPORT_TXT_ROWS = {
       };
     }
     return {
-        head: `День ${row.date}`,
+        head: `День ${exportTxtDay(row.date)}`,
         fields: [
           ["Интенсивность", row.flow ? CYCLE_FLOW_LABELS[row.flow] || row.flow : null],
           ["Смен в день", row.bleeding_details?.changes_per_day ?? null],
@@ -5496,6 +5645,12 @@ function exportTxtRecord(n, record) {
   const headLines = String(head ?? "").split("\n");
   const lines = [`${n}. ${headLines[0]}`.trimEnd()];
   for (const chunk of headLines.slice(1)) lines.push(`   ${chunk}`);
+  // ASCII-рисунок — отдельным блоком до полей: строки выводятся как есть,
+  // без префиксов, отступов и trim (завершающие пробелы значимы).
+  if (record.ascii_art) {
+    lines.push("   ASCII-изображение:");
+    for (const line of String(record.ascii_art).split("\n")) lines.push(line);
+  }
   for (const [label, value] of fields) {
     if (value === null || value === undefined || value === "") continue;
     for (const [i, line] of String(value).split("\n").entries()) {
@@ -5639,12 +5794,15 @@ async function processPairNotifications(env, pair, stamp, budget) {
       if (budget.left < 2) break;
       if (Number(reminder.task.is_private) === 1 && Number(reminder.task.created_by) !== Number(member)) continue;
       budget.left -= 2;
-      const title = Number(reminder.task.is_private) === 1 ? RICH_MASKED : richToHtml(reminder.task.title);
-      // direct_action: Widget с «✅ Выполнено»; fallback — подписанный
+      const title = maskTitle(reminder.task);
+      // direct_action: Widget с кнопкой «Выполнено»; fallback — подписанный
       // callback. Действие то же, что POST /api/tasks/:id/done.
       await deliverNotification(env, member, today, reminder.kind, `${reminder.lead}: ${title} (${reminder.task.time})`, {
         mode: "direct_action",
-        buttons: [{ text: "✅ Выполнено", action: { type: "task_done", refId: Number(reminder.task.id) } }]
+        // Приватность меняет только заголовок (спойлер), не цвет: личный
+        // план остаётся зелёным, как обычный план в календаре.
+        color: "task",
+        buttons: [{ text: "Выполнено", action: { type: "task_done", refId: Number(reminder.task.id) } }]
       });
     }
   }
@@ -5796,7 +5954,7 @@ async function sendCycleReminders(env) {
             // одна web_app-кнопка с dp_*-ссылкой на нужную дату.
             await deliverNotification(env, owner.tg_id, state.today, "cycle_diary",
               "Вчерашний день не записан в дневнике Фло — если хочешь, отметь его.",
-              { mode: "navigation", buttonText: "📝 Записать день", target: { type: "cycle_diary", day: yesterday } });
+              { mode: "navigation", buttonText: "Записать день", color: "flo_fertile", target: { type: "cycle_diary", day: yesterday } });
           }
         }
       }
@@ -7252,14 +7410,15 @@ async function sendHealthReminders(env) {
       // D1 отдаёт BOOLEAN как 0/1: healthReminderKinds ждёт строго true.
       const normalized = userMeds.map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 }));
       for (const { kind, text, medId } of healthReminderKinds(normalized, today, nowHM)) {
-        // direct_action: «✅ Принят»/«⏭ Пропущен» отмечают именно дату
+        // direct_action: «Принят»/«Пропущен» отмечают именно дату
         // напоминания (today в поясе пользователя); nonce одноразовый,
         // обе кнопки делят group_id — после первого выбора вторая гаснет.
         await deliverNotification(env, tgId, today, kind, text, {
           mode: "direct_action",
           buttons: [
-            { text: "✅ Принят", action: { type: "health_med", refId: Number(medId), actionDate: today, status: "taken" } },
-            { text: "⏭ Пропущен", action: { type: "health_med", refId: Number(medId), actionDate: today, status: "skipped" } }
+            // Основное действие — цвет Фло; вторичное подтверждение — серый.
+            { text: "Принят", color: "flo_fertile", action: { type: "health_med", refId: Number(medId), actionDate: today, status: "taken" } },
+            { text: "Пропущен", color: "neutral", action: { type: "health_med", refId: Number(medId), actionDate: today, status: "skipped" } }
           ]
         });
       }
@@ -7374,7 +7533,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS member_stats (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,best_streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY (pair_id,tg_id))`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,ascii_art TEXT,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT,comment TEXT)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
@@ -7481,6 +7640,9 @@ async function ensureSchema(env) {
     ["wishes", "url", "TEXT"],
     ["wishes", "comment", "TEXT"],
     ["memories", "title", "TEXT"],
+    // ASCII-вложение дневника (migrations/0050): колонки нет на базах,
+    // созданных до этой версии.
+    ["memories", "ascii_art", "TEXT"],
     ["tasks", "monthly", "INTEGER NOT NULL DEFAULT 0"],
     ["tasks", "yearly", "INTEGER NOT NULL DEFAULT 0"],
     ["dates", "monthly", "INTEGER NOT NULL DEFAULT 0"],

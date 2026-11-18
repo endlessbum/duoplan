@@ -164,6 +164,9 @@
   const REOPEN_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 6"/><path d="M4 4v6h6"/></svg>';
   const FLAME_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c1.2 3-2.6 4.6-2.6 7.6a3.6 3.6 0 0 0 3.7 3.5c1.8-.1 2.9-1.7 2.6-3.8 1.9 1.5 3.1 3.6 3.1 5.8A6.8 6.8 0 0 1 5.2 15C5.2 9.4 10.4 8 12 3Z"/></svg>';
   const COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.2"/><path d="M5.5 15H4.8A1.8 1.8 0 0 1 3 13.2V4.8A1.8 1.8 0 0 1 4.8 3h8.4A1.8 1.8 0 0 1 15 4.8v.7"/></svg>';
+  // Частичное копирование желания: «название» и «ссылка» получают составную
+  // иконку «звено цепочки + строки текста» — как в app.js.
+  const LINK_TEXT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><g transform="translate(4.4 -0.4) scale(0.62)"><path d="M9.5 14.5a4.24 4.24 0 0 0 6 0l3.2-3.2a4.24 4.24 0 1 0-6-6L11.5 6.5"/><path d="M14.5 9.5a4.24 4.24 0 0 0-6 0l-3.2 3.2a4.24 4.24 0 1 0 6 6l1.2-1.2"/></g><path d="M4.5 15.5h15M4.5 18.5h10M4.5 21h13"/></svg>';
   const PLUS_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>';
   const STAR_ICON = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none" aria-hidden="true"><path d="m12 3 2.55 5.18 5.72.83-4.14 4.03.98 5.7L12 16.45l-5.11 2.69.98-5.7-4.14-4.03 5.72-.83L12 3Z"/></svg>';
   const CHEVRON_LEFT = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5"/></svg>';
@@ -176,11 +179,12 @@
   // itemActionButton/itemActions — дословно из app.js: «⋮» в правом верхнем
   // углу карточки, по тапу выпадает меню действий.
   function itemActionButton(opts) {
-    const { action, type, id, url, label, icon } = opts;
+    const { action, type, id, url, label, icon, part } = opts;
     const typeAttr = type !== undefined ? ` data-type="${esc(type)}"` : "";
     const idAttr = id !== undefined ? ` data-id="${esc(id)}"` : "";
     const urlAttr = url !== undefined ? ` data-url="${esc(url)}"` : "";
-    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
+    const partAttr = part !== undefined ? ` data-part="${esc(part)}"` : "";
+    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}${partAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
   }
 
   function itemActions(buttons) {
@@ -484,8 +488,18 @@
   // wishItem/completedWishItem/savingItem — порты из app.js (вкладка «Пара»).
   function wishItem(w) {
     const canEdit = w.mine !== false;
+    const hasUrl = Boolean(String(w.url || "").trim());
+    const shareButtons = hasUrl
+      ? [
+          itemActionButton({ action: "share-wish", type: "wishes", id: w.id, part: "name", label: "Скопировать название", icon: LINK_TEXT_ICON }),
+          itemActionButton({ action: "share-wish", type: "wishes", id: w.id, part: "url", label: "Скопировать ссылку", icon: LINK_TEXT_ICON }),
+          itemActionButton({ action: "share-wish", type: "wishes", id: w.id, part: "all", label: "Скопировать все", icon: COPY_ICON })
+        ]
+      : [
+          itemActionButton({ action: "share-wish", type: "wishes", id: w.id, part: "name", label: "Скопировать название", icon: LINK_TEXT_ICON })
+        ];
     const actions = [
-      itemActionButton({ action: "share-wish", type: "wishes", id: w.id, label: "Скопировать название и ссылку", icon: COPY_ICON }),
+      ...shareButtons,
       ...(canEdit ? [
         itemActionButton({ action: "done-item", type: "wishes", id: w.id, label: "Исполнено", icon: DONE_ICON }),
         itemActionButton({ action: "edit-item", type: "wishes", id: w.id, label: "Редактировать", icon: EDIT_ICON }),
@@ -1044,7 +1058,7 @@
   // в основном календаре» включёнными).
   const ACCENT_SWATCHES = [
     ["berry", "#b85464"], ["sage", "#55766a"], ["ocean", "#4a6f8f"],
-    ["violet", "#7a5f9e"], ["amber", "#b06a2c"]
+    ["violet", "#7a5f9e"], ["amber", "#9a5a24"]
   ];
   function pairSettingsCard() {
     const swatches = ACCENT_SWATCHES.map(([key, color], i) => `
@@ -1684,7 +1698,9 @@
     "share-wish"(e, btn) {
       const w = [...WISHES_OPEN_MINE, ...WISHES_OPEN_PARTNER, ...WISHES_DONE_MINE, ...WISHES_DONE_PARTNER]
         .find((x) => Number(x.id) === Number(btn.dataset.id));
-      const text = w ? [w.body, w.comment, w.url].filter(Boolean).join("\n") : "";
+      const part = btn.dataset.part || "all";
+      const lines = part === "name" ? [w.body, w.comment] : part === "url" ? [w.url] : [w.body, w.comment, w.url];
+      const text = w ? lines.filter(Boolean).join("\n") : "";
       if (text && navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(
           () => toast("Откройте приложение в Telegram"),

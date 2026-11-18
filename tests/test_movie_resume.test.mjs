@@ -95,11 +95,12 @@ function addMovie(env, { pairId = 1, imdb = "tt1", title = "Фильм", kind = 
 const json = (data, status = 200) => ({ data, status });
 const readJsonReal = async (request) => JSON.parse(await request.text());
 let currentTgId = 1;
+let resumeOptionsResult = { kind: "movie", seasons: [] };
 
 const bundle = new Function(
   "json", "ensureSchemaOnce", "telegramUser", "validTimeZone", "ensureUser",
   "rateLimit", "readJson", "state", "membership", "ownerIds",
-  "cycleState",
+  "cycleState", "movieResumeOptionsFor",
   [
     extractBraced("class HttpError"),
     extractLine("const now = "),
@@ -128,7 +129,8 @@ const bundle = new Function(
     return { ...row, role: row.member_role === "a" ? "a" : "b" };
   },
   () => [],
-  async () => ({})
+  async () => ({}),
+  async () => resumeOptionsResult
 );
 
 const { api } = bundle;
@@ -254,4 +256,45 @@ test("resume: колонка в state/архиве/деталях группы �
   ok(source.includes('"resume"'), "resume нет в regex itemRoute");
   const migration = readFileSync(join(root, "migrations", "0048_movie_resume.sql"), "utf8");
   ok(migration.includes("ALTER TABLE movies ADD COLUMN resume_position"), "миграция 0048 не совпадает");
+});
+
+test("resume-options: GET отдаёт состав для фильма и сериала", async () => {
+  const { env, call } = makeEnv();
+  const movieId = addMovie(env, { imdb: "tt1", kind: "movie" });
+  resumeOptionsResult = { kind: "movie", seasons: [] };
+  let res = await call("GET", `/api/movies/${movieId}/resume-options`);
+  equal(res.status, 200);
+  deepStrictEqual(res.data, { kind: "movie", seasons: [] });
+
+  const seriesId = addMovie(env, { imdb: "tt2", kind: "series" });
+  resumeOptionsResult = { kind: "series", seasons: [{ season: 1, episodes: 8 }, { season: 2, episodes: 10 }] };
+  res = await call("GET", `/api/movies/${seriesId}/resume-options`);
+  equal(res.status, 200);
+  deepStrictEqual(res.data, { kind: "series", seasons: [{ season: 1, episodes: 8 }, { season: 2, episodes: 10 }] });
+  resumeOptionsResult = { kind: "movie", seasons: [] };
+});
+
+test("movieResumeOptionsFor: TMDB приоритетен, иначе число сезонов из карточки", async () => {
+  const HttpError = new Function(`${extractBraced("class HttpError")}\nreturn HttpError;`)();
+  const loadOptions = new Function(
+    "tmdbSeriesSeasons", "HttpError",
+    `${extractBraced("async function movieResumeOptionsFor")}\nreturn movieResumeOptionsFor;`
+  );
+  const envWith = (row) => ({
+    DB: { prepare: () => ({ bind: () => ({ first: async () => row }) }) }
+  });
+
+  const movie = loadOptions(async () => null, HttpError);
+  deepStrictEqual(await movie(envWith({ id: 1, kind: "movie", imdb_id: "tt1", seasons: null, episodes: null }), 1, 1),
+    { kind: "movie", seasons: [] });
+
+  const tmdb = loadOptions(async () => [{ season: 1, episodes: 8 }, { season: 2, episodes: 10 }], HttpError);
+  deepStrictEqual(await tmdb(envWith({ id: 2, kind: "series", imdb_id: "tt2", seasons: 5, episodes: null }), 1, 2),
+    { kind: "series", seasons: [{ season: 1, episodes: 8 }, { season: 2, episodes: 10 }] });
+
+  const fallback = loadOptions(async () => null, HttpError);
+  deepStrictEqual(await fallback(envWith({ id: 3, kind: "series", imdb_id: "tt3", seasons: 2, episodes: 24 }), 1, 3),
+    { kind: "series", seasons: [{ season: 1, episodes: null }, { season: 2, episodes: null }], episodes_total: 24 });
+
+  await rejects(fallback(envWith(null), 1, 9), (error) => error.status === 404 && error.code === "NOT_FOUND");
 });
