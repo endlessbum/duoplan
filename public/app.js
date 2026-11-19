@@ -1798,6 +1798,31 @@
     return Math.max(3, Math.min(11, Math.floor(320 / (cols * 0.6))));
   }
 
+  // Число колонок ASCII-сетки: максимум длины строки в кодовых точках —
+  // та же метрика, что в asciiFontSizeFor.
+  function asciiColumnsOf(art) {
+    return Math.max(1, ...String(art || "").split("\n").map((r) => [...r].length));
+  }
+
+  // Полноразмерный показ вложения в окне чтения записи: размер символов
+  // считается от фактической ширины обёртки и числа колонок, а не от
+  // фиксированных 320px — картинка занимает всю ширину диалога без
+  // горизонтальной прокрутки, пропорции сетки сохраняются.
+  // Диалог уже имеет вертикальную прокрутку, поэтому ограничения высоты
+  // и собственной прокрутки у вложения нет. Вызывается при открытии
+  // записи и на resize (функция сама no-op, если открытого вложения нет).
+  function fitMemoryAsciiArt() {
+    const wrap = document.querySelector(".memory-ascii-wrap");
+    const pre = wrap?.querySelector(".memory-ascii-art");
+    if (!wrap || !pre) return;
+    const width = wrap.clientWidth;
+    if (!width) return;
+    const size = Math.max(3, Math.min(14, Math.floor(width / (asciiColumnsOf(pre.textContent) * 0.6))));
+    pre.style.fontSize = size + "px";
+  }
+
+  window.addEventListener("resize", fitMemoryAsciiArt);
+
   // HTML внутреннего содержимого блока .ascii-block по текущему состоянию.
   function asciiBlockInnerHtml(state) {
     const st = state || { mode: "none" };
@@ -1932,10 +1957,10 @@
           <div class="item-main">
             ${item.title ? `<h3 class="item-title">${renderRichText(item.title)}</h3>` : ""}
             <p class="memory-body">${renderRichText(item.body)}</p>
-            ${item.ascii_art ? `<pre class="memory-ascii-peek">${esc(String(item.ascii_art).split("\n").slice(0, 3).join("\n"))}</pre>` : ""}
             <div class="item-meta">
               <span class="memory-author">${esc(item.display_name || "Партнёр")}</span>
               <span>· ${esc(formatDay(item.day))}</span>
+              ${item.ascii_art ? `<span class="memory-attachment" role="img" aria-label="Есть изображение" title="Есть изображение">📎</span>` : ""}
             </div>
           </div>
           ${itemActions([
@@ -10557,7 +10582,7 @@
           title: "Запись дневника",
           fields: `
             ${item.title ? `<h3 class="memory-view-title">${renderRichText(item.title)}</h3>` : ""}
-            ${item.ascii_art ? `<pre class="memory-ascii-art" style="font-size:${asciiFontSizeFor(item.ascii_art)}px">${esc(item.ascii_art)}</pre>` : ""}
+            ${item.ascii_art ? `<div class="memory-ascii-wrap"><pre class="memory-ascii-art">${esc(item.ascii_art)}</pre></div>` : ""}
             <div class="memory-view-body">${renderRichText(item.body || "")}</div>
             <div class="item-meta" style="margin-top:12px;">
               <span>${esc(item.display_name || "Партнёр")}</span>
@@ -10568,6 +10593,9 @@
           cancelLabel: "Закрыть",
           onSubmit: async () => appState
         });
+        // Полный вложенный текст уже в DOM: подгоняем размер символов под
+        // фактическую ширину диалога (fitMemoryAsciiArt смотрит обёртку).
+        fitMemoryAsciiArt();
       } else if (action === "reopen-item") {
         const type = btn.dataset.type;
         const id = btn.dataset.id;

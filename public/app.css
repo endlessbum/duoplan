@@ -3429,21 +3429,32 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
 }
 
 /* ASCII-вложение записи дневника: оригинал фото не хранится, в базе —
-   только моноширинный текст. pre сохраняет пробелы (white-space: pre). */
-.memory-ascii-art {
+   только моноширинный текст. pre сохраняет пробелы (white-space: pre).
+   В окне чтения вложение показывается полноширинно, без рамки, подложки
+   и внутренней прокрутки: ограничений высоты нет, длинная картинка
+   скроллится вместе с содержимым диалога (.sheet-dialog). Размер символов
+   подгоняет fitMemoryAsciiArt() по фактической ширине обёртки. */
+.memory-ascii-wrap {
   margin: 10px 0 12px;
-  padding: 10px 12px;
-  max-height: 320px;
-  overflow: auto;
-  overflow-x: auto;
+}
+
+.memory-ascii-art {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0;
   white-space: pre;
   font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   font-size: 11px;
   line-height: 1.15;
   color: var(--text);
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
-  border: 1px solid var(--line, rgba(127, 127, 127, 0.18));
-  border-radius: 10px;
+}
+
+/* Значок вложения в строке автора/даты карточки: не увеличивает высоту
+   строки и выравнивается с соседями по базовой линии .item-meta. */
+.memory-attachment {
+  font-size: 0.9em;
+  line-height: 1;
 }
 
 .memory-ascii-peek {
