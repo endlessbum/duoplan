@@ -25,7 +25,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -157,6 +157,11 @@ MIGRATIONS: dict[int, Sequence[str]] = {
     # ASCII-вложение записи дневника (migrations/0050): то же ALTER, что в D1
     # и worker ensureSchema. Повторное применение глушится duplicate column.
     17: ("ALTER TABLE memories ADD COLUMN ascii_art TEXT",),
+    # PD-WISHES-001: личные желания и время шеринга (migrations/0051).
+    18: (
+        "ALTER TABLE wishes ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE wishes ADD COLUMN shared_at INTEGER",
+    ),
 }
 
 

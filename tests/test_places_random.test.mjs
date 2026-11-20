@@ -41,6 +41,7 @@ function loadDeck() {
       "let placePickId = null;",
       // placeList() читает mergedArchive — стаб возвращает недавние как есть.
       "const mergedArchive = (type, recent) => recent || [];",
+      "const byRowId = (a, b) => Number(a) - Number(b);",
       extractBraced(source, "function placeList()"),
       extractBraced(source, "function unvisitedPlaces()"),
       extractBraced(source, "function visitedPlaces()"),

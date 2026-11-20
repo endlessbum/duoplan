@@ -33,9 +33,15 @@ function extractBraced(text, declaration) {
   throw new Error(`незакрытый блок: ${declaration}`);
 }
 
+function extractLine(text, prefix) {
+  const start = text.indexOf(prefix);
+  if (start === -1) throw new Error(`${prefix} не найдено`);
+  return text.slice(start, text.indexOf("\n", start));
+}
+
 const load = new Function(
   [
-    "let appState = { goals: [] };",
+    "let appState = { goals: [], completedGoals: [], user: { tg_id: 1 } };",
     // goalList() читает mergedArchive — стаб возвращает недавние как есть.
     "const mergedArchive = (type, recent) => recent || [];",
     "const archiveMoreHtml = () => \"\";",
@@ -43,11 +49,18 @@ const load = new Function(
     "const REOPEN_ICON = '';",
     "const DONE_ICON = '';",
     "const DELETE_ICON = '';",
+    "const EDIT_ICON = '';",
+    'const document = { documentElement: { dataset: { theme: "dark" } }, querySelectorAll: () => [] };',
+    extractLine(appSource, "  const RICH_TOKENS"),
+    extractBraced(appSource, "function richInline"),
+    extractBraced(appSource, "function renderRichText"),
+    "const formatTimestamp = (v) => v ? String(v) : '';",
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function itemActionButton"),
     extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function partnerMissing"),
     extractBraced(appSource, "function goalList"),
+    extractBraced(appSource, "function doneGoalList"),
     extractBraced(appSource, "function goalCompleted"),
     extractBraced(appSource, "function openGoals"),
     extractBraced(appSource, "function completedGoals"),
@@ -88,8 +101,9 @@ test("предстоящие: карточка цели с пунктами и �
   ok(html.includes("Цель 1"), "нет названия цели");
   ok(html.includes('data-action="goal-item-done" data-id="1"'), "нет отметки пункта");
   ok(html.includes('data-action="goal-item-reopen" data-id="2"'), "нет возврата выполненного пункта");
-  // Пилюлю прогресса «N из M» убрали по запросу — в карточке только пункты.
-  ok(!html.includes("из 2"), "счётчик прогресса вернулся в карточку");
+  // PD-GOALS-001: прогресс «N из M» возвращён по прямому указанию владельца.
+  ok(html.includes("1 из 2"), "нет пилюли прогресса");
+  ok(html.includes('data-action="edit-goal"'), "нет редактирования цели");
   ok(html.includes('data-action="delete-item" data-type="goals"'), "нет удаления цели");
 });
 
@@ -100,7 +114,12 @@ test("выполненный пункт тусклее: класс is-done", () 
 });
 
 test("цель со всеми выполненными пунктами уезжает в «Выполненные»", () => {
-  setState({ goals: [goal(1, [item(1, 1), item(2, 1)]), goal(2, [item(3), item(4, 1)])] });
+  // PD-GOALS-001: сервер уже разделяет наборы; клиент только фильтрует
+  // страховочным goalCompleted и берёт done из completedGoals.
+  setState({
+    goals: [goal(2, [item(3), item(4, 1)])],
+    completedGoals: [goal(1, [item(1, 1), item(2, 1)])]
+  });
   deepStrictEqual(completedGoals().map((g) => g.id), [1], "неверная выборка выполненных");
   deepStrictEqual(openGoals().map((g) => g.id), [2], "неверная выборка предстоящих");
   setView("done");
@@ -109,6 +128,38 @@ test("цель со всеми выполненными пунктами уез�
   ok(!html.includes("Цель 2"), "незавершённая цель попала в «Выполненные»");
   setView("open");
   ok(renderGoalsList().includes("Цель 2"), "незавершённой цели нет в «Предстоящих»");
+});
+
+test("PD-GOALS-001: прогресс, дата закрытия и отдельный архивный тип", () => {
+  setView("done");
+  setState({
+    goals: [],
+    completedGoals: [{ ...goal(7, [item(1, 1), item(2, 1)]), completed_at: 1700009999 }]
+  });
+  const html = renderGoalsList();
+  ok(html.includes("2 из 2"), "нет прогресса на завершённой цели");
+  ok(html.includes("1700009999"), "нет даты закрытия цели");
+  ok(/archiveMoreHtml\("done_goals"/.test(appSource), "выполненные не используют отдельный архив");
+});
+
+test("PD-GOALS-001: пункты рендерят разметку, чекбоксы гасятся без партнёра", () => {
+  const row = goalItemRow({ id: 1, title: "**Важно**", done: 0, done_by: null });
+  ok(row.includes("<b>Важно</b>"), "разметка пункта не рендерится");
+  // В sandbox partnerMissing() читает appState.pair — без пары кнопка disabled.
+  ok(goalItemRow(item(2)).includes("disabled"), "чекбокс не заблокирован без партнёра");
+  // С партнёром — активен и показывает подпись отметившего.
+  setState({ goals: [], completedGoals: [], pair: { id: 1, role: "a", user_b: 2 }, user: { tg_id: 1 } });
+  const partnerRow = goalItemRow({ id: 3, title: "Шаг", done: 1, done_by: 2 });
+  ok(!partnerRow.includes("disabled"), "чекбокс заблокирован при наличии партнёра");
+  ok(partnerRow.includes("отметил партнёр"), "нет подписи отметившего");
+});
+
+test("PD-GOALS-001: пустая цель не считается выполненной и получает подсказку", () => {
+  setView("open");
+  setState({ goals: [goal(8, [])], completedGoals: [] });
+  const html = renderGoalsList();
+  ok(html.includes("В цели нет пунктов"), "нет подсказки про пустую цель");
+  ok(!completedGoals().some((g) => g.id === 8), "пустая цель попала в выполненные");
 });
 
 test("пустые «Выполненные» — поясняющая карточка без кнопки создания", () => {
@@ -136,7 +187,8 @@ test("worker: маршруты целей на месте", () => {
 });
 
 test("worker: состояние и схема", () => {
-  ok(workerSource.includes("FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?)"), "goals не фильтруются по приватности в /api/state");
+  ok(workerSource.includes("FROM goals g WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?)"), "goals не фильтруются по приватности в /api/state");
+  ok(workerSource.includes('completedGoals: (completedGoals.results || []).map'), "завершённые цели не отдаются в /api/state");
   ok(workerSource.includes("FROM goal_items gi"), "пункты целей не отдаются в /api/state");
   ok(/goals: \(goals\.results \|\| \[\]\)\.map/.test(workerSource), "пункты не приклеиваются к цели");
   ok(/CREATE TABLE IF NOT EXISTS goals \(/.test(workerSource), "goals нет в ensureSchema");
@@ -152,15 +204,15 @@ test("app: диалог цели и действия", () => {
   ok(appSource.includes('is_private: fd.get("is_private") === "on"'), "личная цель не передаётся");
   ok(/action === "goal-item-done" \|\| action === "goal-item-reopen"/.test(appSource), "нет обработчика отметки пункта");
   ok(appSource.includes("/api/goal_items/"), "нет запроса отметки пункта");
-  ok(appSource.includes('goals: mergedArchive("goals", appState?.goals || [])'), "goals нет в findItem");
+  ok(appSource.includes('goals: [...mergedArchive("goals", appState?.goals || []), ...mergedArchive("done_goals", appState?.completedGoals || [])]'), "goals нет в findItem");
   // Регрессия 2026-11-11: в Promise.all state() порядок запросов разъехался
   // с деструктуризацией — goals получал строки копилок, savings — пункты
   // целей (заметено на сиде архива). Порядок: savings → goals → goalItems.
   // В конце — partnerUser и stats (итоги пары для окна «Ваша история»).
-  ok(/movieRatings, savings, goals, goalItems, daily, partnerUser, stats\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
+  ok(/movieRatings, savings, goals, goalItems, completedGoals, completedMovies, birthdays, privateWishes, daily, partnerUser, stats\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
   const stateStart = workerSource.indexOf("movieRatings, savings, goals, goalItems");
   const savingsQ = workerSource.indexOf("FROM savings WHERE pair_id=? AND (kind='shared'", stateStart);
-  const goalsQ = workerSource.indexOf("FROM goals WHERE pair_id=? AND (is_private=0", stateStart);
+  const goalsQ = workerSource.indexOf("FROM goals g WHERE g.pair_id=? AND (g.is_private=0", stateStart);
   ok(savingsQ > -1 && goalsQ > savingsQ, "в Promise.all state() savings/goals поменялись местами");
   ok(appSource.includes('goals: "цель"'), "goals нет в typeNames удаления");
   ok(appSource.includes('"add-goal"'), "нет действия создания цели");

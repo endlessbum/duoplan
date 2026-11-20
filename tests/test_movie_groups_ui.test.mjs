@@ -601,3 +601,9 @@ test("UX-03/UX-04: менеджер сохраняет черновик при �
   ok(extractBraced("async function afterGroupPartAdded").includes("{ notice: message }"),
     "менеджер не получает текст результата");
 });
+
+test("PD-MOVIES-001: подпись группы уточняет число частей в текущем списке", () => {
+  const render = extractBraced("function renderMovieGroup(");
+  ok(render.includes("в этом списке"), "нет уточнения о частях в текущем сегменте");
+  ok(render.includes("из ${total} просмотрено"), "общий прогресс группы исчез");
+});

@@ -41,7 +41,7 @@ TABLES = {
         "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at"
     ),
     "memories": "id, pair_id, author_id, title, body, ascii_art, day, created_at",
-    "wishes": "id, pair_id, owner_id, body, done, done_at, url, comment, created_at",
+    "wishes": "id, pair_id, owner_id, body, done, done_at, url, comment, created_at, is_private, shared_at",
     # Контентные коллекции после 0016: раньше молча не экспортировались, и
     # перенос локальной базы в D1 терял цитаты, места, поездки, цели, фильмы
     # и копилки без единого предупреждения. Порядок важен: родители раньше

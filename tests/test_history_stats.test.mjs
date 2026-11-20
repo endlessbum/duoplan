@@ -65,7 +65,7 @@ test("окно истории показывает все пять итогов 
   ok(rows.some(r => r.includes("Планов выполнено") && r.includes("5")), "нет числа выполненных планов");
   ok(rows.some(r => r.includes("Просмотрено кино") && r.includes("17 ч")), "нет часов кино");
   ok(rows.some(r => r.includes("Накоплено") && r.includes("100") && r.includes("₽")), "нет суммы накопленного");
-  ok(rows.some(r => r.includes("Путешествий") && r.includes("3")), "нет числа путешествий");
+  ok(rows.some(r => r.includes("Съездили") && r.includes("3")), "нет числа состоявшихся поездок");
 });
 
 test("нулевые итоги не показываются", () => {
@@ -93,7 +93,7 @@ test("итоги считаются по всей базе, а не по обр�
   ok(/FROM memories WHERE pair_id=\?\) AS memories/.test(workerSource), "нет счётчика записей");
   ok(/FROM tasks WHERE pair_id=\? AND status='done' AND \(is_private=0 OR created_by=\?\)\) AS done_tasks/.test(workerSource),
     "нет счётчика выполненных планов с фильтром личных");
-  ok(/FROM trips WHERE pair_id=\?\) AS trips/.test(workerSource), "нет счётчика путешествий");
+  ok(/FROM trips WHERE pair_id=\? AND visited=1\) AS trips/.test(workerSource), "PD-PLACES-001: счётчик поездок должен считать только съездившие");
   ok(/FROM savings WHERE pair_id=\? AND kind='shared'\) AS saved/.test(workerSource), "нет суммы по общим копилкам");
   ok(/FROM movies WHERE pair_id=\? AND watched=1 AND runtime>0\) AS watched_minutes/.test(workerSource),
     "нет суммы минут по просмотренному кино");

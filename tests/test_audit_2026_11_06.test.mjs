@@ -56,11 +56,11 @@ test("пустой PATCH несуществующей записи — 404, а �
 
 test("PATCH savings: цель не ниже собранной суммы", () => {
   match(worker, /TARGET_BELOW_COLLECTED/);
-  match(worker, /SELECT id,collected FROM savings/);
+  match(worker, /SELECT id,collected,created_by FROM savings/);
 });
 
 test("wishes.url нормализуется к NULL при POST и PATCH", () => {
-  const post = worker.indexOf('INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at)');
+  const post = worker.indexOf('INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at,is_private,shared_at)');
   ok(post !== -1, "POST wishes не найден");
   match(worker, /const wishLink = wishUrl\(body\.url\) \|\| null/);
   // Уточнение к желанию пишется тем же INSERT, пустое значение — NULL.
@@ -74,14 +74,10 @@ test("wishes.url нормализуется к NULL при POST и PATCH", () =>
   );
 });
 
-test("окно ежегодного повтора дат совпадает с worker/ботом (+8 лет)", () => {
-  // nextOccurrence для recurs-дат: worker length:9 → currentYear..+8,
-  // Python range(9) — то же. Плановый yearlyNext остаётся +9 (range(10)).
-  const occurrences = appJs.match(/for \(let year = currentYear; year <= currentYear \+ \d; year\+\+\)/g) || [];
-  ok(occurrences.includes("for (let year = currentYear; year <= currentYear + 8; year++)"),
-    "должно быть окно +8 для дат");
-  ok(occurrences.includes("for (let year = currentYear; year <= currentYear + 9; year++)"),
-    "должно остаться окно +9 для планов");
+test("PD-DATES-001: yearlyNext и nextOccurrence используют одно окно", () => {
+  const loops = appJs.match(/for \(let year = currentYear; year < currentYear \+ RECURRENCE_YEARS; year\+\+\)/g) || [];
+  ok(loops.length === 2, "планы и даты должны использовать единое annual-окно");
+  ok(appJs.includes("const RECURRENCE_YEARS = 10;"), "нет общей константы окна");
 });
 
 test("goal-item действия заблокированы при отсутствующем партнёре", () => {
@@ -95,7 +91,7 @@ test("вкладка «Дни рождения» имеет пагинацию �
   const birthdaysBranch = appJs.match(/if \(datesView === "birthdays"\) \{[\s\S]*?\n    \}/);
   ok(birthdaysBranch, "ветка birthdays не найдена");
   ok(
-    birthdaysBranch[0].includes('archiveMoreHtml("dates"'),
-    "archiveMoreHtml(\"dates\") должен быть и в birthdays-ветке"
+    birthdaysBranch[0].includes('archiveMoreHtml("birthdays"'),
+    "PD-DATES-001: у дней рождения должен быть свой archive-тип"
   );
 });

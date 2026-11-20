@@ -40,6 +40,9 @@ const buildApi = new Function(
     extractLine("const now = "),
     extractLine("const clean = "),
     extractLine("const CYCLE_DATE_RE"),
+    extractLine("const DEFAULT_TZ"),
+    extractBraced("function validTimeZone"),
+    extractBraced("function localDay"),
     extractLine("const HEALTH_MED_FORMS"),
     extractLine("const HEALTH_MED_STATUS"),
     extractLine("const HEALTH_TIME_RE"),
@@ -67,7 +70,7 @@ function createMockDB(meds = [], medExists = true) {
           writes.push({ sql, args });
           return {
             async first() {
-              if (sql.includes("SELECT id FROM health_meds")) return medExists ? { id: 5 } : null;
+              if (sql.includes("FROM health_meds WHERE id=?")) return medExists ? { id: 5, status: "active", start_date: null, end_date: null } : null;
               return null;
             },
             async all() {
@@ -277,4 +280,14 @@ test("POST /api/health/med/delete удаляет препарат и истор�
   ok(response.status === 200);
   const batch = writes.filter(w => w.sql.includes("DELETE FROM health_med_logs") || w.sql.includes("DELETE FROM health_meds"));
   equal(batch.length, 2, "удаляются и журнал, и запись");
+});
+
+test("PD-HEALTH-001: здоровье отдаёт личный today и флаг усечения логов", async () => {
+  const { api, env, request } = makeEnv({ method: "GET" });
+  const res = await api(request, env, new URL("https://duoplan.test/api/health/meds"));
+  equal(res.status, 200);
+  ok(/^\d{4}-\d{2}-\d{2}$/.test(res.data.today || ""), "нет личного дня в healthState");
+  equal(typeof res.data.logs_truncated, "boolean", "нет флага усечения логов");
+  ok(source.includes("status !== \"active\""), "нет guard активного препарата в med-log");
+  ok(source.includes("CASE status WHEN 'active' THEN 0"), "сортировка статусов не явная");
 });

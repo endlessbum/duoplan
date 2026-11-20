@@ -37,6 +37,7 @@ const load = new Function(
     "const mergedArchive = (type, recent) => recent || [];",
     "const archiveMoreHtml = (type) => `<button data-action=\"load-archive\" data-type=\"${type}\">Показать ещё</button>`;",
     "const sortByTaskDeadline = (rows) => rows;",
+    "const sortByCompletedAt = (rows) => rows.slice().sort((a, b) => Number(b.completed_at) - Number(a.completed_at) || Number(b.id) - Number(a.id));",
     "const taskItem = (item) => `<article class=\"card task\">План ${item.id}</article>`;",
     "const completedTaskItem = (item) => `<article class=\"card done\">Завершён ${item.id}</article>`;",
     extractBraced(appSource, "function esc"),
@@ -113,16 +114,35 @@ test("пустые «Выполненные» — поясняющая карт�
 
 test("вид «Предстоящие» без планов: добавление или «Всё впереди»", () => {
   setView("open");
-  // Есть завершённые — только кнопка добавления, без «Всё впереди».
+  // Есть завершённые — своя карточка-подсказка с кнопкой, без «Всё впереди».
   setState({ tasks: [], completedTasks: [doneTask(1)] });
   let html = renderPlansList();
   ok(html.includes('data-action="add-task"'), "нет кнопки добавления");
+  ok(html.includes("Нет предстоящих"), "нет поясняющей карточки при непустом архиве");
   ok(!html.includes("Всё впереди"), "«Всё впереди» не должно показываться при наличии завершённых");
   // Пусто и там и там — карточка «Всё впереди» с кнопкой.
   setState({ tasks: [], completedTasks: [] });
   html = renderPlansList();
   ok(html.includes("Всё впереди"), "нет пустой карточки");
   ok(html.includes('data-action="add-task"'), "нет кнопки добавления в пустой карточке");
+});
+
+test("завершённые сортируются по completed_at DESC, id DESC после merge архива", () => {
+  // Порядок должен совпадать с серверным ORDER BY даже если mergedArchive
+  // склеил recent и архив в произвольном порядке.
+  setView("done");
+  setState({
+    tasks: [],
+    completedTasks: [
+      { ...doneTask(1), completed_at: 100 },
+      { ...doneTask(2), completed_at: 300 },
+      { ...doneTask(3), completed_at: 200 }
+    ]
+  });
+  const html = renderPlansList();
+  ok(html.indexOf("Завершён 2") < html.indexOf("Завершён 3"), "недавние завершённые идут не первыми");
+  ok(html.indexOf("Завершён 3") < html.indexOf("Завершён 1"), "старые завершённые идут не последними");
+  ok(/sortByCompletedAt\(mergedArchive\("done_tasks"/.test(appSource), "renderPlansList не сортирует завершённые");
 });
 
 test("выбранный вид переживает перерисовку списка", () => {

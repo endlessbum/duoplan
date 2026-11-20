@@ -34,6 +34,7 @@ const stubs = `
     return String(v ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   }
   function viewerTimeZone() { return "Europe/Moscow"; }
+  function formatDay(v) { return String(v ?? ""); }
 `;
 
 function buildHealth(healthStateValue, extra = {}, reqImpl = null) {
@@ -79,8 +80,8 @@ test("H3: список препаратов — статус, имя загол�
   assert.ok(html.includes("Витамин D"));
   // Имя препарата — заголовком карточки (h3), не подписью.
   assert.ok(html.includes('<h3 class="health-med-name">Магний</h3>'), "имя препарата — заголовок");
-  // Чип «Напоминание» из карточки убран — настройка только в диалоге.
-  assert.ok(!html.includes("Напоминание:"), "чип напоминания в карточке отсутствует");
+  // PD-HEALTH-001: времена напоминаний видны на карточке.
+  assert.ok(html.includes("Напомним:"), "времена напоминаний не показаны на карточке");
   assert.ok(!html.includes("health-remind-toggle"), "переключателя напоминания в списке нет");
   assert.ok(html.includes("принято 1 · пропущено 0"));
   // «Принят» — primary (цвет акцента), «Пропущен» — secondary, обе full.
@@ -93,7 +94,7 @@ test("H3: список препаратов — статус, имя загол�
   const addIdx = html.indexOf('data-action="health-med-new"');
   const cardIdx = html.indexOf('<section class="card">');
   assert.ok(addIdx > -1 && cardIdx > -1 && addIdx < cardIdx, "«Добавить препарат» над карточкой");
-  assert.ok(html.includes("общий итог за день"), "дневной статус честно подписан");
+  assert.ok(html.includes("один итог за сутки"), "дневной статус честно подписан");
 });
 
 test("H4: у препарата на паузе нет чипов приёма", () => {
@@ -175,4 +176,16 @@ test("H10: ошибка загрузки — повторить; загрузк�
   assert.ok(failed.renderHealthBody().includes("Повторить"));
   const loading = buildHealth(null);
   assert.ok(loading.renderHealthBody().includes("Загружаем список"));
+});
+
+test("PD-HEALTH-001: история, лимит и личный день доступны без партнёра", () => {
+  const ui = buildHealth({ ...richState, logs_truncated: true, today });
+  const html = ui.renderHealthBody();
+  assert.ok(html.includes("История (14 дн.)"), "нет истории приёма");
+  assert.ok(html.includes("последние 600 отметок"), "нет честной подписи лимита");
+  assert.ok(ui.healthToday() === today, "healthToday не берёт дату из healthState");
+  const appSrc = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  for (const action of ["health-med-new", "health-med-edit", "health-intake"]) {
+    assert.ok(!appSrc.includes(`"${action}",`), `${action} попал в общий партнёрский guard`);
+  }
 });

@@ -84,7 +84,7 @@ SCHEMA: list[str] = [
         "pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, "
         "owner_id INTEGER NOT NULL, body TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, "
         "done_at INTEGER, created_at INTEGER NOT NULL, url TEXT, "
-        "comment TEXT)"
+        "comment TEXT, is_private INTEGER NOT NULL DEFAULT 0, shared_at INTEGER)"
     ),
     (
         "CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT, "

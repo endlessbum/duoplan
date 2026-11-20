@@ -376,7 +376,7 @@
   function placeCard(p) {
     const visited = p.visited === true;
     return `
-      <article class="card${visited ? " place-visited" : ""}">
+      <article class="card${visited ? " is-visited" : ""}">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${esc(p.title)}</h3>
@@ -398,7 +398,7 @@
   function tripCard(t) {
     const visited = t.visited === true;
     return `
-      <article class="card${visited ? " place-visited" : ""}">
+      <article class="card${visited ? " is-visited" : ""}">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${esc(t.title)}</h3>

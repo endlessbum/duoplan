@@ -549,3 +549,14 @@ test("publicUser: show_cycle_calendar — авто по полу при NULL, я
   const on = publicUser({ tg_id: 2, display_name: "Он", points: 0, gender: "male", show_cycle_calendar: 1 });
   equal(on.show_cycle_calendar, true);
 });
+
+test("PD-PROFILE-001: пол, время сводок, акцент и PIN в настройках", () => {
+  ok(appSource.includes('data-action="set-gender" data-gender="male"'), "нет смены пола в настройках");
+  ok(appSource.includes("const keepTime = (id, previous) =>"), "пустое время обнуляет настройку");
+  ok(appSource.includes("if (cycleBox && !cycleBox.disabled) body.show_cycle_calendar = cycleBox.checked"),
+    "disabled-чекбокс тихо меняет настройку");
+  ok(appSource.includes('showToast("Цвет сохранён")'), "нет тоста смены акцента");
+  ok(appSource.includes("Хранится только на этом устройстве"), "нет пояснения PIN");
+  ok(appSource.includes("Подгружаем старые события…"), "нет индикатора догрузки календаря");
+  ok(appSource.includes('"contacts", "cycle"'), "контакты не включены в диалог экспорта");
+});

@@ -90,9 +90,11 @@ test("savingItem: пилюля типа, собрано/цель, прогрес
   ok(personal.includes(">Личная</span>"), "личная помечена");
   ok(personal.includes("saving-full"), "полная копилка помечена");
   ok(personal.includes("width:100%"), "прогресс не превышает 100%");
-  // У полной копилки остались только кнопки удаления: пополнять и править нечего.
+  // PD-SAVINGS-001: у полной копилки «Плюс» скрыт, но «Редактировать»
+  // остаётся — можно поднять цель и продолжить копить.
   ok(personal.includes('data-action="delete-item"'), "у полной есть удаление");
-  ok(!personal.includes("deposit-saving") && !personal.includes("edit-saving"), "у полной не должно быть «Плюс» и «Редактировать»");
+  ok(!personal.includes("deposit-saving"), "у полной не должно быть «Плюс»");
+  ok(personal.includes("edit-saving"), "у полной осталось редактирование");
   // Нулевая цель не роняет карточку (деление на ноль).
   const bare = savingItem({ id: 3, kind: "personal", title: "x", target: 0, collected: 0 });
   ok(bare.includes("width:0%"), "нулевая цель — прогресс 0");

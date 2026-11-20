@@ -427,3 +427,8 @@ test("CONTACT-RETRY: HttpError не повторяется (404 не ретра�
   );
   equal(batchCalls, 1, "404 выброшен без повторной попытки");
 });
+
+test("контакты сортируются по имени, затем по фамилии", () => {
+  ok(source.includes("ORDER BY name COLLATE NOCASE ASC, surname COLLATE NOCASE ASC, id ASC"),
+    "сервер не сортирует по фамилии");
+});

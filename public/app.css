@@ -1559,6 +1559,17 @@ select.settings-select {
   color: var(--muted);
 }
 
+/* PD-HOME-001: «Все →» рядом с заголовком превью на главной. */
+.link-button {
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--accent, var(--text));
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 .sheet-dialog {
   width: min(480px, calc(100% - 24px));
   /* Длинные диалоги (экспорт: восемь секций) не вылезают за экран —
@@ -2187,6 +2198,20 @@ input[type="checkbox"]:active {
   color: var(--muted);
 }
 
+/* PD-GOALS-001: подпись «отметил партнёр» и подсказка пустой цели. */
+.goal-item-by {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.empty-hint {
+  margin: 2px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 /* Строки пунктов в диалоге создания цели: та же геометрия поля, что и у
    остальных input диалога, крестик справа удаляет строку. */
 .goal-step-row {
@@ -2257,7 +2282,7 @@ input[type="checkbox"]:active {
   border-color: var(--berry);
 }
 
-.place-visited,
+.is-visited,
 .movie-watched,
 .saving-full {
   opacity: 0.72;
@@ -2355,6 +2380,12 @@ input[type="checkbox"]:active {
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  /* PD-QUOTES-001: длинная цитата (до 600 символов) не растягивает сетку —
+     полный текст доступен по «Скопировать текст». */
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .card .quote-source {
@@ -2914,6 +2945,8 @@ input[type="checkbox"]:active {
   padding-left: 2px;
 }
 .contact-phone-row input { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; }
+/* Введение >11 цифр обрезается маской, но поле помечается — ошибка не молчит. */
+.contact-phone-row input[data-invalid="1"] { border-color: var(--danger, #e05b5b); }
 .contact-name-warning {
   margin: 0 0 10px;
   padding: 10px 12px;

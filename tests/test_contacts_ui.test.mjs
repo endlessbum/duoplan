@@ -10,7 +10,7 @@ const source = readFileSync(new URL("../public/app.js", import.meta.url), "utf8"
 // Секция «Контакты» между маркером и quoteAuthorOptions.
 const markerIdx = source.indexOf("// Контакты: телефонная книга пары");
 const sectionStart = source.lastIndexOf("// ------------------------------------------------------------------", markerIdx);
-const section = source.slice(sectionStart, source.indexOf("// Автор цитаты — select вместо свободного ввода"));
+const section = source.slice(sectionStart, source.indexOf("// PD-QUOTES-001: цитата хранит только то, кто из пары её сказал"));
 
 const stubs = `
   const appState = { user: { tg_id: 777, gender: "female" }, pair: { id: 1, timezone: "Europe/Moscow", partner_gender: "male" } };
@@ -45,7 +45,7 @@ function buildContacts(contactsStateValue, extra = {}, reqImpl = null) {
     `  contactsView = ${JSON.stringify(extra.contactsView ?? "mine")};`,
     `  contactsSearch = ${JSON.stringify(extra.contactsSearch ?? "")};`
   ].join("\n");
-  const src = `${stubs}\n${requestSrc}\n${setters}\n${section}\nreturn { renderContactsBody, renderContactsList, contactsFormatDigits, contactsNormalizePhone, contactsMatches, contactsListFor, handleContactsAction, openContactInfoDialog, getSearch: () => contactsSearch };`;
+  const src = `${stubs}\n${requestSrc}\n${setters}\n${section}\nreturn { renderContactsBody, renderContactsList, contactsFormatDigits, contactsNormalizePhone, contactsMatches, contactsListFor, contactPartnerLabel, handleContactsAction, openContactInfoDialog, getSearch: () => contactsSearch };`;
   return new Function(src)();
 }
 
@@ -162,4 +162,20 @@ test("C10: маска ввода ограничивает 10 цифрами, м�
   ok(section.includes('maxlength="13"'), "10 цифр + 3 пробела");
   ok(section.includes("Максимум 3 номера на контакт"));
   ok(section.includes("Введите полный номер — 10 цифр"), "запрет неполного номера");
+  ok(source.includes('target.setAttribute("data-invalid", "1")'), "слишком длинный ввод не помечается");
+});
+
+test("C11: грамматика пустого партнёра и сортировка по фамилии", () => {
+  const partnerEmpty = buildContacts({ mine: [], partner: [] }, { contactsView: "partner" }, () => {});
+  const html = partnerEmpty.renderContactsBody();
+  ok(html.includes("У него контактов пока нет"), "неверная грамматика пустого состояния");
+  ok(!html.includes("Его контактах"), "старая форма фразы осталась");
+  ok(section.includes('contactPartnerLabel() === "Её" ? "неё" : "него"'), "нет женской формы грамматики");
+
+  const withNames = buildContacts({ mine: [], partner: [
+    { id: 1, name: "Иван", surname: "Петров" },
+    { id: 2, name: "Иван", surname: "Сидоров" },
+    { id: 3, name: "Иван", surname: "Абрамов" }
+  ] }, { contactsView: "partner" }, () => {});
+  assert.equal(withNames.contactsListFor(false).map(c => c.surname).join(","), "Абрамов,Петров,Сидоров");
 });

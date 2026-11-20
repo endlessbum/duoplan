@@ -123,10 +123,10 @@ test("гонка isolate: duplicate column name обрабатывается п�
   deepStrictEqual(log.alters.sort(), [
     "accent_color", "ascii_art", "awaiting_return", "bleeding_details", "clots", "comment", "context", "created_by", "custom_name", "cycle_length_known", "dates_digest_enabled", "dates_digest_time", "day",
     "details", "digest_enabled", "digest_time", "done_at", "end_unknown", "energy", "expires_at", "gender", "is_private",
-    "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "movie_pick_id", "mucus",
+    "is_private", "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "movie_pick_id", "mucus",
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url", "place_pick_id",
-    "rating_checked_at", "rating_source", "resume_position", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "rating_checked_at", "rating_source", "resume_position", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "shared_at", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -157,7 +157,7 @@ test("чистый проход миграции без гонки записы�
   // + resume_position (movies, «Остановились» — migrations/0048)
   // + place_pick_id/movie_pick_id (pairs, общий рандом — migrations/0049)
   // + ascii_art (memories, ASCII-вложение дневника — migrations/0050)
-  deepStrictEqual(log.alters.length, 65);
+  deepStrictEqual(log.alters.length, 67); // +2: PD-WISHES-001 is_private/shared_at
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

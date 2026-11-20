@@ -40,6 +40,7 @@ function extractLine(prefix) {
 const load = new Function(
   [
     'const DEFAULT_TZ = "Europe/Moscow";',
+    "const RECURRENCE_YEARS = 10;",
     extractBraced("function validTimeZone"),
     extractBraced("function localDay"),
     extractBraced("function byRowId"),

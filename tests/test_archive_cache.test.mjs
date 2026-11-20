@@ -37,6 +37,7 @@ const load = new Function(
   "request", "render", "STATE_RECENT_LIMIT", "STATE_ACTIVE_LIMIT", "ARCHIVE_PAGE_SIZE", "ARCHIVE_FETCH_CONCURRENCY",
   [
     "let appState = null;",
+    "const esc = (value) => String(value ?? '');",
     "let archiveCachePairId = null;",
     // Групповые кэши сбрасываются syncArchiveCachePair вместе с архивом.
     "const expandedMovieGroups = new Set();",
@@ -47,8 +48,8 @@ const load = new Function(
     "let movieGroupSuggest = null;",
     "let movieGroupDraft = null;",
     extractBraced("function emptyArchiveEntry"),
-    "const archiveCache = { tasks: emptyArchiveEntry(), dates: emptyArchiveEntry(), wishes: emptyArchiveEntry(), memories: emptyArchiveEntry(), done_tasks: emptyArchiveEntry(), done_wishes: emptyArchiveEntry(), movies: emptyArchiveEntry(), quotes: emptyArchiveEntry(), places: emptyArchiveEntry(), trips: emptyArchiveEntry(), goals: emptyArchiveEntry(), savings: emptyArchiveEntry() };",
-    "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'], movies: ['movies'], quotes: ['quotes'], places: ['places'], trips: ['trips'], goals: ['goals'], savings: ['savings'] };",
+    "const archiveCache = { tasks: emptyArchiveEntry(), dates: emptyArchiveEntry(), wishes: emptyArchiveEntry(), memories: emptyArchiveEntry(), done_tasks: emptyArchiveEntry(), done_wishes: emptyArchiveEntry(), movies: emptyArchiveEntry(), quotes: emptyArchiveEntry(), places: emptyArchiveEntry(), trips: emptyArchiveEntry(), goals: emptyArchiveEntry(), done_goals: emptyArchiveEntry(), savings: emptyArchiveEntry() };",
+    "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'], movies: ['movies'], quotes: ['quotes'], places: ['places'], trips: ['trips'], goals: ['goals', 'done_goals'], savings: ['savings'] };",
     extractBraced("function resetArchiveCache"),
     extractBraced("function syncArchiveCachePair"),
     extractBraced("function removeFromArchiveCache"),
@@ -136,6 +137,44 @@ test("removeFromArchiveCache удаляет запись только из кэ�
   equal(ctx.archiveCache.memories.items.length, 1);
   // У dates архива нет — вызов безопасен.
   ctx.removeFromArchiveCache("dates", 5);
+});
+
+test("done/reopen инвалидируют архив сразу после успешного запроса", () => {
+  // Хвосты за пределами /api/state живут только в archiveCache: без очистки
+  // карточка остаётся в старом сегменте до случайной ревалидации.
+  const doneIdx = source.indexOf('action === "done-item"');
+  const reopenIdx = source.indexOf('action === "reopen-item"');
+  ok(doneIdx > 0 && reopenIdx > doneIdx, "ветки done/reopen не найдены в ожидаемом порядке");
+  const doneBranch = source.slice(doneIdx, source.indexOf('action === "place-visited"', doneIdx));
+  const reopenBranch = source.slice(reopenIdx, source.indexOf('action === "edit-item"', reopenIdx));
+  for (const [name, branch, typeExpr] of [
+    ["done", doneBranch, "btn.dataset.type"],
+    ["reopen", reopenBranch, "type"]
+  ]) {
+    const requestIdx = branch.indexOf("/done") >= 0 && name === "done"
+      ? branch.indexOf("/done")
+      : branch.indexOf("/reopen");
+    const removeIdx = branch.indexOf(`removeFromArchiveCache(${typeExpr}`);
+    const revalidateIdx = branch.indexOf("await revalidateArchiveCache()");
+    ok(requestIdx > 0, `${name}: нет запроса смены состояния`);
+    ok(removeIdx > requestIdx, `${name}: кэш не очищается после запроса`);
+    ok(revalidateIdx > removeIdx, `${name}: нет ожидаемой ревалидации после очистки`);
+  }
+});
+
+test("PD-DATES-001: PATCH даты инвалидирует архив вместо точечного patch", () => {
+  // Оба диалога (ДР и обычная дата) шлют PATCH /api/dates/:id. Проверяем
+  // хвост каждого из двух вхождений до return state.
+  const marker = "/api/dates/${id}`";
+  const first = source.indexOf(marker);
+  const second = source.indexOf(marker, first + marker.length);
+  ok(first > 0 && second > first, "не найдены оба PATCH-диалога дат");
+  const tail = (at) => source.slice(at, source.indexOf("return state;", at));
+  for (const patch of [tail(first), tail(second)]) {
+    ok(patch.includes('removeFromArchiveCache("dates", id)'), "PATCH даты не чистит архив");
+    ok(patch.includes("await revalidateArchiveCache()"), "PATCH даты не перезагружает архив");
+  }
+  ok(source.includes('birthdays: emptyArchiveEntry()'), "нет отдельного архива дней рождения");
 });
 
 test("patchArchiveItem обновляет архивную копию, сохраняя остальные поля", () => {
@@ -255,8 +294,8 @@ test("шесть новых типов архива: кэш, порог 200 и m
     ok(source.includes(`${helper} {\n    return mergedArchive(`), `${helper} не через mergedArchive`);
   }
   ok(source.includes('quotes: mergedArchive("quotes", appState?.quotes || [])'), "findItem: цитаты мимо архива");
-  ok(source.includes('movies: mergedArchive("movies", appState?.movies || [])'), "findItem: фильмы мимо архива");
-  ok(source.includes('goals: mergedArchive("goals", appState?.goals || [])'), "findItem: цели мимо архива");
+  ok(source.includes('movies: [...mergedArchive("movies", appState?.movies || []), ...mergedArchive("watched_movies", appState?.completedMovies || [])]'), "findItem: фильмы мимо архива");
+  ok(source.includes('goals: [...mergedArchive("goals", appState?.goals || []), ...mergedArchive("done_goals", appState?.completedGoals || [])]'), "findItem: цели мимо архива");
   ok(source.includes('savings: mergedArchive("savings", appState?.savings || [])'), "findItem: копилки мимо архива");
   ok(source.includes('places: mergedArchive("places", appState?.places || [])'), "findItem: места мимо архива");
   ok(source.includes('trips: mergedArchive("trips", appState?.trips || [])'), "findItem: трипы мимо архива");

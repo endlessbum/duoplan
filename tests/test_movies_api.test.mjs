@@ -575,3 +575,18 @@ test("/api/state отдаёт ответ, не дожидаясь обновле
   ok(!workerSource.includes("await refreshMovieRatings"), "остался синхронный await refreshMovieRatings");
   ok(workerSource.includes("async fetch(request, env, ctx)"), "ctx не прокинут в fetch-хендлер");
 });
+
+test("PD-MOVIES-001: раздельные наборы movies/completedMovies и подтверждение unwatched", () => {
+  const appSource = readFileSync(join(root, "public/app.js"), "utf8");
+  ok(workerSource.includes("completedMovies: completedMovies.results"), "завершённые фильмы не отдаются в /api/state");
+  ok(workerSource.includes("watched_movies: {"), "нет отдельного архива просмотренного");
+  ok(workerSource.includes("SELECT COUNT(*) AS n FROM movies WHERE pair_id=? AND watched=1"), "COUNT watched_movies не считает просмотренные");
+  ok(/m\.watched=0 ORDER BY m\.created_at DESC/.test(workerSource), "movies-архив смешанный");
+  ok(/m\.watched=1 ORDER BY m\.watched_at DESC/.test(workerSource), "watched_movies без сортировки по дате просмотра");
+  const unwatched = appSource.slice(
+    appSource.indexOf('action === "movie-unwatched"'),
+    appSource.indexOf('action === "movie-resume"')
+  );
+  ok(unwatched.includes("Оценки пары будут сброшены"), "нет подтверждения сброса оценок");
+  ok(unwatched.includes("openDialog"), "подтверждение unwatched не через диалог");
+});

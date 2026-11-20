@@ -167,9 +167,9 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
         "VALUES(1,1,'Годовщина','2026-12-01','18:00',0,1,10,1)"
     )
     con.execute(
-        "INSERT INTO wishes(id,pair_id,owner_id,body,done,done_at,url,comment,created_at) "
+        "INSERT INTO wishes(id,pair_id,owner_id,body,done,done_at,url,comment,created_at,is_private,shared_at) "
         "VALUES(1,1,10,'Билеты',1,'2026-12-02','https://example.com/tickets',"
-        "'В партере, не дальше 5 ряда',1)"
+        "'В партере, не дальше 5 ряда',1,0,1)"
     )
     con.execute(
         "INSERT INTO daily_completions(pair_id,tg_id,day,completed_at) VALUES(1,10,'2026-12-02',5)"
@@ -187,7 +187,7 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
     # экспортёр должен включать их в список колонок для pairs.
     assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, awaiting_return, last_partner, place_pick_id, movie_pick_id, created_at, updated_at) VALUES(1, 'ABC', 'Владелец', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 0, 0, NULL, NULL, 1, 1);" in sql
     # Звёздочка в календаре (done_at), ссылка и уточнение к желанию не теряются.
-    assert "INSERT OR REPLACE INTO wishes(id, pair_id, owner_id, body, done, done_at, url, comment, created_at) VALUES(1, 1, 10, 'Билеты', 1, '2026-12-02', 'https://example.com/tickets', 'В партере, не дальше 5 ряда', 1);" in sql
+    assert "INSERT OR REPLACE INTO wishes(id, pair_id, owner_id, body, done, done_at, url, comment, created_at, is_private, shared_at) VALUES(1, 1, 10, 'Билеты', 1, '2026-12-02', 'https://example.com/tickets', 'В партере, не дальше 5 ряда', 1, 0, 1);" in sql
     # Настройки пользователя (время сводок, акцент) переезжают вместе с ним.
     assert "'08:00'" in sql and "'09:00'" in sql and "'#ff00ff'" in sql
     # Ежедневные отметки — отдельная таблица, её тоже нужно переносить.

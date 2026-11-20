@@ -62,7 +62,7 @@ const buildApi = new Function(
   ].join("\n")
 );
 
-function makeApi() {
+function makeApi(bodyOverride = null) {
   const db = {
     prepare(sql) {
       return {
@@ -84,14 +84,16 @@ function makeApi() {
     () => "Europe/Moscow",
     async () => ({ tg_id: 777, gender: null }),
     async () => {},
-    async () => ({ title: "Правка" }),
+    async () => bodyOverride || { title: "Правка" },
     async () => ({ user: { tg_id: 777 }, pair: { id: 1 } }),
     async () => ({ id: 1, timezone: "Europe/Moscow", awaiting_return: 0 })
   );
-  return { api, env: { DB: db }, request: { method: "PATCH", headers: { get: () => null } } };
+  return { api, db, env: { DB: db }, request: { method: "PATCH", headers: { get: () => null } } };
 }
 
-for (const type of ["goals", "goal_items", "movies"]) {
+// PD-GOALS-001: goals/goal_items теперь редактируются через PATCH — 405
+// ожидается только у movies (карточка IMDb приходит целиком).
+for (const type of ["movies"]) {
   test(`PATCH /api/${type}/1 → 405 METHOD_NOT_ALLOWED, не 500`, async () => {
     const { api, env, request } = makeApi();
     try {
@@ -103,3 +105,19 @@ for (const type of ["goals", "goal_items", "movies"]) {
     }
   });
 }
+
+test("PD-GOALS-001: PATCH /api/goals/:id пишет title и не трогает is_private партнёра", async () => {
+  // row.created_by=777 — тот же tg_id, что у «текущего» пользователя в харнессе,
+  // поэтому is_private должен попасть в UPDATE (проверка авторства пройдена).
+  const { api, db, env, request } = makeApi({ title: "Новое название", is_private: true });
+  const statements = [];
+  const originalPrepare = db.prepare;
+  db.prepare = (sql) => {
+    statements.push(sql);
+    return originalPrepare(sql);
+  };
+  await api(request, env, new URL("https://duoplan.test/api/goals/1"));
+  const update = statements.find((sql) => sql.startsWith("UPDATE goals SET"));
+  equal(typeof update, "string", "нет UPDATE goals");
+  if (!update.includes("is_private")) throw new Error("автор не смог сменить приватность");
+});

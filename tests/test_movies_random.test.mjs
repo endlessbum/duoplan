@@ -38,6 +38,7 @@ function loadDeck() {
       // movieList() читает mergedArchive — стаб возвращает недавние как есть.
       "const mergedArchive = (type, recent) => recent || [];",
       extractBraced(source, "function movieList()"),
+      extractBraced(source, "function watchedMovieList()"),
       extractBraced(source, "function openMovies()"),
       extractBraced(source, "function watchedMovies()"),
       extractBraced(source, "function findLivePick("),
@@ -48,7 +49,9 @@ function loadDeck() {
       extractBraced(source, "function syncMovieDeck("),
       extractBraced(source, "function drawMovie("),
       `return {
-        setMovies: (movies) => { appState = { movies }; },
+        // PD-MOVIES-001: сервер отдаёт непросмотренные и просмотренные
+        // отдельными наборами — харнесс должен делать так же.
+        setMovies: (movies) => { appState = { movies: movies.filter((m) => Number(m.watched) !== 1), completedMovies: movies.filter((m) => Number(m.watched) === 1) }; },
         setWatched: (id, watched) => {
           const movie = appState.movies.find((item) => Number(item.id) === Number(id));
           if (movie) movie.watched = watched ? 1 : 0;

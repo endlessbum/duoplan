@@ -344,5 +344,18 @@ test("приватность savings/goals в архиве фильтруетс�
   ok(/savings: \{\s*\n\s*active: true,\s*\n\s*userScoped: true/.test(source), "savings без userScoped");
   ok(/goals: \{\s*\n\s*active: true,\s*\n\s*userScoped: true/.test(source), "goals без userScoped");
   ok(source.includes("SELECT COUNT(*) AS n FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?)"), "COUNT savings без фильтра видимости");
-  ok(source.includes("SELECT COUNT(*) AS n FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?)"), "COUNT goals без фильтра видимости");
+  ok(source.includes("SELECT COUNT(*) AS n FROM goals g WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?)"), "COUNT goals без фильтра видимости");
+  ok(source.includes("done_goals:"), "нет отдельного архива завершённых целей");
+  ok(source.includes("watched_movies:"), "нет отдельного архива просмотренных фильмов");
+  ok(source.includes("SELECT COUNT(*) AS n FROM movies WHERE pair_id=? AND watched=0"), "COUNT movies включает просмотренные");
+});
+
+test("PD-DATES-001: архив дат разделён по kind и сортируется sortDateRows", () => {
+  ok(source.includes("kind='date'"), "dates-архив включает дни рождения");
+  ok(source.includes("kind='birthday'"), "нет отдельного архива дней рождения");
+  const datesBlock = source.slice(source.indexOf("  dates: {"), source.indexOf("  wishes: {"));
+  equal((datesBlock.match(/sort: "date"/g) || []).length, 2, "оба типа дат должны использовать sortDateRows");
+  ok(source.includes("birthdays: sortDateRows(birthdays.results || [], pair.timezone)"), "birthdays не сортируются в state");
+  ok(source.includes("const RECURRENCE_YEARS = 10;"), "нет единого annual-окна");
+  ok(source.includes("length: RECURRENCE_YEARS"), "worker не использует единое окно");
 });

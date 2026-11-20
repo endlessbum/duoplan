@@ -12,7 +12,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
   (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
-- Текущая версия — `2026.11.19.97` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.20.111` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -66,7 +66,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 50 миграций схемы D1 |
+| `migrations/` | 51 миграция схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
@@ -159,6 +159,7 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0048_movie_resume` | `movies.resume_position` — отметка «Остановились»: точка прерванного просмотра фильма/сериала (время у фильма, «сезон, серия · время» у сериала), сбрасывается при «Просмотрено» |
 | `0049_random_picks` | `pairs.place_pick_id`, `pairs.movie_pick_id` — активный рандом места/фильма общий для обоих участников до «Закрыть»/отметки; снимается при посещении, просмотре и удалении |
 | `0050_memory_ascii` | `memories.ascii_art` — ASCII-вложение записи дневника (генерируется в браузере, оригинал фото не хранится) |
+| `0051_private_wishes` | `wishes.is_private`, `wishes.shared_at` — личные желания видит только автор; публикация в общие — явное действие «Поделиться с партнёром» |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -361,7 +362,7 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 | `POST /api/pair/timezone` | Общий часовой пояс пары `{ timezone }` |
 | `POST /api/gender` | Пол `{ gender: "male" \| "female" }`, доступно до онбординга |
 | `POST /api/settings` | `accent_color`, `digest_time`, `digest_enabled`, `dates_digest_time`, `dates_digest_enabled`, `show_avatar`, `partner_name` |
-| `GET /api/archive` | Страница архива: `type` ∈ `memories`, `done_tasks`, `done_wishes`, `tasks`, `dates`, `wishes`, `movies`, `quotes`, `places`, `trips`, `savings`, `goals`; `page` (по 20, не дальше 500) |
+| `GET /api/archive` | Страница архива: `type` ∈ `memories`, `done_tasks`, `done_wishes`, `tasks`, `dates`, `wishes`, `movies`, `quotes`, `places`, `trips`, `savings`, `goals`, `done_goals`, `watched_movies`, `birthdays`; `page` (по 20, не дальше 500) |
 | `POST /api/data/export` | Выслать в чат «Экспорт.txt» с выбранными разделами (включая Фло — только владелице) |
 | Фло API (под `/api/cycle/`) | `state` — прогноз и настройки; `period` (POST/PATCH/DELETE + `periods` — массовый импорт) — месячные; `log` — дневник дня; `measurement` (+`/delete`) — измерения БТТ/ЛГ; `med`, `med-log` (+`/delete`) — лекарства и приём; `stats` — статистика; `history` — история за диапазон; `share` (категории + подтверждение состава), `share-notify`, `notify`, `profile`, `context` — шеринг и настройки; `export` — JSON в чат; `delete` — удаление данных; `onboard` — мастер настройки; `partner` — вид партнёра (allowlist-категории) |
 | Здоровье API (под `/api/health/`) | `meds` — список препаратов и факта приёма; `med` (POST) — препарат с настройкой напоминания (`remind_enabled`/`remind_time` — список времён `ЧЧ:ММ` через запятую, по одному на приём по схеме, до 4); `med/delete`; `med-log`, `med-log/delete` — отметка приёма (один итог за день). Данные строго личные: `tg_id` из сессии |
@@ -370,11 +371,14 @@ Telegram `initData`; необязательный `x-timezone` задаёт ло
 | `POST /api/dates` | Дата `{ title, day, time, recurs, monthly, is_private, kind }`: `kind='birthday'` — день рождения (всегда ежегодный, без времени и ежемесячного повтора) |
 | `POST /api/memories` | Запись дневника `{ title, body }` (день ставится по часовому поясу пары) |
 | `POST /api/wishes` | Желание `{ body, comment, url }` — `comment` — необязательное уточнение до 500 символов |
-| `POST /api/quotes` | Цитата `{ body, source }` — источник необязателен |
+| `POST /api/quotes` | Цитата `{ body, source }` — `source` — кто из пары сказал (необязателен; пустое значение → `null`) |
 | `POST /api/places` | Место `{ title, note, url }` |
 | `POST /api/places/:id/visited\|unvisited` | Отметить посещение (пишет `visited_by`/`visited_at`) или вернуть в список |
 | `POST /api/trips` | Поездка `{ title, note }` — сегмент «Путешествие» |
 | `POST /api/goals` | Цель `{ title, is_private, items[] }` — минимум один пункт (до 30, по 180 символов); пункты пишутся одним batch, при сбое цель откатывается |
+| `PATCH /api/goals/:id` | Правка названия цели; `is_private` меняет только автор |
+| `POST /api/goals/:id/items` | Добавить пункт `{ title }` (до 30 на цель) |
+| `PATCH /api/goal_items/:id`, `DELETE /api/goal_items/:id` | Правка текста пункта и удаление (последний пункт удалить нельзя) |
 | `POST /api/savings` | Копилка `{ title, target, kind }`: `kind=personal` — личная, `shared` — общая; `target` — целое число рублей |
 | `GET /api/movies/search` | Подсказки IMDb `?q=` для диалога «Добавить фильм» (лимит 30/мин) |
 | `GET /api/savings/:id/history` | История пополнений копилки (автор каждого взноса) |
@@ -1070,7 +1074,7 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.19.97`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.20.111`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.
 
 ### Воспроизводимость окружения

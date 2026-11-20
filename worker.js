@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.19.97";
+const APP_VERSION = "2026.11.20.111";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.19.97";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.19.97";
+const DB_SCHEMA_VERSION = "2026.11.20.111";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -58,11 +58,15 @@ const ACCENT_KEYS = ["berry", "sage", "ocean", "violet", "amber"];
 // (у активных наборов база смещения — STATE_ACTIVE_LIMIT, у архивов — STATE_RECENT_LIMIT).
 const STATE_ACTIVE_LIMIT = 200;
 const STATE_RECENT_LIMIT = 10;
+// PD-DATES-001: одно окно ежегодного повтора для планов, дат и бота
+// (текущий год + 9): 29 февраля всегда попадает в окно, крайние годы не
+// расходятся между вкладками.
+const RECURRENCE_YEARS = 10;
 const ARCHIVE_PAGE_SIZE = 20;
 const ARCHIVE_QUERIES = {
   memories: {
     sql: `SELECT m.id,m.author_id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name FROM memories m
-      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.day DESC, m.created_at DESC, m.id DESC LIMIT ? OFFSET ?`
   },
   done_tasks: {
     userScoped: true,
@@ -72,8 +76,15 @@ const ARCHIVE_QUERIES = {
     sql: "SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at,completed_at FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?) ORDER BY completed_at DESC, id DESC LIMIT ? OFFSET ?"
   },
   done_wishes: {
-    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 AND w.is_private=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
+  },
+  // PD-WISHES-001: личные желания догружаются только автору.
+  private_wishes: {
+    active: true,
+    userScoped: true,
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.is_private=1 AND w.owner_id=? ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
   },
   // Активные наборы: продолжение списков /api/state после 200-й записи.
   // Порядок wishes совпадает со state (SQL). Для tasks/dates И state(), И эта
@@ -86,24 +97,37 @@ const ARCHIVE_QUERIES = {
     userScoped: true,
     sql: "SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?) ORDER BY created_at DESC"
   },
+  // PD-DATES-001: архив разделён по kind. Оба типа сортируются sortDateRows
+  // (nextOccurrence, прошедшие one-shot в конце) — порядок совпадает со state.
   dates: {
     active: true,
     sort: "date",
     // Личные даты видит только создатель: фильтр в SQL, а не после запроса —
     // иначе приватная запись успевает попасть в сортируемый набор.
     userScoped: true,
-    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY day"
+    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='date' ORDER BY day"
+  },
+  birthdays: {
+    active: true,
+    sort: "date",
+    userScoped: true,
+    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='birthday' ORDER BY day"
   },
   wishes: {
     active: true,
-    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
+    sql: `SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 AND w.is_private=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ? OFFSET ?`
   },
   // Общие коллекции пары без приватности: продолжение списков /api/state
   // после 200-й записи, те же колонки и порядок, что в state().
+  // PD-MOVIES-001: movies — только «В планах», watched_movies — только
+  // «Просмотрено». Порядок watched_movies по watched_at DESC как у done_tasks.
   movies: {
     active: true,
-    sql: "SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?"
+    sql: "SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at DESC, m.id DESC LIMIT ? OFFSET ?"
+  },
+  watched_movies: {
+    sql: "SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? AND m.watched=1 ORDER BY m.watched_at DESC, m.id DESC LIMIT ? OFFSET ?"
   },
   quotes: {
     active: true,
@@ -124,11 +148,23 @@ const ARCHIVE_QUERIES = {
     userScoped: true,
     sql: "SELECT id,created_by,kind,title,target,collected,created_at FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
   },
+  // PD-GOALS-001: goals — только цели с незавершёнными пунктами, done_goals —
+  // только завершённые. Оба userScoped (личные цели спрятаны от партнёра).
   goals: {
     active: true,
     userScoped: true,
     // Пункты приклеиваются в archivePage после выборки страницы (как в state()).
-    sql: "SELECT id,title,is_private,created_by,created_at FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    // EXISTS отсекает и завершённые, и «осиротевшие» цели без пунктов.
+    sql: "SELECT id,title,is_private,created_by,created_at FROM goals g WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?) AND EXISTS (SELECT 1 FROM goal_items gi WHERE gi.goal_id=g.id AND gi.done=0) ORDER BY g.created_at DESC, g.id DESC LIMIT ? OFFSET ?"
+  },
+  done_goals: {
+    userScoped: true,
+    // Завершённые цели идут по дате закрытия последнего пункта — как
+    // completedTasks по completed_at. HAVING отсекает пустые цели.
+    sql: `SELECT g.id,g.title,g.is_private,g.created_by,g.created_at,MAX(gi.done_at) AS completed_at FROM goals g
+      JOIN goal_items gi ON gi.goal_id=g.id WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?)
+      GROUP BY g.id HAVING SUM(CASE WHEN gi.done=0 THEN 1 ELSE 0 END)=0
+      ORDER BY completed_at DESC, g.id DESC LIMIT ? OFFSET ?`
   }
 };
 
@@ -1554,7 +1590,7 @@ function nextDateOccurrence(item, timeZone) {
   const isRecurring = !!item.recurs;
   const currentYear = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
   const years = isRecurring
-    ? Array.from({ length: 9 }, (_, index) => currentYear + index)
+    ? Array.from({ length: RECURRENCE_YEARS }, (_, index) => currentYear + index)
     : [Number(parts[0])];
   const fmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
   for (const year of years) {
@@ -1731,7 +1767,7 @@ async function state(env, userId) {
   // Порядок имён строго совпадает с порядком запросов ниже: цели и копилки
   // когда-то поменялись местами, и state.goals отдавал копилки, а
   // state.savings — пункты целей (замечено 2026-11-11 на сиде архива).
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, daily, partnerUser, stats] = await Promise.all([
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, completedGoals, completedMovies, birthdays, privateWishes, daily, partnerUser, stats] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     // monthly/yearly — как в ARCHIVE_QUERIES.done_tasks: редактирование
@@ -1740,13 +1776,16 @@ async function state(env, userId) {
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
-    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='date'").bind(pair.id, user.tg_id).all(),
     env.DB.prepare(`SELECT m.id,m.author_id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name FROM memories m
-      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
-    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
-    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,u.display_name FROM wishes w
-      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
+      LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.day DESC, m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0 AND w.is_private=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=1 AND w.is_private=0 ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
+    // PD-WISHES-001: личные желания видит только автор (open+done одним набором).
+    env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
+      LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.is_private=1 AND w.owner_id=? ORDER BY w.created_at DESC, w.id DESC LIMIT ?`).bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
     // Цитаты и места — общие коллекции пары: приватности у них нет, поэтому
     // фильтровать по created_by нечего. Потолок тот же, что у активных планов:
     // на практике это десятки записей, архив им не нужен.
@@ -1757,7 +1796,7 @@ async function state(env, userId) {
     env.DB.prepare("SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Кино — общая коллекция пары, как места: без приватности и архива.
     // Данные (рейтинг/жанр/длительность) — снимок IMDb на момент добавления.
-    env.DB.prepare("SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? ORDER BY m.created_at DESC, m.id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at DESC, m.id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Голоса RAofP всей пары одним запросом: у фильмов до 200 строк, оценки
     // приклеиваются в памяти — без подзапроса на каждую карточку.
     env.DB.prepare(`SELECT r.movie_id,r.tg_id,r.rating FROM movie_ratings r
@@ -1766,11 +1805,22 @@ async function state(env, userId) {
     // как у личных дат/планов). collected поддерживается при пополнении.
     env.DB.prepare("SELECT id,created_by,kind,title,target,collected,created_at FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
     // Цели: личные (is_private=1) — только для создателя, как личные планы.
-    // Выполненность цели считается по пунктам, поэтому отдаём их вместе с целью.
-    env.DB.prepare("SELECT id,title,is_private,created_by,created_at FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?) ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
+    // PD-GOALS-001: в goals только незавершённые, в completedGoals — только
+    // завершённые (все пункты done). Пустые цели не попадают ни в один список.
+    env.DB.prepare("SELECT id,title,is_private,created_by,created_at FROM goals g WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?) AND EXISTS (SELECT 1 FROM goal_items gi WHERE gi.goal_id=g.id AND gi.done=0) ORDER BY g.created_at DESC, g.id DESC LIMIT ?").bind(pair.id, user.tg_id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare(`SELECT gi.id,gi.goal_id,gi.title,gi.done,gi.done_at,gi.done_by,gi.created_at FROM goal_items gi
       JOIN goals g ON g.id=gi.goal_id WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?)
       ORDER BY gi.created_at ASC, gi.id ASC`).bind(pair.id, user.tg_id).all(),
+    env.DB.prepare(`SELECT g.id,g.title,g.is_private,g.created_by,g.created_at,MAX(gi.done_at) AS completed_at FROM goals g
+      JOIN goal_items gi ON gi.goal_id=g.id WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?)
+      GROUP BY g.id HAVING SUM(CASE WHEN gi.done=0 THEN 1 ELSE 0 END)=0
+      ORDER BY completed_at DESC, g.id DESC LIMIT ?`).bind(pair.id, user.tg_id, STATE_RECENT_LIMIT).all(),
+    // PD-MOVIES-001: просмотренные фильмы собираются в отдельный набор,
+    // чтобы «Показать ещё» считал только их (как done_tasks).
+    env.DB.prepare("SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? AND m.watched=1 ORDER BY m.watched_at DESC, m.id DESC LIMIT ?").bind(pair.id, STATE_RECENT_LIMIT).all(),
+    // PD-DATES-001: дни рождения — отдельный набор для сегмента «Дни рождения».
+    // Сервер уже хранит их с recurs=1; sortDateRows ставит по ближайшему дню.
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='birthday'").bind(pair.id, user.tg_id).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
@@ -1785,13 +1835,15 @@ async function state(env, userId) {
     env.DB.prepare(`SELECT
         (SELECT COUNT(*) FROM memories WHERE pair_id=?) AS memories,
         (SELECT COUNT(*) FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?)) AS done_tasks,
-        (SELECT COUNT(*) FROM trips WHERE pair_id=?) AS trips,
+        // PD-PLACES-001: «Путешествий» в истории — число СЪЕЗДИВШИХ поездок.
+        (SELECT COUNT(*) FROM trips WHERE pair_id=? AND visited=1) AS trips,
         (SELECT COALESCE(SUM(collected),0) FROM savings WHERE pair_id=? AND kind='shared') AS saved,
         (SELECT COALESCE(SUM(runtime * (CASE WHEN kind='series' AND episodes>0 THEN episodes ELSE 1 END)),0)
           FROM movies WHERE pair_id=? AND watched=1 AND runtime>0) AS watched_minutes
       `).bind(pair.id, pair.id, user.tg_id, pair.id, pair.id, pair.id).first()
   ]);
   attachMovieRatings(movies.results || [], movieRatings?.results, user.tg_id);
+  attachMovieRatings(completedMovies.results || [], movieRatings?.results, user.tg_id);
   const sortedDates = sortDateRows(dates.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT);
   // Личное имя партнёра видно только просматривающему — подставляем его и в
   // подписи авторов воспоминаний/желаний (author_id/owner_id совпадает с
@@ -1848,9 +1900,11 @@ async function state(env, userId) {
     tasks: sortByTaskDeadline(tasks.results || [], pair.timezone).slice(0, STATE_ACTIVE_LIMIT),
     completedTasks: completedTasks.results,
     dates: sortedDates,
+    birthdays: sortDateRows(birthdays.results || [], pair.timezone),
     memories: memories.results,
     wishes: wishes.results,
     completedWishes: completedWishes.results,
+    privateWishes: privateWishes.results,
     quotes: quotes.results,
     places: places.results,
     trips: trips.results,
@@ -1858,7 +1912,12 @@ async function state(env, userId) {
       ...goal,
       items: (goalItems.results || []).filter((item) => Number(item.goal_id) === Number(goal.id))
     })),
+    completedGoals: (completedGoals.results || []).map((goal) => ({
+      ...goal,
+      items: (goalItems.results || []).filter((item) => Number(item.goal_id) === Number(goal.id))
+    })),
     movies: movies.results,
+    completedMovies: completedMovies.results,
     movieGroups: await movieGroupSummaries(env, pair.id),
     savings: savings.results,
     // Итоги пары (окно «Ваша история»): нули означают «пусто» — клиент такие
@@ -1903,14 +1962,18 @@ function applyAuthorNameOverrides(rows, user, partnerId) {
 const ARCHIVE_COUNT_SQL = {
   memories: "SELECT COUNT(*) AS n FROM memories WHERE pair_id=?",
   done_tasks: "SELECT COUNT(*) AS n FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?)",
-  done_wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=1",
-  wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=0",
-  movies: "SELECT COUNT(*) AS n FROM movies WHERE pair_id=?",
+  done_wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=1 AND is_private=0",
+  wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND done=0 AND is_private=0",
+  private_wishes: "SELECT COUNT(*) AS n FROM wishes WHERE pair_id=? AND is_private=1 AND owner_id=?",
+  movies: "SELECT COUNT(*) AS n FROM movies WHERE pair_id=? AND watched=0",
+  watched_movies: "SELECT COUNT(*) AS n FROM movies WHERE pair_id=? AND watched=1",
   quotes: "SELECT COUNT(*) AS n FROM quotes WHERE pair_id=?",
   places: "SELECT COUNT(*) AS n FROM places WHERE pair_id=?",
   trips: "SELECT COUNT(*) AS n FROM trips WHERE pair_id=?",
   savings: "SELECT COUNT(*) AS n FROM savings WHERE pair_id=? AND (kind='shared' OR created_by=?)",
-  goals: "SELECT COUNT(*) AS n FROM goals WHERE pair_id=? AND (is_private=0 OR created_by=?)"
+  goals: "SELECT COUNT(*) AS n FROM goals g WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?) AND EXISTS (SELECT 1 FROM goal_items gi WHERE gi.goal_id=g.id AND gi.done=0)",
+  done_goals: `SELECT COUNT(*) AS n FROM goals g WHERE g.pair_id=? AND (g.is_private=0 OR g.created_by=?) AND EXISTS (SELECT 1 FROM goal_items gi WHERE gi.goal_id=g.id)
+    AND NOT EXISTS (SELECT 1 FROM goal_items gi WHERE gi.goal_id=g.id AND gi.done=0)`
 };
 
 // Типы с подписями авторов (JOIN users → display_name): для них archivePage
@@ -1970,12 +2033,12 @@ async function archivePage(env, pair, type, page, user = null) {
   }
   // Кино и цели state() отдаёт с приклеенным (my_rating/pair_rating) и
   // (items) — страница архива должна давать ровно ту же форму карточки.
-  if (type === "movies" && items.length) {
+  if ((type === "movies" || type === "watched_movies") && items.length) {
     const ratingRows = await env.DB.prepare(`SELECT r.movie_id,r.tg_id,r.rating FROM movie_ratings r
       JOIN movies m ON m.id=r.movie_id WHERE m.pair_id=?`).bind(pair.id).all();
     attachMovieRatings(items, ratingRows?.results, userId);
   }
-  if (type === "goals" && items.length) {
+  if ((type === "goals" || type === "done_goals") && items.length) {
     const ids = items.map((goal) => Number(goal.id));
     const itemRows = await env.DB.prepare(`SELECT gi.id,gi.goal_id,gi.title,gi.done,gi.done_at,gi.done_by,gi.created_at FROM goal_items gi
       WHERE gi.goal_id IN (${ids.map(() => "?").join(",")})
@@ -2063,7 +2126,7 @@ async function ensureWishOwner(env, pair, user, id) {
 // Копилка видна автору всегда, общая — обоим партнёрам. Личная копилка
 // партнёра по прямому id отвечает 404, как несуществующая запись.
 async function ensureSavingVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT id,collected FROM savings WHERE id=? AND pair_id=? AND (kind='shared' OR created_by=?)")
+  const row = await env.DB.prepare("SELECT id,collected,created_by FROM savings WHERE id=? AND pair_id=? AND (kind='shared' OR created_by=?)")
     .bind(id, pair.id, user.tg_id).first();
   if (!row) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
   return row;
@@ -2111,7 +2174,7 @@ async function ensureGoalVisible(env, pair, user, goalId, itemId = null) {
 }
 
 async function itemRoute(env, pair, user, method, pathname, body) {
-  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|trips|goals|goal_items|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|resume|deposit))?$/);
+  const match = pathname.match(/^\/api\/(tasks|dates|memories|wishes|quotes|places|trips|goals|goal_items|movies|savings)\/(\d+)(?:\/(done|reopen|visited|unvisited|watched|unwatched|rate|resume|deposit|share))?$/);
   if (!match) return false;
   const [, type, rawId, action] = match;
   const id = Number(rawId);
@@ -2139,6 +2202,17 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       const link = await env.DB.prepare("SELECT group_id FROM movie_group_items WHERE movie_id=?").bind(id).first();
       movieGroupId = link?.group_id || null;
     }
+    // PD-GOALS-001: цель без пунктов не имеет смысла — удаление последнего
+    // пункта запрещено (удалить можно саму цель через delete-item).
+    if (type === "goal_items") {
+      const row = await env.DB.prepare("SELECT goal_id FROM goal_items WHERE id=? AND pair_id=?").bind(id, pair.id).first();
+      if (row) {
+        const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM goal_items WHERE goal_id=?").bind(row.goal_id).first();
+        if (Number(count?.n || 0) <= 1) {
+          throw new HttpError(400, "Нельзя удалить последний пункт цели", "LAST_GOAL_ITEM");
+        }
+      }
+    }
     const result = await env.DB.prepare(`DELETE FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
     // Выпавшая в рандоме карточка удалённого элемента снимается у обоих.
@@ -2152,20 +2226,22 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   }
   if (method === "PATCH") {
     // Фильм приходит из IMDb целиком: точечных правок у карточки нет.
-    // У целей и пунктов PATCH не реализован: без явного 405 запрос падал бы
-    // в ветку wishes и умирал на «no such column: body» с 500.
-    if (type === "movies" || type === "goals" || type === "goal_items") {
+    // PD-GOALS-001: у целей/пунктов PATCH теперь реализован (раньше явный 405
+    // спасал от падения в ветку wishes с «no such column: body» → 500).
+    if (type === "movies") {
       throw new HttpError(405, "Запись этого раздела нельзя отредактировать", "METHOD_NOT_ALLOWED");
     }
     const patchSchemas = {
+      goals: { title: { type: "string", maxLength: 180 }, is_private: { type: "boolean" } },
+      goal_items: { title: { type: "string", maxLength: 180 } },
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
       dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
-      memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" } },
-      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" }, comment: { type: "string", maxLength: 500 } },
+      memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" }, day: { type: "string" } },
+      wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" }, comment: { type: "string", maxLength: 500 }, is_private: { type: "boolean" } },
       quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
       places: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } },
       trips: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 } },
-      savings: { title: { type: "string", maxLength: 120 }, target: { type: "number" } }
+      savings: { title: { type: "string", maxLength: 120 }, target: { type: "number" }, kind: { type: "string", enum: ["shared", "personal"] } }
     };
     if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
     const fields = [];
@@ -2276,6 +2352,11 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (body.ascii_art !== undefined) {
         field("ascii_art", validateAsciiArt(body.ascii_art));
       }
+      // PD-MEMORIES-001: пустая строка сохраняет прежний день (частичный
+      // PATCH). Невалидная дата отклоняется optionalDay до UPDATE.
+      if (body.day !== undefined && clean(body.day)) {
+        field("day", optionalDay(body.day));
+      }
     }
     function patchQuoteFields() {
       if (body.body !== undefined) {
@@ -2321,6 +2402,15 @@ async function itemRoute(env, pair, user, method, pathname, body) {
         }
         field("target", target);
       }
+      // PD-SAVINGS-001: тип меняется только автором; ensureSavingVisible
+      // уже закрывает чужую личную копилку от PATCH по прямому id.
+      if (body.kind !== undefined) {
+        if (body.kind !== "shared" && body.kind !== "personal") throw new HttpError(400, "Недопустимый тип копилки", "INVALID_KIND");
+        if (body.kind === "personal" && Number(savingRow?.created_by) !== Number(user.tg_id)) {
+          throw new HttpError(403, "Сделать копилку личной может только её автор", "NOT_OWNER");
+        }
+        field("kind", body.kind);
+      }
     }
     function patchWishFields() {
       if (body.body !== undefined) {
@@ -2338,8 +2428,28 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (body.comment !== undefined) {
         field("comment", clean(body.comment) || null);
       }
+      // PD-WISHES-001: флаг приватности меняет только владелец (guard выше).
+      if (body.is_private !== undefined) {
+        field("is_private", body.is_private === true ? 1 : 0);
+        if (body.is_private === false) field("shared_at", now());
+      }
     }
-    if (type === "tasks") patchTaskFields();
+    function patchGoalFields() {
+      if (!goalRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+      if (body.title !== undefined) field("title", textField(body, "title", 180, "Цель"));
+      // Как у планов: флаг приватности меняет только автор цели. Партнёру
+      // поле просто не пишется — 403 не нужен, цель остаётся общей.
+      if (body.is_private !== undefined && Number(goalRow.created_by) === Number(user.tg_id)) {
+        field("is_private", body.is_private === true || body.is_private === 1 ? 1 : 0);
+      }
+    }
+    function patchGoalItemFields() {
+      if (!goalRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+      if (body.title !== undefined) field("title", textField(body, "title", 180, "Пункт цели"));
+    }
+    if (type === "goals") patchGoalFields();
+    else if (type === "goal_items") patchGoalItemFields();
+    else if (type === "tasks") patchTaskFields();
     else if (type === "dates") patchDateFields();
     else if (type === "memories") patchMemoryFields();
     else if (type === "quotes") patchQuoteFields();
@@ -2387,6 +2497,11 @@ async function itemRoute(env, pair, user, method, pathname, body) {
           .bind(id, pair.id).run();
     },
     async wishes() {
+      // PD-WISHES-001: «share» — явный перевод личного желания в общие.
+      if (action === "share") {
+        return env.DB.prepare("UPDATE wishes SET is_private=0,shared_at=? WHERE id=? AND pair_id=? AND owner_id=? AND is_private=1")
+          .bind(now(), id, pair.id, user.tg_id).run();
+      }
       if (!["done", "reopen"].includes(action)) throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
       return action === "done"
         ? env.DB.prepare("UPDATE wishes SET done=1,done_at=? WHERE id=? AND pair_id=? AND owner_id=? AND done=0").bind(now(), id, pair.id, user.tg_id).run()
@@ -2692,14 +2807,7 @@ async function api(request, env, url, ctx = null) {
   if (url.pathname.startsWith("/api/health/")) {
     const stamp = now();
     if (request.method === "GET" && url.pathname === "/api/health/meds") {
-      const [medsRes, logsRes] = await Promise.all([
-        env.DB.prepare("SELECT id,name,dosage,form,schedule,remind_enabled,remind_time,start_date,end_date,status,note FROM health_meds WHERE tg_id=? ORDER BY status='completed', status='paused', start_date DESC, id DESC").bind(user.tg_id).all(),
-        env.DB.prepare("SELECT med_id,date,time,status,note FROM health_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 600").bind(user.tg_id).all()
-      ]);
-      return json({
-        meds: (medsRes.results || []).map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 })),
-        med_logs: logsRes.results || []
-      });
+      return json(await healthState(env, user.tg_id, timezone));
     }
     if (request.method === "POST" && url.pathname === "/api/health/med") {
       const name = String(body.name || "").trim().slice(0, 120);
@@ -2757,8 +2865,13 @@ async function api(request, env, url, ctx = null) {
         throw new HttpError(400, "Проверьте препарат и дату", "INVALID_DATE");
       }
       if (!["taken", "skipped"].includes(status)) throw new HttpError(400, "Неизвестный статус приёма", "INVALID_STATUS");
-      const med = await env.DB.prepare("SELECT id FROM health_meds WHERE id=? AND tg_id=?").bind(medId, user.tg_id).first();
+      // PD-HEALTH-001: те же гарды, что у executeHealthMedStatus бота —
+      // активный курс и попадание даты в диапазон; UPSERT остаётся за приложением.
+      const med = await env.DB.prepare("SELECT id,status,start_date,end_date FROM health_meds WHERE id=? AND tg_id=?").bind(medId, user.tg_id).first();
       if (!med) throw new HttpError(404, "Препарат не найден", "NOT_FOUND");
+      if (med.status !== "active" || (med.start_date && date < med.start_date) || (med.end_date && date > med.end_date)) {
+        throw new HttpError(409, "Препарат не активен в эту дату", "MED_UNAVAILABLE");
+      }
       const time = optionalTime(body.time);
       const note = body.note ? String(body.note).slice(0, 500) : null;
       await env.DB.prepare(`INSERT INTO health_med_logs(med_id,tg_id,date,time,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
@@ -3568,18 +3681,24 @@ async function api(request, env, url, ctx = null) {
     const savingId = Number(savingHistoryMatch[1]);
     if (!positiveId(savingId)) throw new HttpError(400, "Некорректный идентификатор", "INVALID_ID");
     await ensureSavingVisible(env, pair, user, savingId);
+    // PD-SAVINGS-001: история догружается страницами по STATE_ACTIVE_LIMIT.
+    const page = Math.max(0, Number(url.searchParams.get("page") || 0) || 0);
+    const offset = page * STATE_ACTIVE_LIMIT;
     const deposits = await env.DB.prepare(`SELECT d.tg_id,d.amount,d.created_at,u.display_name FROM savings_deposits d
-      LEFT JOIN users u ON u.tg_id=d.tg_id WHERE d.saving_id=? ORDER BY d.created_at DESC, d.id DESC LIMIT ?`)
-      .bind(savingId, STATE_ACTIVE_LIMIT).all();
+      LEFT JOIN users u ON u.tg_id=d.tg_id WHERE d.saving_id=? ORDER BY d.created_at DESC, d.id DESC LIMIT ? OFFSET ?`)
+      .bind(savingId, STATE_ACTIVE_LIMIT + 1, offset).all();
+    const rows = deposits.results || [];
+    const hasMore = rows.length > STATE_ACTIVE_LIMIT;
+    if (hasMore) rows.pop();
     const override = clean(user.partner_custom_name) || null;
     const ownName = clean(user.custom_name) || null;
-    for (const row of deposits.results || []) {
+    for (const row of rows) {
       // Личные имена — зеркально state(): партнёру — свой оверрайд,
       // своим пополнениям — собственное личное имя.
       if (override && Number(row.tg_id) !== Number(user.tg_id)) row.display_name = override;
       if (ownName && Number(row.tg_id) === Number(user.tg_id)) row.display_name = ownName;
     }
-    return json({ deposits: deposits.results || [] });
+    return json({ deposits: rows, hasMore, page });
   }
   if (request.method === "POST" && url.pathname === "/api/pair/leave") {
     await leavePair(env, pair, url, ctx);
@@ -3689,15 +3808,16 @@ async function api(request, env, url, ctx = null) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
-    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" } });
+    validateSchema(body, { body: { type: "string", required: true, maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" }, day: { type: "string" } });
     const text = textField(body, "body", 2000, "Воспоминание");
-    // Заголовок необязателен на сервере (у старых записей и записей из бота
-    // его нет), но клиент запрашивает его при создании. ascii_art — тоже
-    // необязателен; валидируется отдельно, без trim (см. validateAsciiArt).
+    // Заголовок и дата необязательны: без day используется сегодня по поясу
+    // пары (как раньше). ascii_art валидируется отдельно, без trim.
     const title = clean(body.title) || null;
     const asciiArt = validateAsciiArt(body.ascii_art);
+    const day = body.day === undefined ? localDay(pair.timezone) : optionalDay(body.day);
+    const memoryDay = day || localDay(pair.timezone);
     await env.DB.prepare("INSERT INTO memories(pair_id,author_id,title,body,ascii_art,day,created_at) VALUES(?,?,?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, title, text, asciiArt, localDay(pair.timezone), now()).run();
+      .bind(pair.id, user.tg_id, title, text, asciiArt, memoryDay, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/wishes") {
@@ -3705,13 +3825,15 @@ async function api(request, env, url, ctx = null) {
       body: { type: "string", required: true, maxLength: 300 },
       url: { type: "string" },
       // Уточнение к подарку: размер, цвет, где купить, чем заменить.
-      comment: { type: "string", maxLength: 500 }
+      comment: { type: "string", maxLength: 500 },
+      is_private: { type: "boolean" }
     });
     const text = textField(body, "body", 300, "Желание");
     const wishLink = wishUrl(body.url) || null;
     const wishComment = clean(body.comment) || null;
-    await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at) VALUES(?,?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, text, wishLink, wishComment, now()).run();
+    const isPrivate = body.is_private === true;
+    await env.DB.prepare("INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at,is_private,shared_at) VALUES(?,?,?,?,?,?,?,?)")
+      .bind(pair.id, user.tg_id, text, wishLink, wishComment, now(), isPrivate ? 1 : 0, isPrivate ? null : now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/quotes") {
@@ -3787,6 +3909,24 @@ async function api(request, env, url, ctx = null) {
   }
   if (request.method === "POST" && url.pathname === "/api/goals") {
     return createGoal();
+  }
+  // PD-GOALS-001: добавление пункта в существующую цель. visibility-guard
+  // уже отсекает чужие личные цели; лимит 30 и длина текста — как при создании.
+  async function addGoalItem() {
+    const match = /^\/api\/goals\/(\d+)\/items$/.exec(url.pathname);
+    if (!match || !positiveId(match[1])) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+    const goalId = Number(match[1]);
+    await ensureGoalVisible(env, pair, user, goalId);
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 180 } });
+    const title = textField(body, "title", 180, "Пункт цели");
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM goal_items WHERE goal_id=?").bind(goalId).first();
+    if (Number(count?.n || 0) >= 30) throw new HttpError(400, "Не больше 30 пунктов на цель", "INVALID_ITEMS");
+    await env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
+      .bind(goalId, pair.id, user.tg_id, title, now()).run();
+    return json(await state(env, user.tg_id));
+  }
+  if (request.method === "POST" && /^\/api\/goals\/\d+\/items$/.test(url.pathname)) {
+    return addGoalItem();
   }
   // Добавление фильма по выбору из подсказок: карточка собирается из IMDb
   // целиком (название/рейтинг/жанр/длительность), ручной ввод названий нет.
@@ -5176,6 +5316,7 @@ const EXPORT_SECTIONS = {
   memories: ["all", "mine"],
   quotes: ["all", "mine"],
   wishes: ["all", "mine"],
+  contacts: ["all", "mine"],
   // Фло — только владелица (проверка в exportData), состав один: «all».
   cycle: ["all"]
 };
@@ -5190,6 +5331,7 @@ const EXPORT_LABELS = {
   memories: "дневник",
   quotes: "цитаты",
   wishes: "желания",
+  contacts: "контакты",
   cycle: "фло (трекер цикла)"
 };
 
@@ -5216,6 +5358,14 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=?${scope === "mine" ? " AND q.author_id=?" : ""} ORDER BY q.created_at ASC, q.id ASC`,
   wishes: (scope) => `SELECT w.id,w.body,w.url,w.comment,w.created_at,u.display_name AS author FROM wishes w
     LEFT JOIN users u ON u.tg_id=w.owner_id WHERE w.pair_id=? AND w.done=0${scope === "mine" ? " AND w.owner_id=?" : ""} ORDER BY w.created_at ASC, w.id ASC`,
+  // PD-PROFILE-001: контакты — телефоны собраны в одну строку (GROUP_CONCAT
+  // по sort), состав «all» видит оба списка, «mine» — только владельца.
+  contacts: (scope) => `SELECT c.id,c.name,c.surname,c.comment,u.display_name AS author,
+      (SELECT GROUP_CONCAT(p.phone, ', ') FROM contact_phones p WHERE p.contact_id=c.id
+        ORDER BY p.sort ASC, p.id ASC) AS phones
+    FROM contacts c LEFT JOIN users u ON u.tg_id=c.owner_id
+    WHERE c.pair_id=?${scope === "mine" ? " AND c.owner_id=?" : ""}
+    ORDER BY c.name COLLATE NOCASE ASC, c.surname COLLATE NOCASE ASC, c.id ASC`,
   // Фло: периоды и дневник одной лентой (kind различает строки). Данные
   // принадлежат tg_id владельца — пару в запросе нет, бинды [userId, userId].
   // Все ветки UNION ALL обязаны иметь одинаковый набор колонок в одном
@@ -5365,6 +5515,14 @@ const EXPORT_ROW_MAPPERS = {
   }),
   dates: exportDateRow,
   birthdays: exportDateRow,
+  contacts: (row) => ({
+    id: row.id,
+    name: clean(row.name),
+    surname: clean(row.surname) || null,
+    comment: clean(row.comment) || null,
+    phones: clean(row.phones) || "",
+    author: clean(row.author) || "Партнёр"
+  }),
   places: (row) => ({
     id: row.id,
     title: row.title,
@@ -5557,6 +5715,14 @@ const EXPORT_TXT_ROWS = {
       ["Ссылка", row.url],
       ["Добавил", row.author],
       ["Создан", exportTxtTime(row.created_at)]
+    ]
+  }),
+  contacts: (row) => ({
+    head: [row.name, row.surname].filter(Boolean).join(" "),
+    fields: [
+      ["Телефоны", row.phones],
+      ["Комментарий", row.comment],
+      ["Добавил", row.author]
     ]
   }),
   // Фло: периоды и дневник в одной секции, kind разводит форму записи.
@@ -7349,14 +7515,21 @@ function cycleProfileContext(profile) {
 // ---- Здоровье (вкладка «Дневник → Здоровье»): личный журнал препаратов ----
 
 // Состояние журнала для владельца: препараты + факт приёма (последние 600).
-async function healthState(env, tgId) {
-  const [medsRes, logsRes] = await Promise.all([
-    env.DB.prepare("SELECT id,name,dosage,form,schedule,remind_enabled,remind_time,start_date,end_date,status,note FROM health_meds WHERE tg_id=? ORDER BY status='completed', status='paused', start_date DESC, id DESC").bind(tgId).all(),
-    env.DB.prepare("SELECT med_id,date,time,status,note FROM health_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT 600").bind(tgId).all()
+async function healthState(env, tgId, timeZone = null) {
+  const LIMIT = 600;
+  const [medsRes, logsRes, user] = await Promise.all([
+    env.DB.prepare("SELECT id,name,dosage,form,schedule,remind_enabled,remind_time,start_date,end_date,status,note FROM health_meds WHERE tg_id=? ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END, start_date DESC, id DESC").bind(tgId).all(),
+    env.DB.prepare("SELECT med_id,date,time,status,note FROM health_med_logs WHERE tg_id=? ORDER BY date DESC, id DESC LIMIT ?").bind(tgId, LIMIT + 1).all(),
+    timeZone ? Promise.resolve(null) : env.DB.prepare("SELECT timezone FROM users WHERE tg_id=?").bind(tgId).first()
   ]);
+  const raw = logsRes.results || [];
+  const tz = timeZone || user?.timezone || "UTC";
   return {
+    // PD-HEALTH-001: личный день пользователя, а не день зрителя/пары.
+    today: localDay(tz),
+    logs_truncated: raw.length > LIMIT,
     meds: (medsRes.results || []).map(m => ({ ...m, remind_enabled: Number(m.remind_enabled) === 1 })),
-    med_logs: logsRes.results || []
+    med_logs: raw.slice(0, LIMIT)
   };
 }
 
@@ -7472,7 +7645,7 @@ async function contactsState(env, tgId) {
   if (pair && pair.user_b) {
     const otherId = pair.user_a === tgId ? pair.user_b : pair.user_a;
     const rows = (await env.DB.prepare(
-      "SELECT id, owner_id, name, surname, comment FROM contacts WHERE pair_id=? AND owner_id IN (?, ?) ORDER BY name COLLATE NOCASE ASC, id ASC"
+      "SELECT id, owner_id, name, surname, comment FROM contacts WHERE pair_id=? AND owner_id IN (?, ?) ORDER BY name COLLATE NOCASE ASC, surname COLLATE NOCASE ASC, id ASC"
     ).bind(pair.id, tgId, otherId).all()).results || [];
     const ids = rows.map(r => r.id);
     const phones = ids.length
@@ -7534,7 +7707,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,ascii_art TEXT,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT,comment TEXT)`,
+    `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT,comment TEXT,is_private INTEGER NOT NULL DEFAULT 0,shared_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
@@ -7680,7 +7853,10 @@ async function ensureSchema(env) {
     ["movies", "resume_position", "TEXT"],
     // Активный рандом места/фильма на пару (migrations/0049).
     ["pairs", "place_pick_id", "INTEGER"],
-    ["pairs", "movie_pick_id", "INTEGER"]
+    ["pairs", "movie_pick_id", "INTEGER"],
+    // PD-WISHES-001: личные желания и время их шеринга (migrations/0051).
+    ["wishes", "is_private", "INTEGER NOT NULL DEFAULT 0"],
+    ["wishes", "shared_at", "INTEGER"]
   ]) {
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
     if (!info.results.some(row => row.name === column)) {

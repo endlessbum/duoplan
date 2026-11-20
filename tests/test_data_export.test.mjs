@@ -334,3 +334,12 @@ test("TXT: ISO-даты и таймстемпы печатаются как дд
   equal(helpers.exportTxtTime(Math.floor(Date.UTC(2026, 0, 2, 23, 30) / 1000)), "02.01.2026");
   equal(helpers.exportTxtTime(0), null);
 });
+
+test("PD-PROFILE-001: экспорт включает контакты (все/мои) с телефонами", () => {
+  ok(exportSections({ sections: { contacts: "all" } }).contacts === "all");
+  ok(exportSections({ sections: { contacts: "mine" } }).contacts === "mine");
+  ok(source.includes("contacts: [\"all\", \"mine\"]"), "нет секции контактов в EXPORT_SECTIONS");
+  ok(source.includes("GROUP_CONCAT(p.phone, ', ')"), "телефоны не собраны в экспорт");
+  ok(source.includes('contacts: "контакты"'), "нет подписи секции контактов");
+  ok(source.includes('contacts: (row) => ({'), "нет маппера контактов");
+});

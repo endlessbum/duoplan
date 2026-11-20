@@ -157,6 +157,8 @@
   // у архивов (memories, done_*) — после STATE_RECENT_LIMIT.
   const STATE_RECENT_LIMIT = 10;
   const STATE_ACTIVE_LIMIT = 200;
+  // PD-DATES-001: одно окно ежегодного повтора для планов и дат (текущий +9).
+  const RECURRENCE_YEARS = 10;
   // Размер страницы /api/archive: для счётчика «Показать ещё (N из M)».
   const ARCHIVE_PAGE_SIZE = 20;
   // Предзагрузка тянет страницы параллельно, но не сразу все: 4 запроса
@@ -165,7 +167,9 @@
   const archiveCache = {
     tasks: emptyArchiveEntry(),
     dates: emptyArchiveEntry(),
+    birthdays: emptyArchiveEntry(),
     wishes: emptyArchiveEntry(),
+    private_wishes: emptyArchiveEntry(),
     memories: emptyArchiveEntry(),
     done_tasks: emptyArchiveEntry(),
     done_wishes: emptyArchiveEntry(),
@@ -174,6 +178,8 @@
     places: emptyArchiveEntry(),
     trips: emptyArchiveEntry(),
     goals: emptyArchiveEntry(),
+    done_goals: emptyArchiveEntry(),
+    watched_movies: emptyArchiveEntry(),
     savings: emptyArchiveEntry()
   };
   let archiveCachePairId = null;
@@ -205,14 +211,14 @@
   // id в таблицах D1 независимы, поэтому по типу идём строго по своим ключам.
   const ARCHIVE_KEYS_BY_TYPE = {
     memories: ["memories"],
-    dates: ["dates"],
+    dates: ["dates", "birthdays"],
     tasks: ["tasks", "done_tasks"],
-    wishes: ["wishes", "done_wishes"],
-    movies: ["movies"],
+    wishes: ["wishes", "done_wishes", "private_wishes"],
+    movies: ["movies", "watched_movies"],
     quotes: ["quotes"],
     places: ["places"],
     trips: ["trips"],
-    goals: ["goals"],
+    goals: ["goals", "done_goals"],
     savings: ["savings"]
   };
   function removeFromArchiveCache(type, id) {
@@ -379,13 +385,15 @@
     // Записи, которые снова стали активными (вернули из завершённых), из кэша архива не показываем;
     // «хвост» активного набора наоборот скрывается, когда запись завершили или удалили.
     if (type === "done_tasks") for (const x of appState?.tasks || []) seen.add(Number(x.id));
+    if (type === "movies") for (const x of appState?.completedMovies || []) seen.add(Number(x.id));
+    if (type === "watched_movies") for (const x of appState?.movies || []) seen.add(Number(x.id));
     if (type === "done_wishes") for (const x of appState?.wishes || []) seen.add(Number(x.id));
     if (type === "tasks") for (const x of appState?.completedTasks || []) seen.add(Number(x.id));
     if (type === "wishes") for (const x of appState?.completedWishes || []) seen.add(Number(x.id));
     return recent.concat(archiveCache[type].items.filter((x) => !seen.has(Number(x.id))));
   }
 
-  function archiveMoreHtml(type, recentCount) {
+  function archiveMoreHtml(type, recentCount, label = "Показать ещё") {
     const cache = archiveCache[type];
     // Кнопка «Показать ещё» у активных наборов появляется только на границе
     // 200 записей, у архивов — сразу после 10 недавних.
@@ -401,7 +409,7 @@
     // Собирается только из чисел — экранирование не требуется.
     const remaining = Number.isFinite(cache.remaining) ? cache.remaining : null;
     const counter = remaining === null ? "" : ` (${Math.min(ARCHIVE_PAGE_SIZE, remaining)} из ${remaining})`;
-    return `<button class="secondary full" type="button" data-action="load-archive" data-type="${type}" style="margin-top:10px;">Показать ещё${counter}</button>`;
+    return `<button class="secondary full" type="button" data-action="load-archive" data-type="${type}" style="margin-top:10px;">${esc(label)}${counter}</button>`;
   }
   let toastTimer = null;
   let sessionExpired = false;
@@ -1277,9 +1285,8 @@
     const tz = pairTimeZone();
     const today = zonedToday(tz);
     const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(new Date()));
-    // Окно как в worker и боте (_yearly_occurrence, range(10)): одна
-    // константа на все поверхности (29 февраля всегда находится внутри).
-    for (let year = currentYear; year <= currentYear + 9; year++) {
+    // PD-DATES-001: одна константа на все поверхности (планы и даты).
+    for (let year = currentYear; year < currentYear + RECURRENCE_YEARS; year++) {
       const candidate = annualDate(day, year, time);
       if (candidate && candidate >= today) return candidate;
     }
@@ -1312,6 +1319,18 @@
     const decorated = rows.map((row) => ({ row, at: planTarget(row.day, row.time, taskRepeat(row))?.getTime() ?? Infinity }));
     decorated.sort((a, b) => a.at - b.at || byRowId(a.row.id, b.row.id));
     return decorated.map(({ row }) => row);
+  }
+
+  // Завершённые приходят из /api/state и архива в порядке completed_at DESC,
+  // id DESC. После mergedArchive списки склеиваются без сортировки, поэтому
+  // при гонках/частичной ревалидации порядок мог ломаться — восстанавливаем
+  // его на клиенте тем же компаратором, что и на сервере.
+  function sortByCompletedAt(rows) {
+    const at = (row) => {
+      const value = Number(row?.completed_at);
+      return Number.isFinite(value) ? value : -Infinity;
+    };
+    return rows.slice().sort((a, b) => at(b) - at(a) || byRowId(a.id, b.id));
   }
 
   function dayTime(day, time, fallbackHour = 12) {
@@ -1353,10 +1372,8 @@
     if (!item.recurs) return dayTime(item.day, item.time, 12);
     const now = new Date();
     const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
-    // Окно как в worker.nextDateOccurrence и боте next_date_occurrence
-    // (range(9) → текущий..+8): одна константа на все поверхности.
-    // Отличается от yearlyNext планов — там окно +9 (range(10)).
-    for (let year = currentYear; year <= currentYear + 8; year++) {
+    // PD-DATES-001: единое окно с yearlyNext планов (RECURRENCE_YEARS).
+    for (let year = currentYear; year < currentYear + RECURRENCE_YEARS; year++) {
       const candidate = annualDate(item.day, year, item.time);
       if (candidate && candidate >= today) return candidate;
     }
@@ -1375,7 +1392,7 @@
 
   // Итоги пары для окна «Ваша история». Считает сервер (/api/state → stats):
   // в самом state только 10 недавних записей, счёт оттуда врал бы.
-  // Нулевые строки не показываем — «Путешествий: 0» только мозолит глаза.
+  // Нулевые строки не показываем — «Съездили: 0» только мозолит глаза.
   function historyStatsRows() {
     const stats = appState?.stats || {};
     const rows = [];
@@ -1386,9 +1403,11 @@
     const minutes = Number(stats.watchedMinutes || 0);
     if (minutes > 0) rows.push(["Просмотрено кино", formatWatchedTime(minutes)]);
     const saved = Number(stats.saved || 0);
-    if (saved > 0) rows.push(["Накоплено", `${formatAmount(saved)} ₽`]);
+    // PD-HOME-001: saved считается только по общим копилкам (сервер).
+    if (saved > 0) rows.push(["Накоплено в общих копилках", `${formatAmount(saved)} ₽`]);
     const trips = Number(stats.trips || 0);
-    if (trips > 0) rows.push(["Путешествий", String(trips)]);
+    // PD-PLACES-001: в истории считаем только состоявшиеся поездки.
+    if (trips > 0) rows.push(["Съездили", String(trips)]);
     return rows.map(([name, value]) => `
               <div class="saving-history-row"><span class="saving-history-name">${esc(name)}</span><span>${esc(value)}</span></div>`).join("");
   }
@@ -1609,19 +1628,24 @@
   function renderHome() {
     const { pair, user, daily, tasks = [], dates = [], memories = [] } = appState;
     if (!pair?.user_b) {
+      // PD-HOME-001: «партнёр вышел» и «партнёр ещё не входил» — разные
+      // состояния. В резервированном пространстве код не для нового входа.
+      const returning = Number(pair?.awaiting_return) === 1;
       return `
         ${renderTabHeader("home")}
         <section class="card">
-          <p class="eyebrow">Ожидание партнёра</p>
-          <h2>Пригласите партнёра в пространство</h2>
-          <p>Отправьте код партнёру. После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня.</p>
+          <p class="eyebrow">${returning ? "Ожидание возвращения" : "Ожидание партнёра"}</p>
+          <h2>${returning ? "Пространство ждёт вашего партнёра" : "Пригласите партнёра в пространство"}</h2>
+          <p>${returning
+            ? "Партнёр вышел, и код зарезервирован за ним. Изменения заморожены до его возвращения — загляните в «Нашу пару», чтобы узнать подробности."
+            : "Отправьте код партнёру. После его присоединения здесь появятся общие планы, значимые даты, общий дневник, вишлист и ритуал дня."}</p>
           <div style="margin-top:18px;">
             <button class="primary full" type="button" data-action="go-tab" data-tab="pair">Наша пара</button>
           </div>
         </section>
       `;
     }
-    const ritualBlock = pair.user_b && daily ? `
+    const ritualBlock = daily ? `
       <section class="card${daily.done ? " is-done" : ""}">
         <p class="eyebrow">Ритуал дня</p>
         <h3>${esc(daily.action)}</h3>
@@ -1632,16 +1656,18 @@
 
     const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
     // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
-    // На главной каждая группа — не больше трёх карточек, остальное за «Все →».
+    // На главной каждая группа — не больше трёх карточек; у каждой группы есть
+    // явная ссылка «Все →» в её раздел.
     // Дни рождения и значимые даты — разные списки с разными заголовками,
     // поэтому смешанный срез заменён двумя фильтрами.
     const previewDates = dates.filter((item) => item.kind !== "birthday").slice(0, 3).map(dateItem).join("");
     const previewBirthdays = dates.filter((item) => item.kind === "birthday").slice(0, 3).map(birthdayItem).join("");
     const latestMemory = memories[0];
+    // PD-HOME-001: явный переход из превью в полный список раздела.
+    const allLink = (tab) => `<button class="link-button" type="button" data-action="go-tab" data-tab="${tab}">Все →</button>`;
 
     return `
       ${renderTabHeader("home")}
-      ${pair.user_b ? `
       <section class="card hero-card" role="button" tabindex="0" data-action="open-history" aria-label="История пары и рекорд серии">
         <p class="eyebrow">Ваша история</p>
         <h2>${esc(pair.name1)} и ${esc(pair.name2)}</h2>
@@ -1650,39 +1676,34 @@
           <span class="stat-pill">${user.points || 0} XP</span>
           <span class="stat-pill">Вместе ${pair.together_pts || 0} XP</span>
         </div>
-      </section>` : `
-      <section class="card hero-card">
-        <p class="eyebrow">Ожидание партнёра</p>
-        <h2>Код пары: ${esc(pair.code)}</h2>
-        <p>Отправьте код партнёру, чтобы открыть ритуалы дня и общее пространство.</p>
-      </section>`}
+      </section>
 
       ${ritualBlock}
 
       ${previewTasks ? `
       <div class="section-head-inline">
-        <h3>Ближайшие планы</h3>
+        <h3>Ближайшие планы</h3>${allLink("tasks")}
       </div>
       ${previewTasks}
       ` : ""}
 
       ${previewDates ? `
       <div class="section-head-inline">
-        <h3>Значимые даты</h3>
+        <h3>Значимые даты</h3>${allLink("dates")}
       </div>
       ${previewDates}
       ` : ""}
 
       ${previewBirthdays ? `
       <div class="section-head-inline">
-        <h3>Дни рождения</h3>
+        <h3>Дни рождения</h3>${allLink("dates")}
       </div>
       ${previewBirthdays}
       ` : ""}
 
       ${latestMemory ? `
         <div class="section-head-inline">
-          <h3>Из дневника</h3>
+          <h3>Из дневника</h3>${allLink("memories")}
         </div>
         ${memoryItem(latestMemory)}
       ` : ""}
@@ -1746,8 +1767,13 @@
     else label = `Через ${days} ${plural(days, "день", "дня", "дней")}`;
     const chip = label ? `<span class="day-chip ${chipClass}"${dataCountdown}>${esc(label)}</span>` : "";
     const whenText = `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}${Number(item.monthly) === 1 ? " · Ежемесячно" : item.recurs ? " · Ежегодно" : ""}</span>${viewerTimeHint(item.day, item.time) ? `<span class="day-chip is-muted">${esc(viewerTimeHint(item.day, item.time))}</span>` : ""}`;
+    // PD-DATES-001: повторяющаяся дата ведёт в календарь на ближайшее
+    // наступление, а не на исходный год якоря (как карточка дня рождения).
+    const calendarDay = (Number(item.monthly) === 1 || item.recurs) && next
+      ? (calendarKeyFromDate(next, pairTimeZone()) || item.day)
+      : item.day;
     return `
-      <article class="card" role="button" tabindex="0" data-action="show-in-calendar" data-day="${esc(item.day)}" aria-label="Показать в календаре">
+      <article class="card" role="button" tabindex="0" data-action="show-in-calendar" data-day="${esc(calendarDay)}" aria-label="Показать в календаре">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
@@ -1761,8 +1787,8 @@
             </div>
           </div>
           ${itemActions([
-            itemActionButton({ action: "edit-item", type: "dates", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "dates", id: item.id, label: "Удалить", icon: DELETE_ICON })
+            itemActionButton({ action: "edit-item", type: "dates", id: item.id, label: "Редактировать", icon: EDIT_ICON, disabled: partnerMissing() }),
+            itemActionButton({ action: "delete-item", type: "dates", id: item.id, label: "Удалить", icon: DELETE_ICON, disabled: partnerMissing() })
           ].join("\n            "))}
         </div>
       </article>
@@ -1964,16 +1990,16 @@
             </div>
           </div>
           ${itemActions([
-            itemActionButton({ action: "edit-item", type: "memories", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "memories", id: item.id, label: "Удалить", icon: DELETE_ICON })
+            itemActionButton({ action: "edit-item", type: "memories", id: item.id, label: "Редактировать", icon: EDIT_ICON, disabled: partnerMissing() }),
+            itemActionButton({ action: "delete-item", type: "memories", id: item.id, label: "Удалить", icon: DELETE_ICON, disabled: partnerMissing() })
           ].join("\n            "))}
         </div>
       </article>
     `;
   }
 
-  function wishItem(item, editable = true) {
-    const canEdit = editable && item.owner_id === appState.user.tg_id;
+  function wishItem(item, editable = true, isPrivate = false) {
+    const canEdit = editable && Number(item.owner_id) === Number(appState.user.tg_id);
     // «Скопировать» — чтение, доступно обоим партнёрам: мутации (исполнено/
     // правка/удаление) остаются только владельцу, копирование — всем.
     // Без ссылки в меню только «Скопировать название»; со ссылкой —
@@ -1990,6 +2016,9 @@
         ];
     const actions = [
       ...shareButtons,
+      ...(canEdit && isPrivate && appState.pair?.user_b ? [
+        itemActionButton({ action: "share-private-wish", id: item.id, label: "Поделиться с партнёром", icon: LINK_ICON })
+      ] : []),
       ...(canEdit ? [
         itemActionButton({ action: "done-item", type: "wishes", id: item.id, label: "Исполнено", icon: DONE_ICON }),
         itemActionButton({ action: "edit-item", type: "wishes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
@@ -2020,6 +2049,14 @@
     return [body, comment, url].filter(Boolean).join("\n");
   }
 
+  // PD-WISHES-001: ссылку без схемы дополняем https:// — сервер принимает
+  // только http/https, а пользователь часто вводит «ozon.ru/...».
+  function wishUrlFromInput(value) {
+    const url = String(value ?? "").trim();
+    if (!url || /^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return url;
+    return `https://${url}`;
+  }
+
   // Части «Поделиться» из меню ⋮: name — название с уточнением без ссылки,
   // url — только ссылка, all — всё вместе (прежний wishShareText целиком).
   function wishSharePart(wish, part) {
@@ -2034,14 +2071,14 @@
   function findItem(type, id) {
     const collections = {
       tasks: [...mergedArchive("tasks", appState?.tasks || []), ...mergedArchive("done_tasks", appState?.completedTasks || [])],
-      dates: mergedArchive("dates", appState?.dates || []),
+      dates: [...mergedArchive("dates", appState?.dates || []), ...mergedArchive("birthdays", appState?.birthdays || [])],
       memories: mergedArchive("memories", appState?.memories || []),
-      wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || [])],
+      wishes: [...mergedArchive("wishes", appState?.wishes || []), ...mergedArchive("done_wishes", appState?.completedWishes || []), ...mergedArchive("private_wishes", appState?.privateWishes || [])],
       quotes: mergedArchive("quotes", appState?.quotes || []),
       places: mergedArchive("places", appState?.places || []),
       trips: mergedArchive("trips", appState?.trips || []),
-      goals: mergedArchive("goals", appState?.goals || []),
-      movies: mergedArchive("movies", appState?.movies || []),
+      goals: [...mergedArchive("goals", appState?.goals || []), ...mergedArchive("done_goals", appState?.completedGoals || [])],
+      movies: [...mergedArchive("movies", appState?.movies || []), ...mergedArchive("watched_movies", appState?.completedMovies || [])],
       savings: mergedArchive("savings", appState?.savings || [])
     };
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
@@ -2070,12 +2107,13 @@
   // data-id/data-url добавляются только когда заданы — у deposit-saving и
   // open-url своих атрибутов нет.
   function itemActionButton(opts) {
-    const { action, type, id, url, label, icon, part } = opts;
+    const { action, type, id, url, label, icon, part, disabled } = opts;
     const typeAttr = type !== undefined ? ` data-type="${esc(type)}"` : "";
     const idAttr = id !== undefined ? ` data-id="${esc(id)}"` : "";
     const urlAttr = url !== undefined ? ` data-url="${esc(url)}"` : "";
     const partAttr = part !== undefined ? ` data-part="${esc(part)}"` : "";
-    return `<button class="item-menu-item" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}${partAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
+    const disabledAttr = disabled ? " disabled aria-disabled=\"true\"" : "";
+    return `<button class="item-menu-item${disabled ? " is-disabled" : ""}" type="button" role="menuitem" data-action="${action}"${typeAttr}${idAttr}${urlAttr}${partAttr}${disabledAttr}><span class="item-menu-icon" aria-hidden="true">${icon}</span><span class="item-menu-label">${esc(label)}</span></button>`;
   }
 
   // Меню действий карточки: в правом верхнем углу — «⋮» без кнопочной
@@ -2133,11 +2171,17 @@
   function completedTaskItem(item) {
     const created = formatTimestamp(item.created_at);
     const completed = formatTimestamp(item.completed_at);
+    // Дата исходного плана остаётся полезной и после завершения, но отсчёт
+    // («через N дней» / «Время пришло») завершённому плану уже не нужен.
+    const when = item.day
+      ? `<span class="item-when-line">${item.is_private ? `<span class="day-chip is-private">Личное</span>` : ""}<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}</span></span>`
+      : (item.is_private ? `<span class="day-chip is-private">Личное</span>` : "");
     return `
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.title)}</h3>
+            ${when ? `<div class="item-meta">${when}</div>` : ""}
             ${completionMeta(created, completed)}
           </div>
           ${itemActions([
@@ -2151,12 +2195,22 @@
   }
 
   function completedWishItem(item, editable = true) {
-    const canEdit = editable && item.owner_id === appState.user.tg_id;
-    const actions = canEdit ? [
+    const canEdit = editable && Number(item.owner_id) === Number(appState.user.tg_id);
+    const hasUrl = Boolean(String(item.url || "").trim());
+    // PD-WISHES-001: копировать исполненное можно так же, как открытое.
+    const shareActions = hasUrl ? [
+      itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "name", label: "Скопировать название", icon: LINK_TEXT_ICON }),
+      itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "url", label: "Скопировать ссылку", icon: LINK_TEXT_ICON }),
+      itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "all", label: "Скопировать все", icon: COPY_ICON })
+    ] : [itemActionButton({ action: "share-wish", type: "wishes", id: item.id, part: "name", label: "Скопировать название", icon: LINK_TEXT_ICON })];
+    const actions = [
+      ...shareActions,
+      ...(canEdit ? [
       itemActionButton({ action: "reopen-item", type: "wishes", id: item.id, label: "Вернуть в желания", icon: REOPEN_ICON }),
       itemActionButton({ action: "edit-item", type: "wishes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
       itemActionButton({ action: "delete-item", type: "wishes", id: item.id, label: "Удалить", icon: DELETE_ICON })
-    ].join("\n      ") : "";
+      ] : []),
+    ].join("\n      ");
     const created = formatTimestamp(item.created_at);
     const completed = formatTimestamp(item.done_at);
     return `
@@ -2599,6 +2653,14 @@
         <p class="eyebrow">Настройки</p>
         <h3>Оформление и уведомления</h3>
         <div class="settings-row">
+          <span class="settings-label">Пол</span>
+          <span class="settings-actions">
+            <button type="button" class="secondary${user.gender === "male" ? " is-active" : ""}" data-action="set-gender" data-gender="male">Мужчина</button>
+            <button type="button" class="secondary${user.gender === "female" ? " is-active" : ""}" data-action="set-gender" data-gender="female">Женщина</button>
+          </span>
+        </div>
+        <p class="settings-hint">Влияет на обращения и календарь Фло; смена требует подтверждения</p>
+        <div class="settings-row">
           <span class="settings-label">Акцентный цвет</span>
           <div class="swatch-row">${swatches}</div>
         </div>
@@ -2671,7 +2733,7 @@
         <p class="eyebrow">Безопасность</p>
         <h3>Пароль на вход</h3>
         ${pinField("pin-input")}
-        <p class="settings-hint">Четырёхзначный пароль будет запрашиваться при открытии приложения</p>
+        <p class="settings-hint">Четырёхзначный пароль будет запрашиваться при открытии приложения. Хранится только на этом устройстве и не восстанавливается при сбросе данных браузера</p>
         ${storedPin()
           ? `<button class="secondary full card-action" type="button" data-action="clear-pin">Удалить</button>`
           : `<button class="secondary full card-action" type="button" data-action="save-pin">Задать</button>`}
@@ -3463,6 +3525,9 @@
       <p class="flo-line">Общий доступ: ${share.enabled ? "включён" : "выключен"}.</p>
       <p class="flo-line">Партнёру передаются: ${esc(sharedText)}.</p>
       <p class="flo-line">Уведомлять партнёра: ${share.notify ? "да" : "нет"}.</p>
+      ${share.enabled && !share.confirmed
+        ? `<p class="flo-disclaimer">Подтвердите состав в окне «Настроить» — пока этого не сделано, партнёр видит только урезанный календарь или «Пока не делится».</p>`
+        : ""}
       <button type="button" class="secondary full card-action" data-action="flo-share-open">Настроить</button>
       <p class="flo-disclaimer">Симптомы, заметки, препараты, боль, вес и стресс не передаются никогда.</p>`;
   }
@@ -3812,7 +3877,7 @@
   function renderFloPartnerView() {
     const v = floPartner;
     if (!v || v.shared !== true) {
-      return `<section class="card"><h3>Пока не делится</h3><p>Партнёрша пока не делится календарём. Когда она включит общий доступ, здесь появится её календарь</p></section>`;
+      return `<section class="card"><h3>Пока не делится</h3><p>Партнёр пока не делится календарём. Когда общий доступ будет включён, здесь появится её календарь</p></section>`;
     }
     const f = v.forecast || {};
     const lines = [];
@@ -4065,7 +4130,7 @@
     return `
       <section class="card">
         <h3>Лекарства и курсы</h3>
-        <p class="settings-hint">Это ваш личный журнал: препараты не видны партнёру и не используются для рекомендаций. Фактический приём отмечается в дневнике выбранного дня</p>
+        <p class="settings-hint">Это ваш личный журнал: препараты не видны партнёру и не используются для рекомендаций. Фактический приём отмечается в дневнике выбранного дня. Это не то же самое, что «Здоровье → Препараты» в Дневнике: там отдельный журнал, записи не общие между разделами.</p>
         ${list || `<p class="flo-disclaimer">Пока нет препаратов</p>`}
         <button type="button" class="primary full card-action" style="margin-top:8px" data-action="flo-med-new">Добавить препарат</button>
       </section>`;
@@ -5558,6 +5623,7 @@
     if (action === "flo-goto-period") {
       // Переход к фактическим записям периода: вкладка «Сегодня» на дне начала.
       floView = "today";
+      floDeleteArmed = false;
       floSelectedDate = date;
       floMonth = date.slice(0, 7);
       return render();
@@ -5648,6 +5714,10 @@
       try {
         floState = await request("/api/cycle/delete", { method: "POST", body: { confirm: "DELETE" } });
         floStats = undefined;
+        // PD-FLO-001: без этого «призраки» догруженных месяцев остаются
+        // поверх пустого state (floAllPeriods/floAllLogs мержат extra).
+        floExtra = { periods: [], logs: [], meds: [], med_logs: [], measurements: [] };
+        floFetchedMonths = new Set();
         floDeleteArmed = false;
         floSelectedDate = null;
         showToast("Данные Фло удалены");
@@ -5872,6 +5942,7 @@
     ` : "";
     return `
       ${inviteBlock}
+      ${calendarFetching ? `<p class="settings-hint" role="status">Подгружаем старые события…</p>` : ""}
       ${renderPairCalendar()}
       ${renderPairSettings()}
       ${renderPairLock()}
@@ -5891,11 +5962,13 @@
     const isMine = wishView === "mine";
     const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
     let html = renderSegment("wishesView", wishesView, [["open", "Загадано"], ["done", "Исполнено"]], "is-sub");
-    if (hasPartner) {
+    {
+      const isPrivate = wishView === "private";
       html += `
         <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
           <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine" data-tab="mine">Мои</button>
-          <button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>
+          ${hasPartner ? `<button class="wish-switch-btn${!isMine && !isPrivate ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine && !isPrivate}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>` : ""}
+          <button class="wish-switch-btn${isPrivate ? " is-active" : ""}" type="button" role="tab" aria-selected="${isPrivate}" data-action="wish-view" data-view="private" data-tab="private">Личные</button>
         </div>
       `;
     }
@@ -5929,15 +6002,13 @@
     const percent = Number(saving.target) > 0
       ? Math.min(100, Math.round((Number(saving.collected) / Number(saving.target)) * 100))
       : 0;
-    // У полной копилки цель достигнута: «Пополнить» и «Редактировать» не нужны —
-    // остаётся только удаление; история по-прежнему открывается тапом.
-    const actions = full
-      ? itemActionButton({ action: "delete-item", type: "savings", id: saving.id, label: "Удалить", icon: DELETE_ICON })
-      : [
-          itemActionButton({ action: "deposit-saving", id: saving.id, label: "Пополнить", icon: PLUS_ICON }),
-          itemActionButton({ action: "edit-saving", id: saving.id, label: "Редактировать", icon: EDIT_ICON }),
-          itemActionButton({ action: "delete-item", type: "savings", id: saving.id, label: "Удалить", icon: DELETE_ICON })
-        ].join("\n        ");
+    // PD-SAVINGS-001: у полной копилки «Пополнить» скрыто, но «Редактировать»
+    // остаётся — можно поднять цель и продолжить. История — тапом по карточке.
+    const actions = [
+      ...(full ? [] : [itemActionButton({ action: "deposit-saving", id: saving.id, label: "Пополнить", icon: PLUS_ICON })]),
+      itemActionButton({ action: "edit-saving", id: saving.id, label: "Редактировать", icon: EDIT_ICON }),
+      itemActionButton({ action: "delete-item", type: "savings", id: saving.id, label: "Удалить", icon: DELETE_ICON })
+    ].join("\n        ");
     return `
       <article class="card${full ? " saving-full" : ""}" data-action="open-saving" data-id="${saving.id}"
         role="button" tabindex="0" aria-label="История пополнений копилки «${esc(saving.title)}»">
@@ -6015,7 +6086,7 @@
   // «Завершённые» переехали из хвоста списка в отдельный вид.
   function renderPlansList() {
     const taskDisabledClass = partnerMissing() ? " is-disabled" : "";
-    const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
+    const doneTasks = sortByCompletedAt(mergedArchive("done_tasks", appState.completedTasks || []));
     if (plansView === "done") {
       if (!doneTasks.length) {
         return `<section class="card"><h3>Пока ничего не завершено</h3><p>Отметьте план выполненным — он переедет сюда</p></section>`;
@@ -6042,7 +6113,17 @@
         </section>
       `;
     } else {
-      html += `<button class="primary full add-button${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>`;
+      // Предстоящих нет, но в архиве есть завершённые: даём такую же карточку-
+      // подсказку, как при полностью пустом списке, без «Всё впереди».
+      html += `
+        <section class="card">
+          <h3>Нет предстоящих</h3>
+          <p>Все планы выполнены — запишите новую идею или посмотрите завершённые</p>
+          <div style="margin-top:12px;">
+            <button class="primary full${taskDisabledClass}" type="button" data-action="add-task">Добавить план</button>
+          </div>
+        </section>
+      `;
     }
     html += archiveMoreHtml("tasks", (appState.tasks || []).length);
     return html;
@@ -6055,7 +6136,10 @@
   // приватность, отсчёт, календарь, сводки и экспорт работают без отдельной
   // таблицы. Здесь только делим список по виду.
   function datesOfKind(kind) {
-    return mergedArchive("dates", appState.dates || []).filter((item) =>
+    // PD-DATES-001: у каждого сегмента свой recent + свой архивный тип.
+    const recent = kind === "birthday" ? (appState.birthdays || []) : (appState.dates || []);
+    const type = kind === "birthday" ? "birthdays" : "dates";
+    return mergedArchive(type, recent).filter((item) =>
       (item.kind === "birthday" ? "birthday" : "date") === kind
     );
   }
@@ -6078,7 +6162,7 @@
       return `
         <button class="primary full add-button${disabledClass}" type="button" data-action="add-birthday">Добавить день рождения</button>
         ${rows.map(birthdayItem).join("")}
-        ${archiveMoreHtml("dates", (appState.dates || []).length)}
+        ${archiveMoreHtml("birthdays", (appState.birthdays || []).length)}
       `;
     }
     // Порядок приходит отсортированным из /api/state (sortDateRows):
@@ -6166,9 +6250,13 @@
     return values.map(t => `<input name="remind_times" data-fmt="none" type="time" value="${esc(t)}">`).join("");
   }
 
-  // «Сегодня» зрителя: отметки приёма привязаны к личному дню, не к паре.
+  // PD-HEALTH-001: «сегодня» — личный календарный день пользователя. Сервер
+  // отдаёт его в healthState.today (по timezone из users); локальный расчёт —
+  // fallback до загрузки и для диалогов.
   function healthToday() {
-    return new Intl.DateTimeFormat("en-CA", { timeZone: viewerTimeZone(), year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    if (healthState?.today) return healthState.today;
+    const tz = appState?.user?.timezone || viewerTimeZone();
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   }
 
   // silent — предзагрузка при старте: без перерисовки и без ошибки на экране,
@@ -6198,6 +6286,24 @@
       taken: logs.filter(l => l.med_id === medId && l.status === "taken").length,
       skipped: logs.filter(l => l.med_id === medId && l.status === "skipped").length
     };
+  }
+
+  // PD-HEALTH-001: компактная история за 14 дней по препарату — данные уже
+  // есть в healthState.med_logs (limit 600), новый запрос не нужен.
+  function healthMedHistoryHtml(medId, today) {
+    const byDate = new Map((healthState?.med_logs || [])
+      .filter(l => Number(l.med_id) === Number(medId))
+      .map(l => [l.date, l.status]));
+    const days = [];
+    for (let i = 13; i >= 0; i--) {
+      const date = new Date(`${today}T12:00:00Z`);
+      date.setUTCDate(date.getUTCDate() - i);
+      const key = date.toISOString().slice(0, 10);
+      const status = byDate.get(key);
+      if (status) days.push(`${esc(formatDay(key))}: ${status === "taken" ? "принят" : "пропущен"}`);
+    }
+    if (!days.length) return "";
+    return `<div class="item-meta"><span class="day-chip is-muted">История (14 дн.): ${days.join(" · ")}</span></div>`;
   }
 
   // Диалог препарата (добавление/правка) — как в других вкладках: отдельное
@@ -6372,6 +6478,9 @@
       const statusLabel = HEALTH_MED_STATUS_LABELS[m.status] || m.status;
       const { taken, skipped } = healthIntakeCounts(m.id);
       const meta = [m.dosage, m.schedule, m.form ? HEALTH_MED_FORMS.find(([c]) => c === m.form)?.[1] : ""].filter(Boolean).join(" · ");
+      const remind = m.remind_enabled && m.remind_time
+        ? `<div class="item-meta"><span class="day-chip is-muted">Напомним: ${esc(String(m.remind_time).split(",").map(t => t.trim()).filter(Boolean).join(", "))}</span></div>` : "";
+      const history = healthMedHistoryHtml(m.id, today);
       // Отметки приёма — полноширинные кнопки, как «Добавить препарат»:
       // «Принят» в цвете акцента (.primary → var(--berry)), «Пропущен»
       // нейтральная .secondary. Выбранная за сегодня помечается кольцом.
@@ -6385,7 +6494,9 @@
         <div class="item-main">
           <h3 class="health-med-name">${esc(m.name)}</h3>
           <div class="item-meta"><span class="day-chip is-muted">${esc(statusLabel)}</span><span>${esc(meta)}</span></div>
+          ${remind}
           <div class="item-meta"><span>${esc(m.start_date || "")}${m.end_date ? ` — ${esc(m.end_date)}` : ""}</span><span>принято ${taken} · пропущено ${skipped}</span></div>
+          ${history}
           ${chips}
         </div>
         <button class="icon-btn" type="button" data-action="health-med-edit" data-id="${m.id}" aria-label="Изменить">${EDIT_ICON}</button>
@@ -6395,7 +6506,8 @@
       <button class="primary full add-button" type="button" data-action="health-med-new">Добавить препарат</button>
       <section class="card">
         ${rows}
-        <p class="flo-disclaimer">Отметка «принят/пропущен» — общий итог за день, контроль отдельных доз не ведётся. Приложение не назначает лечение</p>
+        ${healthState.logs_truncated ? `<p class="settings-hint">Показаны последние 600 отметок — более старые дни в счётчики не входят.</p>` : ""}
+        <p class="flo-disclaimer">Даже при схеме 2–4 приёма в день сохраняется только один итог за сутки: «принят» или «пропущен». Контроль отдельных доз не ведётся. Приложение не назначает лечение</p>
       </section>`;
   }
 
@@ -6485,9 +6597,12 @@
 
   function contactsListFor(isMine) {
     const list = isMine ? (contactsState?.mine || []) : (contactsState?.partner || []);
-    // Алфавитный порядок по имени; сервер сортирует тоже, но поиск и локальные
-    // мутации держат порядок на клиенте.
-    return [...list].sort((a, b) => String(a.name).localeCompare(String(b.name), "ru"));
+    // Алфавитный порядок по имени, затем по фамилии (одинаковые имена без
+    // фамилии не должны выстраиваться произвольно). Сервер сортирует так же.
+    return [...list].sort((a, b) =>
+      String(a.name).localeCompare(String(b.name), "ru")
+      || String(a.surname || "").localeCompare(String(b.surname || ""), "ru")
+      || Number(a.id) - Number(b.id));
   }
 
   // Поиск по имени, фамилии, цифрам номера и комментарию.
@@ -6542,7 +6657,7 @@
             <p>Имена и номера всегда под рукой — и ваши, и партнёрши</p>
             <div style="margin-top:12px;">${addButton}</div>
           </section>`
-        : `<section class="card"><h3>Пока пусто</h3><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `${esc(contactPartnerLabel())} контактах пока пусто`}</p></section>`;
+        : `<section class="card"><h3>Пока пусто</h3><p>${searching ? `По запросу «${esc(contactsSearch.trim())}» никого не нашлось.` : `У ${contactPartnerLabel() === "Её" ? "неё" : "него"} контактов пока нет`}</p></section>`;
     }
     return `
       ${isMine ? addButton : ""}
@@ -6785,17 +6900,18 @@
     if (list) list.innerHTML = renderContactsList();
   });
 
-  // Автор цитаты — select вместо свободного ввода: по запросу выбор
-  // ограничен двумя пользователями пространства (имена из pair уже учитывают
-  // личное имя партнёра). Пустого варианта «Не указан» нет: автор установлен
-  // всегда, по умолчанию это первый партнёр. Старые цитаты с источником-текстом
-  // (книга, фильм) при редактировании получают свой источник лишним вариантом —
-  // иначе select молча затёр бы его.
+  // PD-QUOTES-001: цитата хранит только то, кто из пары её сказал. «Не указан»
+  // отправляет пустую строку (сервер нормализует в null). Старые записи с
+  // произвольным source сохраняют его как дополнительную опцию, чтобы правка
+  // текста не стирала подпись молча.
   function quoteAuthorOptions(selected) {
     const pair = appState.pair || {};
     const names = [pair.name1, pair.name2].filter((name) => name);
     if (selected && !names.includes(selected)) names.push(selected);
-    return names.map((name) => `<option value="${esc(name)}"${name === selected ? " selected" : ""}>${esc(name)}</option>`).join("");
+    const empty = `<option value=""${selected ? "" : " selected"}>Не указан</option>`;
+    return empty + names.map((name) =>
+      `<option value="${esc(name)}"${name === selected ? " selected" : ""}>${esc(name)}</option>`
+    ).join("");
   }
 
   function quoteItem(item) {
@@ -6809,12 +6925,14 @@
         <div class="item-row">
           <div class="item-main">
             <div class="item-meta">
+              ${item.display_name ? `<span class="memory-author">${esc(item.display_name)}</span><span>· </span>` : ""}
               <span>${esc(formatTimestamp(item.created_at))}</span>
             </div>
           </div>
           ${itemActions([
-            itemActionButton({ action: "edit-item", type: "quotes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "quotes", id: item.id, label: "Удалить", icon: DELETE_ICON })
+            itemActionButton({ action: "copy-quote", id: item.id, label: "Скопировать текст", icon: COPY_ICON }),
+            itemActionButton({ action: "edit-item", type: "quotes", id: item.id, label: "Редактировать", icon: EDIT_ICON, disabled: partnerMissing() }),
+            itemActionButton({ action: "delete-item", type: "quotes", id: item.id, label: "Удалить", icon: DELETE_ICON, disabled: partnerMissing() })
           ].join("\n            "))}
         </div>
       </article>
@@ -6869,8 +6987,8 @@
             </div>
           </div>
           ${itemActions([
-            itemActionButton({ action: "edit-item", type: "dates", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "dates", id: item.id, label: "Удалить", icon: DELETE_ICON })
+            itemActionButton({ action: "edit-item", type: "dates", id: item.id, label: "Редактировать", icon: EDIT_ICON, disabled: partnerMissing() }),
+            itemActionButton({ action: "delete-item", type: "dates", id: item.id, label: "Удалить", icon: DELETE_ICON, disabled: partnerMissing() })
           ].join("\n            "))}
         </div>
       </article>
@@ -6936,7 +7054,11 @@
   }
 
   function visitedPlaces() {
-    return placeList().filter((place) => Number(place.visited) === 1);
+    // PD-PLACES-001: посещённое упорядочено по дате визита, а не создания.
+    return placeList().filter((place) => Number(place.visited) === 1)
+      .slice().sort((a, b) =>
+        (Number(b.visited_at) || Number(b.created_at) || 0) - (Number(a.visited_at) || Number(a.created_at) || 0)
+        || byRowId(a.id, b.id));
   }
 
   // Hero-карточка рандома — информер: показывается до первого запуска
@@ -7013,7 +7135,7 @@
       <article class="card place-pick" aria-live="polite">
         <p class="eyebrow">Вам выпало</p>
         <h2 class="place-pick-title">${esc(place.title)}</h2>
-        ${place.note ? `<p class="place-pick-note">${esc(place.note)}</p>` : ""}
+        ${place.note ? `<p class="place-pick-note">${renderRichText(place.note)}</p>` : ""}
         <div class="place-actions">
           <button class="primary full" type="button" data-action="place-visited" data-id="${place.id}">Посетили</button>
           <button class="secondary full" type="button" data-action="random-place">Следующее</button>
@@ -7026,21 +7148,24 @@
 
   function placeItem(place) {
     const visited = Number(place.visited) === 1;
+    const locked = partnerMissing();
+    const by = visited && place.visited_by && Number(place.visited_by) !== Number(appState.user?.tg_id)
+      ? `<span class="day-chip is-muted">отметил партнёр</span>` : "";
     return `
-      <article class="card${visited ? " place-visited" : ""}">
+      <article class="card${visited ? " is-visited" : ""}">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${esc(place.title)}</h3>
-            ${place.note ? `<p class="place-note">${esc(place.note)}</p>` : ""}
-            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(place.visited_at) || "Посещено")}</span></div>` : ""}
+            ${place.note ? `<p class="place-note">${renderRichText(place.note)}</p>` : ""}
+            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(place.visited_at) || "Посещено")}</span>${by}</div>` : ""}
           </div>
           ${itemActions([
             itemActionButton(visited
-              ? { action: "place-unvisited", id: place.id, label: "Вернуть в список", icon: REOPEN_ICON }
-              : { action: "place-visited", id: place.id, label: "Отметить посещённым", icon: DONE_ICON }),
+              ? { action: "place-unvisited", id: place.id, label: "Вернуть в список", icon: REOPEN_ICON, disabled: locked }
+              : { action: "place-visited", id: place.id, label: "Отметить посещённым", icon: DONE_ICON, disabled: locked }),
             ...(place.url ? [itemActionButton({ action: "open-url", url: place.url, label: "Ссылка", icon: LINK_ICON })] : []),
-            itemActionButton({ action: "edit-item", type: "places", id: place.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "places", id: place.id, label: "Удалить", icon: DELETE_ICON })
+            itemActionButton({ action: "edit-item", type: "places", id: place.id, label: "Редактировать", icon: EDIT_ICON, disabled: locked }),
+            itemActionButton({ action: "delete-item", type: "places", id: place.id, label: "Удалить", icon: DELETE_ICON, disabled: locked })
           ].join("\n            "))}
         </div>
       </article>
@@ -7097,7 +7222,8 @@
         html += visited.map((place) => placeItem(place)).join("");
       }
     }
-    return html + archiveMoreHtml("places", (appState.places || []).length);
+    // PD-PLACES-001: архив общий для open/visited — счётчик относится ко всему списку.
+    return html + archiveMoreHtml("places", (appState.places || []).length, "Показать ещё из всего списка");
   }
 
   // ------------------------------------------------------------------
@@ -7113,25 +7239,32 @@
   }
 
   function visitedTrips() {
-    return tripList().filter((trip) => Number(trip.visited) === 1);
+    // PD-PLACES-001: «Съездили» — по дате отметки, как «Посещённые» места.
+    return tripList().filter((trip) => Number(trip.visited) === 1)
+      .slice().sort((a, b) =>
+        (Number(b.visited_at) || Number(b.created_at) || 0) - (Number(a.visited_at) || Number(a.created_at) || 0)
+        || byRowId(a.id, b.id));
   }
 
   function tripItem(trip) {
     const visited = Number(trip.visited) === 1;
+    const locked = partnerMissing();
+    const by = visited && trip.visited_by && Number(trip.visited_by) !== Number(appState.user?.tg_id)
+      ? `<span class="day-chip is-muted">отметил партнёр</span>` : "";
     return `
-      <article class="card${visited ? " place-visited" : ""}">
+      <article class="card${visited ? " is-visited" : ""}">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${esc(trip.title)}</h3>
-            ${trip.note ? `<p class="place-note">${esc(trip.note)}</p>` : ""}
-            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(trip.visited_at) || "Съездили")}</span></div>` : ""}
+            ${trip.note ? `<p class="place-note">${renderRichText(trip.note)}</p>` : ""}
+            ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(trip.visited_at) || "Съездили")}</span>${by}</div>` : ""}
           </div>
           ${itemActions([
             itemActionButton(visited
-              ? { action: "trip-unvisited", id: trip.id, label: "Вернуть в список", icon: REOPEN_ICON }
-              : { action: "trip-visited", id: trip.id, label: "Отметить съездили", icon: DONE_ICON }),
-            itemActionButton({ action: "edit-item", type: "trips", id: trip.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "trips", id: trip.id, label: "Удалить", icon: DELETE_ICON })
+              ? { action: "trip-unvisited", id: trip.id, label: "Вернуть в список", icon: REOPEN_ICON, disabled: locked }
+              : { action: "trip-visited", id: trip.id, label: "Отметить съездили", icon: DONE_ICON, disabled: locked }),
+            itemActionButton({ action: "edit-item", type: "trips", id: trip.id, label: "Редактировать", icon: EDIT_ICON, disabled: locked }),
+            itemActionButton({ action: "delete-item", type: "trips", id: trip.id, label: "Удалить", icon: DELETE_ICON, disabled: locked })
           ].join("\n            "))}
         </div>
       </article>
@@ -7152,7 +7285,7 @@
           <button class="primary full card-action${disabledClass}" type="button" data-action="add-trip">Добавить поездку</button>
         </section>
       `;
-      return html + archiveMoreHtml("trips", (appState.trips || []).length);
+      return html + archiveMoreHtml("trips", (appState.trips || []).length, "Показать ещё из всего списка");
     }
     html += `<button class="primary full add-button${disabledClass}" type="button" data-action="add-trip">Добавить поездку</button>`;
     if (open.length) {
@@ -7163,14 +7296,19 @@
       html += `<div class="section-head-inline"><h3>Съездили · ${visited.length}</h3></div>`;
       html += visited.map((trip) => tripItem(trip)).join("");
     }
-    return html + archiveMoreHtml("trips", (appState.trips || []).length);
+    return html + archiveMoreHtml("trips", (appState.trips || []).length, "Показать ещё из всего списка");
   }
 
   // ------------------------------------------------------------------
   // Кино: избранное к просмотру с данными IMDb (сегмент вкладки «Планы»)
   // ------------------------------------------------------------------
+  // PD-MOVIES-001: архив разделён так же, как tasks/done_tasks и goals/done_goals.
   function movieList() {
     return mergedArchive("movies", appState.movies || []);
+  }
+
+  function watchedMovieList() {
+    return mergedArchive("watched_movies", appState.completedMovies || []);
   }
 
   function openMovies() {
@@ -7178,7 +7316,7 @@
   }
 
   function watchedMovies() {
-    return movieList().filter((movie) => Number(movie.watched) === 1);
+    return watchedMovieList().filter((movie) => Number(movie.watched) === 1);
   }
 
   // Пилюля оценки: серая (0–3.9 и «нет оценки»), красная (4–5.9),
@@ -7221,7 +7359,8 @@
         if (clearPick) moviePickId = null;
         // Архивная карточка фильма (201+) не входит в /api/state: перекачиваем
         // загруженные страницы, иначе my_rating/pair_rating остались бы старыми.
-        revalidateArchiveCache();
+        removeFromArchiveCache("movies", movie.id);
+        await revalidateArchiveCache();
         haptic();
         showToast(toast);
         return state;
@@ -7460,12 +7599,14 @@
       : "";
     // «Объединить в группу» — только у записей вне групп и вне режима выбора.
     const groupAction = !selecting && !movie.group_id
-      ? itemActionButton({ action: "group-movie", id: movie.id, label: "Объединить в группу", icon: LINK_ICON })
+      ? itemActionButton({ action: "group-movie", id: movie.id, label: "Объединить в группу", icon: LINK_ICON, disabled: partnerMissing() })
       : "";
     // В IMDb жанры приходят списком — для пилюли берём первый.
     const genre = movie.genres ? String(movie.genres).split(",")[0].trim() : "";
     const yearPill = movie.year ? `<span class="day-chip is-muted">${esc(movie.year)}</span>` : "";
     const length = formatMovieLength(movie);
+    // PD-MOVIES-001: действия карточки визуально недоступны без партнёра.
+    const locked = partnerMissing();
     // Карточка — обычный контейнер: внутри неё живут самостоятельные кнопки
     // (просмотрено, ссылка, удалить…), поэтому role="button" на <article>
     // вложил бы интерактив в интерактив. Тап по фону по-прежнему работает
@@ -7487,12 +7628,13 @@
               ${movie.resume_position ? `<span class="day-chip is-resume" title="Точка, на которой остановились">▶ ${esc(movie.resume_position)}</span>` : ""}
             </div>
             ${watched ? `<div class="item-meta">${raofpPill(movie)}</div>` : ""}
-            ${watched ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(movie.watched_at) || "Просмотрено")}</span></div>` : ""}
+            ${watched ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(movie.watched_at) || "Просмотрено")}</span>${movie.watched_by && Number(movie.watched_by) !== Number(appState.user?.tg_id) ? `<span class="day-chip is-muted">отметил партнёр</span>` : ""}</div>` : ""}
           </div>
           ${itemActions([
             itemActionButton(watched
-              ? { action: "movie-unwatched", id: movie.id, label: "Вернуть в список", icon: REOPEN_ICON }
-              : { action: "movie-watched", id: movie.id, label: "Просмотрено", icon: DONE_ICON }),
+              ? { action: "movie-unwatched", id: movie.id, label: "Вернуть в список", icon: REOPEN_ICON, disabled: locked }
+              : { action: "movie-watched", id: movie.id, label: "Просмотрено", icon: DONE_ICON, disabled: locked }),
+            ...(watched && movie.my_rating != null ? [itemActionButton({ action: "rate-movie", id: movie.id, label: "Изменить оценку", icon: EDIT_ICON, disabled: locked })] : []),
             ...(movie.url ? [itemActionButton({ action: "open-url", url: movie.url, label: "Ссылка", icon: LINK_ICON })] : []),
             ...(groupAction ? [groupAction] : []),
             // «Остановились» — только у просматриваемых: у просмотренных
@@ -7502,14 +7644,14 @@
                 action: "movie-resume",
                 id: movie.id,
                 label: movie.resume_position ? "Изменить точку просмотра" : "Остановились",
-                icon: RESUME_ICON
+                icon: RESUME_ICON, disabled: locked
               }),
-              ...(movie.resume_position ? [itemActionButton({ action: "movie-resume-clear", id: movie.id, label: "Сбросить точку просмотра", icon: DELETE_ICON })] : [])
+              ...(movie.resume_position ? [itemActionButton({ action: "movie-resume-clear", id: movie.id, label: "Сбросить точку просмотра", icon: DELETE_ICON, disabled: locked })] : [])
             ] : []),
-            itemActionButton({ action: "delete-item", type: "movies", id: movie.id, label: "Удалить", icon: DELETE_ICON })
+            itemActionButton({ action: "delete-item", type: "movies", id: movie.id, label: "Удалить", icon: DELETE_ICON, disabled: locked })
           ].join("\n            "))}
         </div>
-        ${watched && movie.my_rating == null ? `<button class="secondary full card-action" type="button" data-action="rate-movie" data-id="${movie.id}">Оценить</button>` : ""}
+        ${watched && movie.my_rating == null ? `<button class="secondary full card-action${locked ? " is-disabled" : ""}" type="button" data-action="rate-movie" data-id="${movie.id}"${locked ? " disabled" : ""}>Оценить</button>` : ""}
       </article>
     `;
   }
@@ -7630,6 +7772,8 @@
       const genre = movie.genres ? String(movie.genres).split(",")[0].trim().toLowerCase() : "";
       return genre || null;
     }
+    // PD-MOVIES-001: отсутствующая оценка — null, а не 0/NaN: sortMovies
+    // стабильно отправляет такие карточки в конец в обоих направлениях.
     if (key === "raofp") return Number(movie.pair_rating) > 0 ? Number(movie.pair_rating) : null;
     return null;
   }
@@ -7893,9 +8037,14 @@
           .map((layer) =>
             `<div class="movie-group-stack__layer" style="--layer:${layer}" aria-hidden="true"></div>`).join("")
       : "";
+    // PD-MOVIES-001: прогресс группы — общий, а видимых частей в текущем
+    // сегменте может быть меньше. Подписываем оба числа явно.
+    const inThisList = availableCount === null
+      ? ""
+      : ` · в этом списке ${countForUi} ${esc(plural(countForUi, "часть", "части", "частей"))}`;
     const metaChips = [
       `<span class="day-chip is-muted">${esc(typeLabel)}</span>`,
-      `<span class="day-chip is-muted">${total} ${esc(noun)} · ${watched} из ${total} просмотрено</span>`
+      `<span class="day-chip is-muted">${total} ${esc(noun)} · ${watched} из ${total} просмотрено${inThisList}</span>`
     ].join("");
     const buttonLabel = availableCount === null
       ? "Показать части"
@@ -8342,7 +8491,10 @@
     // Панель выбора для группы живёт вне веток списков: режим выбора может
     // быть активен и при пустом «Просмотрено»/пустом результате фильтра —
     // иначе «Отмена» пропадает, а выбор остаётся в памяти.
-    const archive = archiveMoreHtml("movies", (appState.movies || []).length);
+    // PD-MOVIES-001: у каждого сегмента свой архив и свой счётчик остатка.
+    const archive = moviesView === "watched"
+      ? archiveMoreHtml("watched_movies", (appState.completedMovies || []).length)
+      : archiveMoreHtml("movies", (appState.movies || []).length);
     if (moviesView === "watched") {
       const all = watchedMovies();
       if (!all.length) {
@@ -8437,6 +8589,22 @@
     const openWishes = isMine ? ownOpen : partnerOpen;
     const doneWishes = isMine ? ownDone : partnerDone;
     const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
+    // PD-WISHES-001: личные желания видит только автор; шеринг — явное действие.
+    if (wishView === "private") {
+      const privateAll = mergedArchive("private_wishes", appState.privateWishes || []);
+      const privateOpen = privateAll.filter((w) => Number(w.done) !== 1);
+      const privateDone = privateAll.filter((w) => Number(w.done) === 1);
+      if (wishesView === "done") {
+        return privateDone.length
+          ? privateDone.map((item) => completedWishItem(item, true)).join("")
+          : `<section class="card"><h3>Пока пусто</h3><p>Исполненных личных желаний нет</p></section>`;
+      }
+      let privHtml = `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish" data-private="1">Добавить личное желание</button>`;
+      privHtml += privateOpen.length
+        ? privateOpen.map((item) => wishItem(item, true, true)).join("")
+        : `<section class="card"><h3>Пока пусто</h3><p>Здесь только ваши желания — партнёр их не видит, пока вы не поделитесь</p></section>`;
+      return privHtml + archiveMoreHtml("private_wishes", (appState.privateWishes || []).length);
+    }
     // Вид «Исполненно»: только исполненные желания — свои или партнёра.
     if (wishesView === "done") {
       if (!doneWishes.length) {
@@ -8784,6 +8952,8 @@
   // Переключение под-вкладки «Фло»: меняем только #flo-body, капля и бар живые.
   function commitFloView(value) {
     if (floView === value) return;
+    // PD-FLO-001: «вооружённое» удаление не должно переживать уход с настроек.
+    floDeleteArmed = false;
     floView = value;
     const body = document.getElementById("flo-body");
     if (!body) { render(); return; }
@@ -8817,6 +8987,12 @@
     return mergedArchive("goals", appState.goals || []);
   }
 
+  // PD-GOALS-001: завершённые цели живут в отдельном наборе /api/state и
+  // отдельном архивном типе — как completedTasks/done_tasks у планов.
+  function doneGoalList() {
+    return mergedArchive("done_goals", appState.completedGoals || []);
+  }
+
   function goalCompleted(goal) {
     const items = goal.items || [];
     return items.length > 0 && items.every((item) => Number(item.done) === 1);
@@ -8827,32 +9003,47 @@
   }
 
   function completedGoals() {
-    return goalList().filter(goalCompleted);
+    return doneGoalList().filter(goalCompleted);
   }
 
   function goalItemRow(item) {
     const done = Number(item.done) === 1;
+    const disabled = partnerMissing() ? " disabled" : "";
+    const by = done && item.done_by && Number(item.done_by) !== Number(appState.user?.tg_id)
+      ? `<span class="goal-item-by">отметил партнёр</span>` : "";
     return `
       <div class="goal-item${done ? " is-done" : ""}">
-        <button class="goal-item-check" type="button" data-action="${done ? "goal-item-reopen" : "goal-item-done"}" data-id="${item.id}" aria-label="${done ? "Вернуть пункт в работу" : "Отметить пункт выполненным"}">${done ? REOPEN_ICON : DONE_ICON}</button>
-        <span class="goal-item-title">${esc(item.title)}</span>
+        <button class="goal-item-check${disabled ? " is-disabled" : ""}" type="button" data-action="${done ? "goal-item-reopen" : "goal-item-done"}" data-id="${item.id}" aria-label="${done ? "Вернуть пункт в работу" : "Отметить пункт выполненным"}"${disabled}>${done ? REOPEN_ICON : DONE_ICON}</button>
+        <span class="goal-item-title">${renderRichText(item.title)}</span>
+        ${by}
       </div>
     `;
   }
 
   function goalItem(goal) {
     const items = goal.items || [];
+    const done = items.filter((item) => Number(item.done) === 1).length;
+    const completedAt = goal.completed_at || items.reduce((max, item) => Math.max(max, Number(item.done_at) || 0), 0);
+    const closed = goalCompleted(goal) && completedAt
+      ? `<span class="day-chip">${esc(formatTimestamp(completedAt))}</span>` : "";
+    const progress = items.length
+      ? `<div class="item-meta"><span class="day-chip is-muted">${done} из ${items.length}</span>${closed}</div>` : "";
+    const actions = [
+      itemActionButton({ action: "edit-goal", type: "goals", id: goal.id, label: "Редактировать цель", icon: EDIT_ICON }),
+      itemActionButton({ action: "delete-item", type: "goals", id: goal.id, label: "Удалить цель", icon: DELETE_ICON })
+    ];
     return `
       <article class="card goal-card">
         <div class="item-row">
           <div class="item-main">
-            <h3 class="item-title">${esc(goal.title)}</h3>
+            <h3 class="item-title">${renderRichText(goal.title)}</h3>
             ${Number(goal.is_private) === 1 ? `<div class="item-meta"><span class="day-chip is-muted">Личная</span></div>` : ""}
+            ${progress}
           </div>
-          ${itemActions(itemActionButton({ action: "delete-item", type: "goals", id: goal.id, label: "Удалить цель", icon: DELETE_ICON }))}
+          ${itemActions(actions.join("\n            "))}
         </div>
         <div class="goal-items">
-          ${items.map(goalItemRow).join("")}
+          ${items.length ? items.map(goalItemRow).join("") : `<p class="empty-hint">В цели нет пунктов — удалите её или добавьте пункт</p>`}
         </div>
       </article>
     `;
@@ -8864,10 +9055,10 @@
       const done = completedGoals();
       if (!done.length) {
         return `<section class="card"><h3>Пока ничего не достигнуто</h3><p>Отметьте все пункты цели — она переедет сюда</p></section>`
-          + archiveMoreHtml("goals", (appState.goals || []).length);
+          + archiveMoreHtml("done_goals", (appState.completedGoals || []).length);
       }
       return done.map(goalItem).join("")
-        + archiveMoreHtml("goals", (appState.goals || []).length);
+        + archiveMoreHtml("done_goals", (appState.completedGoals || []).length);
     }
     const open = openGoals();
     if (!open.length) {
@@ -9207,7 +9398,12 @@
     if (target.hasAttribute("data-contact-phone")) {
       let digits = target.value.replace(/\D/g, "");
       if (digits.length === 11 && (digits[0] === "7" || digits[0] === "8")) digits = digits.slice(1);
+      // PD (Контакты): если после срезки префикса всё ещё >10 цифр, обрезаем
+      // осознанно и помечаем поле — молчаливая маска скрывала бы ошибку ввода.
+      const tooLong = digits.length > 10;
       target.value = contactsFormatDigits(digits);
+      if (tooLong) target.setAttribute("data-invalid", "1");
+      else target.removeAttribute("data-invalid");
       return;
     }
     const form = target.closest("form");
@@ -9858,7 +10054,7 @@
       } else if (action === "add-contact") {
         openContactDialog(null);
       } else if (action === "contacts-view") {
-        const view = btn.dataset.view === "partner" ? "partner" : "mine";
+        const view = ["partner", "private"].includes(btn.dataset.view) ? btn.dataset.view : "mine";
         if (view !== contactsView) {
           contactsView = view;
           contactsSearch = "";
@@ -10010,6 +10206,65 @@
             }
           })
         });
+      } else if (action === "edit-goal") {
+        const goal = findItem("goals", btn.dataset.id);
+        if (!goal) { showToast("Цель не найдена"); return; }
+        const items = goal.items || [];
+        const ownsPrivacy = Number(goal.created_by) === Number(appState.user.tg_id);
+        openDialog({
+          title: "Редактировать цель",
+          fields: `
+            <label class="field"><span>Что за цель?</span><input name="title" data-fmt="none" maxlength="180" required value="${esc(goal.title || "")}"></label>
+            ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${Number(goal.is_private) === 1 ? "checked" : ""}> Личная — видите только вы</span></label>` : ""}
+            <div class="field"><span>Пункты выполнения</span>
+              <div class="goal-steps" id="goal-steps">
+                ${items.map((item) => `
+                  <div class="goal-step-row">
+                    <input name="items" data-item-id="${esc(item.id)}" data-fmt="** _" maxlength="180" required value="${esc(item.title || "")}">
+                    <button class="icon-btn" type="button" data-action="remove-goal-step" aria-label="Удалить пункт" ${items.length <= 1 ? "hidden" : ""}>${DELETE_ICON}</button>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+            <button class="goal-add" type="button" data-action="add-goal-step" aria-label="Добавить пункт">+</button>
+            <label class="field"><span>Новый пункт (необязательно)</span><input name="new_item" data-fmt="** _" maxlength="180" placeholder="Ещё один шаг"></label>
+          `,
+          onSubmit: async (fd) => {
+            const id = goal.id;
+            const title = String(fd.get("title") || "").trim();
+            // Удалённые строки больше не приходят в FormData — сначала удаляем
+            // отсутствующие пункты (кроме последнего, guard и на сервере есть),
+            // затем обновляем текст, затем добавляем новый.
+            const keepIds = new Set([...dialogForm.querySelectorAll('input[name="items"]')].map((el) => Number(el.dataset.itemId)));
+            for (const item of items) {
+              if (!keepIds.has(Number(item.id))) {
+                await request(`/api/goal_items/${item.id}`, { method: "DELETE", body: {} });
+              }
+            }
+            let state = await request(`/api/goals/${id}`, {
+              method: "PATCH",
+              body: { title, ...(ownsPrivacy ? { is_private: fd.get("is_private") === "on" } : {}) }
+            });
+            const currentInputs = [...dialogForm.querySelectorAll('input[name="items"]')];
+            for (let i = 0; i < currentInputs.length; i++) {
+              const el = currentInputs[i];
+              const original = items[i];
+              const next = String(el.value || "").trim();
+              if (original && Number(el.dataset.itemId) === Number(original.id) && next !== String(original.title || "").trim()) {
+                state = await request(`/api/goal_items/${original.id}`, {
+                  method: "PATCH", body: { title: next }
+                });
+              }
+            }
+            const newItem = String(fd.get("new_item") || "").trim();
+            if (newItem) {
+              state = await request(`/api/goals/${id}/items`, { method: "POST", body: { title: newItem } });
+            }
+            removeFromArchiveCache("goals", id);
+            await revalidateArchiveCache();
+            return state;
+          }
+        });
       } else if (action === "add-date") {
         openDialog({
           title: "Значимая дата",
@@ -10028,11 +10283,13 @@
         openDialog({
           ascii: { mode: "none", art: null, file: null, palette: "detail", quality: "high", busy: false, hadArt: false },
           title: "Запись в дневник",
-          fields: `<label class="field"><span>Заголовок</span><input name="title" data-fmt="none" maxlength="180" required placeholder="Тёплый вечер у реки"></label>
+          fields: `<label class="field"><span>Заголовок (необязательно)</span><input name="title" data-fmt="none" maxlength="180" placeholder="Тёплый вечер у реки"></label>
            <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required placeholder="Сегодня был тёплый вечер…"></textarea></label>
+           <label class="field"><span>Дата записи</span><input type="date" name="day" value="${esc(calendarKeyFromDate(new Date(), pairTimeZone()))}"></label>
+           ${pairTimeHintHtml()}
            <div class="ascii-block" data-ascii-block>${asciiBlockInnerHtml({ mode: "none" })}</div>`,
           onSubmit: (fd) => {
-            const body = { title: fd.get("title"), body: fd.get("body") };
+            const body = { title: fd.get("title"), body: fd.get("body"), day: fd.get("day") };
             if (dialogContext?.ascii?.mode === "set" && dialogContext.ascii.art) body.ascii_art = dialogContext.ascii.art;
             return request("/api/memories", { method: "POST", body });
           }
@@ -10042,17 +10299,18 @@
           title: "Новое желание",
           fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" data-fmt="none" maxlength="300" required placeholder="Плёночный фотоаппарат"></label>
            <label class="field"><span>Уточнение (необязательно)</span><textarea name="comment" data-fmt="** _ __ ~~" rows="3" maxlength="500" placeholder="Размер, цвет, где купить или чем можно заменить"></textarea></label>
-           <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>`,
-          onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), comment: fd.get("comment"), url: fd.get("url") } })
+           <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>
+           <label class="field"><span><input type="checkbox" name="is_private"${btn.dataset.private === "1" ? " checked" : ""}> Личное — партнёр не увидит, пока вы не поделитесь</span></label>`,
+          onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), comment: fd.get("comment"), url: wishUrlFromInput(fd.get("url")), is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-quote") {
         openDialog({
           title: "Новая цитата",
           fields: `
             <label class="field"><span>Цитата</span><textarea name="body" data-fmt="** _" rows="4" maxlength="600" required placeholder="Мы в ответе за тех, кого приручили"></textarea></label>
-            <label class="field"><span>Автор</span><select name="source">${quoteAuthorOptions("")}</select></label>
+            <label class="field"><span>Кто сказал</span><select name="source">${quoteAuthorOptions("")}</select></label>
           `,
-          onSubmit: (fd) => request("/api/quotes", { method: "POST", body: { body: fd.get("body"), source: fd.get("source") } })
+          onSubmit: (fd) => request("/api/quotes", { method: "POST", body: { body: fd.get("body"), source: fd.get("source") || null } })
         });
       } else if (action === "add-place") {
         openDialog({
@@ -10062,7 +10320,7 @@
             <label class="field"><span>Заметка (необязательно)</span><textarea name="note" data-fmt="** _ __" rows="3" maxlength="600" placeholder="Почему хочется именно сюда"></textarea></label>
             <label class="field"><span>Ссылка на карту (необязательно)</span><input name="url" type="url" placeholder="https://maps.example.com/..."></label>
           `,
-          onSubmit: (fd) => request("/api/places", { method: "POST", body: { title: fd.get("title"), note: fd.get("note"), url: fd.get("url") } })
+          onSubmit: (fd) => request("/api/places", { method: "POST", body: { title: fd.get("title"), note: fd.get("note"), url: wishUrlFromInput(fd.get("url")) } })
         });
       } else if (action === "add-trip") {
         openDialog({
@@ -10154,9 +10412,15 @@
           submitLabel: isWish ? "Да, исполнено" : "Да, выполнено",
           onSubmit: async () => {
             appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}/done`, { method: "POST", body: {} });
+            // Запись переехала между активным и завершённым набором. Без
+            // инвалидации её «хвост» (>200 active / >10 recent) остался бы в
+            // кэше архива и кратко показывал устаревшую карточку.
+            removeFromArchiveCache(btn.dataset.type, btn.dataset.id);
+            await revalidateArchiveCache();
             haptic();
-            showToast(doneItem?.title
-              ? `${isWish ? "Исполнено" : "Выполнено"}: «${doneItem.title}»`
+            const doneLabel = doneItem?.title || doneItem?.body || "";
+            showToast(doneLabel
+              ? `${isWish ? "Исполнено" : "Выполнено"}: «${doneLabel}»`
               : (isWish ? "Желание исполнено" : "План выполнен"));
             return appState;
           }
@@ -10204,14 +10468,18 @@
       } else if (action === "goal-item-done" || action === "goal-item-reopen") {
         const id = btn.dataset.id;
         const markDone = action === "goal-item-done";
+        const ownerGoal = [...(appState.goals || []), ...(appState.completedGoals || [])]
+          .find((g) => (g.items || []).some((i) => Number(i.id) === Number(id)));
         btn.disabled = true;
         try {
           appState = await request(`/api/goal_items/${id}/${markDone ? "done" : "reopen"}`, { method: "POST", body: {} });
+          if (ownerGoal) removeFromArchiveCache("goals", ownerGoal.id);
           haptic();
           // Отмеченный последним пункт закрывает цель — отдельный акцент.
           let toast = markDone ? "Пункт цели выполнен" : "Пункт возвращён в работу";
           if (markDone) {
-            const goal = (appState.goals || []).find((g) => (g.items || []).some((i) => Number(i.id) === Number(id)));
+            const goal = [...(appState.goals || []), ...(appState.completedGoals || [])]
+              .find((g) => (g.items || []).some((i) => Number(i.id) === Number(id)));
             if (goal && goalCompleted(goal)) toast = `Цель «${goal.title}» выполнена!`;
           }
           showToast(toast);
@@ -10399,17 +10667,22 @@
       } else if (action === "movie-unwatched") {
         const id = btn.dataset.id;
         const movie = findMovieById(id);
-        btn.disabled = true;
-        try {
-          appState = await request(`/api/movies/${id}/unwatched`, { method: "POST", body: {} });
-          if (movie?.group_id) movieGroupDetails.delete(movie.group_id);
-          haptic();
-          showToast(movie ? `«${movie.title}» снова в списке` : "Фильм вернулся в список");
-          revalidateArchiveCache();
-          render();
-        } finally {
-          btn.disabled = false;
-        }
+        // PD-MOVIES-001: unwatched удаляет оценки ОБОИХ партнёров — это
+        // необратимо, поэтому сначала явное подтверждение (как у delete).
+        openDialog({
+          title: "Вернуть в «В планах»?",
+          fields: `<p style="margin:2px 0 0;">Оценки пары будут сброшены — RAofP придётся ставить заново. Фильм «${esc(movie?.title || "")}» вернётся в список.</p>`,
+          submitLabel: "Вернуть и сбросить оценки",
+          onSubmit: async () => {
+            appState = await request(`/api/movies/${id}/unwatched`, { method: "POST", body: {} });
+            if (movie?.group_id) movieGroupDetails.delete(movie.group_id);
+            haptic();
+            showToast(movie ? `«${movie.title}» снова в списке` : "Фильм вернулся в список");
+            removeFromArchiveCache("movies", id);
+            await revalidateArchiveCache();
+            return appState;
+          }
+        });
       } else if (action === "movie-resume") {
         const movie = findMovieById(btn.dataset.id);
         if (movie) openMovieResumeDialog(movie);
@@ -10502,9 +10775,16 @@
           fields: `
             <label class="field"><span>Название</span><input name="title" data-fmt="none" maxlength="120" required value="${esc(saving.title)}"></label>
             <label class="field"><span>Сколько нужно накопить</span><input name="target" type="number" inputmode="numeric" min="1" step="1" required value="${esc(saving.target)}"></label>
+            <label class="field"><span>Видимость</span><select name="kind"><option value="shared"${saving.kind === "shared" ? " selected" : ""}>Общая — видят оба</option><option value="personal"${saving.kind !== "shared" ? " selected" : ""}>Личная — только я</option></select></label>
+            <p class="settings-hint">Сейчас собрано ${esc(formatAmount(saving.collected))}. Цель не может быть меньше собранной суммы.</p>
           `,
           onSubmit: async (fd) => {
-            const body = { title: fd.get("title"), target: Number(fd.get("target")) };
+            const target = Number(fd.get("target"));
+            if (!Number.isFinite(target) || target < Number(saving.collected)) {
+              showDialogError(new Error(`Цель не может быть меньше уже собранной суммы (${formatAmount(saving.collected)})`));
+              return;
+            }
+            const body = { title: fd.get("title"), target, kind: fd.get("kind") };
             const state = await request(`/api/savings/${saving.id}`, {
               method: "PATCH",
               body
@@ -10528,21 +10808,40 @@
         // история первой копилки вставлялась в диалог второй. Паттерн —
         // как openMovieDetails: захват dialogContext и сверка перед вставкой.
         const context = dialogContext;
-        try {
-          const data = await request(`/api/savings/${saving.id}/history`);
+        // PD-SAVINGS-001: история страницами; гонку экранит dialogContext.
+        const loadPage = async (page, append) => {
+          const data = await request(`/api/savings/${saving.id}/history?page=${page}`);
           if (dialogContext !== context || !dialog.open) return;
           const box = dialogFields.querySelector(".saving-history");
           if (!box) return;
           const rows = data.deposits || [];
-          box.innerHTML = rows.length
-            ? rows.map((row) => `
+          const html = rows.map((row) => `
                 <div class="saving-history-row">
                   <span class="saving-history-name">${esc(row.display_name || "Партнёр")}</span>
                   <span class="saving-history-amount">+${esc(formatAmount(row.amount))}</span>
                   <span class="saving-history-date">${esc(formatTimestamp(row.created_at))}</span>
                 </div>
-              `).join("")
-            : `<p class="movie-suggest-hint">Пополнений пока не было — нажмите «Плюс» на карточке.</p>`;
+              `).join("");
+          const more = data.hasMore
+            ? `<button class="secondary full card-action" type="button" data-action="saving-history-more" data-page="${Number(data.page) + 1}">Показать ещё</button>`
+            : "";
+          box.innerHTML = (append ? box.innerHTML.replace(/<button[^>]*data-action="saving-history-more"[\s\S]*?<\/button>/, "") + html : (html || `<p class="movie-suggest-hint">Пополнений пока не было — нажмите «Плюс» на карточке.</p>`)) + more;
+        };
+        try {
+          await loadPage(0, false);
+          // Кнопка догрузки внутри read-only диалога: общий делегат action
+          // обрабатывает её, не закрывая окно.
+          const historyHandler = (event) => {
+            const btn = event.target.closest('[data-action="saving-history-more"]');
+            if (!btn || dialogContext !== context) return;
+            btn.disabled = true;
+            loadPage(Number(btn.dataset.page), true).catch(handleRequestError).finally(() => {
+              if (dialogContext === context && btn.isConnected) btn.disabled = false;
+            });
+          };
+          dialogFields.addEventListener("click", historyHandler);
+          const off = () => dialogFields.removeEventListener("click", historyHandler);
+          dialog.addEventListener("close", off, { once: true });
         } catch (error) {
           if (dialogContext !== context || !dialog.open) return;
           handleRequestError(error);
@@ -10604,10 +10903,16 @@
         btn.disabled = true;
         try {
           appState = await request(`/api/${type}/${id}/reopen`, { method: "POST", body: {} });
+          // Возвращённая запись должна сразу исчезнуть из завершённых архивов
+          // и появиться в предстоящих, включая «хвосты» за пределами /api/state.
+          removeFromArchiveCache(type, id);
+          await revalidateArchiveCache();
         } finally {
           btn.disabled = false;
         }
-        showToast(item?.title ? `Возвращено: «${item.title}»` : "Запись возвращена");
+        const backLabel = item?.title || item?.body || "";
+        haptic();
+        showToast(backLabel ? `Возвращено: «${backLabel}»` : "Запись возвращена");
         render();
       } else if (action === "edit-item") {
         const type = btn.dataset.type;
@@ -10655,7 +10960,10 @@
               onSubmit: async (fd) => {
                 const body = { title: fd.get("title"), day: fd.get("day"), is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
                 const state = await request(`/api/dates/${id}`, { method: "PATCH", body });
-                patchArchiveItem("dates", id, body);
+                // PD-DATES-001: смена day меняет позицию в sortDateRows —
+                // точечный patch кэша оставил бы карточку на старом месте.
+                removeFromArchiveCache("dates", id);
+                await revalidateArchiveCache();
                 return state;
               }
             });
@@ -10668,6 +10976,7 @@
               <label class="field"><span>Дата</span><input type="date" name="day" required value="${esc(item.day || "")}"></label>
               <label class="field"><span>Время (необязательно)</span><input type="time" name="time" value="${esc(item.time || "")}" lang="ru"></label>
               <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs" ${Number(item.monthly) === 1 ? "checked" : ""}> Повторять каждый месяц</span></label>
+              ${Number(String(item.day || "").slice(8)) >= 29 ? `<p class="settings-hint">День ${esc(String(item.day).slice(8))} есть не в каждом месяце — такие месяцы пропускаются.</p>` : ""}
               <label class="field"><span><input type="checkbox" name="recurs" data-excludes="monthly" ${Number(item.monthly) === 1 ? "" : item.recurs ? "checked" : ""}> Повторять каждый год</span></label>
               ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личная — видите только вы</span></label>` : ""}
               ${pairTimeHintHtml()}
@@ -10675,7 +10984,10 @@
             onSubmit: async (fd) => {
               const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
               const state = await request(`/api/dates/${id}`, { method: "PATCH", body });
-              patchArchiveItem("dates", id, body);
+              // PD-DATES-001: day/time/recurs меняют sortDateRows — обновляем
+              // архив целиком, а не точечный patch устаревшей позиции.
+              removeFromArchiveCache("dates", id);
+              await revalidateArchiveCache();
               return state;
             }
           });
@@ -10692,11 +11004,13 @@
               busy: false,
               hadArt: hasAscii
             },
-            fields: `<label class="field"><span>Заголовок</span><input name="title" data-fmt="none" maxlength="180" placeholder="Без заголовка" value="${esc(item.title || "")}"></label>
+            fields: `<label class="field"><span>Заголовок (необязательно)</span><input name="title" data-fmt="none" maxlength="180" placeholder="Без заголовка" value="${esc(item.title || "")}"></label>
              <label class="field"><span>Воспоминание</span><textarea name="body" rows="4" maxlength="2000" required>${esc(item.body || "")}</textarea></label>
+             <label class="field"><span>Дата записи</span><input type="date" name="day" value="${esc(item.day || "")}"></label>
+             ${pairTimeHintHtml()}
              <div class="ascii-block" data-ascii-block>${asciiBlockInnerHtml({ mode: hasAscii ? "keep" : "none", art: item.ascii_art || "" })}</div>`,
             onSubmit: async (fd) => {
-              const body = { body: fd.get("body"), title: fd.get("title") };
+              const body = { body: fd.get("body"), title: fd.get("title"), day: fd.get("day") };
               // ascii_art шлём только когда пользователь его менял: отсутствие
               // поля в PATCH сохраняет прежнее вложение (совместимость со
               // старыми клиентами), null/"" — явное удаление.
@@ -10704,7 +11018,10 @@
               if (mode === "set" && dialogContext.ascii.art) body.ascii_art = dialogContext.ascii.art;
               else if (mode === "delete") body.ascii_art = null;
               const state = await request(`/api/memories/${id}`, { method: "PATCH", body });
-              patchArchiveItem("memories", id, body);
+              // PD-MEMORIES-001: смена day меняет порядок ленты — архив
+              // перезагружаем целиком, а не патчим кэш точечно.
+              removeFromArchiveCache("memories", id);
+              await revalidateArchiveCache();
               return state;
             }
           });
@@ -10728,10 +11045,10 @@
             title: "Редактировать цитату",
             fields: `
               <label class="field"><span>Цитата</span><textarea name="body" data-fmt="** _" rows="4" maxlength="600" required>${esc(item.body || "")}</textarea></label>
-              <label class="field"><span>Автор</span><select name="source">${quoteAuthorOptions(item.source || "")}</select></label>
+              <label class="field"><span>Кто сказал</span><select name="source">${quoteAuthorOptions(item.source || "")}</select></label>
             `,
             onSubmit: async (fd) => {
-              const body = { body: fd.get("body"), source: fd.get("source") };
+              const body = { body: fd.get("body"), source: fd.get("source") || null };
               const state = await request(`/api/quotes/${id}`, { method: "PATCH", body });
               patchArchiveItem("quotes", id, body);
               return state;
@@ -10809,6 +11126,43 @@
         } else {
           showToast(link);
         }
+      } else if (action === "copy-quote") {
+        // PD-QUOTES-001: копирование — чтение, доступно даже без партнёра.
+        const quote = findItem("quotes", btn.dataset.id);
+        if (!quote) return;
+        const text = String(quote.body || "") + (quote.source ? `\n— ${quote.source}` : "");
+        let copied = false;
+        if (navigator.clipboard?.writeText) {
+          try { await navigator.clipboard.writeText(text); copied = true; } catch (error) { copied = false; }
+        }
+        if (!copied) {
+          const area = document.createElement("textarea");
+          area.value = text;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+          finally { area.remove(); }
+        }
+        showToast(copied ? "Цитата скопирована" : "Не удалось скопировать");
+      } else if (action === "share-private-wish") {
+        const wish = findItem("wishes", btn.dataset.id);
+        if (!wish) return;
+        const label = wish.title || wish.body || "";
+        openDialog({
+          title: "Поделиться желанием?",
+          fields: `<p style="margin:2px 0 0;">«${esc(label)}» станет общим — партнёр увидит его в своём списке. Вернуть в личные можно будет в настройках записи.</p>`,
+          submitLabel: "Поделиться",
+          onSubmit: async () => {
+            appState = await request(`/api/wishes/${wish.id}/share`, { method: "POST", body: {} });
+            removeFromArchiveCache("wishes", wish.id);
+            await revalidateArchiveCache();
+            showToast("Желание теперь общее");
+            return appState;
+          }
+        });
       } else if (action === "share-wish") {
         // Копирование в буфер: чтение, доступно обоим партнёрам даже без
         // второго в пространстве (в PARTNER_LOCKED_ACTIONS не входит).
@@ -10850,7 +11204,7 @@
       } else if (action === "leave-pair") {
         confirmLeaveSpace();
       } else if (action === "wish-view") {
-        const view = btn.dataset.view === "partner" ? "partner" : "mine";
+        const view = ["partner", "private"].includes(btn.dataset.view) ? btn.dataset.view : "mine";
         if (view === wishView) return;
         wishView = view;
         // Тап по переключателю: точечная перерисовка списков + анимация капли
@@ -10869,32 +11223,37 @@
         await loadArchivePage(btn.dataset.type, btn);
       } else if (action === "set-accent") {
         appState = await request("/api/settings", { method: "POST", body: { accent_color: btn.dataset.accent || null } });
+        showToast("Цвет сохранён");
         render();
       } else if (action === "save-settings") {
         const timeOf = (id) => {
           const value = document.getElementById(id)?.value || "";
           return /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : null;
         };
-        appState = await request("/api/settings", {
-          method: "POST",
-          body: {
-            digest_enabled: document.getElementById("digest-enabled")?.checked ?? true,
-            digest_time: timeOf("digest-time"),
-            dates_digest_enabled: document.getElementById("dates-digest-enabled")?.checked ?? true,
-            dates_digest_time: timeOf("dates-digest-time"),
-            weekly_digest_enabled: document.getElementById("weekly-digest-enabled")?.checked ?? false,
-            weekly_digest_time: timeOf("weekly-digest-time"),
-            weekly_digest_day: document.getElementById("weekly-digest-day")?.value === "mon" ? "mon" : "sun",
-            show_avatar: document.getElementById("show-avatar")?.checked ?? true,
-            // У выключенного чекбокса (нет доступа к календарю партнёрши)
-            // .checked читается как сохранённое значение — оно и уходит.
-            show_cycle_calendar: document.getElementById("cycle-calendar")?.checked ?? (appState.user?.gender === "female"),
-            // Пустое поле оставляет текущее имя из Telegram.
-            display_name: document.getElementById("display-name-input")?.value?.trim() || null,
-            // Пустое поле сбрасывает личное имя партнёра на имя из Telegram.
-            partner_name: document.getElementById("partner-name-input")?.value?.trim() || null
-          }
-        });
+        // PD-PROFILE-001: пустое/битое время не обнуляет сохранённое значение —
+        // просто не включаем поле в PATCH.
+        const keepTime = (id, previous) => {
+          const value = timeOf(id);
+          return value === null && previous ? undefined : value;
+        };
+        const cycleBox = document.getElementById("cycle-calendar");
+        const body = {
+          digest_enabled: document.getElementById("digest-enabled")?.checked ?? true,
+          dates_digest_enabled: document.getElementById("dates-digest-enabled")?.checked ?? true,
+          weekly_digest_enabled: document.getElementById("weekly-digest-enabled")?.checked ?? false,
+          weekly_digest_day: document.getElementById("weekly-digest-day")?.value === "mon" ? "mon" : "sun",
+          show_avatar: document.getElementById("show-avatar")?.checked ?? true,
+          display_name: document.getElementById("display-name-input")?.value?.trim() || null,
+          partner_name: document.getElementById("partner-name-input")?.value?.trim() || null
+        };
+        for (const [key, value] of Object.entries({
+          digest_time: keepTime("digest-time", appState.user?.digest_time),
+          dates_digest_time: keepTime("dates-digest-time", appState.user?.dates_digest_time),
+          weekly_digest_time: keepTime("weekly-digest-time", appState.user?.weekly_digest_time)
+        })) if (value !== undefined) body[key] = value;
+        // Недоступный чекбокс не должен тихо перезаписывать серверное значение.
+        if (cycleBox && !cycleBox.disabled) body.show_cycle_calendar = cycleBox.checked;
+        appState = await request("/api/settings", { method: "POST", body });
         showToast("Настройки сохранены");
         // Переключатель «Отображение аватара» мог включить фото: прогреваем
         // его до перерисовки, чтобы аватар появился сразу, а не поверх буквы.
@@ -10971,6 +11330,11 @@
               <option value="all">Все</option>
               <option value="mine">Только мои</option>
             </select></label>
+            <label class="field"><span>Контакты</span><select name="contacts">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Все</option>
+              <option value="mine">Только мои</option>
+            </select></label>
             ${appState?.user?.gender === "female" ? `<label class="field"><span>Фло (месячные и дневник)</span><select name="cycle">
               <option value="" selected>Не выгружать</option>
               <option value="all">Всё</option>
@@ -10978,7 +11342,7 @@
           `,
           onSubmit: async (fd) => {
             const sections = {};
-            for (const key of ["plans", "movies", "dates", "birthdays", "places", "trips", "memories", "quotes", "wishes", "cycle"]) {
+            for (const key of ["plans", "movies", "dates", "birthdays", "places", "trips", "memories", "quotes", "wishes", "contacts", "cycle"]) {
               const value = fd.get(key);
               if (value) sections[key] = value;
             }

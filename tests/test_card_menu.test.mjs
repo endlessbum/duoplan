@@ -89,6 +89,7 @@ const loadMovieItem = new Function(
     extractBraced("function raofpPill"),
     extractBraced("function formatMovieLength"),
     "let movieGroupSelection = null;",
+    "const partnerMissing = () => false;",
     extractBraced("function movieItem"),
     "return movieItem;"
   ].join("\n")

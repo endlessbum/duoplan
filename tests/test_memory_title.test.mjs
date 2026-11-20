@@ -129,3 +129,34 @@ test("state() и архив отдают title вместе с телом зап
   const archive = source.slice(source.indexOf("memories: {"), source.indexOf("memories: {") + 400);
   deepStrictEqual(archive.includes("m.ascii_art"), true, "ARCHIVE_QUERIES.memories без m.title");
 });
+
+test("PD-MEMORIES-001: create/PATCH day и сортировка ленты по дню", async () => {
+  const { api, env, queries, request } = makeEnv({
+    pair: { id: 1, timezone: "Europe/Moscow" },
+    body: { title: "", body: "Вчерашний вечер", day: "2026-11-19" }
+  });
+  await api(request, env, new URL("https://duoplan.test/api/memories"));
+  const insert = queries.find((q) => q.sql.startsWith("INSERT INTO memories"));
+  equal(insert.args[5], "2026-11-19", "create не сохранил указанный день");
+
+  const noDay = makeEnv({
+    pair: { id: 1, timezone: "Europe/Moscow" },
+    body: { body: "Сегодня" }
+  });
+  await noDay.api(noDay.request, noDay.env, new URL("https://duoplan.test/api/memories"));
+  const insertNoDay = noDay.queries.find((q) => q.sql.startsWith("INSERT INTO memories"));
+  equal(insertNoDay.args[5].length, 10, "без day должна подставиться дата пары");
+
+  const patch = makeEnv({
+    pair: { id: 1, timezone: "Europe/Moscow" },
+    body: { body: "Текст", day: "2026-11-01" }
+  });
+  patch.request.method = "PATCH";
+  await patch.api(patch.request, patch.env, new URL("https://duoplan.test/api/memories/8"));
+  const update = patch.queries.find((q) => q.sql.startsWith("UPDATE memories"));
+  equal(update.sql.includes("day=?"), true, "PATCH не меняет day");
+  equal(update.args.includes("2026-11-01"), true, "PATCH day не записан");
+
+  equal((source.match(/ORDER BY m\.day DESC, m\.created_at DESC, m\.id DESC/g) || []).length, 2,
+    "state и архив должны сортировать записи по дню");
+});

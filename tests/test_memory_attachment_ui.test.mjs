@@ -52,7 +52,7 @@ function cssBlock(selector) {
 // ASCII-символов важно), соседи по карточке — стабы с сохранением разметки.
 function buildMemoryItem() {
   const factory = new Function(
-    "renderRichText", "formatDay", "itemActions", "itemActionButton", "EDIT_ICON", "DELETE_ICON",
+    "renderRichText", "formatDay", "itemActions", "itemActionButton", "EDIT_ICON", "DELETE_ICON", "partnerMissing",
     [
       extractBraced("function esc"),
       extractBraced("function memoryItem"),
@@ -64,7 +64,8 @@ function buildMemoryItem() {
     (d) => String(d ?? ""),
     (html) => `<div class="item-actions">${html}</div>`,
     (o) => `<button data-action="${o.action}" data-type="${o.type}" data-id="${o.id}">${o.label}</button>`,
-    "E", "D"
+    "E", "D",
+    () => false
   );
 }
 

@@ -39,6 +39,8 @@ function extractLine(prefix) {
 const RENDER_DEPS = [
     // pairTimeZone и applyAccent-путь читают appState/документ — минимальные стабы.
     'const document = { documentElement: { dataset: { theme: "dark" } }, querySelectorAll: () => [] };',
+    "const RECURRENCE_YEARS = 10;",
+    "function partnerMissing() { return false; }",
     extractLine("  const RICH_TOKENS"),
     extractLine("  const REOPEN_ICON"),
     extractLine("  const DONE_ICON"),
@@ -106,16 +108,20 @@ test("у плана с датой карточка-кнопка календар
   ok(!noDay.includes('role="button"'), "карточка без даты не должна быть кнопкой");
 });
 
-test("у значимой даты вся карточка ведёт в календарь с её днём", () => {
-  for (const item of [
-    { id: 3, title: "Ежегодная", day: "2021-05-17", time: "", recurs: 1, is_private: 0 },
-    { id: 4, title: "Разовая", day: "2024-01-01", time: "12:00", recurs: 0, is_private: 1 }
-  ]) {
+test("у значимой даты карточка ведёт в календарь: разовая — в исходный день, повтор — в ближайший", () => {
+  const recurring = { id: 3, title: "Ежегодная", day: "2021-05-17", time: "", recurs: 1, is_private: 0 };
+  const oneShot = { id: 4, title: "Разовая", day: "2024-01-01", time: "12:00", recurs: 0, is_private: 1 };
+  for (const item of [recurring, oneShot]) {
     const html = dateItem(item);
     ok(html.includes('data-action="show-in-calendar"'), item.title);
-    ok(html.includes(`data-day="${item.day}"`), item.title);
     ok(!html.includes("link-btn"), "кнопка «В календаре» вернулась: " + item.title);
   }
+  // PD-DATES-001: разовая дата — исходный день, повторяющаяся — nextOccurrence.
+  ok(dateItem(oneShot).includes('data-day="2024-01-01"'), "разовая дата не ведёт в исходный день");
+  const recurringHtml = dateItem(recurring);
+  const dayAttr = /data-day="(\d{4}-\d{2}-\d{2})"/.exec(recurringHtml)?.[1];
+  ok(dayAttr && dayAttr !== recurring.day, "ежегодная дата ведёт в год якоря");
+  ok(dayAttr.endsWith("-05-17"), "ежегодная дата ведёт не на ближайшее 17 мая");
 });
 
 test("карточка дня рождения ведёт в календарь на ближайшее наступление", () => {
@@ -175,6 +181,26 @@ test("просрочка старше недели — приглушённый 
   equal(countdownChip("", ""), "");
 });
 
+test("завершённый план показывает исходные дату/время и чип «Личное»", () => {
+  const rich = completedTaskItem({
+    id: 30,
+    title: "План",
+    day: "2026-11-05",
+    time: "19:30",
+    is_private: 1,
+    created_at: 1730000000,
+    completed_at: 1730100000
+  });
+  ok(rich.includes("05.11.2026"), "нет даты исходного плана");
+  ok(rich.includes("19:30"), "нет времени исходного плана");
+  ok(rich.includes('class="day-chip is-private">Личное'), "нет чипа «Личное»");
+  ok(!rich.includes("Время пришло") && !rich.includes("Через "), "отсчёт завершённому плану не нужен");
+  // Чип приватности показывается и без даты, но без пустых meta-пилюль.
+  const privateNoDay = completedTaskItem({ id: 31, title: "План", is_private: 1 });
+  ok(privateNoDay.includes('class="day-chip is-private">Личное'), "личный план без даты потерял чип");
+  ok(!privateNoDay.includes("undefined"), "в разметке undefined");
+});
+
 test("кнопка возврата — SVG в стиле приложения, а не эмодзи-глиф ↩ (U+21A9)", () => {
   // Регрессия: U+21A9 на мобильных рендерится эмодзи и выпадает из стиля
   // текстовых кнопок ✓ ✎ ✕. Заменён на инлайн-SVG (stroke 1.9, как в app.html).
@@ -218,9 +244,11 @@ test("quoteAuthorOptions: только пользователи простран
   const quoteAuthorOptions = loadQuote();
   const fresh = quoteAuthorOptions("");
   ok(fresh.includes("<option"), "select без вариантов");
-  // «Не указан» больше нет: автор из партнёров установлен всегда.
-  ok(!fresh.includes("Не указан"), "пустой вариант «Не указан» вернулся");
-  ok(!(fresh.match(/value=""/g) || []).length, "пустое значение в select");
+  // PD-QUOTES-001: «Не указан» — легальный вариант, по умолчанию выбранный.
+  ok(fresh.includes("Не указан"), "нет варианта «Не указан»");
+  ok(fresh.includes('value="" selected'), "пустой вариант не выбран по умолчанию");
+  ok(quoteAuthorOptions("Аня").includes('value=""') && !quoteAuthorOptions("Аня").includes('value="" selected'),
+    "при выбранном партнёре «Не указан» не должен быть active");
   ok(fresh.includes('value="Аня"') && fresh.includes('value="Боря"'), "нет обоих пользователей пространства");
   ok(!fresh.includes("Антуан"), "свободный источник остался в выборе");
   ok(quoteAuthorOptions("Аня").includes('value="Аня" selected'), "выбранный автор не подставляется");
@@ -241,7 +269,16 @@ test("quoteAuthorOptions: только пользователи простран
   );
   const solo = loadSolo()("");
   ok(solo.includes('value="Аня"'), "свой вариант потерян");
-  ok(!(solo.match(/value=""/g) || []).length, "пустое имя партнёра попало в select как пустой вариант");
+  ok((solo.match(/value=""/g) || []).length === 1, "«Не указан» должен оставаться даже с одним партнёром");
+});
+
+test("PD-QUOTES-001: карточка цитаты копируется, меню блокируется без партнёра", () => {
+  ok(source.includes('action: "copy-quote"'), "нет действия «Скопировать текст»");
+  ok(source.includes('action === "copy-quote"'), "нет обработчика копирования");
+  ok(source.includes("Кто сказал"), "подпись поля не переименована");
+  const quoteCard = source.slice(source.indexOf("function quoteItem("), source.indexOf("function formatBirthday"));
+  ok((quoteCard.match(/disabled: partnerMissing\(\)/g) || []).length === 2,
+    "меню цитаты не заблокировано без партнёра");
 });
 
 test("у чужого исполненного желания кнопок нет, у своего — есть", () => {
@@ -272,6 +309,7 @@ test("movieItem: пилюля рейтинга по порогам оценки"
       extractBraced("function ratingPill"),
       extractBraced("function raofpPill"),
       extractBraced("function formatMovieLength"),
+      "const partnerMissing = () => false;",
       extractBraced("function movieItem"),
       "return { ratingPill, formatMovieLength, movieItem };"
     ].join("\n")
@@ -336,6 +374,7 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
       // карточка упала бы на ReferenceError ещё до рендера.
       "let movieGroupSelection = null;",
       extractLine("  const LINK_ICON"),
+      "const partnerMissing = () => false;",
       extractBraced("function movieItem"),
       "return { formatMovieLength, movieItem, setSelection: (s) => { movieGroupSelection = s; } };"
     ].join("\n")
@@ -367,7 +406,9 @@ test("formatMovieLength: хронометраж фильма и сезоны/с�
   ok(watched.includes('data-action="rate-movie"'), "нет кнопки «Оценить» для второго партнёра");
   const rated = movieItem({ id: 33, title: "Дюна", rating: 8, watched: 1, watched_at: 1730000000, my_rating: 9, pair_rating: 8.5 });
   ok(rated.includes("RAofP 8.5"), "RAofP не показан");
-  ok(!rated.includes('data-action="rate-movie"'), "кнопка «Оценить» осталась после оценки");
+  // PD-MOVIES-001: после оценки появляется «Изменить оценку» (тот же rate).
+  ok(!rated.includes('>Оценить</button>'), "кнопка первого голосования осталась после оценки");
+  ok(rated.includes('data-action="rate-movie"') && rated.includes("Изменить оценку"), "нет повторной оценки");
   ok(!card.includes("RAofP"), "у непросмотренного фильма не должно быть RAofP");
   // Ни жанра, ни года, ни длительности — карточка не падает.
   const bare = movieItem({ id: 32, title: "Без данных", watched: 0 });
@@ -488,6 +529,7 @@ test("memoryItem: заголовок, свёрнутое тело и клик-р
       extractBraced("function itemActionButton"),
       extractBraced("function itemActions"),
       extractBraced("function formatDay"),
+      "function partnerMissing() { return false; }",
       extractBraced("function richInline"),
       extractBraced("function renderRichText"),
       extractBraced("function memoryItem"),
@@ -545,8 +587,9 @@ test("карточка «Ваша история»: тап открывает о
   const heroBody = source.slice(heroStart, source.indexOf("</section>", heroStart));
   ok(!heroBody.includes("Начало истории"), "«Начало истории» осталось на карточке");
   ok(source.includes("Начало истории</span><span>"), "нет строки «Начало истории» в окне");
-  // Карточка «Ожидание партнёра» осталась нетапабельной с подсказкой про код.
-  ok(source.includes("Отправьте код партнёру, чтобы открыть ритуалы дня"), "потеряна подсказка ожидания партнёра");
+  // PD-HOME-001: два состояния ожидания — первый вход и возвращение.
+  ok(source.includes("Отправьте код партнёру. После его присоединения"), "потеряна подсказка первого входа");
+  ok(source.includes("Пространство ждёт вашего партнёра"), "нет подсказки ожидания возвращения");
 });
 
 test("карточки role=button активируются с клавиатуры (Enter/Space)", () => {
@@ -575,4 +618,40 @@ test("удержание Enter не повторяет клик по карто�
   // без проверки e.repeat один тап превращался в серию кликов по карточке.
   ok(/if \(e\.key === "Enter"\) \{\s*if \(!e\.repeat\) card\.click\(\)/.test(source),
     "Enter по карточке не защищён от автоповтора (нет e.repeat)");
+});
+
+test("PD-MOVIES-001: карточка показывает отметившего и блокирует действия без партнёра", () => {
+  const load = new Function([
+    "const appState = { user: { tg_id: 1 } };",
+    "const partnerMissing = () => false;",
+    [
+      extractLine("  const REOPEN_ICON"),
+      extractLine("  const DONE_ICON"),
+      extractLine("  const EDIT_ICON"),
+      extractLine("  const DELETE_ICON"),
+      extractLine("  const LINK_ICON"),
+      extractLine("  const RESUME_ICON"),
+      extractLine("  const LINK_TEXT_ICON"),
+      extractLine("  const COPY_ICON"),
+      "let movieGroupSelection = null;",
+      extractBraced("function esc"),
+      extractBraced("function itemActionButton"),
+      extractBraced("function itemActions"),
+      extractBraced("function plural"),
+      'const pairTimeZone = () => "UTC";',
+      'const viewerTimeZone = () => "UTC";',
+      extractBraced("function formatTimestamp"),
+      extractBraced("function scorePill"),
+      extractBraced("function ratingPill"),
+      extractBraced("function raofpPill"),
+      extractBraced("function formatMovieLength"),
+      extractBraced("function movieItem"),
+      "return movieItem;"
+    ].join("\n")
+  ].join("\n"))();
+  const alien = load({ id: 90, title: "Дюна", watched: 1, watched_at: 1730000000, watched_by: 999, my_rating: 8, pair_rating: 8 });
+  ok(alien.includes("отметил партнёр"), "нет подписи отметившего");
+  const own = load({ id: 91, title: "Дюна", watched: 1, watched_at: 1730000000, watched_by: 1, my_rating: 8, pair_rating: 8 });
+  ok(!own.includes("отметил партнёр"), "своя отметка названа чужой");
+  ok(source.includes("disabled: locked"), "действия карточки не блокируются без партнёра");
 });

@@ -45,6 +45,7 @@ const load = new Function(
     "const EDIT_ICON = '';",
     "const DELETE_ICON = '';",
     extractBraced(appSource, "function esc"),
+    "const renderRichText = (v) => esc(v);",
     extractBraced(appSource, "function itemActionButton"),
     extractBraced(appSource, "function itemActions"),
     extractBraced(appSource, "function partnerMissing"),
@@ -95,6 +96,23 @@ test("карточка поездки: название, заметка и пи�
   const done = tripItem({ id: 2, title: "Италия", note: "", visited: 1, visited_at: 1700000000 });
   ok(done.includes("day-chip"), "у посещённой поездки нет пилюли даты");
   ok(done.includes('data-action="trip-unvisited"'), "нет возврата в список");
+});
+
+test("PD-PLACES-001: поездки сортируются по дате отметки и показывают, кто отметил", () => {
+  setState({
+    trips: [
+      { ...trip(1, 1), visited_at: 1500000000, created_at: 1700000999 },
+      { ...trip(2, 1), visited_at: 1700000000, created_at: 1500000000 }
+    ]
+  });
+  const html = renderTripsBody();
+  ok(html.indexOf("Поездка 2") < html.indexOf("Поездка 1"), "«Съездили» не по visited_at");
+  ok(html.includes("отметил партнёр") === false, "без visited_by подпись не нужна");
+  const withBy = tripItem({ id: 3, title: "Италия", visited: 1, visited_at: 1700000000, visited_by: 999 });
+  ok(withBy.includes("отметил партнёр"), "нет подписи отметившего");
+  ok(appSource.includes("renderRichText(trip.note)"), "заметка поездки не рендерит разметку");
+  ok(appSource.includes('archiveMoreHtml("trips", (appState.trips || []).length, "Показать ещё из всего списка")'),
+    "нет честной подписи архива поездок");
 });
 
 test("без партнёра кнопка добавления блокируется, как у мест", () => {

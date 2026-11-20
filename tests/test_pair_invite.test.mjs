@@ -38,6 +38,7 @@ const loadRenderPair = new Function(
   "renderPairLock",
   "renderPairTimezone",
   "renderPairExport",
+  "calendarFetching",
   [
     extractBraced(appSource, "function esc"),
     extractBraced(appSource, "function partnerMissing"),
@@ -54,7 +55,8 @@ function render(pair) {
     () => "",
     () => "",
     () => "",
-    () => ""
+    () => "",
+    false
   );
   return renderPair();
 }

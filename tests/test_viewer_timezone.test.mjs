@@ -35,6 +35,7 @@ const load = new Function(
   "planTarget",
   [
     "let appState = null;",
+    "const RECURRENCE_YEARS = 10;",
     "function esc(value) { return String(value ?? ''); }",
     extractBraced("function pairTimeZone("),
     extractBraced("function viewerTimeZone("),
