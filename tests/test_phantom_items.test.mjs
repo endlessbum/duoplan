@@ -29,7 +29,9 @@ function extractBraced(text, declaration) {
 
 const mergedArchiveFactory = new Function(
   "archiveCache", "appState",
-  `${extractBraced(source, "function mergedArchive")}; return mergedArchive;`
+  `${extractBraced(source, "function isArchiveItemReal")}
+   ${extractBraced(source, "function mergedArchive")}
+   return mergedArchive;`
 );
 
 function cache(items) {
@@ -69,9 +71,50 @@ test("delete-item: для несуществующей локально запи
   const idx = branch.indexOf("if (!item)");
   ok(idx > 0, "нет guards для несуществующей записи");
   const guard = branch.slice(idx, idx + 500);
-  ok(guard.includes("removeFromArchiveCache"), "фантом не убирается из кэша");
+  ok(guard.includes("dropMissingItem"), "фантом не убирается из кэша и state");
   ok(guard.includes("showToast"), "нет понятного сообщения пользователю");
   const deleteCall = guard.indexOf("request(");
   const returnIdx = guard.indexOf("return;");
   ok(deleteCall === -1 || returnIdx < deleteCall, "DELETE уходит на сервер для фантома");
+});
+
+test("mergedArchive: пустые body у желаний/цитат и title у планов/целей отфильтровываются", () => {
+  for (const [type, rows, expected] of [
+    ["wishes", [{ id: 1, body: "" }, { id: 2, body: "  " }, { id: 3, body: "Кофемашина" }], 3],
+    ["private_wishes", [{ id: 1, body: "" }, { id: 2, body: "Личное" }], 2],
+    ["quotes", [{ id: 1, body: "  " }, { id: 2, body: "Цитата" }], 2],
+    ["tasks", [{ id: 1, title: "" }, { id: 2, title: "План" }], 2],
+    ["goals", [{ id: 1, title: "  " }, { id: 2, title: "Цель" }], 2],
+    ["memories", [{ id: 1, title: "", body: "" }, { id: 2, title: "", body: "Текст" }], 2],
+  ]) {
+    const merged = mergedArchiveFactory({}, { pair: { id: 1 } })(type, rows);
+    ok(merged.length === 1, `${type}: ожидалась одна настоящая запись, получено ${merged.length}`);
+    ok(merged[0].id === expected, `${type}: осталась фантомная запись`);
+  }
+});
+
+test("delete-item: на 404 cleanup кэша и state, карточка не залипает", () => {
+  const branch = source.slice(
+    source.indexOf('action === "delete-item"'),
+    source.indexOf('action === "open-memory"')
+  );
+  const catchIdx = branch.indexOf("catch (error)");
+  ok(catchIdx > 0, "нет catch вокруг DELETE");
+  const block = branch.slice(catchIdx, catchIdx + 700);
+  ok(/error\?\.status === 404/.test(block), "нет проверки 404");
+  ok(block.includes("dropMissingItem"), "404 не чистит кэш/state");
+  ok(block.includes("render()"), "404 не перерисовывает список");
+});
+
+test("загрузка архива не складывает фантомы в кэш", () => {
+  for (const needle of [
+    ".filter((x) => isArchiveItemReal(type, x))",
+  ]) {
+    ok(source.includes(needle), "фильтр isArchiveItemReal не применяется при загрузке архива");
+  }
+  const loadPage = extractBraced(source, "async function loadArchivePage");
+  ok(loadPage.includes("isArchiveItemReal"), "loadArchivePage не фильтрует записи");
+  const fetchAll = extractBraced(source, "async function fetchArchiveEverything");
+  ok((fetchAll.match(/isArchiveItemReal/g) || []).length >= 3,
+    "fetchArchiveEverything фильтрует не все страницы");
 });

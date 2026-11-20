@@ -68,6 +68,7 @@ const load = new Function(
     "async function refreshMovieGroupDetails(id) { preloadGroupCalls.push('refresh:' + id); }",
     extractBraced("async function preloadAllArchives"),
     extractBraced("async function revalidateArchiveCache"),
+    extractBraced("function isArchiveItemReal"),
     extractBraced("function mergedArchive"),
     extractBraced("function archiveMoreHtml"),
     "return { setAppState: (v) => { appState = v; }, archiveCache, syncArchiveCachePair, mergedArchive, archiveMoreHtml, removeFromArchiveCache, patchArchiveItem, loadArchivePage, fetchArchiveEverything, preloadAllArchives, preloadGroupCalls, revalidateArchiveCache };"
@@ -324,7 +325,7 @@ test("кнопка «Показать ещё» подписана счётчик
 
 test("хвост активных планов скрывается, когда запись завершили", () => {
   const ctx = makeCtx();
-  const base = Array.from({ length: 200 }, (_, i) => ({ id: i + 1 }));
+  const base = Array.from({ length: 200 }, (_, i) => ({ id: i + 1, title: `План ${i + 1}` }));
   ctx.setAppState({ pair: { id: 1 }, tasks: base, completedTasks: [] });
   ctx.syncArchiveCachePair();
   ctx.archiveCache.tasks.items.push({ id: 500, title: "хвост" });
@@ -425,7 +426,7 @@ test("загружаемый сейчас тип (loading) перезагруз�
   const ctx = makeCtx(async (path) => {
     calls.push(path);
     await gate;
-    return { items: [{ id: 1 }], hasMore: false };
+    return { items: [{ id: 1, body: "Воспоминание" }], hasMore: false };
   });
   const flight = ctx.loadArchivePage("memories"); // cache.loading = true
   await ctx.revalidateArchiveCache();

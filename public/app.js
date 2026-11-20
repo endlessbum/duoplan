@@ -226,6 +226,24 @@
       archiveCache[key].items = archiveCache[key].items.filter((x) => Number(x.id) !== Number(id));
     }
   }
+  // Сервер ответил 404: записи нет ни в БД, ни в свежем state — убираем её
+  // везде, иначе «призрак» продолжает рисоваться из архивного кэша/state.
+  function dropMissingItem(type, id) {
+    removeFromArchiveCache(type, id);
+    const keys = {
+      tasks: ["tasks", "completedTasks"], dates: ["dates", "birthdays"],
+      memories: ["memories"], wishes: ["wishes", "completedWishes", "privateWishes"],
+      quotes: ["quotes"], places: ["places"], trips: ["trips"],
+      goals: ["goals", "completedGoals"], movies: ["movies", "completedMovies"],
+      savings: ["savings"]
+    }[type] || [];
+    if (!appState) return;
+    for (const key of keys) {
+      if (Array.isArray(appState[key])) {
+        appState[key] = appState[key].filter((x) => Number(x.id) !== Number(id));
+      }
+    }
+  }
   function patchArchiveItem(type, id, patch) {
     // undefined-поля отбрасываем: spread перезаписал бы ими значения кэша —
     // is_private: undefined у чужого плана (право приватности только у автора)
@@ -267,7 +285,9 @@
       const next = await request(`/api/archive?type=${encodeURIComponent(type)}&page=${cache.page + 1}`);
       if (archiveCachePairId !== pairIdAtStart) return;
       const seen = new Set(cache.items.map((x) => Number(x.id)));
-      cache.items.push(...(next.items || []).filter((x) => !seen.has(Number(x.id))));
+      cache.items.push(...(next.items || [])
+        .filter((x) => isArchiveItemReal(type, x))
+        .filter((x) => !seen.has(Number(x.id))));
       cache.page += 1;
       cache.hasMore = Boolean(next.hasMore);
       cache.remaining = Number.isFinite(next.remaining) ? Number(next.remaining) : null;
@@ -286,7 +306,7 @@
     const fetchPage = (page) => request(`/api/archive?type=${encodeURIComponent(type)}&page=${page}`);
     const first = await fetchPage(0);
     if (archiveCachePairId !== pairIdAtStart) return null;
-    const items = [...(first.items || [])];
+    const items = (first.items || []).filter((x) => isArchiveItemReal(type, x));
     let page = 0;
     let hasMore = Boolean(first.hasMore);
     const remainingRaw = Number(first.remaining);
@@ -301,7 +321,9 @@
           );
           const responses = await Promise.all(batch);
           if (archiveCachePairId !== pairIdAtStart) return null;
-          for (const response of responses) items.push(...(response.items || []));
+          for (const response of responses) {
+            items.push(...(response.items || []).filter((x) => isArchiveItemReal(type, x)));
+          }
         }
         page = pages;
       } else {
@@ -310,7 +332,7 @@
         while (hasMore && page < 1000) {
           const response = await fetchPage(++page);
           if (archiveCachePairId !== pairIdAtStart) return null;
-          items.push(...(response.items || []));
+          items.push(...(response.items || []).filter((x) => isArchiveItemReal(type, x)));
           hasMore = Boolean(response.hasMore);
         }
       }
@@ -380,21 +402,28 @@
     await Promise.all([...movieGroupDetails.keys()].map((id) => refreshMovieGroupDetails(id)));
   }
 
+  // Фантомные строки из архивного кэша (например, от старой пары или
+  // прерванной миграции) не должны превращаться в пустые карточки: у них
+  // нет валидного id или нет содержимого, которое приложение показывает.
+  // Такие записи нельзя ни открыть, ни удалить — сервер законно отвечает 404.
+  // Функция общая: используется и в mergedArchive, и при загрузке архива.
+  function isArchiveItemReal(type, x) {
+    if (!x || typeof x !== "object") return false;
+    const id = Number(x.id);
+    if (!Number.isInteger(id) || id <= 0) return false;
+    const has = (key) => String(x[key] ?? "").trim() !== "";
+    if (type === "places" || type === "trips") return has("title");
+    if (type === "tasks" || type === "done_tasks" || type === "goals" || type === "done_goals") return has("title");
+    if (type === "wishes" || type === "done_wishes" || type === "private_wishes") return has("body");
+    if (type === "quotes") return has("body");
+    if (type === "memories") return has("title") || has("body");
+    // Фильмы/копилки/даты приходят с сервера с обязательными полями; если
+    // поле вдруг пустое, карточка всё равно имеет осмысленное id и кликается.
+    return true;
+  }
+
   function mergedArchive(type, recent) {
-    // Фантомные строки из архивного кэша (например, от старой пары или
-    // прерванной миграции) не должны превращаться в пустые карточки: у них
-    // нет валидного id, а у мест/поездок ещё и пустой title. Такие записи
-    // нельзя ни открыть, ни удалить — сервер законно отвечает 404.
-    // Логика встроена сюда, чтобы функция оставалась самодостаточной в тестах.
-    const isReal = (x) => {
-      if (!x || typeof x !== "object") return false;
-      const id = Number(x.id);
-      if (!Number.isInteger(id) || id <= 0) return false;
-      if (type === "places" || type === "trips") {
-        return String(x.title ?? "").trim() !== "";
-      }
-      return true;
-    };
+    const isReal = (x) => isArchiveItemReal(type, x);
     const cleanRecent = (recent || []).filter(isReal);
     const seen = new Set(cleanRecent.map((x) => Number(x.id)));
     // Записи, которые снова стали активными (вернули из завершённых), из кэша архива не показываем;
@@ -1858,11 +1887,37 @@
     if (!wrap || !pre) return;
     const width = wrap.clientWidth;
     if (!width) return;
-    // Верхнего клампа нет намеренно: изображение должно занимать всю ширину
-    // окна записи. Пропорции сохраняет моноширинная сетка + line-height: 1.15 —
-    // при росте font-size одинаково растут и ширина, и высота картинки.
-    const size = Math.max(3, Math.min(64, Math.floor(width / (asciiColumnsOf(pre.textContent) * 0.6))));
+    // Калибруем реальную ширину глифа в этом WebView: у моноширинных шрифтов
+    // отношение ch/em отличается от «книжного» 0.6, из-за чего картинка или
+    // не добирала ширину, или обрезалась. Замер делаем в том же <pre>, чтобы
+    // использовать его Actual font-family/font-size.
+    let glyphRatio = 0.6;
+    try {
+      const probe = document.createElement("span");
+      probe.textContent = "M".repeat(10);
+      probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;";
+      pre.appendChild(probe);
+      const w = probe.getBoundingClientRect().width;
+      const h = parseFloat(getComputedStyle(pre).fontSize) || 11;
+      if (w > 0 && h > 0) {
+        const ratio = w / 10 / h;
+        if (ratio >= 0.3 && ratio <= 1.2) glyphRatio = ratio;
+      }
+      probe.remove();
+    } catch {
+      // В старых WebView getBoundingClientRect на скрытом span может бросить —
+      // остаётся эмпирический коэффициент 0.6.
+    }
+    // Верхний кламп 64 — только от безумных размеров; на обычных экранах
+    // картинка занимает всю ширину wrap. Пропорции сохраняет line-height: 1.15.
+    const size = Math.max(3, Math.min(64, Math.floor(width / (asciiColumnsOf(pre.textContent) * glyphRatio))));
     pre.style.fontSize = size + "px";
+    // Если после применения шрифта картинка чуть не добрала ширину из‑за
+    // округления до целого px — подгоняем дробным значением.
+    const actual = pre.scrollWidth;
+    if (actual > 0 && actual < width) {
+      pre.style.fontSize = (size * width / actual) + "px";
+    }
   }
 
   window.addEventListener("resize", fitMemoryAsciiArt);
@@ -10872,7 +10927,7 @@
           // Фантом из кэша архива (пустая карточка, которой нет на сервере):
           // убираем её локально и не дёргаем API, иначе прилетает 404
           // «Запись не найдена» и карточка остаётся на месте.
-          removeFromArchiveCache(btn.dataset.type, btn.dataset.id);
+          dropMissingItem(btn.dataset.type, btn.dataset.id);
           showToast("Запись не найдена — карточка убрана из списка");
           render();
           return;
@@ -10887,7 +10942,19 @@
           fields: `<p style="margin:2px 0 0;">Это действие нельзя отменить.</p>`,
           submitLabel: "Удалить",
           onSubmit: async () => {
-            appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
+            try {
+              appState = await request(`/api/${btn.dataset.type}/${btn.dataset.id}`, { method: "DELETE" });
+            } catch (error) {
+              // Запись мог удалить партнёр или её уже не было в БД (фантом из
+              // кэша). Чистим и кэш, и state, чтобы карточка не «залипла».
+              if (error?.status === 404 || error?.code === "NOT_FOUND") {
+                dropMissingItem(btn.dataset.type, btn.dataset.id);
+                showToast("Запись уже удалена — список обновлён");
+                render();
+                return appState;
+              }
+              throw error;
+            }
             if (btn.dataset.type === "movies" && item?.group_id) movieGroupDetails.delete(item.group_id);
             // Из appState удалённая запись уходит сразу, но в кэше архива она
             // осталась бы и продолжала отображаться (и повторное удаление дало бы 404).
@@ -10919,9 +10986,10 @@
           cancelLabel: "Закрыть",
           onSubmit: async () => appState
         });
-        // Полный вложенный текст уже в DOM: подгоняем размер символов под
-        // фактическую ширину диалога (fitMemoryAsciiArt смотрит обёртку).
-        fitMemoryAsciiArt();
+        // Полный вложенный текст уже в DOM. В Telegram WebView layout после
+        // showModal() может быть ещё не финальным (clientWidth === 0), поэтому
+        // подгоняем размер после двух кадров — двойной rAF надёжнее setTimeout(0).
+        requestAnimationFrame(() => requestAnimationFrame(() => fitMemoryAsciiArt()));
       } else if (action === "reopen-item") {
         const type = btn.dataset.type;
         const id = btn.dataset.id;

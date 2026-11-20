@@ -60,6 +60,7 @@ function makeLoader() {
       extractBraced("function richInline"),
       extractBraced("function renderRichText"),
       extractBraced("function partnerMissing"),
+      extractBraced("function isArchiveItemReal"),
       extractBraced("function mergedArchive"),
       extractBraced("function archiveMoreHtml"),
       extractBraced("function wishItem"),

@@ -1559,17 +1559,6 @@ select.settings-select {
   color: var(--muted);
 }
 
-/* PD-HOME-001: «Все →» рядом с заголовком превью на главной. */
-.link-button {
-  padding: 4px 2px;
-  border: 0;
-  background: none;
-  color: var(--accent, var(--text));
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
 .sheet-dialog {
   width: min(480px, calc(100% - 24px));
   /* Длинные диалоги (экспорт: восемь секций) не вылезают за экран —
@@ -3468,6 +3457,9 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
    скроллится вместе с содержимым диалога (.sheet-dialog). Размер символов
    подгоняет fitMemoryAsciiArt() по фактической ширине обёртки. */
 .memory-ascii-wrap {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   margin: 10px 0 12px;
 }
 
