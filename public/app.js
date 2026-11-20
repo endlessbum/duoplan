@@ -381,7 +381,22 @@
   }
 
   function mergedArchive(type, recent) {
-    const seen = new Set(recent.map((x) => Number(x.id)));
+    // Фантомные строки из архивного кэша (например, от старой пары или
+    // прерванной миграции) не должны превращаться в пустые карточки: у них
+    // нет валидного id, а у мест/поездок ещё и пустой title. Такие записи
+    // нельзя ни открыть, ни удалить — сервер законно отвечает 404.
+    // Логика встроена сюда, чтобы функция оставалась самодостаточной в тестах.
+    const isReal = (x) => {
+      if (!x || typeof x !== "object") return false;
+      const id = Number(x.id);
+      if (!Number.isInteger(id) || id <= 0) return false;
+      if (type === "places" || type === "trips") {
+        return String(x.title ?? "").trim() !== "";
+      }
+      return true;
+    };
+    const cleanRecent = (recent || []).filter(isReal);
+    const seen = new Set(cleanRecent.map((x) => Number(x.id)));
     // Записи, которые снова стали активными (вернули из завершённых), из кэша архива не показываем;
     // «хвост» активного набора наоборот скрывается, когда запись завершили или удалили.
     if (type === "done_tasks") for (const x of appState?.tasks || []) seen.add(Number(x.id));
@@ -390,7 +405,10 @@
     if (type === "done_wishes") for (const x of appState?.wishes || []) seen.add(Number(x.id));
     if (type === "tasks") for (const x of appState?.completedTasks || []) seen.add(Number(x.id));
     if (type === "wishes") for (const x of appState?.completedWishes || []) seen.add(Number(x.id));
-    return recent.concat(archiveCache[type].items.filter((x) => !seen.has(Number(x.id))));
+    const archived = (archiveCache[type]?.items || [])
+      .filter(isReal)
+      .filter((x) => !seen.has(Number(x.id)));
+    return cleanRecent.concat(archived);
   }
 
   function archiveMoreHtml(type, recentCount, label = "Показать ещё") {
@@ -1656,15 +1674,12 @@
 
     const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
     // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
-    // На главной каждая группа — не больше трёх карточек; у каждой группы есть
-    // явная ссылка «Все →» в её раздел.
+    // На главной каждая группа — не больше трёх карточек.
     // Дни рождения и значимые даты — разные списки с разными заголовками,
     // поэтому смешанный срез заменён двумя фильтрами.
     const previewDates = dates.filter((item) => item.kind !== "birthday").slice(0, 3).map(dateItem).join("");
     const previewBirthdays = dates.filter((item) => item.kind === "birthday").slice(0, 3).map(birthdayItem).join("");
     const latestMemory = memories[0];
-    // PD-HOME-001: явный переход из превью в полный список раздела.
-    const allLink = (tab) => `<button class="link-button" type="button" data-action="go-tab" data-tab="${tab}">Все →</button>`;
 
     return `
       ${renderTabHeader("home")}
@@ -1682,28 +1697,28 @@
 
       ${previewTasks ? `
       <div class="section-head-inline">
-        <h3>Ближайшие планы</h3>${allLink("tasks")}
+        <h3>Ближайшие планы</h3>
       </div>
       ${previewTasks}
       ` : ""}
 
       ${previewDates ? `
       <div class="section-head-inline">
-        <h3>Значимые даты</h3>${allLink("dates")}
+        <h3>Значимые даты</h3>
       </div>
       ${previewDates}
       ` : ""}
 
       ${previewBirthdays ? `
       <div class="section-head-inline">
-        <h3>Дни рождения</h3>${allLink("dates")}
+        <h3>Дни рождения</h3>
       </div>
       ${previewBirthdays}
       ` : ""}
 
       ${latestMemory ? `
         <div class="section-head-inline">
-          <h3>Из дневника</h3>${allLink("memories")}
+          <h3>Из дневника</h3>
         </div>
         ${memoryItem(latestMemory)}
       ` : ""}
@@ -1843,7 +1858,10 @@
     if (!wrap || !pre) return;
     const width = wrap.clientWidth;
     if (!width) return;
-    const size = Math.max(3, Math.min(14, Math.floor(width / (asciiColumnsOf(pre.textContent) * 0.6))));
+    // Верхнего клампа нет намеренно: изображение должно занимать всю ширину
+    // окна записи. Пропорции сохраняет моноширинная сетка + line-height: 1.15 —
+    // при росте font-size одинаково растут и ширина, и высота картинки.
+    const size = Math.max(3, Math.min(64, Math.floor(width / (asciiColumnsOf(pre.textContent) * 0.6))));
     pre.style.fontSize = size + "px";
   }
 
@@ -10850,6 +10868,15 @@
       } else if (action === "delete-item") {
         const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", trips: "поездку", goals: "цель", movies: "фильм", savings: "копилку" };
         const item = findItem(btn.dataset.type, btn.dataset.id);
+        if (!item) {
+          // Фантом из кэша архива (пустая карточка, которой нет на сервере):
+          // убираем её локально и не дёргаем API, иначе прилетает 404
+          // «Запись не найдена» и карточка остаётся на месте.
+          removeFromArchiveCache(btn.dataset.type, btn.dataset.id);
+          showToast("Запись не найдена — карточка убрана из списка");
+          render();
+          return;
+        }
         // У дня рождения своё название: «Удалить дату?» звучало бы странно.
         const name = btn.dataset.type === "dates" && item?.kind === "birthday"
           ? "день рождения"
@@ -11088,7 +11115,8 @@
         openExternal(btn.dataset.url);
       } else if (action === "open-history") {
         // Окно «Ваша история»: тап по карточке героя. Рекорд серии (best_streak)
-        // хранится у каждого партнёра свой; огонёк — в акценте из настроек.
+        // хранится у каждого партнёра свой; огонёк остаётся только на главной
+        // карточке — внутри окна строку показываем без иконки.
         openDialog({
           title: "Ваша история",
           submitLabel: null,
@@ -11097,7 +11125,7 @@
           fields: `
             <div class="saving-history">
               <div class="saving-history-row"><span class="saving-history-name">Начало истории</span><span>${esc(formatDay(appState?.pair?.started_at || ""))}</span></div>
-              <div class="saving-history-row"><span class="saving-history-name"><span style="color: var(--berry);">${FLAME_ICON}</span> Рекорд серии</span><span>${Number(appState?.user?.best_streak || 0)} дн.</span></div>
+              <div class="saving-history-row"><span class="saving-history-name">Рекорд серии</span><span>${Number(appState?.user?.best_streak || 0)} дн.</span></div>
               ${historyStatsRows()}
             </div>`
         });

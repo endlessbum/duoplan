@@ -581,7 +581,8 @@ test("карточка «Ваша история»: тап открывает о
   ok(source.includes('class="card hero-card" role="button" tabindex="0" data-action="open-history"'), "нет тапа на карточке истории");
   ok(source.includes('action === "open-history"'), "нет обработчика open-history");
   ok(source.includes("Рекорд серии"), "в окне нет рекорда серии");
-  ok(/<span style="color: var\(--berry\);">\$\{FLAME_ICON\}<\/span> Рекорд серии/.test(source), "огонёк рекорда не в акценте");
+  // Огонёк остаётся только на главной карточке, внутри окна его нет.
+  ok(!/Рекорд серии[\s\S]{0,120}FLAME_ICON/.test(source), "огонёк попал в строку рекорда внутри окна");
   // «Начало истории» переехало из карточки в окно.
   const heroStart = source.indexOf('class="card hero-card" role="button"');
   const heroBody = source.slice(heroStart, source.indexOf("</section>", heroStart));

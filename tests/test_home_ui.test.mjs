@@ -5,7 +5,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const app = readFileSync(join(process.cwd(), "public/app.js"), "utf8");
-const css = readFileSync(join(process.cwd(), "public/app.css"), "utf8");
 const home = app.slice(app.indexOf("function renderHome()"), app.indexOf("function taskItem("));
 
 test("awaiting_return отличается от первого приглашения", () => {
@@ -17,13 +16,11 @@ test("awaiting_return отличается от первого приглаше�
   ok(!home.includes("Код пары:"), "мёртвая ветка кода пары осталась");
 });
 
-test("превью имеют «Все →» в нужные разделы", () => {
-  for (const tab of ["tasks", "dates", "memories"]) {
-    ok(home.includes(`allLink("${tab}")`), `нет перехода в ${tab}`);
-  }
+test("превью на главной не содержат «Все →»", () => {
+  ok(!home.includes("Все →"), "ссылка «Все →» осталась на главной");
+  ok(!home.includes("allLink("), "хелпер allLink остался");
+  // Кнопка «Наша пара» в состоянии ожидания — не превью-ссылка, она остаётся.
   ok((home.match(/data-action="go-tab"/g) || []).length >= 1, "нет go-tab в карточке ожидания");
-  ok((home.match(/\$\{allLink\("/g) || []).length >= 4, "не все заголовки превью получили «Все →»");
-  ok(css.includes(".link-button {"), "нет стиля ссылки «Все →»");
 });
 
 test("герой больше не содержит недостижимую ветку", () => {

@@ -1832,10 +1832,10 @@ async function state(env, userId) {
     // обрезанному state (там недавних записей — 10, активных — 200).
     // Личные планы партнёра не считаем — те же фильтры, что и в списках;
     // копилки — только общие (kind='shared'), личные не в паре.
+    // PD-PLACES-001: «Путешествий» в истории — число СЪЕЗДИВШИХ поездок.
     env.DB.prepare(`SELECT
         (SELECT COUNT(*) FROM memories WHERE pair_id=?) AS memories,
         (SELECT COUNT(*) FROM tasks WHERE pair_id=? AND status='done' AND (is_private=0 OR created_by=?)) AS done_tasks,
-        // PD-PLACES-001: «Путешествий» в истории — число СЪЕЗДИВШИХ поездок.
         (SELECT COUNT(*) FROM trips WHERE pair_id=? AND visited=1) AS trips,
         (SELECT COALESCE(SUM(collected),0) FROM savings WHERE pair_id=? AND kind='shared') AS saved,
         (SELECT COALESCE(SUM(runtime * (CASE WHEN kind='series' AND episodes>0 THEN episodes ELSE 1 END)),0)
@@ -8080,3 +8080,5 @@ export default {
     }
   }
 };
+
+
