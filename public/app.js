@@ -2059,7 +2059,7 @@
             <div class="item-meta">
               <span class="memory-author">${esc(item.display_name || "Партнёр")}</span>
               <span>· ${esc(formatDay(item.day))}</span>
-              ${item.ascii_art ? `<span class="memory-attachment" role="img" aria-label="Есть изображение" title="Есть изображение">📎</span>` : ""}
+              ${item.ascii_art ? `<span class="memory-attachment" role="img" aria-label="Есть изображение" title="Есть изображение">${PAPERCLIP_ICON}</span>` : ""}
             </div>
           </div>
           ${itemActions([
@@ -2165,6 +2165,9 @@
   const DONE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
   const EDIT_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4.5L19.5 9a2.1 2.1 0 0 0-3-3L5.5 17 4 20Z"/><path d="M13.5 7.5 16.5 10.5"/></svg>';
   const DELETE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></svg>';
+  // Вложение записи дневника: классическая скрепка (feather) в общем стиле
+  // stroke-иконок — вместо эмодзи 📎, который выбивался из палитры интерфейса.
+  const PAPERCLIP_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
   // Копирование желания (название, уточнение, ссылка): классический значок
   // «копировать» — два перекрывающихся листа — вместо значка «поделиться»
   // из трёх кружков, который читался как шаринг, а не как копирование.

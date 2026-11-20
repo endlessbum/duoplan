@@ -3475,11 +3475,14 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   color: var(--text);
 }
 
-/* Значок вложения в строке автора/даты карточки: не увеличивает высоту
-   строки и выравнивается с соседями по базовой линии .item-meta. */
+/* Значок вложения (скрепка) в строке автора/даты карточки: SVG в общем
+   стиле иконок приложения, наследует цвет меты, не увеличивает высоту
+   строки и выравнивается по центру соседей .item-meta. */
 .memory-attachment {
-  font-size: 0.9em;
+  display: inline-flex;
+  align-items: center;
   line-height: 1;
+  opacity: 0.85;
 }
 
 .memory-ascii-peek {

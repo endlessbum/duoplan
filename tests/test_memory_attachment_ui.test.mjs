@@ -51,8 +51,10 @@ function cssBlock(selector) {
 // Собирает memoryItem() в linkedom-окружении: esc — настоящий (экранирование
 // ASCII-символов важно), соседи по карточке — стабы с сохранением разметки.
 function buildMemoryItem() {
+  const paperclip = source.match(/const PAPERCLIP_ICON = '([^']+)'/)?.[1];
+  if (!paperclip) throw new Error("PAPERCLIP_ICON не найден в app.js");
   const factory = new Function(
-    "renderRichText", "formatDay", "itemActions", "itemActionButton", "EDIT_ICON", "DELETE_ICON", "partnerMissing",
+    "renderRichText", "formatDay", "itemActions", "itemActionButton", "EDIT_ICON", "DELETE_ICON", "PAPERCLIP_ICON", "partnerMissing",
     [
       extractBraced("function esc"),
       extractBraced("function memoryItem"),
@@ -65,6 +67,7 @@ function buildMemoryItem() {
     (html) => `<div class="item-actions">${html}</div>`,
     (o) => `<button data-action="${o.action}" data-type="${o.type}" data-id="${o.id}">${o.label}</button>`,
     "E", "D",
+    paperclip,
     () => false
   );
 }
@@ -95,6 +98,9 @@ test("карточка с вложением: нет ASCII-превью, ест�
   equal(kids.indexOf(clip) > kids.indexOf(date), true, "скрепка стоит до даты");
   equal(clip.getAttribute("aria-label"), "Есть изображение", "нет доступного описания");
   equal(clip.getAttribute("title"), "Есть изображение", "нет title");
+  // Скрепка — SVG в stroke-стиле иконок приложения, не эмодзи
+  ok(clip.querySelector("svg"), "скрепка не SVG-иконка");
+  ok(!clip.textContent.includes("📎"), "эмодзи 📎 остался в карточке");
 });
 
 test("карточка без вложения: значка скрепки нет", () => {
@@ -178,9 +184,12 @@ test("стили .memory-ascii-art: полноширинность, без ра�
   ok(cssBlock(".memory-ascii-wrap"), "нет обёртки .memory-ascii-wrap");
 });
 
-test("значок скрепки оформлен и не ломает строку меты", () => {
+test("значок скрепки: inline-flex по центру меты, цвет наследуется", () => {
   const block = cssBlock(".memory-attachment");
-  ok(block.includes("font-size"), "нет компактного размера значка");
+  ok(/display\s*:\s*inline-flex/.test(block), "скрепка не выровнена inline-flex");
+  ok(/align-items\s*:\s*center/.test(block), "нет центрирования по вертикали");
+  ok(!/font-size\s*:/.test(block), "скрепка задаёт font-size — размер зашит в SVG");
+  ok(source.includes('const PAPERCLIP_ICON'), "нет константы PAPERCLIP_ICON");
 });
 
 test("компактный предпросмотр формы не тронут", () => {
