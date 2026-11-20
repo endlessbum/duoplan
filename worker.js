@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.20.112";
+const APP_VERSION = "2026.11.20.113";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.20.112";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.20.112";
+const DB_SCHEMA_VERSION = "2026.11.20.113";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -1767,7 +1767,11 @@ async function state(env, userId) {
   // Порядок имён строго совпадает с порядком запросов ниже: цели и копилки
   // когда-то поменялись местами, и state.goals отдавал копилки, а
   // state.savings — пункты целей (замечено 2026-11-11 на сиде архива).
-  const [tasks, completedTasks, dates, memories, wishes, completedWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, completedGoals, completedMovies, birthdays, privateWishes, daily, partnerUser, stats] = await Promise.all([
+  // Порядок имён ОБЯЗАН совпадать с порядком запросов ниже: приватные желания
+  // (PD-WISHES-001) стоят седьмыми, перед цитатами. Сдвиг здесь тихо
+  // подменял целые разделы: quotes получал личные желания, birthdays —
+  // просмотренные фильмы (репорт 2026-11-20 «пропали цитаты и дни рождения»).
+  const [tasks, completedTasks, dates, memories, wishes, completedWishes, privateWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, completedGoals, completedMovies, birthdays, daily, partnerUser, stats] = await Promise.all([
     // Личные планы (is_private=1) — только для создателя, как и личные даты.
     env.DB.prepare("SELECT id,title,status,day,time,monthly,yearly,is_private,created_by,created_at FROM tasks WHERE pair_id=? AND status='open' AND (is_private=0 OR created_by=?)").bind(pair.id, user.tg_id).all(),
     // monthly/yearly — как в ARCHIVE_QUERIES.done_tasks: редактирование

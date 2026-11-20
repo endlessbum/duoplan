@@ -209,7 +209,11 @@ test("app: диалог цели и действия", () => {
   // с деструктуризацией — goals получал строки копилок, savings — пункты
   // целей (заметено на сиде архива). Порядок: savings → goals → goalItems.
   // В конце — partnerUser и stats (итоги пары для окна «Ваша история»).
-  ok(/movieRatings, savings, goals, goalItems, completedGoals, completedMovies, birthdays, privateWishes, daily, partnerUser, stats\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
+  // Регрессия 2026-11-20 (репорт «пропали цитаты и дни рождения»): запрос
+  // личных желаний PD-WISHES-001 вставили седьмым, а деструктуризацию не
+  // обновили — quotes получал личные желания, birthdays — просмотренные
+  // фильмы. privateWishes стоит между completedWishes и quotes.
+  ok(/completedWishes, privateWishes, quotes, places, trips, movies, movieRatings, savings, goals, goalItems, completedGoals, completedMovies, birthdays, daily, partnerUser, stats\]/.test(workerSource), "деструктуризация state() разъехалась с запросами");
   const stateStart = workerSource.indexOf("movieRatings, savings, goals, goalItems");
   const savingsQ = workerSource.indexOf("FROM savings WHERE pair_id=? AND (kind='shared'", stateStart);
   const goalsQ = workerSource.indexOf("FROM goals g WHERE g.pair_id=? AND (g.is_private=0", stateStart);
