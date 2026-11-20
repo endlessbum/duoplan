@@ -7679,17 +7679,45 @@ async function ensureSchema(env) {
     const meta = await env.DB.prepare("SELECT value FROM app_meta WHERE key='schema_version'").first();
     previousSchemaVersion = meta?.value ? String(meta.value) : null;
     if (meta?.value === DB_SCHEMA_VERSION) {
+      // Версия в app_meta может опережать реальную схему: если деплой или
+      // миграция прервались, early return оставит базу без колонок и /api/state
+      // упадёт (репорт 2026-11-20). Перед возвратом проверяем критические
+      // колонки, которые читают state() и архивные запросы.
       try {
-        await env.DB.batch([
-          env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
-            SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_a)`),
-          env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
-            SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`)
-        ]);
-      } catch (repairError) {
-        console.error("pair_members repair failed", repairError);
+        const required = [
+          ["wishes", "is_private"],
+          ["wishes", "shared_at"],
+          ["dates", "is_private"],
+          ["tasks", "is_private"],
+          ["memories", "ascii_art"]
+        ];
+        let schemaComplete = true;
+        for (const [table, column] of required) {
+          const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+          if (!info.results?.some(row => row.name === column)) {
+            schemaComplete = false;
+            break;
+          }
+        }
+        if (schemaComplete) {
+          try {
+            await env.DB.batch([
+              env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
+                SELECT user_a,id,'a',created_at FROM pairs WHERE user_a!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_a)`),
+              env.DB.prepare(`INSERT OR IGNORE INTO pair_members(tg_id,pair_id,role,joined_at)
+                SELECT user_b,id,'b',created_at FROM pairs WHERE user_b!=0 AND EXISTS(SELECT 1 FROM users WHERE tg_id=pairs.user_b)`)
+            ]);
+          } catch (repairError) {
+            console.error("pair_members repair failed", repairError);
+          }
+          return;
+        }
+        console.error("DuoPlan schema version mismatch: rebuilding idempotent schema", {
+          recorded: meta.value, expected: DB_SCHEMA_VERSION
+        });
+      } catch (checkError) {
+        console.error("DuoPlan schema check failed: running full ensureSchema", checkError);
       }
-      return;
     }
   } catch {
     // Таблицы app_meta ещё нет — продолжаем полную инициализацию
