@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.20.111";
+const APP_VERSION = "2026.11.20.112";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.20.111";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.20.111";
+const DB_SCHEMA_VERSION = "2026.11.20.112";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -140,7 +140,7 @@ const ARCHIVE_QUERIES = {
   },
   trips: {
     active: true,
-    sql: "SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    sql: "SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at,saving_id FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
   },
   // Личные сущности: фильтр в SQL, как у state() и остальных userScoped-типов.
   savings: {
@@ -1793,7 +1793,7 @@ async function state(env, userId) {
       LEFT JOIN users u ON u.tg_id=q.author_id WHERE q.pair_id=? ORDER BY q.created_at DESC, q.id DESC LIMIT ?`).bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     env.DB.prepare("SELECT id,title,note,url,visited,visited_at,visited_by,created_by,created_at FROM places WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Поездки — общая коллекция пары, как места: без приватности и архива.
-    env.DB.prepare("SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
+    env.DB.prepare("SELECT id,title,note,visited,visited_at,visited_by,created_by,created_at,saving_id FROM trips WHERE pair_id=? ORDER BY created_at DESC, id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
     // Кино — общая коллекция пары, как места: без приватности и архива.
     // Данные (рейтинг/жанр/длительность) — снимок IMDb на момент добавления.
     env.DB.prepare("SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at DESC, m.id DESC LIMIT ?").bind(pair.id, STATE_ACTIVE_LIMIT).all(),
@@ -2240,7 +2240,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" }, comment: { type: "string", maxLength: 500 }, is_private: { type: "boolean" } },
       quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
       places: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, url: { type: "string" } },
-      trips: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 } },
+      trips: { title: { type: "string", maxLength: 120 }, note: { type: "string", maxLength: 600 }, saving_id: { type: "number" } },
       savings: { title: { type: "string", maxLength: 120 }, target: { type: "number" }, kind: { type: "string", enum: ["shared", "personal"] } }
     };
     if (patchSchemas[type]) validateSchema(body, patchSchemas[type]);
@@ -2387,6 +2387,9 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (body.note !== undefined) {
         field("note", clean(body.note) || null);
       }
+      if (body.saving_id !== undefined) {
+        field("saving_id", tripSavingId);
+      }
     }
     function patchSavingFields() {
       if (body.title !== undefined) {
@@ -2446,6 +2449,21 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     function patchGoalItemFields() {
       if (!goalRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
       if (body.title !== undefined) field("title", textField(body, "title", 180, "Пункт цели"));
+    }
+    // Проверка копилки для поездки делается здесь (async-контекст), а не в
+    // синхронном patchTripFields: null/0 снимает привязку, иначе — только
+    // общая активная копилка этой пары.
+    let tripSavingId = null;
+    if (type === "trips" && body.saving_id !== undefined) {
+      if (body.saving_id === null || body.saving_id === 0 || body.saving_id === "") {
+        tripSavingId = null;
+      } else {
+        if (!positiveId(body.saving_id)) throw new HttpError(400, "Некорректная копилка", "INVALID_SAVING");
+        const saving = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=? AND kind='shared' AND collected<target")
+          .bind(Number(body.saving_id), pair.id).first();
+        if (!saving) throw new HttpError(404, "Доступная копилка не найдена", "NOT_FOUND");
+        tripSavingId = saving.id;
+      }
     }
     if (type === "goals") patchGoalFields();
     else if (type === "goal_items") patchGoalItemFields();
@@ -3855,12 +3873,46 @@ async function api(request, env, url, ctx = null) {
       .bind(pair.id, user.tg_id, title, note, link, now()).run();
     return json(await state(env, user.tg_id));
   }
+  // Поездка может быть сразу привязана к общей активной копилке. Если нужной
+  // копилки ещё нет, клиент шлёт new_saving: обе записи создаются одной операцией
+  // с компенсирующим удалением копилки при сбое вставки поездки (не остаётся
+  // копилки, которую пользователь не просил создавать отдельно).
+  async function attachableSaving(savingId, newSaving) {
+    if (newSaving) {
+      validateSchema(newSaving, { title: { type: "string", required: true, maxLength: 120 }, target: { type: "number", required: true, errorCode: "INVALID_AMOUNT" } });
+      const savingTitle = textField(newSaving, "title", 120, "Название копилки");
+      const target = moneyAmount(newSaving.target, "Цель");
+      const result = await env.DB.prepare("INSERT INTO savings(pair_id,created_by,kind,title,target,collected,created_at) VALUES(?,?,?,?,?,0,?)")
+        .bind(pair.id, user.tg_id, "shared", savingTitle, target, now()).run();
+      if (!positiveId(result.meta.last_row_id)) throw new HttpError(500, "Не удалось создать копилку", "SAVING_ID_MISSING");
+      return result.meta.last_row_id;
+    }
+    if (savingId === undefined || savingId === null || savingId === "") return null;
+    if (!positiveId(savingId)) throw new HttpError(400, "Некорректная копилка", "INVALID_SAVING");
+    // Только общая незавершённая копилка этой пары: личные и чужие не доступны,
+    // завершённую нельзя прикрепить к новой поездке.
+    const row = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=? AND kind='shared' AND collected<target").bind(Number(savingId), pair.id).first();
+    if (!row) throw new HttpError(404, "Доступная копилка не найдена", "NOT_FOUND");
+    return row.id;
+  }
   if (request.method === "POST" && url.pathname === "/api/trips") {
-    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, note: { type: "string", maxLength: 600 } });
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, note: { type: "string", maxLength: 600 }, saving_id: { type: "number" }, new_saving: { type: "object" } });
     const title = textField(body, "title", 120, "Поездка");
     const note = clean(body.note) || null;
-    await env.DB.prepare("INSERT INTO trips(pair_id,created_by,title,note,created_at) VALUES(?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, title, note, now()).run();
+    const savingId = await attachableSaving(body.saving_id, body.new_saving);
+    try {
+      await env.DB.prepare("INSERT INTO trips(pair_id,created_by,title,note,created_at,saving_id) VALUES(?,?,?,?,?,?)")
+        .bind(pair.id, user.tg_id, title, note, now(), savingId).run();
+    } catch (error) {
+      if (body.new_saving && savingId) {
+        try {
+          await env.DB.prepare("DELETE FROM savings WHERE id=? AND pair_id=?").bind(savingId, pair.id).run();
+        } catch (cleanupError) {
+          console.error("trip saving cleanup failed", cleanupError);
+        }
+      }
+      throw error;
+    }
     return json(await state(env, user.tg_id));
   }
   // Создание цели: название + пункты выполнения (хотя бы один). Пункты без
@@ -5350,7 +5402,7 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.kind='birthday'${scope === "private" ? " AND d.is_private=1 AND d.created_by=?" : " AND (d.is_private=0 OR d.created_by=?)"} ORDER BY d.day ASC, d.id ASC`,
   places: (scope) => `SELECT p.id,p.title,p.note,p.url,p.visited,p.visited_at,p.created_at,u.display_name AS author FROM places p
     LEFT JOIN users u ON u.tg_id=p.created_by WHERE p.pair_id=?${scope === "mine" ? " AND p.created_by=?" : ""} ORDER BY p.created_at ASC, p.id ASC`,
-  trips: (scope) => `SELECT t.id,t.title,t.note,t.visited,t.visited_at,t.created_at,u.display_name AS author FROM trips t
+  trips: (scope) => `SELECT t.id,t.title,t.note,t.saving_id,t.visited,t.visited_at,t.created_at,u.display_name AS author FROM trips t
     LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=?${scope === "mine" ? " AND t.created_by=?" : ""} ORDER BY t.created_at ASC, t.id ASC`,
   memories: (scope) => `SELECT m.id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name AS author FROM memories m
     LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=?${scope === "mine" ? " AND m.author_id=?" : ""} ORDER BY m.created_at ASC, m.id ASC`,
@@ -5537,6 +5589,7 @@ const EXPORT_ROW_MAPPERS = {
     id: row.id,
     title: row.title,
     note: clean(row.note) || null,
+    saving_id: row.saving_id || null,
     visited: Number(row.visited) === 1,
     visited_at: row.visited_at || null,
     author: clean(row.author) || "Партнёр",
@@ -7689,7 +7742,8 @@ async function ensureSchema(env) {
           ["wishes", "shared_at"],
           ["dates", "is_private"],
           ["tasks", "is_private"],
-          ["memories", "ascii_art"]
+          ["memories", "ascii_art"],
+          ["trips", "saving_id"]
         ];
         let schemaComplete = true;
         for (const [table, column] of required) {
@@ -7738,7 +7792,7 @@ async function ensureSchema(env) {
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT,comment TEXT,is_private INTEGER NOT NULL DEFAULT 0,shared_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS places (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,url TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,note TEXT,visited INTEGER NOT NULL DEFAULT 0,visited_at INTEGER,visited_by INTEGER,created_at INTEGER NOT NULL,saving_id INTEGER REFERENCES savings(id) ON DELETE SET NULL)`,
     `CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,is_private INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS goal_items (id INTEGER PRIMARY KEY AUTOINCREMENT,goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,title TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,done_by INTEGER,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS movies (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,created_by INTEGER NOT NULL,imdb_id TEXT NOT NULL,title TEXT NOT NULL,year INTEGER,kind TEXT NOT NULL DEFAULT 'movie',rating REAL,rating_source TEXT,rating_checked_at INTEGER,details TEXT,genres TEXT,runtime INTEGER,seasons INTEGER,episodes INTEGER,url TEXT,watched INTEGER NOT NULL DEFAULT 0,watched_at INTEGER,watched_by INTEGER,resume_position TEXT,created_at INTEGER NOT NULL)`,
@@ -7884,8 +7938,11 @@ async function ensureSchema(env) {
     ["pairs", "movie_pick_id", "INTEGER"],
     // PD-WISHES-001: личные желания и время их шеринга (migrations/0051).
     ["wishes", "is_private", "INTEGER NOT NULL DEFAULT 0"],
-    ["wishes", "shared_at", "INTEGER"]
+    ["wishes", "shared_at", "INTEGER"],
+    // Поездка → общая копилка (migrations/0052).
+    ["trips", "saving_id", "INTEGER REFERENCES savings(id) ON DELETE SET NULL"]
   ]) {
+
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
     if (!info.results.some(row => row.name === column)) {
       try {
@@ -8080,5 +8137,7 @@ export default {
     }
   }
 };
+
+
 
 

@@ -7319,6 +7319,44 @@
         || byRowId(a.id, b.id));
   }
 
+  // Доступные для прикрепления копилки: только общие и ещё не завершённые.
+  // Личные копилки и «Накоплено» в поездку не попадают — поездка общая.
+  function availableTripSavings() {
+    return savingsList().filter((saving) =>
+      saving.kind === "shared" && !savingIsFull(saving));
+  }
+
+  // Поля привязки копилки в диалоге поездки. value="" — без копилки,
+  // value="new" — создать общую копилку вместе с поездкой. Блок новых полей
+  // показывается переключателем в общем change-обработчике диалога.
+  function tripSavingFormFields(savings, selectedId) {
+    const options = savings.map((saving) =>
+      `<option value="${saving.id}"${Number(selectedId) === Number(saving.id) ? " selected" : ""}>${esc(saving.title)} · ${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))}</option>`
+    ).join("");
+    return `
+      <label class="field"><span>Копилка на поездку</span><select name="saving_choice" data-trip-saving-choice>
+        <option value=""${selectedId ? "" : " selected"}>Без копилки</option>
+        ${options}
+        <option value="new">Создать новую копилку</option>
+      </select></label>
+      <div data-trip-new-saving${selectedId === "new" ? "" : " hidden"}>
+        <label class="field"><span>Название копилки</span><input name="new_saving_title" data-fmt="none" maxlength="120" placeholder="Например, ${esc("Поездка")}" ${selectedId === "new" ? "required" : ""}></label>
+        <label class="field"><span>Сколько нужно накопить</span><input name="new_saving_target" type="number" inputmode="numeric" min="1" step="1" placeholder="30000" ${selectedId === "new" ? "required" : ""}></label>
+        <p class="settings-hint">Новая копилка будет общей — пополнять её смогут оба.</p>
+      </div>
+    `;
+  }
+
+  function tripSavingChip(trip) {
+    if (!trip.saving_id) return "";
+    const saving = savingsList().find((item) => Number(item.id) === Number(trip.saving_id));
+    if (!saving) return "";
+    const percent = Number(saving.target) > 0
+      ? Math.min(100, Math.round((Number(saving.collected) / Number(saving.target)) * 100))
+      : 0;
+    return `<span class="day-chip">Копилка «${esc(saving.title)}» · ${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))} · ${percent}%</span>`;
+  }
+
   function tripItem(trip) {
     const visited = Number(trip.visited) === 1;
     const locked = partnerMissing();
@@ -7330,6 +7368,7 @@
           <div class="item-main">
             <h3 class="item-title">${esc(trip.title)}</h3>
             ${trip.note ? `<p class="place-note">${renderRichText(trip.note)}</p>` : ""}
+            ${tripSavingChip(trip) ? `<div class="item-meta">${tripSavingChip(trip)}</div>` : ""}
             ${visited ? `<div class="item-meta"><span class="day-chip">${esc(formatTimestamp(trip.visited_at) || "Съездили")}</span>${by}</div>` : ""}
           </div>
           ${itemActions([
@@ -9515,6 +9554,18 @@
     episodeControl.outerHTML = movieResumeEpisodeControl(count, null);
   });
 
+  // Выбор копилки в диалоге поездки: «Создать новую» открывает поля суммы
+  // и названия; остальные варианты (включая «Без копилки») их скрывают.
+  dialogFields.addEventListener("change", (e) => {
+    const savingSelect = e.target.closest?.("select[data-trip-saving-choice]");
+    if (!savingSelect) return;
+    const block = dialogFields.querySelector("[data-trip-new-saving]");
+    if (!block) return;
+    const isNew = savingSelect.value === "new";
+    block.hidden = !isNew;
+    for (const control of block.querySelectorAll("input")) control.required = isNew;
+  });
+
   // ------------------------------------------------------------------
   // Живые подсказки IMDb в диалоге «Найти кино»: печатаем название —
   // приходят совпадения; тап по строке сразу добавляет фильм и закрывает
@@ -10396,13 +10447,27 @@
           onSubmit: (fd) => request("/api/places", { method: "POST", body: { title: fd.get("title"), note: fd.get("note"), url: wishUrlFromInput(fd.get("url")) } })
         });
       } else if (action === "add-trip") {
+        const tripSavings = availableTripSavings();
         openDialog({
           title: "Новая поездка",
           fields: `
             <label class="field"><span>Куда хотим съездить?</span><input name="title" data-fmt="none" maxlength="120" required placeholder="Байкал, Италия, Владивосток"></label>
             <label class="field"><span>Заметка (необязательно)</span><textarea name="note" data-fmt="** _ __" rows="3" maxlength="600" placeholder="Когда хочется поехать и что посмотреть"></textarea></label>
+            ${tripSavingFormFields(tripSavings, null)}
           `,
-          onSubmit: (fd) => request("/api/trips", { method: "POST", body: { title: fd.get("title"), note: fd.get("note") } })
+          onSubmit: (fd) => {
+            const body = { title: fd.get("title"), note: fd.get("note") };
+            const choice = fd.get("saving_choice");
+            if (choice === "new") {
+              body.new_saving = {
+                title: String(fd.get("new_saving_title") || fd.get("title") || "").slice(0, 120),
+                target: Number(fd.get("new_saving_target"))
+              };
+            } else if (choice) {
+              body.saving_id = Number(choice);
+            }
+            return request("/api/trips", { method: "POST", body });
+          }
         });
       } else if (action === "add-movie") {
         openMovieSearchDialog();
@@ -11170,9 +11235,10 @@
             fields: `
               <label class="field"><span>Куда хотим съездить?</span><input name="title" data-fmt="none" maxlength="120" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Заметка (необязательно)</span><textarea name="note" data-fmt="** _ __" rows="3" maxlength="600">${esc(item.note || "")}</textarea></label>
+              ${tripSavingFormFields(availableTripSavings(), item.saving_id || null).replace('<option value="new">Создать новую копилку</option>', "")}
             `,
             onSubmit: async (fd) => {
-              const body = { title: fd.get("title"), note: fd.get("note") };
+              const body = { title: fd.get("title"), note: fd.get("note"), saving_id: fd.get("saving_choice") ? Number(fd.get("saving_choice")) : null };
               const state = await request(`/api/trips/${id}`, { method: "PATCH", body });
               patchArchiveItem("trips", id, body);
               return state;

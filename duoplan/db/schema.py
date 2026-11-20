@@ -104,7 +104,8 @@ SCHEMA: list[str] = [
         "pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE, "
         "created_by INTEGER NOT NULL, title TEXT NOT NULL, note TEXT, "
         "visited INTEGER NOT NULL DEFAULT 0, visited_at INTEGER, visited_by INTEGER, "
-        "created_at INTEGER NOT NULL)"
+        "created_at INTEGER NOT NULL, "
+        "saving_id INTEGER REFERENCES savings(id) ON DELETE SET NULL)"
     ),
     (
         "CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, "

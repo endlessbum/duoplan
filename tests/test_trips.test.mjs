@@ -35,7 +35,9 @@ function extractBraced(text, declaration) {
 
 const load = new Function(
   [
-    "let appState = { trips: [] };",
+    "let appState = { trips: [], savings: [] };",
+    "const savingsList = () => appState.savings || [];",
+    "const savingIsFull = (s) => Number(s.collected) >= Number(s.target);",
     // tripList() читает mergedArchive — стаб возвращает недавние как есть.
     "const mergedArchive = (type, recent) => recent || [];",
     "const archiveMoreHtml = () => \"\";",
@@ -52,14 +54,18 @@ const load = new Function(
     'const pairTimeZone = () => "UTC";',
     extractBraced(appSource, "function formatTimestamp"),
     extractBraced(appSource, "function tripList"),
+    "const formatAmount = (v) => String(v ?? 0);",
+    extractBraced(appSource, "function availableTripSavings"),
+    extractBraced(appSource, "function tripSavingFormFields"),
+    extractBraced(appSource, "function tripSavingChip"),
     extractBraced(appSource, "function openTrips"),
     extractBraced(appSource, "function visitedTrips"),
     extractBraced(appSource, "function tripItem"),
     extractBraced(appSource, "function renderTripsBody"),
-    "return { esc, tripItem, renderTripsBody, setState: (v) => { appState = v; } };"
+    "return { esc, tripItem, renderTripsBody, availableTripSavings, tripSavingFormFields, setState: (v) => { appState = v; } };"
   ].join("\n")
 );
-const { esc, tripItem, renderTripsBody, setState } = load();
+const { esc, tripItem, renderTripsBody, availableTripSavings, tripSavingFormFields, setState } = load();
 
 const trip = (id, visited = 0, note = "") => ({
   id,
@@ -132,7 +138,7 @@ test("worker: маршруты поездок на месте", () => {
   ok(workerSource.includes('trips: "trips"'), "trips нет в карте таблиц itemRoute");
   ok(workerSource.includes('if (request.method === "POST" && url.pathname === "/api/trips")'), "нет POST /api/trips");
   ok(workerSource.includes("const visitToggle") && workerSource.includes("trips: visitToggle"), "нет ветки visited/unvisited у поездок");
-  ok(/trips: \{ title: \{ type: "string", maxLength: 120 \}, note: \{ type: "string", maxLength: 600 \} \}/.test(workerSource), "trips нет в patchSchemas");
+  ok(/trips: \{ title: \{ type: "string", maxLength: 120 \}, note: \{ type: "string", maxLength: 600 \}, saving_id: \{ type: "number" \} \}/.test(workerSource), "trips нет в patchSchemas");
   ok(workerSource.includes("DELETE FROM trips WHERE pair_id=?"), "trips нет в каскаде leavePair");
 });
 
@@ -143,10 +149,53 @@ test("worker: состояние и схема", () => {
   ok(workerSource.includes("CREATE INDEX IF NOT EXISTS idx_trips_pair ON trips(pair_id,visited)"), "нет индекса поездок");
 });
 
+test("поездка → копилка: доступны только общие незавершённые", () => {
+  const helper = load();
+  helper.setState({
+    trips: [],
+    savings: [
+      { id: 1, kind: "shared", title: "Общая", target: 100, collected: 20 },
+      { id: 2, kind: "shared", title: "Завершённая", target: 100, collected: 100 },
+      { id: 3, kind: "personal", title: "Личная", target: 100, collected: 10 }
+    ]
+  });
+  deepStrictEqual(helper.availableTripSavings().map((s) => s.id), [1]);
+});
+
+test("поездка → копилка: карточка показывает название и прогресс", () => {
+  setState({
+    trips: [{ id: 5, title: "Япония", visited: 0, saving_id: 1 }],
+    savings: [{ id: 1, kind: "shared", title: "На Японию", target: 100000, collected: 25000 }]
+  });
+  const html = tripItem({ id: 5, title: "Япония", visited: 0, saving_id: 1 });
+  ok(html.includes("Копилка «На Японию»"), "нет названия копилки");
+  ok(html.includes("25"), "нет прогресса копилки");
+});
+
+test("диалог поездки: выбор копилки и создание новой", () => {
+  const fields = tripSavingFormFields([
+    { id: 7, kind: "shared", title: "Море", target: 50000, collected: 10000 }
+  ], null);
+  ok(fields.includes('name="saving_choice"'), "нет селекта копилки");
+  ok(fields.includes('<option value="7"'), "нет существующей копилки");
+  ok(fields.includes('<option value="new">Создать новую копилку</option>'), "нет пункта создания");
+  ok(fields.includes("data-trip-new-saving"), "нет блока новых полей");
+  ok(fields.includes('name="new_saving_target"'), "нет суммы новой копилки");
+});
+
+test("worker: поездка создаётся с копилкой и проверяет доступ", () => {
+  ok(workerSource.includes("async function attachableSaving"), "нет проверки копилки");
+  ok(workerSource.includes("INSERT INTO trips(pair_id,created_by,title,note,created_at,saving_id)"), "INSERT поездки без saving_id");
+  ok(workerSource.includes("kind='shared' AND collected<target"), "нет фильтра доступных копилок");
+  ok(workerSource.includes("new_saving: { type: \"object\" }"), "POST не принимает новую копилку");
+  ok(workerSource.includes('DELETE FROM savings WHERE id=? AND pair_id=?'), "нет компенсации при сбое");
+  ok(workerSource.includes("saving_id INTEGER REFERENCES savings(id) ON DELETE SET NULL"), "схема trips без связи");
+});
+
 test("worker: экспорт поездок", () => {
   ok(/trips: \["all", "mine"\]/.test(workerSource), "trips нет в EXPORT_SECTIONS");
   ok(/trips: "поездки"/.test(workerSource), "trips нет в EXPORT_LABELS");
-  ok(/trips: \(scope\) => `SELECT t\.id,t\.title,t\.note,t\.visited/.test(workerSource), "trips нет в EXPORT_SQL");
+  ok(/trips: \(scope\) => `SELECT t\.id,t\.title,t\.note,t\.saving_id,t\.visited/.test(workerSource), "trips нет в EXPORT_SQL");
   ok(/trips: \(row\) => \(\{\n    id: row\.id,\n    title: row\.title,/.test(workerSource), "trips нет в EXPORT_ROW_MAPPERS");
   ok(/trips: \(row\) => \(\{\n    head: row\.title,/.test(workerSource), "trips нет в EXPORT_TXT_ROWS");
 });

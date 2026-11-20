@@ -52,7 +52,7 @@ TABLES = {
         "id, pair_id, created_by, title, note, url, visited, visited_at, visited_by, created_at"
     ),
     "trips": (
-        "id, pair_id, created_by, title, note, visited, visited_at, visited_by, created_at"
+        "id, pair_id, created_by, title, note, visited, visited_at, visited_by, created_at, saving_id"
     ),
     "goals": "id, pair_id, created_by, title, is_private, created_at",
     "goal_items": "id, goal_id, pair_id, created_by, title, done, done_at, done_by, created_at",

@@ -65,7 +65,8 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set(), app
     cycle_periods: new Set(["id", "tg_id", "start_date", "end_date", "created_at", "updated_at"]),
     tasks: new Set(["id", "pair_id", "title", "status", "created_by", "created_at", "completed_by", "completed_at"]),
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
-    rate_limits: new Set(["bucket_key", "count"])
+    rate_limits: new Set(["bucket_key", "count"]),
+    trips: new Set(["id", "pair_id", "created_by", "title", "note", "visited", "visited_at", "visited_by", "created_at"])
   };
   const failedOnce = new Set();
   const log = { alters: [], versionWrite: null, batches: [] };
@@ -126,7 +127,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
     "is_private", "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "movie_pick_id", "mucus",
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url", "place_pick_id",
-    "rating_checked_at", "rating_source", "resume_position", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "shared_at", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "rating_checked_at", "rating_source", "resume_position", "saving_id", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "shared_at", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -157,7 +158,7 @@ test("чистый проход миграции без гонки записы�
   // + resume_position (movies, «Остановились» — migrations/0048)
   // + place_pick_id/movie_pick_id (pairs, общий рандом — migrations/0049)
   // + ascii_art (memories, ASCII-вложение дневника — migrations/0050)
-  deepStrictEqual(log.alters.length, 67); // +2: PD-WISHES-001 is_private/shared_at
+  deepStrictEqual(log.alters.length, 68); // +1: trips.saving_id (поездка → копилка)
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

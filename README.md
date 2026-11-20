@@ -12,7 +12,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
   (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
-- Текущая версия — `2026.11.20.111` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.20.112` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -66,7 +66,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 51 миграция схемы D1 |
+| `migrations/` | 52 миграция схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
@@ -160,6 +160,7 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0049_random_picks` | `pairs.place_pick_id`, `pairs.movie_pick_id` — активный рандом места/фильма общий для обоих участников до «Закрыть»/отметки; снимается при посещении, просмотре и удалении |
 | `0050_memory_ascii` | `memories.ascii_art` — ASCII-вложение записи дневника (генерируется в браузере, оригинал фото не хранится) |
 | `0051_private_wishes` | `wishes.is_private`, `wishes.shared_at` — личные желания видит только автор; публикация в общие — явное действие «Поделиться с партнёром» |
+| `0052_trip_savings` | `trips.saving_id` — поездка может быть прикреплена к общей активной копилке; новая копилка создаётся вместе с поездкой |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -1074,7 +1075,7 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.20.111`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.20.112`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.
 
 ### Воспроизводимость окружения
@@ -1097,3 +1098,6 @@ aiosqlite, tzdata и dev-инструментов; `package.json` — верси
 production-переменная `OWNER_IDS`. Локальный прогон миграций и тестов эти
 проверки не заменяют. Аудит 2026-11-11 перечислял те же пункты — исторические
 замечания того отчёта закрыты, актуальный чек-лист — этот список.
+
+
+
