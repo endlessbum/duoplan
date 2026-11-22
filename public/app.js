@@ -7804,11 +7804,21 @@
 
   function renderMoviePick(movie) {
     const length = formatMovieLength(movie);
+    // Выпавшая часть группы (решение владельца 2026-11-22): карточка
+    // предлагает группу и конкретную часть с точкой продолжения —
+    // «Сага» → «Часть 2» → «▶ 2 сезон, 5 серия · 34:12» — а не одиночный
+    // фильм, у которого группа и точка отсутствуют.
+    const group = movie.group_id ? movieGroupMap().get(movie.group_id) : null;
+    const titleAria = group
+      ? `Открыть описание: ${movie.title} из «${group.title}»`
+      : `Открыть описание: ${movie.title}`;
     return `
       <article class="card place-pick movie-pick" aria-live="polite" data-action="open-movie" data-id="${movie.id}">
         <p class="eyebrow">Вам выпало</p>
-        <h2 class="place-pick-title"><button class="movie-title-open" type="button" data-action="open-movie" data-id="${movie.id}" aria-label="Открыть описание: ${esc(movie.title)}">${esc(movie.title)}</button></h2>
+        <h2 class="place-pick-title"><button class="movie-title-open" type="button" data-action="open-movie" data-id="${movie.id}" aria-label="${esc(titleAria)}">${esc(group ? group.title : movie.title)}</button></h2>
+        ${group ? `<p class="place-pick-note">${esc(movie.title)}</p>` : ""}
         <div class="item-meta">
+          ${movie.resume_position ? `<span class="day-chip is-resume" title="Точка, на которой остановились">▶ ${esc(movie.resume_position)}</span>` : ""}
           ${ratingPill(movie.rating, movie.rating_source)}
           ${length ? `<span>${esc(length)}</span>` : ""}
         </div>

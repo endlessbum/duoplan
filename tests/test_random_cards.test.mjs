@@ -15,8 +15,9 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { ok, match } from "node:assert/strict";
+import { ok, match, equal } from "node:assert/strict";
 import { test } from "node:test";
+import { parseHTML } from "linkedom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -28,6 +29,23 @@ function sliceBetween(text, startNeedle, endNeedle) {
   const end = text.indexOf(endNeedle, start);
   ok(end !== -1, `${endNeedle} после ${startNeedle} не найден`);
   return text.slice(start, end);
+}
+
+// Собирает renderMoviePick() в linkedom: экранирование — настоящее (в чипах
+// только текст), соседи-функции — стабы с разметкой проекта.
+function renderPick(movie) {
+  const body = sliceBetween(appJs, "function renderMoviePick(", "function filterMoviesByKind");
+  const factory = new Function(
+    "esc", "formatMovieLength", "ratingPill", "movieGroupMap",
+    `${body}\nreturn renderMoviePick;`
+  );
+  const renderMoviePick = factory(
+    (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+    () => "",
+    (rating) => (rating ? `<span class="day-chip">${rating}</span>` : ""),
+    () => new Map([["g1", { id: "g1", title: "Сага" }]])
+  );
+  return parseHTML(renderMoviePick(movie));
 }
 
 test("hero-информеры «Рандом» есть, но скрыты на пустом списке", () => {
@@ -58,6 +76,32 @@ test("карточки результата имеют кнопку «Закры
   // быть role="button" (вложенный интерактив); открытие — кнопка в заголовке.
   ok(!moviePick.includes('role="button"'), "movie-pick не должен быть role=button");
   ok(moviePick.includes('class="movie-title-open"'), "у movie-pick нет кнопки открытия в заголовке");
+});
+
+test("выпавшая часть группы: группа, часть и точка продолжения (решение 2026-11-22)", () => {
+  const { document } = renderPick({
+    id: 12, title: "Часть 2", kind: "series", rating: 7.8, rating_source: "imdb",
+    runtime: 50, resume_position: "2 сезон, 5 серия · 34:12", group_id: "g1"
+  });
+  ok(document.querySelector(".movie-pick"), "карточка не построилась");
+  equal(document.querySelector(".place-pick-title")?.textContent.trim(), "Сага",
+    "заголовок карточки группы не показан");
+  equal(document.querySelector(".place-pick-note")?.textContent.trim(), "Часть 2",
+    "название выпавшей части не показано");
+  const chips = [...document.querySelectorAll(".item-meta .day-chip")].map((c) => c.textContent.trim());
+  ok(chips.some((t) => t.includes("▶ 2 сезон, 5 серия · 34:12")), "нет чипа точки продолжения");
+  ok(chips.some((t) => t.includes("7.8")), "рейтинг части потерян");
+});
+
+test("выпавший одиночный фильм: без группы и без точки, если не задана", () => {
+  const { document } = renderPick({
+    id: 13, title: "Дюна", kind: "movie", rating: 8.1, rating_source: "imdb", runtime: 165
+  });
+  equal(document.querySelector(".place-pick-title")?.textContent.trim(), "Дюна",
+    "заголовок одиночного фильма искажён");
+  equal(document.querySelector(".place-pick-note"), null, "подпись части у одиночного фильма");
+  equal(document.querySelector(".day-chip.is-resume"), null, "чип точки без resume_position");
+  ok([...document.querySelectorAll(".place-actions button")].length === 4, "кнопки действий изменились");
 });
 
 test("close-pick сбрасывает оба выбора и перерисовывает экран", () => {
