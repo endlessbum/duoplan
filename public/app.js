@@ -1960,7 +1960,7 @@
     }
     return note + hiddenFile + `
       <div class="ascii-toolbar">
-        <button type="button" class="btn ghost" data-ascii-action="ascii-pick">Добавить фото → ASCII</button>
+        <button type="button" class="secondary full" data-ascii-action="ascii-pick">Добавить фото</button>
       </div>
       <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
   }
@@ -6323,7 +6323,12 @@
     const count = healthTimesCount(m);
     const values = [];
     for (let i = 0; i < count; i++) values.push(stored[i] || healthDefaultTime(i, count));
-    return values.map(t => `<input name="remind_times" data-fmt="none" type="time" value="${esc(t)}">`).join("");
+    // Каждое время — в обёртке .field: иначе селектор .field > input не
+    // действует (инпут внутри .health-times) и поле выглядит голым нативным
+    // контролом посреди оформленных полей диалога (репорт 2026-11-22).
+    return values.map((t, i) =>
+      `<label class="field"><input name="remind_times" data-fmt="none" type="time" value="${esc(t)}" aria-label="Время приёма ${i + 1}"></label>`
+    ).join("");
   }
 
   // PD-HEALTH-001: «сегодня» — личный календарный день пользователя. Сервер
@@ -6519,12 +6524,18 @@
       const current = [...inputs].map(i => i.value);
       timesBox.innerHTML = "";
       for (let i = 0; i < n; i++) {
+        // Обёртка .field — как в healthRemindTimesHtml: время приёма должно
+        // выглядеть как остальные поля ввода диалога.
+        const wrap = document.createElement("label");
+        wrap.className = "field";
         const inp = document.createElement("input");
         inp.name = "remind_times";
         inp.type = "time";
         inp.dataset.fmt = "none";
+        inp.setAttribute("aria-label", `Время приёма ${i + 1}`);
         inp.value = current[i] || healthDefaultTime(i, n);
-        timesBox.appendChild(inp);
+        wrap.appendChild(inp);
+        timesBox.appendChild(wrap);
       }
     };
     fieldsBox?.querySelector?.("[data-health-form]")?.addEventListener?.("change", syncDose);

@@ -2865,13 +2865,15 @@ input[type="checkbox"]:active {
 .health-intake .flo-chip {
   justify-self: center;
 }
-/* Поля времени приёма в диалоге препарата — стопкой на всю ширину. */
+/* Поля времени приёма в диалоге препарата — стопкой на всю ширину; каждое
+   поле обёрнуто в label.field (healthRemindTimesHtml/syncTimes), поэтому
+   выглядит как остальные поля ввода диалога: рамка, высота, фон. */
 .health-times {
   display: grid;
   gap: 8px;
 }
-.health-times input {
-  width: 100%;
+.health-times .field {
+  margin-bottom: 0;
 }
 
 /* --- Контакты: телефонная книга («Дневник → Контакты») --- */
