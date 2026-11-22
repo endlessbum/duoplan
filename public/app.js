@@ -8126,10 +8126,9 @@
     const percent = Math.min(100, Math.max(0, Number(group.watched_percent) || 0));
     const noun = movieGroupNoun(group, total);
     const typeLabel = MOVIE_GROUP_TYPE_LABELS[group.group_type] || MOVIE_GROUP_TYPE_LABELS.collection;
-    // Кнопка и стопка считаются по полной сводке сервера, а не по первой
-    // загруженной странице: часть может лежать глубже архива. Счётчики по
-    // статусу+типу приходят из movieGroupSummaries; если старый state их не
-    // отдаёт, подпись остаётся нейтральной («Показать части»).
+    // Слои стопки считаются по полной сводке сервера (по статусу+типу текущего
+    // сегмента), а не по первой загруженной странице: часть может лежать глубже
+    // архива. Если старый state сводки не отдаёт — считаем по загруженным частям.
     const kind = movieKindFilter[view] || "all";
     const wantWatched = view === "watched";
     const rawAvailable = kind === "movie"
@@ -8152,21 +8151,18 @@
           .map((layer) =>
             `<div class="movie-group-stack__layer" style="--layer:${layer}" aria-hidden="true"></div>`).join("")
       : "";
-    // PD-MOVIES-001: прогресс группы — общий, а видимых частей в текущем
-    // сегменте может быть меньше. Подписываем оба числа явно.
-    const inThisList = availableCount === null
-      ? ""
-      : ` · в этом списке ${countForUi} ${esc(plural(countForUi, "часть", "части", "частей"))}`;
     const metaChips = [
       `<span class="day-chip is-muted">${esc(typeLabel)}</span>`,
-      `<span class="day-chip is-muted">${total} ${esc(noun)} · ${watched} из ${total} просмотрено${inThisList}</span>`
+      `<span class="day-chip is-muted">${total} ${esc(noun)} · ${watched} из ${total} просмотрено</span>`
     ].join("");
-    const buttonLabel = availableCount === null
-      ? "Показать части"
-      : `Показать ${availableCount} ${esc(plural(availableCount, "часть", "части", "частей"))}`;
+    // Стопка кликабельна целиком (решение владельца 2026-11-22: кнопка
+    // «Показать … частей» удалена): тап по карточке и декоративным слоям
+    // открывает окно состава, ⋮ — меню управления.
     return `
       <div class="movie-group" data-group-id="${esc(group.id)}">
-        <div class="movie-group-stack" data-layers="${layers}">
+        <div class="movie-group-stack" data-layers="${layers}" role="button" tabindex="0"
+          data-action="movie-group-open" data-id="${esc(group.id)}" data-view="${esc(view)}"
+          aria-haspopup="dialog" aria-label="Открыть состав группы ${esc(group.title)}">
           ${layerHtml}
           <article class="card movie-group-card">
             <div class="item-row">
@@ -8182,8 +8178,6 @@
               aria-valuetext="${watched} из ${total} просмотрено">
               <div class="movie-group-progress-bar" style="width:${percent}%"></div>
             </div>
-            <button class="secondary full card-action" type="button" data-action="movie-group-open" data-id="${esc(group.id)}"
-              data-view="${esc(view)}" aria-haspopup="dialog">${buttonLabel}</button>
           </article>
         </div>
       </div>

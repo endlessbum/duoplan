@@ -3248,7 +3248,9 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
 /* Стопка: передняя карточка — самая крупная, задние слои идут друг за
    другом вправо и уменьшаются и по ширине, и по высоте. Весь запас под
    слои лежит внутри ширины контента страницы, поэтому стопка не вылезает
-   за её границы. Слои декоративные — без текста, без кликов, вне a11y. */
+   за её границы. Слои декоративные (aria-hidden, pointer-events: none),
+   но сама стопка кликабельна целиком: тап по карточке и по краям слоёв
+   открывает окно состава (кнопки «Показать … частей» больше нет). */
 .movie-group-stack {
   --stack-peek: 8px;   /* сколько видно слоя справа */
   --stack-step: 14px;  /* сдвиг левого края слоя вправо */
@@ -3256,6 +3258,7 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   --stack-reserve: calc(var(--stack-peek) * 2 + 4px);
   position: relative;
   padding-right: var(--stack-reserve);
+  cursor: pointer;
 }
 
 /* Две части — один задний слой: запас уменьшается до одного peek,
@@ -3300,7 +3303,7 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   border-radius: 999px;
   background: var(--line);
   overflow: hidden;
-  margin: 10px 0 8px;
+  margin: 10px 0 0;
 }
 
 .movie-group-progress-bar {

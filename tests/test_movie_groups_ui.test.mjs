@@ -93,7 +93,7 @@ test("buildMovieEntries: фильм с group_id, которого нет в movi
   equal(entries[0].type, "movie");
 });
 
-test("карточка стопки: счётчики, прогресс, тип, слои и кнопка окна", () => {
+test("карточка стопки: счётчики, прогресс, тип, слои и тап по стопке", () => {
   const group = { ...GROUP, open_count: 2 };
   const html = renderMovieGroup({
     type: "group", group, members: [member(11, { group_position: 0 }), member(12, { group_position: 1 })]
@@ -106,10 +106,14 @@ test("карточка стопки: счётчики, прогресс, тип,
   ok(html.includes('data-layers="1"'), "две части — один задний слой и расширенная передняя карточка");
   equal((html.match(/movie-group-stack__layer/g) || []).length, 1, "должен быть ровно один задний слой");
   ok(!html.includes("<MOVIE:"), "карточка не должна показывать части");
-  ok(html.includes("Показать 2 части"), "нет кнопки просмотра частей");
-  ok(html.includes('data-action="movie-group-open"'), "кнопка не открывает окно состава");
-  ok(html.includes('data-view="open"'), "кнопка не передаёт вид списка");
-  ok(html.includes('aria-haspopup="dialog"'), "кнопка не объявляет окно");
+  // Решение владельца 2026-11-22: кнопки «Показать … частей» больше нет,
+  // стопка открывается тапом по карточке (data-action на .movie-group-stack).
+  ok(!html.includes("Показать "), "кнопка «Показать … частей» вернулась");
+  ok(!html.includes("card-action"), "в карточке осталась кнопка-действие");
+  ok(/role="button"[^>]*data-action="movie-group-open"/.test(html), "стопка не кликабельна как карточка");
+  ok(html.includes('data-action="movie-group-open"'), "стопка не открывает окно состава");
+  ok(html.includes('data-view="open"'), "стопка не передаёт вид списка");
+  ok(html.includes('aria-haspopup="dialog"'), "стопка не объявляет окно");
   ok(!html.includes("ещё в планах"), "под шкалой осталась подпись о планах");
   ok(!html.includes("Показано "), "под шкалой осталась подпись о загрузке");
   ok(!html.includes("movie-group-members"), "состав не должен разворачиваться в списке");
@@ -117,10 +121,9 @@ test("карточка стопки: счётчики, прогресс, тип,
   ok(html.includes('aria-valuetext="2 из 3 просмотрено"'), "нет текстового значения прогресса");
 });
 
-test("UI-05: кнопка и слои стопки считаются по всей группе, а не по загруженной странице", () => {
+test("UI-05: слои стопки считаются по всей группе, а не по загруженной странице", () => {
   const group = { ...GROUP, id: "g8", total_count: 8, open_count: 8, watched_count: 0, watched_percent: 0 };
   const html = renderMovieGroup({ type: "group", group, members: [member(11)] }, "open");
-  ok(html.includes("Показать 8 частей"), "кнопка показывает только загруженную страницу");
   ok(!html.includes("Показано "), "дубль счётчика под шкалой больше не нужен");
   equal((html.match(/movie-group-stack__layer/g) || []).length, 2, "стопка не показывает два задних слоя");
   ok(html.includes('data-layers="2"'), "3+ части — два задних слоя");
@@ -139,7 +142,6 @@ test("Просмотрено: стопка растёт как в «В план�
   const h1 = renderMovieGroup({ type: "group", group: one, members: [watched(11)] }, "watched");
   ok(h1.includes('data-layers="0"'), "один просмотренный фильм — карточка на полную ширину");
   ok(!h1.includes("movie-group-stack__layer"), "у одного просмотренного нет задних слоёв");
-  ok(h1.includes("Показать 1 часть"), "кнопка считает просмотренные, а не всю группу");
 
   const two = { ...GROUP, id: "gw2", total_count: 2, open_count: 0, open_movie_count: 0, watched_count: 2, watched_movie_count: 2, watched_percent: 100 };
   const h2 = renderMovieGroup({ type: "group", group: two, members: [watched(11), watched(12)] }, "watched");
@@ -191,8 +193,10 @@ test("UI-05/A11Y-06: фильтр типа считает части для ок
     async () => {}
   );
   const html = kindRender({ type: "group", group, members: [member(11)] }, "open");
-  ok(html.includes("Показать 5 частей"), "фильтр «Сериалы» должен считать по open_series_count");
-  ok(html.includes('data-action="movie-group-open"'), "кнопка не открывает окно состава");
+  // Кнопки больше нет — счётчик фильтра типа виден по числу слоёв стопки:
+  // 5 сериалов в сводке против 1 загруженной части — два задних слоя.
+  ok(html.includes('data-layers="2"'), "фильтр «Сериалы» должен считать по open_series_count");
+  ok(html.includes('data-action="movie-group-open"'), "стопка не открывает окно состава");
   ok(html.includes('data-view="open"'), "окно не получит вид «В планах»");
   ok(/aria-hidden="true"/.test(html), "декоративные слои должны быть скрыты от скринридера");
 });
@@ -602,8 +606,8 @@ test("UX-03/UX-04: менеджер сохраняет черновик при �
     "менеджер не получает текст результата");
 });
 
-test("PD-MOVIES-001: подпись группы уточняет число частей в текущем списке", () => {
+test("PD-MOVIES-001 (уточнено 2026-11-22): подпись группы — только количество и просмотрено", () => {
   const render = extractBraced("function renderMovieGroup(");
-  ok(render.includes("в этом списке"), "нет уточнения о частях в текущем сегменте");
+  ok(!render.includes("в этом списке"), "уточнение о частях в текущем сегменте не удалено");
   ok(render.includes("из ${total} просмотрено"), "общий прогресс группы исчез");
 });
