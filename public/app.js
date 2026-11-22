@@ -1929,7 +1929,7 @@
     const hiddenFile = `<input type="file" accept="image/*" data-ascii-file hidden>`;
     const peekOf = (art) => String(art || "").split("\n").slice(0, 4).join("\n");
     if (st.mode === "preview") {
-      return note + hiddenFile + `
+      return hiddenFile + `
         <div class="ascii-preview" data-ascii-preview><pre class="memory-ascii-preview" data-ascii-art-pre></pre></div>
         <div class="ascii-toolbar">
           ${asciiPaletteSelectHtml(st.palette || "detail")}
@@ -1938,30 +1938,36 @@
           <button type="button" class="btn ghost" data-ascii-action="ascii-repick">Другое фото</button>
           <button type="button" class="btn ghost" data-ascii-action="ascii-cancel-preview">Отмена</button>
         </div>
+        ${note}
         <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
     }
     if (st.mode === "set" || st.mode === "keep") {
-      return note + hiddenFile + `
+      return hiddenFile + `
         <pre class="memory-ascii-peek" data-ascii-peek style="font-size:${asciiFontSizeFor(st.art)}px">${esc(peekOf(st.art))}</pre>
         <div class="ascii-toolbar">
           <button type="button" class="btn ghost" data-ascii-action="ascii-replace">Заменить изображение</button>
           <button type="button" class="btn ghost" data-ascii-action="ascii-delete">Удалить изображение</button>
         </div>
+        ${note}
         <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
     }
     if (st.mode === "delete") {
-      return note + hiddenFile + `
+      return hiddenFile + `
         <p class="ascii-status is-warn">Изображение будет удалено при сохранении записи.</p>
         <div class="ascii-toolbar">
           <button type="button" class="btn ghost" data-ascii-action="ascii-undo-delete">Вернуть изображение</button>
           <button type="button" class="btn ghost" data-ascii-action="ascii-replace">Выбрать другое фото</button>
         </div>
+        ${note}
         <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
     }
-    return note + hiddenFile + `
+    // Пояснение про ASCII — под кнопкой (решение владельца 2026-11-22),
+    // а не над ней.
+    return hiddenFile + `
       <div class="ascii-toolbar">
         <button type="button" class="secondary full" data-ascii-action="ascii-pick">Добавить фото</button>
       </div>
+      ${note}
       <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
   }
 
