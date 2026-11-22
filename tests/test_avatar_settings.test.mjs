@@ -558,5 +558,5 @@ test("PD-PROFILE-001: пол, время сводок, акцент и PIN в н
   ok(appSource.includes('showToast("Цвет сохранён")'), "нет тоста смены акцента");
   ok(appSource.includes("Хранится только на этом устройстве"), "нет пояснения PIN");
   ok(appSource.includes("Подгружаем старые события…"), "нет индикатора догрузки календаря");
-  ok(appSource.includes('"contacts", "cycle"'), "контакты не включены в диалог экспорта");
+  ok(appSource.includes('"contacts", "health", "cycle"'), "контакты/здоровье не включены в диалог экспорта");
 });

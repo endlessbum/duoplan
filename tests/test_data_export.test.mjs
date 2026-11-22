@@ -1,8 +1,9 @@
 // Экспорт данных: POST /api/data/export (worker.js) — пользователь выбирает
 // разделы и состав каждого, воркер собирает выбранные коллекции пары в один
-// человекочитаемый TXT («Экспорт.txt») через sendDocument. Проверяем
-// нормализацию строк (флаги, заглушки автора), валидацию секций,
-// SQL-фильтры приватности, содержимое multipart-формы и счётчики в ответе.
+// машиночитаемый JSON-конверт («Экспорт.json») через sendDocument; этот же
+// файл читает импорт (POST /api/data/import). Проверяем нормализацию строк
+// (флаги, заглушки автора), валидацию секций, SQL-фильтры приватности,
+// содержимое multipart-формы (конверт с app/kind/schema) и счётчики в ответе.
 //
 // Запуск: node --test tests/test_data_export.test.mjs
 import { readFileSync } from "node:fs";
@@ -145,11 +146,8 @@ const buildApi = new Function(
     extractBraced("function exportMemoryRow"),
     extractBraced("function exportDateRow"),
     extractBraced("const EXPORT_ROW_MAPPERS = {"),
-    extractBraced("function exportTxtDay"),
-    extractBraced("function exportTxtTime"),
-    extractBraced("const EXPORT_TXT_ROWS = {"),
-    extractBraced("function exportTxtRecord"),
-    extractBraced("function exportTxtDoc"),
+    extractLine("const EXPORT_FILE_SCHEMA = 1"),
+    extractBraced("function buildExportEnvelope"),
     extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
@@ -165,6 +163,7 @@ function resultsFor(sql, rows) {
   if (sql.includes("FROM memories")) return rows.memories || [];
   if (sql.includes("FROM quotes")) return rows.quotes || [];
   if (sql.includes("FROM wishes")) return rows.wishes || [];
+  if (sql.includes("FROM health_meds")) return rows.health || [];
   return [];
 }
 
@@ -237,36 +236,35 @@ test("маршрут: фильтры приватности по состава�
   }
   ok(env0.queries.find((q) => q.sql.includes("FROM wishes")).sql.includes("w.done=0"), "желания — только не подаренные");
 
-  // Один sendDocument с файлом «Экспорт.txt» — человекочитаемый документ.
+  // Один sendDocument с файлом «Экспорт.json» — машиночитаемый конверт.
   equal(env0.uploads.length, 1);
   const upload = env0.uploads[0];
   equal(upload.method, "sendDocument");
   equal(upload.form.get("chat_id"), "777");
   match(upload.form.get("caption"), /Экспорт данных — /);
   const doc = upload.form.get("document");
-  equal(doc.name, "Экспорт.txt");
-  const txt = await doc.text();
-  ok(txt.startsWith("Общий дневник — экспорт данных\n"), "шапка документа");
-  ok(/Дата выгрузки: \d{2}\.\d{2}\.\d{4}$/m.test(txt), "дата выгрузки дд.мм.гггг");
-  match(txt, new RegExp(`Версия: ${APP_VERSION}`));
-  // Пустые секции не печатаются, заполненные — с заголовком и записями.
-  ok(!txt.includes("Места —") && !txt.includes("Желания —"), "пустые секции пропущены");
-  ok(txt.includes("Планы — 1"), "заголовок секции планов с количеством");
-  ok(txt.includes("1. Поездка"), "план: главная строка");
-  ok(txt.includes("Когда: 01.12.2026"), "план: дата в формате приложения");
-  ok(txt.includes("Добавил: Аня"), "автор записи");
-  ok(txt.includes("Кино — 1") && txt.includes("1. Оппенгеймер") && txt.includes("Рейтинг: 8.4 (IMDb)"), "кино-секция");
-  ok(txt.includes("Дневник — 1") && txt.includes("1. Выходные") && txt.includes("Текст: Текст"), "секция дневника");
-  ok(txt.includes("День: 31.10.2026"), "день дневника в формате приложения");
-  // Личные флаги попадают в файл только когда есть что показывать.
-  ok(!txt.includes("Личный"), "общий план не помечен личным");
+  equal(doc.name, "Экспорт.json");
+  const envelope = JSON.parse(await doc.text());
+  // Специальная валидация файла: импорт отличает файл DuoPlan по шапке.
+  equal(envelope.app, "duoplan");
+  equal(envelope.kind, "duoplan-export");
+  equal(envelope.schema, 1);
+  equal(envelope.version, APP_VERSION);
+  ok(Number.isInteger(envelope.exported_at) && envelope.exported_at > 0, "нет времени выгрузки");
+  // Пустые секции в файл не попадают.
+  ok(!("places" in envelope.sections) && !("wishes" in envelope.sections), "пустые секции пропущены");
+  equal(envelope.sections.plans[0].title, "Поездка");
+  equal(envelope.sections.movies[0].title, "Оппенгеймер");
+  equal(envelope.sections.movies[0].rating, 8.4);
+  equal(envelope.sections.memories[0].title, "Выходные");
+  equal(envelope.sections.memories[0].body, "Текст");
   deepStrictEqual(response.data, {
     ok: true,
     counts: { plans: 1, movies: 1, dates: 0, birthdays: 0, places: 0, memories: 1, quotes: 0, wishes: 0 }
   });
 });
 
-test("маршрут: состав «all» общих коллекций — один бинд, дни рождения попадают в TXT", async () => {
+test("маршрут: состав «all» общих коллекций — один бинд, дни рождения попадают в файл", async () => {
   const env0 = makeApiEnv({
     pair: { id: 9, timezone: "Europe/Moscow" },
     body: { sections: { places: "all", memories: "all", quotes: "all", wishes: "all", birthdays: "all" } },
@@ -286,16 +284,14 @@ test("маршрут: состав «all» общих коллекций — о�
   }
   equal(env0.queries.find((x) => x.sql.includes("kind='birthday'")).args.length, 2, "дни рождения: фильтр видимости в обоих составах");
 
-  // Регрессия H1: секция «Дни рождения» рендерится в TXT (раньше — TypeError).
-  const doc = env0.uploads[0].form.get("document");
-  const txt = await doc.text();
-  ok(txt.includes("Дни рождения — 1"), "заголовок секции дней рождения");
-  ok(txt.includes("1. День рождения Маши"), "запись дня рождения");
-  ok(txt.includes("День: 03.12.1996"), "день рождения в формате приложения");
+  // Секция дней рождения попадает в конверт (регрессия H1: раньше TypeError).
+  const envelope = JSON.parse(await env0.uploads[0].form.get("document").text());
+  equal(envelope.sections.birthdays[0].title, "День рождения Маши");
+  equal(envelope.sections.birthdays[0].day, "1996-12-03");
   deepStrictEqual(response.data.counts, { places: 0, memories: 1, quotes: 0, wishes: 0, birthdays: 1 });
 });
 
-test("уточнение к желанию попадает в SQL и в TXT-экспорт", async () => {
+test("уточнение к желанию попадает в SQL и в файл экспорта", async () => {
   const env0 = makeApiEnv({
     pair: { id: 9, timezone: "Europe/Moscow" },
     body: { sections: { wishes: "all" } },
@@ -306,9 +302,9 @@ test("уточнение к желанию попадает в SQL и в TXT-э�
   const response = await env0.api(env0.request, env0.env, new URL("https://duoplan.test/api/data/export"));
   const query = env0.queries.find((x) => x.sql.includes("FROM wishes"));
   ok(query.sql.includes("w.comment"), "SELECT желаний должен читать comment");
-  const txt = await env0.uploads[0].form.get("document").text();
-  ok(txt.includes("1. Плед"), "название желания в файле");
-  ok(txt.includes("Уточнение: Серый, 150×200"), "уточнение в файле");
+  const envelope = JSON.parse(await env0.uploads[0].form.get("document").text());
+  equal(envelope.sections.wishes[0].body, "Плед");
+  equal(envelope.sections.wishes[0].comment, "Серый, 150×200");
   equal(response.data.counts.wishes, 1);
 });
 
@@ -321,18 +317,46 @@ test("маршрут без выбранных секций — 400 и без з
   equal(env0.queries.length, 0, "до SQL-запросов дело не доходит");
 });
 
-test("TXT: ISO-даты и таймстемпы печатаются как дд.мм.гггг", () => {
-  const helpers = new Function([
-    extractBraced("function exportTxtDay"),
-    extractBraced("function exportTxtTime"),
-    "return { exportTxtDay, exportTxtTime };"
+test("конверт: пустые секции не попадают в файл, шапка валидации на месте", () => {
+  const build = new Function([
+    extractLine("const EXPORT_FILE_SCHEMA = 1"),
+    extractBraced("const EXPORT_LABELS = {"),
+    extractBraced("function buildExportEnvelope"),
+    "return buildExportEnvelope;"
   ].join("\n"))();
-  equal(helpers.exportTxtDay("2026-11-05"), "05.11.2026");
-  equal(helpers.exportTxtDay(""), "");
-  equal(helpers.exportTxtDay(null), "");
-  equal(helpers.exportTxtDay("не дата"), "не дата");
-  equal(helpers.exportTxtTime(Math.floor(Date.UTC(2026, 0, 2, 23, 30) / 1000)), "02.01.2026");
-  equal(helpers.exportTxtTime(0), null);
+  const envelope = build("2026.11.20.119", { plans: [{ id: 1 }], places: [], memories: [{ id: 2 }] });
+  equal(envelope.app, "duoplan");
+  equal(envelope.kind, "duoplan-export");
+  equal(envelope.schema, 1);
+  equal(envelope.version, "2026.11.20.119");
+  ok(Number.isInteger(envelope.exported_at));
+  deepStrictEqual(Object.keys(envelope.sections), ["plans", "memories"], "пустые секции должны пропускаться");
+});
+
+test("health: напоминания препараты выгружаются с настройками приёма", () => {
+  ok(source.includes('health: ["all"]'), "нет секции здоровья в EXPORT_SECTIONS");
+  ok(source.includes('health: "здоровье (препараты)"'), "нет подписи секции здоровья");
+  const med = EXPORT_ROW_MAPPERS.health({
+    id: 9, name: "Магний", form: "tablet", dosage: "400 мг", schedule: "2 раза в день",
+    status: "active", start_date: "2026-11-01", end_date: null,
+    remind_enabled: 1, remind_time: "08:00,20:00", note: "после еды", created_at: 1790000000
+  });
+  equal(med.remind_enabled, true);
+  equal(med.remind_time, "08:00,20:00");
+  equal(med.start_date, "2026-11-01");
+  ok(source.includes("FROM health_meds"), "нет SQL секции здоровья");
+  ok(source.includes('if (key === "health") return [userId];'), "бинды здоровья не по tg_id");
+});
+
+test("cycle: дозировка препарата Фло — отдельным полем (нужна импорту)", () => {
+  const med = EXPORT_ROW_MAPPERS.cycle({
+    kind: "med", day: "2026-10-01", end_date: null,
+    note: "Эстроген", med_dosage: "2 мг", category: "hormonal", form: "tablet",
+    schedule: "1 раз в день", status: "active", created_at: 5
+  });
+  equal(med.name, "Эстроген", "имя препарата склеено с дозой");
+  equal(med.dosage, "2 мг", "доза не вынесена отдельным полем");
+  ok(source.includes("md.dosage AS med_dosage"), "в SQL нет отдельной колонки дозы");
 });
 
 test("PD-PROFILE-001: экспорт включает контакты (все/мои) с телефонами", () => {
@@ -342,4 +366,38 @@ test("PD-PROFILE-001: экспорт включает контакты (все/�
   ok(source.includes("GROUP_CONCAT(p.phone, ', ')"), "телефоны не собраны в экспорт");
   ok(source.includes('contacts: "контакты"'), "нет подписи секции контактов");
   ok(source.includes('contacts: (row) => ({'), "нет маппера контактов");
+});
+
+// ------------------------------------------------------------------
+// Импорт в клиенте: кнопка в профиле, файл-пикер и валидация конверта
+// ------------------------------------------------------------------
+const appJs = readFileSync(join(root, "public", "app.js"), "utf8");
+
+test("клиент: кнопка «Импортировать» в карте экспорта", () => {
+  const exportCard = appJs.slice(
+    appJs.indexOf("function renderPairExport()"),
+    appJs.indexOf("function renderPairTimezone()")
+  );
+  ok(exportCard.includes('data-action="import-data"'), "нет кнопки импорта");
+  ok(exportCard.includes(">Импортировать</button>"), "нет подписи кнопки импорта");
+  ok(exportCard.includes(">Экспортировать</button>"), "кнопка экспорта пропала");
+});
+
+test("клиент: чужой JSON отсеивается до диалога импорта", () => {
+  const dialog = appJs.slice(
+    appJs.indexOf("function openImportDialog("),
+    appJs.indexOf("function renderPairExport()")
+  );
+  ok(dialog.includes('envelope?.app !== "duoplan"'), "нет проверки app в конверте");
+  ok(dialog.includes('envelope?.kind !== "duoplan-export"'), "нет проверки kind в конверте");
+  ok(dialog.includes("Не удалось прочитать файл"), "нет сообщения о нечитаемом файле");
+  ok(dialog.includes("Это не файл экспорта DuoPlan"), "нет сообщения про чужой файл");
+  ok(dialog.includes("/api/data/import"), "нет запроса импорта");
+  // Чекбоксы секций с количеством найденных записей
+  ok(dialog.includes("imp_${esc(key)}"), "нет чекбоксов секций");
+  ok(dialog.includes("imp_${key}") && dialog.includes("fd.get(`imp_${key}`)"), "выбор секций не читается из формы");
+  // Файл-пикер: json + скрытый input
+  const handler = appJs.slice(appJs.indexOf('action === "import-data"'), appJs.indexOf('action === "save-pair-timezone"'));
+  ok(handler.includes('input.accept = ".json,application/json"'), "пикер не ограничен JSON");
+  ok(handler.includes("openImportDialog"), "пикер не открывает диалог импорта");
 });

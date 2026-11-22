@@ -197,7 +197,7 @@ test("worker: экспорт поездок", () => {
   ok(/trips: "поездки"/.test(workerSource), "trips нет в EXPORT_LABELS");
   ok(/trips: \(scope\) => `SELECT t\.id,t\.title,t\.note,t\.saving_id,t\.visited/.test(workerSource), "trips нет в EXPORT_SQL");
   ok(/trips: \(row\) => \(\{\n    id: row\.id,\n    title: row\.title,/.test(workerSource), "trips нет в EXPORT_ROW_MAPPERS");
-  ok(/trips: \(row\) => \(\{\n    head: row\.title,/.test(workerSource), "trips нет в EXPORT_TXT_ROWS");
+  ok(/trips: \(scope\) => `SELECT t.id/.test(workerSource) && /trips: \(row\) => \({/.test(workerSource), "trips нет в SQL/маппере экспорта");
 });
 
 test("app: сегмент «Посетить/Путешествие» на вкладке «Места»", () => {

@@ -2825,6 +2825,77 @@
 
   // Резервная копия — отдельная карточка под настройками: кнопка с пояснением
   // слишком значима, чтобы прятать её внутри персональных настроек.
+  // Подписи секций файла экспорта в диалоге импорта (ключи совпадают с
+  // EXPORT_SECTIONS на сервере).
+  const IMPORT_LABELS = {
+    plans: "Планы (незавершённые)",
+    movies: "Кино (непросмотренные)",
+    dates: "Значимые даты",
+    birthdays: "Дни рождения",
+    places: "Места",
+    trips: "Поездки",
+    memories: "Записи дневника",
+    quotes: "Цитаты",
+    wishes: "Желания (не подаренные)",
+    contacts: "Контакты",
+    health: "Здоровье (препараты и напоминания)",
+    cycle: "Фло (месячные и дневник)"
+  };
+
+  // Диалог импорта: показать, что найдено в файле, и дать выбрать секции.
+  // Файл — JSON-конверт экспорта DuoPlan (buildExportEnvelope на сервере):
+  // чужой JSON отсеивается сразу, до диалога.
+  function openImportDialog(text) {
+    let envelope;
+    try {
+      envelope = JSON.parse(text);
+    } catch {
+      showToast("Не удалось прочитать файл — нужен файл экспорта DuoPlan");
+      return;
+    }
+    if (envelope?.app !== "duoplan" || envelope?.kind !== "duoplan-export"
+      || !envelope?.sections || typeof envelope.sections !== "object") {
+      showToast("Это не файл экспорта DuoPlan — импорт отменён");
+      return;
+    }
+    const found = Object.entries(envelope.sections)
+      .filter(([, rows]) => Array.isArray(rows) && rows.length);
+    if (!found.length) {
+      showToast("В файле нет записей для импорта");
+      return;
+    }
+    openDialog({
+      title: "Импорт данных",
+      fields: `
+        <p class="settings-hint">Найдено в файле${envelope.version ? ` (экспорт версии ${esc(envelope.version)})` : ""} — отметьте, что добавить:</p>
+        ${found.map(([key, rows]) => `
+          <label class="field"><span><input type="checkbox" name="imp_${esc(key)}" checked> ${esc(IMPORT_LABELS[key] || key)} — ${rows.length}</span></label>`).join("")}
+        <p class="settings-hint">Записи добавятся к существующим, автором станете вы. Напоминания, приватность, время и точки просмотра восстанавливаются из файла; дубликаты кино и записей Фло пропускаются</p>
+      `,
+      submitLabel: "Импортировать",
+      onSubmit: async (fd) => {
+        const sections = {};
+        for (const [key, rows] of found) {
+          if (fd.get(`imp_${key}`) === "on") sections[key] = rows;
+        }
+        if (!Object.keys(sections).length) {
+          showToast("Ничего не выбрано — импорт отменён");
+          return appState;
+        }
+        // Ответ импорта — счётчики, а не состояние: подтягиваем свежий state.
+        const result = await request("/api/data/import", { method: "POST", body: { sections } });
+        const total = Object.values(result?.counts || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+        const skippedTotal = Object.values(result?.skipped || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+        showToast(skippedTotal
+          ? `Импортировано: ${total}, пропущено дублей: ${skippedTotal}`
+          : `Импортировано: ${total} записей`);
+        const fresh = await request("/api/state");
+        render();
+        return fresh;
+      }
+    });
+  }
+
   function renderPairExport() {
     return `
       <section class="card">
@@ -2832,6 +2903,8 @@
         <h3>Экспорт данных</h3>
         <p class="settings-hint">Выберите разделы — бот пришлёт один файл с выбранным. Удобно хранить вне приложения</p>
         <button class="secondary full card-action" type="button" data-action="export-data">Экспортировать</button>
+        <button class="secondary full" type="button" data-action="import-data" style="margin-top:10px;">Импортировать</button>
+        <p class="settings-hint">Импорт читает файл экспорта DuoPlan: показывает, что нашлось в файле, и добавляет выбранное в это пространство</p>
       </section>
     `;
   }
@@ -11521,6 +11594,10 @@
               <option value="all">Все</option>
               <option value="mine">Только мои</option>
             </select></label>
+            <label class="field"><span>Здоровье (препараты и напоминания)</span><select name="health">
+              <option value="" selected>Не выгружать</option>
+              <option value="all">Мои препараты</option>
+            </select></label>
             ${appState?.user?.gender === "female" ? `<label class="field"><span>Фло (месячные и дневник)</span><select name="cycle">
               <option value="" selected>Не выгружать</option>
               <option value="all">Всё</option>
@@ -11528,7 +11605,7 @@
           `,
           onSubmit: async (fd) => {
             const sections = {};
-            for (const key of ["plans", "movies", "dates", "birthdays", "places", "trips", "memories", "quotes", "wishes", "contacts", "cycle"]) {
+            for (const key of ["plans", "movies", "dates", "birthdays", "places", "trips", "memories", "quotes", "wishes", "contacts", "health", "cycle"]) {
               const value = fd.get(key);
               if (value) sections[key] = value;
             }
@@ -11540,6 +11617,23 @@
             return appState;
           }
         });
+      } else if (action === "import-data") {
+        // Файл выбирается в системном пикере: JSON-конверт экспорта приходит
+        // от бота («Экспорт.json»), пользователь сохраняет его на устройство.
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json,application/json";
+        input.style.display = "none";
+        document.body.appendChild(input);
+        input.addEventListener("change", () => {
+          const file = input.files?.[0];
+          input.remove();
+          if (!file) return;
+          file.text()
+            .then((text) => openImportDialog(text))
+            .catch(() => showToast("Не удалось прочитать файл"));
+        });
+        input.click();
       } else if (action === "save-pair-timezone") {
         const value = document.getElementById("pair-timezone")?.value || "";
         if (!value) {

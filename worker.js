@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.20.118";
+const APP_VERSION = "2026.11.20.119";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.20.118";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.20.118";
+const DB_SCHEMA_VERSION = "2026.11.20.119";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -3665,7 +3665,7 @@ async function api(request, env, url, ctx = null) {
   // партнёра. Остаются доступны чтение (GET) и личное: настройки, часовой
   // пояс, экспорт, выход. Свежая пара без партнёра (awaiting_return=0)
   // ведёт себя как раньше.
-  const SOLO_ALLOWED_PATHS = new Set(["/api/pair/leave", "/api/settings", "/api/pair/timezone", "/api/data/export"]);
+  const SOLO_ALLOWED_PATHS = new Set(["/api/pair/leave", "/api/settings", "/api/pair/timezone", "/api/data/export", "/api/data/import"]);
   if (Number(pair.awaiting_return) === 1 && request.method !== "GET" && !SOLO_ALLOWED_PATHS.has(url.pathname)) {
     throw new HttpError(403, "Партнёр вышел из пространства — изменения будут доступны после его возвращения", "PARTNER_ABSENT");
   }
@@ -3765,9 +3765,10 @@ async function api(request, env, url, ctx = null) {
       .bind(...binds, now(), pair.id).run();
     return json(await state(env, user.tg_id));
   }
-  // Экспорт данных: бот запрашивающему партнёру высылается один TXT-файл —
-  // человекочитаемый документ с выбранными разделами. Личные даты партнёра
-  // не включаются — фильтры как в UI.
+  // Экспорт данных: бот запрашивающему партнёру высылается один JSON-файл —
+  // машиночитаемый конверт с выбранными разделами, его же читает импорт
+  // (buildExportEnvelope). Личные даты партнёра не включаются — фильтры
+  // как в UI.
   async function exportData() {
     await rateLimit(env, `export:${user.tg_id}`, 5, 3600);
     const sections = exportSections(body);
@@ -3787,7 +3788,7 @@ async function api(request, env, url, ctx = null) {
     const form = new FormData();
     form.append("chat_id", String(user.tg_id));
     form.append("caption", `Экспорт данных — ${summary}.`);
-    form.append("document", new Blob([exportTxtDoc(APP_VERSION, payload)], { type: "text/plain;charset=utf-8" }), "Экспорт.txt");
+    form.append("document", new Blob([JSON.stringify(buildExportEnvelope(APP_VERSION, payload))], { type: "application/json" }), "Экспорт.json");
     try {
       await telegramForm(env, "sendDocument", form);
     } catch (error) {
@@ -3797,8 +3798,408 @@ async function api(request, env, url, ctx = null) {
     }
     return json({ ok: true, counts });
   }
+  // Импорт данных: читает JSON-конверт экспорта (buildExportEnvelope),
+  // валидирует каждую строку и вставляет выбранные пользователем секции.
+  // Два прохода: сначала валидация всего файла (ничего не пишется) — битая
+  // строка отменяет импорт целиком; затем вставка. Дубли по уникальным
+  // индексам (кино, Фло) не роняют импорт — уходят в skipped. Автором
+  // импортированных записей становится текущий пользователь; настройки
+  // записей (приватность, время, напоминания, точки просмотра) берутся
+  // из файла.
+  async function importData() {
+    await rateLimit(env, `import:${user.tg_id}`, 5, 3600);
+    const raw = body?.sections;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new HttpError(400, "В файле нет разделов для импорта", "INVALID_IMPORT");
+    }
+    const requested = {};
+    for (const [key, rows] of Object.entries(raw)) {
+      if (!EXPORT_SECTIONS[key]) throw new HttpError(400, "Неизвестный раздел импорта", "INVALID_IMPORT");
+      if (!Array.isArray(rows)) throw new HttpError(400, "Некорректный раздел импорта", "INVALID_IMPORT");
+      if (rows.length) requested[key] = rows;
+    }
+    if (!Object.keys(requested).length) {
+      throw new HttpError(400, "В файле нет записей для импорта", "INVALID_IMPORT");
+    }
+    // Фло — личные данные владелицы, как в экспорте.
+    if (requested.cycle && user.gender !== "female") {
+      throw new HttpError(403, "Фло доступен только владелице календаря", "FORBIDDEN");
+    }
+
+    // --- чтение строки файла: строго и с понятными ошибками ---
+    const rowText = (row, key, { label = "Значение", max = 2048, required = false } = {}) => {
+      const value = String(row?.[key] ?? "").trim();
+      if (!value) {
+        if (required) throw new HttpError(400, `Файл повреждён: не заполнено «${label}»`, "INVALID_ROW");
+        return null;
+      }
+      if ([...value].length > max) {
+        throw new HttpError(400, `Файл повреждён: «${label}» длиннее ${max} символов`, "INVALID_ROW");
+      }
+      return value;
+    };
+    const rowBool = (row, key) => (row?.[key] === true || row?.[key] === 1 ? 1 : 0);
+    const rowDate = (row, key, { label = "Дата", required = false } = {}) => {
+      const value = String(row?.[key] ?? "").trim();
+      if (!value) {
+        if (required) throw new HttpError(400, `Файл повреждён: не заполнено «${label}»`, "INVALID_ROW");
+        return null;
+      }
+      if (!validDate(value)) throw new HttpError(400, `Файл повреждён: «${label}» — не дата`, "INVALID_ROW");
+      return value;
+    };
+    const rowStamp = (row) => {
+      const value = Number(row?.created_at);
+      return Number.isInteger(value) && value > 0 ? value : now();
+    };
+    const rowInt = (row, key, { label, min, max }) => {
+      const value = row?.[key];
+      if (value === undefined || value === null || value === "") return null;
+      const num = Number(value);
+      if (!Number.isFinite(num) || num < min || num > max) {
+        throw new HttpError(400, `Файл повреждён: «${label}» вне диапазона`, "INVALID_ROW");
+      }
+      return Math.round(num);
+    };
+    const rowReal = (row, key, { label, min, max }) => {
+      const value = row?.[key];
+      if (value === undefined || value === null || value === "") return null;
+      const num = Number(value);
+      if (!Number.isFinite(num) || num < min || num > max) {
+        throw new HttpError(400, `Файл повреждён: «${label}» вне диапазона`, "INVALID_ROW");
+      }
+      return num;
+    };
+    const rowOneOf = (row, key, allowed, { label }) => {
+      const value = String(row?.[key] ?? "").trim();
+      if (!value) return null;
+      if (!allowed.includes(value)) throw new HttpError(400, `Файл повреждён: «${label}»`, "INVALID_ROW");
+      return value;
+    };
+    const rowJson = (row, key, fallback) => {
+      const value = row?.[key];
+      if (value === undefined || value === null || value === "") return fallback;
+      try {
+        return JSON.stringify(typeof value === "string" ? JSON.parse(value) : value ?? JSON.parse(fallback));
+      } catch {
+        throw new HttpError(400, "Файл повреждён: битая структура в разделе Фло", "INVALID_ROW");
+      }
+    };
+    const IMP_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+    const rowTimes = (row, key) => {
+      const value = row?.[key];
+      if (value === undefined || value === null || value === "") return null;
+      const parts = String(value).split(",").map((t) => t.trim()).filter(Boolean);
+      for (const part of parts) {
+        if (!IMP_TIME_RE.test(part)) throw new HttpError(400, "Файл повреждён: время приёма — ЧЧ:ММ", "INVALID_ROW");
+      }
+      return parts.join(",") || null;
+    };
+    const rowLimit = (rows) => {
+      if (rows.length > 10000) throw new HttpError(400, "Раздел файла слишком велик", "INVALID_IMPORT");
+    };
+
+    // --- проход 1: валидация, ничего не пишется ---
+    const work = [];
+    if (requested.plans) {
+      rowLimit(requested.plans);
+      for (const row of requested.plans) {
+        const title = rowText(row, "title", { label: "Название плана", max: 180, required: true });
+        const day = rowDate(row, "day");
+        const time = optionalTime(row?.time ?? null);
+        const monthly = rowBool(row, "monthly");
+        const yearly = monthly ? 0 : rowBool(row, "yearly");
+        if ((monthly || yearly) && !day) throw new HttpError(400, "Файл повреждён: повтор плана без даты", "INVALID_ROW");
+        work.push({
+          section: "plans",
+          // Порядок binds = порядок колонок SQL: (pair_id,title,day,time,
+          // monthly,yearly,is_private,created_by,created_at).
+          sql: "INSERT INTO tasks(pair_id,title,day,time,monthly,yearly,is_private,created_by,created_at,status) VALUES(?,?,?,?,?,?,?,?,?,'open')",
+          binds: [pair.id, title, day, time, monthly, yearly, rowBool(row, "is_private"), user.tg_id, rowStamp(row)]
+        });
+      }
+    }
+    if (requested.movies) {
+      rowLimit(requested.movies);
+      for (const row of requested.movies) {
+        const imdbId = rowText(row, "imdb_id", { label: "ID фильма", max: 32, required: true });
+        if (!/^tt\d+$/.test(imdbId)) throw new HttpError(400, "Файл повреждён: некорректный ID фильма", "INVALID_ROW");
+        const title = rowText(row, "title", { label: "Название фильма", max: 200, required: true }) || "Без названия";
+        const year = rowInt(row, "year", { label: "Год фильма", min: 1880, max: new Date().getUTCFullYear() + 1 });
+        const kind = rowOneOf(row, "kind", ["movie", "series"], { label: "Тип фильма" }) || "movie";
+        const rating = rowReal(row, "rating", { label: "Рейтинг", min: 0, max: 10 });
+        const ratingSource = rowOneOf(row, "rating_source", ["imdb", "tmdb"], { label: "Источник оценки" });
+        const runtime = rowInt(row, "runtime", { label: "Длительность", min: 0, max: 100000 });
+        const seasons = rowInt(row, "seasons", { label: "Сезоны", min: 0, max: 500 });
+        const episodes = rowInt(row, "episodes", { label: "Эпизоды", min: 0, max: 10000 });
+        const url = rowText(row, "url", { label: "Ссылка фильма", max: 2048 });
+        const resume = rowText(row, "resume_position", { label: "Точка просмотра", max: 60 });
+        work.push({
+          section: "movies", ignore: true,
+          sql: "INSERT OR IGNORE INTO movies(pair_id,created_by,imdb_id,title,year,kind,rating,rating_source,runtime,seasons,episodes,url,resume_position,watched,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+          binds: [pair.id, user.tg_id, imdbId, title, year, kind, rating, ratingSource, runtime, seasons, episodes, url, resume, rowStamp(row)]
+        });
+      }
+    }
+    for (const sectionKey of ["dates", "birthdays"]) {
+      if (!requested[sectionKey]) continue;
+      rowLimit(requested[sectionKey]);
+      const kind = sectionKey === "birthdays" ? "birthday" : "date";
+      for (const row of requested[sectionKey]) {
+        const title = rowText(row, "title", { label: "Название даты", max: 120, required: true });
+        const day = rowDate(row, "day", { label: "Дата", required: true });
+        work.push({
+          section: sectionKey,
+          sql: "INSERT INTO dates(pair_id,title,day,time,recurs,monthly,kind,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+          binds: [pair.id, title, day, optionalTime(row?.time ?? null), rowBool(row, "recurs"), rowBool(row, "monthly"), kind, rowBool(row, "is_private"), user.tg_id, rowStamp(row)]
+        });
+      }
+    }
+    for (const sectionKey of ["places", "trips"]) {
+      if (!requested[sectionKey]) continue;
+      rowLimit(requested[sectionKey]);
+      for (const row of requested[sectionKey]) {
+        const title = rowText(row, "title", { label: "Название", max: 120, required: true });
+        const note = rowText(row, "note", { label: "Заметка", max: 600 });
+        const url = sectionKey === "places" ? rowText(row, "url", { label: "Ссылка места", max: 2048 }) : null;
+        const visited = rowBool(row, "visited");
+        const visitedAt = visited ? rowStamp({ created_at: row?.visited_at }) : null;
+        work.push({
+          section: sectionKey,
+          sql: sectionKey === "places"
+            ? "INSERT INTO places(pair_id,created_by,title,note,url,visited,visited_at,visited_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)"
+            : "INSERT INTO trips(pair_id,created_by,title,note,visited,visited_at,visited_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+          binds: sectionKey === "places"
+            ? [pair.id, user.tg_id, title, note, url, visited, visitedAt, visited ? user.tg_id : null, rowStamp(row)]
+            : [pair.id, user.tg_id, title, note, visited, visitedAt, visited ? user.tg_id : null, rowStamp(row)]
+        });
+      }
+    }
+    if (requested.memories) {
+      rowLimit(requested.memories);
+      for (const row of requested.memories) {
+        const bodyText = rowText(row, "body", { label: "Текст записи", max: 2000, required: true });
+        const title = rowText(row, "title", { label: "Заголовок записи", max: 180 });
+        const art = validateAsciiArt(row?.ascii_art ?? null);
+        const day = rowDate(row, "day");
+        work.push({
+          section: "memories",
+          sql: "INSERT INTO memories(pair_id,author_id,title,body,ascii_art,day,created_at) VALUES(?,?,?,?,?,?,?)",
+          binds: [pair.id, user.tg_id, title, bodyText, art, day, rowStamp(row)]
+        });
+      }
+    }
+    if (requested.quotes) {
+      rowLimit(requested.quotes);
+      for (const row of requested.quotes) {
+        const text = rowText(row, "body", { label: "Текст цитаты", max: 600, required: true });
+        const source = rowText(row, "source", { label: "Кто сказал", max: 120 });
+        work.push({
+          section: "quotes",
+          sql: "INSERT INTO quotes(pair_id,author_id,body,source,created_at) VALUES(?,?,?,?,?)",
+          binds: [pair.id, user.tg_id, text, source, rowStamp(row)]
+        });
+      }
+    }
+    if (requested.wishes) {
+      rowLimit(requested.wishes);
+      for (const row of requested.wishes) {
+        const text = rowText(row, "body", { label: "Желание", max: 300, required: true });
+        const url = wishUrl(row?.url ?? null) || null;
+        const comment = rowText(row, "comment", { label: "Уточнение желания", max: 500 });
+        work.push({
+          section: "wishes",
+          sql: "INSERT INTO wishes(pair_id,owner_id,body,url,comment,created_at) VALUES(?,?,?,?,?,?)",
+          binds: [pair.id, user.tg_id, text, url, comment, rowStamp(row)]
+        });
+      }
+    }
+    if (requested.contacts) {
+      rowLimit(requested.contacts);
+      for (const row of requested.contacts) {
+        const name = rowText(row, "name", { label: "Имя контакта", max: 120, required: true });
+        const surname = rowText(row, "surname", { label: "Фамилия контакта", max: 120 });
+        const comment = rowText(row, "comment", { label: "Комментарий контакта", max: 1000 });
+        const phones = String(row?.phones ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+        for (const phone of phones) {
+          if ([...phone].length > 40) throw new HttpError(400, "Файл повреждён: телефон длиннее 40 символов", "INVALID_ROW");
+        }
+        work.push({
+          section: "contacts", kind: "contact", phones,
+          sql: "INSERT INTO contacts(pair_id,owner_id,name,surname,comment,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+          binds: [pair.id, user.tg_id, name, surname, comment, rowStamp(row), now()]
+        });
+      }
+    }
+    if (requested.health) {
+      rowLimit(requested.health);
+      for (const row of requested.health) {
+        const name = rowText(row, "name", { label: "Название препарата", max: 120, required: true });
+        const start = rowDate(row, "start_date", { label: "Начало курса", required: true });
+        const remind = rowBool(row, "remind_enabled");
+        const remindTime = rowTimes(row, "remind_time");
+        if (remind && !remindTime) throw new HttpError(400, "Файл повреждён: напоминание без времени приёма", "INVALID_ROW");
+        const stamp = rowStamp(row);
+        work.push({
+          section: "health",
+          sql: "INSERT INTO health_meds(tg_id,name,form,dosage,schedule,remind_enabled,remind_time,start_date,end_date,status,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          binds: [
+            user.tg_id, name,
+            rowText(row, "form", { label: "Форма препарата", max: 40 }),
+            rowText(row, "dosage", { label: "Доза препарата", max: 60 }),
+            rowText(row, "schedule", { label: "Схема приёма", max: 60 }),
+            remind, remindTime, start,
+            rowDate(row, "end_date"),
+            rowOneOf(row, "status", ["active", "paused", "completed"], { label: "Статус препарата" }) || "active",
+            rowText(row, "note", { label: "Комментарий препарата", max: 1000 }),
+            stamp, stamp
+          ]
+        });
+      }
+    }
+    if (requested.cycle) {
+      rowLimit(requested.cycle);
+      for (const row of requested.cycle) {
+        const kind = String(row?.kind ?? "");
+        const stamp = rowStamp(row);
+        if (kind === "period") {
+          const start = rowDate(row, "start_date", { label: "Начало месячных", required: true });
+          work.push({
+            section: "cycle", ignore: true,
+            sql: "INSERT OR IGNORE INTO cycle_periods(tg_id,start_date,end_date,end_unknown,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            binds: [user.tg_id, start, rowDate(row, "end_date"), rowBool(row, "end_unknown"), stamp, stamp]
+          });
+        } else if (kind === "log") {
+          const date = rowDate(row, "date", { label: "День дневника Фло", required: true });
+          work.push({
+            section: "cycle", ignore: true,
+            sql: "INSERT OR IGNORE INTO cycle_logs(tg_id,date,flow,clots,energy,mood,symptoms,symptoms_clear,note,sex,sex_count,leakage,pain_score,pain_locations,life_impact,mucus,sleep_hours,sleep_quality,stress,sick,travel,weight_kg,bleeding_details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            binds: [
+              user.tg_id, date,
+              rowText(row, "flow", { label: "Интенсивность", max: 20 }),
+              rowBool(row, "clots"),
+              rowText(row, "energy", { label: "Энергия", max: 20 }),
+              rowText(row, "mood", { label: "Настроение", max: 20 }),
+              rowJson(row, "symptoms", "[]"), rowBool(row, "symptoms_clear"),
+              rowText(row, "note", { label: "Заметка Фло", max: 2000 }),
+              rowText(row, "sex", { label: "Секс", max: 20 }),
+              rowInt(row, "sex_count", { label: "Число контактов", min: 0, max: 100 }) ?? 1,
+              rowText(row, "leakage", { label: "Протекание", max: 20 }),
+              rowInt(row, "pain_score", { label: "Боль", min: 0, max: 10 }),
+              rowJson(row, "pain_locations", "[]"),
+              rowText(row, "life_impact", { label: "Влияние на жизнь", max: 20 }),
+              rowJson(row, "mucus", "{}"),
+              rowReal(row, "sleep_hours", { label: "Сон", min: 0, max: 24 }),
+              rowText(row, "sleep_quality", { label: "Качество сна", max: 20 }),
+              rowText(row, "stress", { label: "Стресс", max: 20 }),
+              rowBool(row, "sick"), rowBool(row, "travel"),
+              rowReal(row, "weight_kg", { label: "Вес", min: 20, max: 400 }),
+              rowJson(row, "bleeding_details", "null"),
+              stamp, stamp
+            ]
+          });
+        } else if (kind === "measurement") {
+          const date = rowDate(row, "date", { label: "День измерения", required: true });
+          const mKind = rowText(row, "m_kind", { label: "Тип измерения", max: 20, required: true });
+          work.push({
+            section: "cycle", ignore: true,
+            sql: "INSERT OR IGNORE INTO cycle_measurements(tg_id,date,time,kind,value,unit,result,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            binds: [user.tg_id, date, rowText(row, "m_time", { label: "Время измерения", max: 20 }), mKind,
+              rowReal(row, "m_value", { label: "Значение измерения", min: 0, max: 1000 }),
+              rowText(row, "m_unit", { label: "Единица измерения", max: 8 }),
+              rowText(row, "m_result", { label: "Результат теста", max: 20 }),
+              rowText(row, "note", { label: "Заметка измерения", max: 2000 }),
+              stamp, stamp]
+          });
+        } else if (kind === "med") {
+          const name = rowText(row, "name", { label: "Название препарата Фло", max: 120, required: true });
+          const start = rowDate(row, "start_date", { label: "Начало курса Фло", required: true });
+          work.push({
+            section: "cycle", kind: "cycle_med", name,
+            sql: "INSERT INTO cycle_meds(tg_id,name,dosage,category,form,schedule,status,start_date,end_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            binds: [user.tg_id, name,
+              rowText(row, "dosage", { label: "Доза препарата Фло", max: 60 }),
+              rowText(row, "category", { label: "Категория препарата Фло", max: 20 }),
+              rowText(row, "form", { label: "Форма препарата Фло", max: 20 }),
+              rowText(row, "schedule", { label: "Приём препарата Фло", max: 60 }),
+              rowOneOf(row, "status", ["active", "paused", "completed"], { label: "Статус препарата Фло" }) || "active",
+              start, rowDate(row, "end_date"), stamp, stamp]
+          });
+        } else if (kind === "med_log") {
+          const date = rowDate(row, "date", { label: "День приёма Фло", required: true });
+          const medName = rowText(row, "med_name", { label: "Препарат приёма Фло", max: 120, required: true });
+          work.push({
+            section: "cycle", kind: "cycle_med_log", medName, ignore: true,
+            sql: "INSERT OR IGNORE INTO cycle_med_logs(med_id,tg_id,date,time,status,dose_taken,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            binds: [null, user.tg_id, date,
+              rowText(row, "time", { label: "Время приёма Фло", max: 20 }),
+              rowOneOf(row, "status", ["taken", "skipped"], { label: "Статус приёма Фло" }) || "taken",
+              rowText(row, "dose_taken", { label: "Фактическая доза", max: 40 }),
+              rowText(row, "note", { label: "Заметка приёма Фло", max: 2000 }),
+              stamp, stamp]
+          });
+        } else {
+          throw new HttpError(400, "Файл повреждён: неизвестная запись Фло", "INVALID_ROW");
+        }
+      }
+    }
+
+    // --- проход 2: вставка ---
+    const counts = {};
+    const skipped = {};
+    const cycleMedIds = new Map();
+    for (const item of work) {
+      if (item.kind === "contact") {
+        const result = await env.DB.prepare(item.sql).bind(...item.binds).run();
+        const contactId = result.meta?.last_row_id;
+        counts[item.section] = (counts[item.section] || 0) + 1;
+        for (const [i, phone] of item.phones.entries()) {
+          await env.DB.prepare("INSERT OR IGNORE INTO contact_phones(contact_id,phone,sort,created_at) VALUES(?,?,?,?)")
+            .bind(contactId, phone, i, item.binds[5]).run();
+        }
+        continue;
+      }
+      if (item.kind === "cycle_med") {
+        const result = await env.DB.prepare(item.sql).bind(...item.binds).run();
+        if (item.name) cycleMedIds.set(item.name, result.meta?.last_row_id);
+        counts[item.section] = (counts[item.section] || 0) + 1;
+        continue;
+      }
+      if (item.kind === "cycle_med_log") {
+        let medId = cycleMedIds.get(item.medName);
+        if (!medId) {
+          const found = await env.DB.prepare("SELECT id FROM cycle_meds WHERE tg_id=? AND name=?")
+            .bind(user.tg_id, item.medName).first();
+          medId = found?.id ?? null;
+        }
+        if (!medId) {
+          // Приёма без препарата в файле нет (экспорт не отдаёт такие) —
+          // считаем пропуском, а не ошибкой.
+          skipped[item.section] = (skipped[item.section] || 0) + 1;
+          continue;
+        }
+        const result = await env.DB.prepare(item.sql).bind(medId, ...item.binds.slice(1)).run();
+        if (!(result.meta?.changes > 0)) {
+          skipped[item.section] = (skipped[item.section] || 0) + 1;
+          continue;
+        }
+        counts[item.section] = (counts[item.section] || 0) + 1;
+        continue;
+      }
+      const result = await env.DB.prepare(item.sql).bind(...item.binds).run();
+      if (item.ignore && !(result.meta?.changes > 0)) {
+        skipped[item.section] = (skipped[item.section] || 0) + 1;
+        continue;
+      }
+      counts[item.section] = (counts[item.section] || 0) + 1;
+    }
+    return json({ ok: true, counts, skipped });
+  }
   if (request.method === "POST" && url.pathname === "/api/data/export") {
     return exportData();
+  }
+  if (request.method === "POST" && url.pathname === "/api/data/import") {
+    return importData();
   }
   if (request.method === "POST" && url.pathname === "/api/tasks") {
     validateSchema(body, { title: { type: "string", required: true, maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } });
@@ -5373,6 +5774,9 @@ const EXPORT_SECTIONS = {
   quotes: ["all", "mine"],
   wishes: ["all", "mine"],
   contacts: ["all", "mine"],
+  // Здоровье — личный журнал препаратов (PD-HEALTH-001): remind_enabled/
+  // remind_time едут в файл, чтобы импорт восстановил напоминания.
+  health: ["all"],
   // Фло — только владелица (проверка в exportData), состав один: «all».
   cycle: ["all"]
 };
@@ -5388,6 +5792,7 @@ const EXPORT_LABELS = {
   quotes: "цитаты",
   wishes: "желания",
   contacts: "контакты",
+  health: "здоровье (препараты)",
   cycle: "фло (трекер цикла)"
 };
 
@@ -5422,12 +5827,17 @@ const EXPORT_SQL = {
     FROM contacts c LEFT JOIN users u ON u.tg_id=c.owner_id
     WHERE c.pair_id=?${scope === "mine" ? " AND c.owner_id=?" : ""}
     ORDER BY c.name COLLATE NOCASE ASC, c.surname COLLATE NOCASE ASC, c.id ASC`,
+  // Здоровье: личные препараты запросившего целиком — курс, схема и
+  // напоминания (remind_enabled/remind_time), чтобы импорт их вернул.
+  health: () => `SELECT h.id,h.name,h.form,h.dosage,h.schedule,h.status,h.start_date,h.end_date,h.remind_enabled,h.remind_time,h.note,h.created_at FROM health_meds h
+    WHERE h.tg_id=? ORDER BY h.start_date ASC, h.id ASC`,
   // Фло: периоды и дневник одной лентой (kind различает строки). Данные
   // принадлежат tg_id владельца — пару в запросе нет, бинды [userId, userId].
   // Все ветки UNION ALL обязаны иметь одинаковый набор колонок в одном
   // порядке. Раньше measurement/med/med_log склеивались в extra через
   // '|' — символ из пользовательского текста ломал разбор. Теперь поля
-  // разделены, mapper получает их как есть.
+  // разделены, mapper получает их как есть. Дозировка препарата — отдельной
+  // колонкой med_dosage (склейка «имя (доза)» ломала импорт).
   cycle: () => `SELECT 'period' AS kind, p.start_date AS day, p.end_date,
       NULL AS flow, NULL AS clots, NULL AS energy, NULL AS mood, NULL AS symptoms, NULL AS symptoms_clear,
       NULL AS note, NULL AS sex, NULL AS sex_count, NULL AS leakage, NULL AS pain_score, NULL AS pain_locations,
@@ -5436,7 +5846,7 @@ const EXPORT_SQL = {
       p.end_unknown, NULL AS bleeding_details,
       NULL AS m_kind, NULL AS m_value, NULL AS m_unit, NULL AS m_result, NULL AS m_time,
       NULL AS category, NULL AS form, NULL AS schedule, NULL AS status,
-      NULL AS med_name, NULL AS med_time, NULL AS med_status, NULL AS dose_taken, p.created_at
+      NULL AS med_name, NULL AS med_time, NULL AS med_status, NULL AS dose_taken, p.created_at, NULL AS med_dosage
     FROM cycle_periods p WHERE p.tg_id=?
     UNION ALL
     SELECT 'log', l.date, NULL,
@@ -5446,7 +5856,7 @@ const EXPORT_SQL = {
       NULL, l.bleeding_details,
       NULL, NULL, NULL, NULL, NULL,
       NULL, NULL, NULL, NULL,
-      NULL, NULL, NULL, NULL, l.created_at
+      NULL, NULL, NULL, NULL, l.created_at, NULL AS med_dosage
     FROM cycle_logs l WHERE l.tg_id=?
     UNION ALL
     SELECT 'measurement', m.date, NULL,
@@ -5455,17 +5865,17 @@ const EXPORT_SQL = {
       NULL, NULL,
       m.kind, m.value, m.unit, m.result, m.time,
       NULL, NULL, NULL, NULL,
-      NULL, NULL, NULL, NULL, m.created_at
+      NULL, NULL, NULL, NULL, m.created_at, NULL AS med_dosage
     FROM cycle_measurements m WHERE m.tg_id=?
     UNION ALL
     SELECT 'med', md.start_date, md.end_date,
       NULL, NULL, NULL, NULL, NULL, NULL,
-      md.name || CASE WHEN md.dosage IS NOT NULL THEN ' (' || md.dosage || ')' ELSE '' END,
+      md.name,
       NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
       NULL, NULL,
       NULL, NULL, NULL, NULL, NULL,
       md.category, md.form, md.schedule, md.status,
-      NULL, NULL, NULL, NULL, md.created_at
+      NULL, NULL, NULL, NULL, md.created_at, md.dosage AS med_dosage
     FROM cycle_meds md WHERE md.tg_id=?
     UNION ALL
     SELECT 'med_log', ml.date, NULL,
@@ -5474,7 +5884,7 @@ const EXPORT_SQL = {
       NULL, NULL,
       NULL, NULL, NULL, NULL, NULL,
       NULL, NULL, NULL, NULL,
-      COALESCE(mm.name, ''), ml.time, ml.status, ml.dose_taken, ml.created_at
+      COALESCE(mm.name, ''), ml.time, ml.status, ml.dose_taken, ml.created_at, NULL AS med_dosage
     FROM cycle_med_logs ml LEFT JOIN cycle_meds mm ON mm.id=ml.med_id WHERE ml.tg_id=?
     ORDER BY day ASC`
 };
@@ -5486,6 +5896,8 @@ const EXPORT_SQL = {
 // рождения фильтр видимости стоит в обоих составах — биндятся всегда.
 function exportSectionBinds(key, scope, pairId, userId) {
   if (key === "movies") return [pairId];
+  // Здоровье — личные препараты запросившего: один плейсхолдер tg_id.
+  if (key === "health") return [userId];
   // У Фло пять плейсхолдеров tg_id (периоды + дневник + измерения +
   // препараты + факт приёма), пары в запросе нет.
   if (key === "cycle") return [userId, userId, userId, userId, userId];
@@ -5615,6 +6027,21 @@ const EXPORT_ROW_MAPPERS = {
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   }),
+  // Здоровье: напоминания — часть записи, импорт обязан их восстановить.
+  health: (row) => ({
+    id: row.id,
+    name: clean(row.name) || "",
+    form: clean(row.form) || null,
+    dosage: clean(row.dosage) || null,
+    schedule: clean(row.schedule) || null,
+    status: clean(row.status) || "active",
+    start_date: row.start_date,
+    end_date: row.end_date || null,
+    remind_enabled: Number(row.remind_enabled) === 1,
+    remind_time: clean(row.remind_time) || null,
+    note: clean(row.note) || null,
+    created_at: row.created_at
+  }),
   // Каждая ветка UNION ALL сохраняет свой kind: сводить всё к "log"
   // нельзя — measurement/med/med_log потеряли бы поля до рендера TXT.
   cycle: (row) => {
@@ -5636,6 +6063,7 @@ const EXPORT_ROW_MAPPERS = {
     if (row.kind === "med") {
       return {
         kind: "med", start_date: row.day, end_date: row.end_date || null, name: clean(row.note) || "",
+        dosage: clean(row.med_dosage) || null,
         category: row.category || null, form: row.form || null, schedule: row.schedule || null,
         status: row.status || null, created_at: row.created_at
       };
@@ -5663,241 +6091,29 @@ const EXPORT_ROW_MAPPERS = {
 };
 
 // ------------------------------------------------------------------
-// Рендер TXT: каждая выбранная секция — заголовок с количеством записей,
-// далее нумерованные записи. Первая строка записи — заголовок (или сам
-// текст для дневника/цитат/желаний), дальше строки «Метка: значение»,
-// пустые поля пропускаются, многострочные значения печатаются с отступом.
+// Файл экспорта — машиночитаемый JSON-конверт (импорт читает его же).
+// «Специальная валидация»: app/kind/schema позволяют клиенту сразу
+// отличить файл DuoPlan от любого другого JSON, version — версия,
+// которой создан файл; строки секций — нормализованные объекты
+// EXPORT_ROW_MAPPERS со всеми настройками записей (напоминания,
+// приватность, точки просмотра).
 // ------------------------------------------------------------------
+const EXPORT_FILE_SCHEMA = 1;
 
-// Как formatDay в приложении: ISO-дата → дд.мм.гггг, не ISO — как есть.
-function exportTxtDay(value) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value ?? ""));
-  return m ? `${m[3]}.${m[2]}.${m[1]}` : String(value ?? "");
-}
-
-// unix-секунды → дд.мм.гггг (дата берётся в UTC — как и раньше, чтобы
-// выгрузка не зависела от того, откуда её открыли; время в TXT не печатаем,
-// как и в карточках приложения).
-function exportTxtTime(unix) {
-  if (!unix) return null;
-  return exportTxtDay(new Date(unix * 1000).toISOString().slice(0, 10));
-}
-
-// Главная строка и поля каждой записи. Поля — пары [метка, значение].
-const EXPORT_TXT_ROWS = {
-  plans: (row) => ({
-    head: row.title,
-    fields: [
-      ["Когда", [exportTxtDay(row.day), row.time].filter(Boolean).join(" ")],
-      ["Повтор", row.monthly ? "ежемесячный" : row.yearly ? "ежегодный" : null],
-      ["Личный", row.is_private ? "да" : null],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  movies: (row) => ({
-    head: row.title,
-    fields: [
-      ["Год", row.year],
-      ["Тип", row.kind === "series" ? "сериал" : "фильм"],
-      ["Рейтинг", row.rating ? `${row.rating} (${row.rating_source === "tmdb" ? "TMDB" : "IMDb"})` : null],
-      ["RAofP", row.pair_rating],
-      ["Длительность", row.runtime ? `${row.runtime} мин` : null],
-      ["Сезоны", row.seasons],
-      ["Эпизоды", row.episodes],
-      ["Ссылка", row.url],
-      ["Остановились на", row.resume_position],
-      ["Группа", row.group_title],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  dates: (row) => ({
-    head: row.title,
-    fields: [
-      ["День", [exportTxtDay(row.day), row.time].filter(Boolean).join(" ")],
-      ["Повторяется", row.recurs ? "да" : null],
-      ["Ежемесячная", row.monthly ? "да" : null],
-      ["Личная", row.is_private ? "да" : null],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  // Дни рождения рендерятся той же формой записи, что и значимые даты:
-  // это одна таблица dates с разным kind (маппер строк общий — exportDateRow).
-  birthdays: (row) => EXPORT_TXT_ROWS.dates(row),
-  places: (row) => ({
-    head: row.title,
-    fields: [
-      ["Заметка", row.note],
-      ["Ссылка", row.url],
-      ["Посещено", row.visited ? (row.visited_at ? `да (${exportTxtTime(row.visited_at)})` : "да") : null],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  trips: (row) => ({
-    head: row.title,
-    fields: [
-      ["Заметка", row.note],
-      ["Съездили", row.visited ? (row.visited_at ? `да (${exportTxtTime(row.visited_at)})` : "да") : null],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  memories: (row) => ({
-    head: row.title || "(без заголовка)",
-    // ascii_art возвращается отдельным свойством: exportTxtRecord рисует его
-    // блоком без отступов и без trim — геометрия рисунка не должна меняться.
-    ascii_art: row.ascii_art || null,
-    fields: [
-      ["День", exportTxtDay(row.day)],
-      ["Текст", row.body],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  quotes: (row) => ({
-    head: row.body,
-    fields: [
-      ["Источник", row.source],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  wishes: (row) => ({
-    head: row.body,
-    fields: [
-      ["Уточнение", row.comment],
-      ["Ссылка", row.url],
-      ["Добавил", row.author],
-      ["Создан", exportTxtTime(row.created_at)]
-    ]
-  }),
-  contacts: (row) => ({
-    head: [row.name, row.surname].filter(Boolean).join(" "),
-    fields: [
-      ["Телефоны", row.phones],
-      ["Комментарий", row.comment],
-      ["Добавил", row.author]
-    ]
-  }),
-  // Фло: периоды и дневник в одной секции, kind разводит форму записи.
-  cycle: (row) => {
-    if (row.kind === "period") {
-      return {
-        head: `Месячные с ${exportTxtDay(row.start_date)}`,
-        fields: [["Конец", exportTxtDay(row.end_date) || (row.end_unknown ? "неизвестно" : null)], ["Создана", exportTxtTime(row.created_at)]]
-      };
-    }
-    if (row.kind === "measurement") {
-      const mKind = row.m_kind || "";
-      const label = mKind === "bbt" ? "Базальная температура" : "Тест на ЛГ";
-      const value = mKind === "bbt"
-        ? (row.m_value !== null && row.m_value !== undefined ? `${row.m_value}${row.m_unit === "F" ? "°F" : "°C"}` : null)
-        : (row.m_result ? ({ negative: "отрицательный", positive: "положительный", unclear: "неясно" })[row.m_result] || row.m_result : null);
-      return {
-        head: `${label} — ${exportTxtDay(row.date)}`,
-        fields: [["Время", row.m_time], ["Значение", value], ["Заметка", row.note], ["Записано", exportTxtTime(row.created_at)]]
-      };
-    }
-    if (row.kind === "med") {
-      const statusLabel = { active: "активен", completed: "завершён", paused: "приостановлен" }[row.status] || row.status;
-      return {
-        head: `Препарат: ${row.name}`,
-        fields: [
-          ["Категория", row.category ? ({ hormonal: "гормональный", contraceptive: "контрацепция", supplement: "БАД", other: "прочее" })[row.category] || row.category : null],
-          ["Форма", row.form ? ({ tablet: "таблетка", capsule: "капсула", injection: "инъекция", patch: "пластырь", iud: "спираль", other: "прочее" })[row.form] || row.form : null],
-          ["Приём", row.schedule],
-          ["Статус", statusLabel],
-          ["Окончание курса", exportTxtDay(row.end_date)],
-          ["Создан", exportTxtTime(row.created_at)]
-        ]
-      };
-    }
-    if (row.kind === "med_log") {
-      const statusLabel = row.status === "taken" ? "принят" : row.status === "skipped" ? "пропущен" : row.status;
-      return {
-        head: `${row.med_name || "Препарат"} — ${exportTxtDay(row.date)}`,
-        fields: [
-          ["Время", row.time],
-          ["Статус", statusLabel],
-          ["Фактическая доза", row.dose_taken],
-          ["Комментарий", row.note],
-          ["Записано", exportTxtTime(row.created_at)]
-        ]
-      };
-    }
-    return {
-        head: `День ${exportTxtDay(row.date)}`,
-        fields: [
-          ["Интенсивность", row.flow ? CYCLE_FLOW_LABELS[row.flow] || row.flow : null],
-          ["Смен в день", row.bleeding_details?.changes_per_day ?? null],
-          ["Пропитывание", row.bleeding_details?.saturation
-            ? ({ low: "слабое", medium: "среднее", high: "сильное" })[row.bleeding_details.saturation] || row.bleeding_details.saturation
-            : null],
-          ["Ночная смена", row.bleeding_details?.night_change ? "отмечено" : null],
-          ["Сгустки", row.clots ? "отмечены" : null],
-          ["Энергия", row.energy ? CYCLE_ENERGY_LABELS[row.energy] || row.energy : null],
-          ["Настроение", row.mood ? CYCLE_MOOD_LABELS[row.mood] || row.mood : null],
-          ["Симптомы", row.symptoms?.length ? row.symptoms.map(code => CYCLE_SYMPTOM_LABELS[code] || code).join(", ") : null],
-          ["Симптомов не было", row.symptoms_clear ? "отмечено" : null],
-          ["Протекание", row.leakage ? CYCLE_LEAKAGE_LABELS[row.leakage] || row.leakage : null],
-          ["Боль", row.pain_score === null || row.pain_score === undefined ? null : `${row.pain_score}/10`],
-          ["Где болело", row.pain_locations ? (JSON.parse(row.pain_locations || "[]")).map(code => CYCLE_PAIN_LOCATION_LABELS[code] || code).join(", ") || null : null],
-          ["Влияние на жизнь", row.life_impact ? CYCLE_LIFE_IMPACT_LABELS[row.life_impact] || row.life_impact : null],
-          ["Слизь", row.mucus ? cycleMucusLabel(JSON.parse(row.mucus || "{}")) : null],
-          ["Сон", row.sleep_hours !== null && row.sleep_hours !== undefined ? `${row.sleep_hours} ч${row.sleep_quality ? `, ${CYCLE_SLEEP_QUALITY_LABELS[row.sleep_quality] || row.sleep_quality}` : ""}` : null],
-          ["Стресс", row.stress ? CYCLE_STRESS_LABELS[row.stress] || row.stress : null],
-          ["Болезнь/температура", row.sick ? "отмечено" : null],
-          ["Поездка/смена часового пояса", row.travel ? "отмечено" : null],
-          ["Вес", row.weight_kg !== null && row.weight_kg !== undefined ? `${row.weight_kg} кг` : null],
-          ["Секс", row.sex ? `${CYCLE_SEX_LABELS[row.sex] || row.sex}${(row.sex_count || 0) > 1 ? ` ×${row.sex_count}` : ""}` : null],
-          ["Заметка", row.note],
-          ["Записан", exportTxtTime(row.created_at)]
-        ]
-      };
-  }
-};
-
-// Строки одной записи: номер и главная строка (продолжения — с отступом),
-// затем поля «Метка: значение» (пустые пропускаются). Сигнатура без
-// деструктуризации — extractBraced в тестах берёт первую «{» после имени.
-function exportTxtRecord(n, record) {
-  const { head, fields } = record;
-  const headLines = String(head ?? "").split("\n");
-  const lines = [`${n}. ${headLines[0]}`.trimEnd()];
-  for (const chunk of headLines.slice(1)) lines.push(`   ${chunk}`);
-  // ASCII-рисунок — отдельным блоком до полей: строки выводятся как есть,
-  // без префиксов, отступов и trim (завершающие пробелы значимы).
-  if (record.ascii_art) {
-    lines.push("   ASCII-изображение:");
-    for (const line of String(record.ascii_art).split("\n")) lines.push(line);
-  }
-  for (const [label, value] of fields) {
-    if (value === null || value === undefined || value === "") continue;
-    for (const [i, line] of String(value).split("\n").entries()) {
-      lines.push(i === 0 ? `   ${label}: ${line}` : `       ${line}`);
-    }
-  }
-  return lines.join("\n");
-}
-
-// Весь документ: шапка + секции в порядке EXPORT_LABELS (пустые секции не
-// печатаются — их количества и так видны в подписи к файлу).
-function exportTxtDoc(version, payload) {
-  const parts = [
-    "Общий дневник — экспорт данных",
-    `Дата выгрузки: ${exportTxtTime(Math.floor(Date.now() / 1000))}`,
-    `Версия: ${version}`
-  ];
-  for (const [key, label] of Object.entries(EXPORT_LABELS)) {
+function buildExportEnvelope(version, payload) {
+  const sections = {};
+  for (const key of Object.keys(EXPORT_LABELS)) {
     const rows = payload[key] || [];
-    if (!rows.length) continue;
-    parts.push("", `${label[0].toUpperCase()}${label.slice(1)} — ${rows.length}`, "");
-    parts.push(rows.map((row, i) => exportTxtRecord(i + 1, EXPORT_TXT_ROWS[key](row))).join("\n\n"));
+    if (rows.length) sections[key] = rows;
   }
-  return `${parts.join("\n")}\n`;
+  return {
+    app: "duoplan",
+    kind: "duoplan-export",
+    schema: EXPORT_FILE_SCHEMA,
+    version,
+    exported_at: Math.floor(Date.now() / 1000),
+    sections
+  };
 }
 
 // Отправка файла: multipart/form-data — fetch сам ставит boundary, поэтому

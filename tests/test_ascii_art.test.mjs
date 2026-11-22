@@ -296,11 +296,9 @@ test("state() и ARCHIVE_QUERIES отдают m.ascii_art", () => {
   ok(arch.includes("m.ascii_art"), "ARCHIVE_QUERIES.memories без m.ascii_art");
 });
 
-test("экспорт memories: SELECT и мапперы включают ascii_art", () => {
+test("экспорт memories: SELECT и маппер включают ascii_art", () => {
   ok(source.includes("m.ascii_art"), "export SQL без ascii_art");
   ok(source.includes("ascii_art: row.ascii_art ?? null"), "exportMemoryRow без ascii_art");
-  ok(source.includes("ascii_art: row.ascii_art || null"), "EXPORT_TXT_ROWS.memories без ascii_art");
-  ok(source.includes("ASCII-изображение:"), "exportTxtRecord без блока ASCII");
 });
 
 test("ensureSchema: memories имеет ascii_art и ALTER-список", () => {
@@ -308,40 +306,32 @@ test("ensureSchema: memories имеет ascii_art и ALTER-список", () => 
   ok(source.includes('["memories", "ascii_art", "TEXT"]'), "ALTER-список без ascii_art");
 });
 
-// ------------------------- TXT-экспорт: блок ASCII без искажений -------------------------
-
-const buildTxt = new Function(
+// ------------------------- Экспорт: ascii_art без искажений -------------------------
+// В JSON-файле экспорта ascii_art — обычное поле строки: важно, что текст
+// рисунка не обрезается и не нормализуется; геометрию держат пробелы строк.
+const buildMappers = new Function(
   [
     extractLine("const clean = "),
-    extractBraced("function exportTxtDay"),
-    extractBraced("function exportTxtTime"),
-    extractBraced("const EXPORT_TXT_ROWS = {"),
-    extractBraced("function exportTxtRecord"),
-    "return { EXPORT_TXT_ROWS, exportTxtRecord };"
+    extractBraced("function exportMemoryRow"),
+    extractBraced("function exportDateRow"),
+    extractBraced("const EXPORT_ROW_MAPPERS = {"),
+    "return { EXPORT_ROW_MAPPERS };"
   ].join("\n")
 )();
 
-test("TXT-экспорт: ascii_art отдельным блоком, пробелы строк сохранены", () => {
+test("экспорт: ascii_art строки рисунка сохранены как есть", () => {
   const art = "  @#  \n..   \n#####  ";
-  const rec = buildTxt.EXPORT_TXT_ROWS.memories({
+  const row = buildMappers.EXPORT_ROW_MAPPERS.memories({
     title: "Вечер", body: "Текст", day: "2026-11-18", author: "Аня",
     created_at: 1760000000, ascii_art: art
   });
-  equal(rec.ascii_art, art);
-  const txt = buildTxt.exportTxtRecord(1, rec);
-  ok(txt.includes("ASCII-изображение:"), "нет заголовка блока");
-  // Строки рисунка идут без отступов и без trim — хвостовые пробелы целы.
-  ok(txt.includes("\n  @#  \n"), "ведущие/хвостовые пробелы потеряны");
-  ok(txt.includes("\n#####  \n"), "хвостовые пробелы последней строки потеряны");
-  ok(!txt.includes("   @#"), "строка рисунка не должна иметь отступ поля");
+  equal(row.ascii_art, art);
 });
 
-test("TXT-экспорт: запись без ascii_art не получает пустой блок", () => {
-  const rec = buildTxt.EXPORT_TXT_ROWS.memories({
+test("экспорт: запись без ascii_art — null в файле", () => {
+  const row = buildMappers.EXPORT_ROW_MAPPERS.memories({
     title: null, body: "Текст", day: "2026-11-18", author: "Аня",
     created_at: 1760000000, ascii_art: null
   });
-  equal(rec.ascii_art, null);
-  const txt = buildTxt.exportTxtRecord(1, rec);
-  equal(txt.includes("ASCII-изображение"), false);
+  equal(row.ascii_art, null);
 });
