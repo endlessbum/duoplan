@@ -58,6 +58,7 @@ const buildApi = new Function(
     extractBraced("function textField"),
     extractBraced("function validDate"),
     extractBraced("function optionalTime"),
+    extractBraced("function showYearsValue"),
     extractBraced("function validateAsciiArt"),
     extractBraced("function wishUrl"),
     extractBraced("function validTimeZone"),
@@ -165,7 +166,32 @@ test("импорт дат: kind секции принудителен (birthdays
   const inserts = insertsFor(env0, "dates");
   equal(inserts.length, 1, "дата не вставлена");
   ok(inserts[0].sql.includes("kind"), "kind не вставляется");
-  deepStrictEqual(inserts[0].args, [3, "День рождения Маши", "1996-12-03", null, 1, 0, "birthday", 0, 777, 5]);
+  deepStrictEqual(inserts[0].args, [3, "День рождения Маши", "1996-12-03", null, 1, 0, "birthday", 0, 777, 0, 5]);
+});
+
+test("импорт дат: show_years сохраняется только у ежегодных записей", async () => {
+  const row = (extra) => ({
+    id: 8, title: "Годовщина", day: "2020-11-20", time: null, recurs: true, monthly: false,
+    is_private: false, kind: "date", created_at: 5, ...extra
+  });
+  const annual = makeApiEnv({ pair: { id: 3, timezone: "Europe/Moscow" }, body: { sections: { dates: [row({ show_years: true })] } } });
+  await callImport(annual);
+  deepStrictEqual(insertsFor(annual, "dates")[0].args[9], 1);
+
+  const monthly = makeApiEnv({ pair: { id: 3, timezone: "Europe/Moscow" }, body: { sections: { dates: [row({ monthly: true, show_years: true })] } } });
+  await callImport(monthly);
+  deepStrictEqual(insertsFor(monthly, "dates")[0].args[9], 0);
+
+  const oneShot = makeApiEnv({ pair: { id: 3, timezone: "Europe/Moscow" }, body: { sections: { dates: [row({ recurs: false, show_years: true })] } } });
+  await callImport(oneShot);
+  deepStrictEqual(insertsFor(oneShot, "dates")[0].args[9], 0);
+
+  // Старый файл без поля и некорректное значение не включают флаг.
+  for (const legacy of [{}, { show_years: "true" }]) {
+    const env0 = makeApiEnv({ pair: { id: 3, timezone: "Europe/Moscow" }, body: { sections: { dates: [row(legacy)] } } });
+    await callImport(env0);
+    deepStrictEqual(insertsFor(env0, "dates")[0].args[9], 0);
+  }
 });
 
 test("импорт кино с точкой просмотра; дубль по imdb_id уходит в skipped", async () => {

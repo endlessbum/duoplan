@@ -253,14 +253,23 @@ test("миграция 0026: обе таблицы и индексы, соста
   deepStrictEqual(columns(migrationSql, "goal_items"), columns(workerSource, "goal_items"), "колонки goal_items расходятся");
 });
 
-// Атомарность создания цели: пункты — один batch, при его сбое цель
-// удаляется компенсирующе (репорт аудита 2026-11-06: сбой второго запроса
-// оставлял «осиротевшую» цель без пунктов).
-test("создание цели атомарно: компенсирующее удаление при сбое batch", () => {
-  ok(workerSource.includes('DELETE FROM goals WHERE id=? AND pair_id=?'),
-    "нет компенсирующего удаления цели при сбое batch пунктов");
-  ok(workerSource.includes("goal cleanup failed"), "сбой компенсации не логируется");
-  ok(/catch \(error\) \{[\s\S]*?DELETE FROM goals[\s\S]*?throw error;\s*\}/.test(
-    workerSource.slice(workerSource.indexOf("async function createGoal"), workerSource.indexOf('"/api/movies"'))
-  ), "компенсация не перехватывает исходную ошибку");
+// Атомарность создания цели (аудит 2026-11-23, REL-2B-01): цель и пункты —
+// один batch, D1 исполняет его единой транзакцией. Компенсирующее удаление
+// больше не нужно: аварийное завершение между INSERT'ами не оставляет
+// «невидимой» цели без пунктов, отдельной паузы между INSERT'ами нет.
+test("создание цели атомарно: цель и пункты одним batch", () => {
+  const createGoalSource = workerSource.slice(
+    workerSource.indexOf("async function createGoal"),
+    workerSource.indexOf('"/api/movies"')
+  );
+  ok(createGoalSource.includes("INSERT INTO goals(pair_id,created_by,title,is_private,created_at)"),
+    "нет INSERT цели");
+  ok(createGoalSource.includes("json_each(?)"),
+    "пункты не вставляются одним оператором batch'а");
+  ok(createGoalSource.includes("(SELECT last_insert_rowid())"),
+    "goal_id пунктов не связан с INSERT'ом цели");
+  ok(!createGoalSource.includes("DELETE FROM goals WHERE id=?"),
+    "компенсирующее удаление не должно вернуться");
+  ok(!createGoalSource.includes("goal cleanup failed"),
+    "компенсация больше не нужна — batch атомарен");
 });

@@ -42,6 +42,10 @@
   const dialogFields = document.getElementById("dialog-fields");
   const dialogSubmit = document.getElementById("dialog-submit");
   const dialogCancel = document.getElementById("dialog-cancel");
+  const dialogConfirm = document.getElementById("dialog-confirm");
+  const dialogConfirmText = document.getElementById("dialog-confirm-text");
+  const dialogConfirmStay = document.getElementById("dialog-confirm-stay");
+  const dialogConfirmLeave = document.getElementById("dialog-confirm-leave");
   const dialogError = document.getElementById("dialog-error");
   const toastEl = document.getElementById("toast");
 
@@ -206,6 +210,14 @@
     movieGroupSelection = null;
     movieGroupSuggest = null;
     movieGroupDraft = null;
+    // DP-ADD-002/003: телефонная книга и партнёрский Фло тоже живут в
+    // пространстве пары и кэшируются между рендерами. Без сброса после
+    // выхода/создания/входа в другую пару новые экраны показывали бы
+    // контакты и данные цикла прежней пары до ближайшего фонового тика.
+    contactsState = null;
+    contactsBusy = false;
+    floPartner = undefined;
+    floPartnerBusy = false;
   }
   // Активная запись и её завершённая копия живут в разных кэшах — чистим оба,
   // id в таблицах D1 независимы, поэтому по типу идём строго по своим ключам.
@@ -1189,6 +1201,12 @@
       const validDay = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
       if (target === "cycle_diary") {
         if (appState?.pair) {
+          // «Наша пара» — верхний раздел приложения: без смены currentTab
+          // первый render() показывал главную, а Фло оставался только в
+          // состоянии, и кнопка «Записать день» вела не на тот экран
+          // (DP-REPEAT-001). Нижняя навигация не трогается: как и при обычном
+          // открытии «Нашей пары» с главной, подсвеченной остаётся главная.
+          currentTab = "pair";
           pairView = "flo";
           floView = "today";
           if (validDay) floSelectedDate = validDay;
@@ -1201,9 +1219,9 @@
 
   function goBack() {
     // Открытое окно — первый «Назад» закрывает его, вкладка не трогается.
-    // Повторное нажатие уже работает как навигация: не главная → главная.
+    // Как и тап по фону: окно с изменениями сначала просит подтверждение.
     if (dialog?.open) {
-      dialog.close();
+      requestDialogClose();
       return;
     }
     if (currentTab !== "home") {
@@ -1301,11 +1319,18 @@
       if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
     }
     const now = new Date();
-    const startY = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
-    const startM = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit" }).format(now));
     const keyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
     const dayFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit", day: "2-digit" });
     const todayKey = keyFmt.format(now);
+    // BUG-3-02 (аудит 2026-11-23): дата начала — нижняя граница повтора:
+    // если она в будущем, поиск начинается с её месяца.
+    const sourceKey = /^\d{4}-\d{2}-\d{2}$/.test(String(day || "")) ? String(day) : "";
+    let startY = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+    let startM = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "2-digit" }).format(now));
+    if (sourceKey && sourceKey > todayKey) {
+      startY = Number(sourceKey.slice(0, 4));
+      startM = Number(sourceKey.slice(5, 7));
+    }
     for (let offset = 0; offset < 25; offset++) {
       const absolute = startM - 1 + offset;
       const year = startY + Math.floor(absolute / 12);
@@ -1315,7 +1340,8 @@
       const cm = Number(cp.find((q) => q.type === "month")?.value);
       const cd = Number(cp.find((q) => q.type === "day")?.value);
       if (cm !== month + 1 || cd !== dayOfMonth) continue;
-      if (keyFmt.format(candidate) >= todayKey) return candidate;
+      const key = keyFmt.format(candidate);
+      if (key >= todayKey && (!sourceKey || key >= sourceKey)) return candidate;
     }
     return null;
   }
@@ -1332,12 +1358,16 @@
     const tz = pairTimeZone();
     const today = zonedToday(tz);
     const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(new Date()));
+    // BUG-3-02 (аудит 2026-11-23): ежегодный повтор плана не начинается раньше
+    // его исходного года.
+    const sourceYear = Number(String(day || "").split("-")[0]);
+    const startYear = Number.isFinite(sourceYear) ? Math.max(currentYear, sourceYear) : currentYear;
     // PD-DATES-001: одна константа на все поверхности (планы и даты).
-    for (let year = currentYear; year < currentYear + RECURRENCE_YEARS; year++) {
+    for (let year = startYear; year < startYear + RECURRENCE_YEARS; year++) {
       const candidate = annualDate(day, year, time);
       if (candidate && candidate >= today) return candidate;
     }
-    return annualDate(day, currentYear, time);
+    return annualDate(day, startYear, time);
   }
 
   function planTarget(day, time, repeat = null) {
@@ -1419,8 +1449,12 @@
     if (!item.recurs) return dayTime(item.day, item.time, 12);
     const now = new Date();
     const currentYear = Number(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric" }).format(now));
+    // BUG-3-02 (аудит 2026-11-23): первое наступление повторяющейся даты —
+    // сама dates.day, поиск не начинается раньше исходного года.
+    const sourceYear = Number(String(item.day).split("-")[0]);
+    const startYear = Number.isFinite(sourceYear) ? Math.max(currentYear, sourceYear) : currentYear;
     // PD-DATES-001: единое окно с yearlyNext планов (RECURRENCE_YEARS).
-    for (let year = currentYear; year < currentYear + RECURRENCE_YEARS; year++) {
+    for (let year = startYear; year < startYear + RECURRENCE_YEARS; year++) {
       const candidate = annualDate(item.day, year, item.time);
       if (candidate && candidate >= today) return candidate;
     }
@@ -1673,7 +1707,7 @@
   }
 
   function renderHome() {
-    const { pair, user, daily, tasks = [], dates = [], memories = [] } = appState;
+    const { pair, user, daily, tasks = [], dates = [], birthdays = [], memories = [] } = appState;
     if (!pair?.user_b) {
       // PD-HOME-001: «партнёр вышел» и «партнёр ещё не входил» — разные
       // состояния. В резервированном пространстве код не для нового входа.
@@ -1704,11 +1738,20 @@
     const previewTasks = sortByTaskDeadline(tasks).slice(0, 3).map(taskItem).join("");
     // Порядок дат приходит отсортированным из /api/state — повторно не сортируем.
     // На главной каждая группа — не больше трёх карточек.
-    // Дни рождения и значимые даты — разные списки с разными заголовками,
-    // поэтому смешанный срез заменён двумя фильтрами.
-    const previewDates = dates.filter((item) => item.kind !== "birthday").slice(0, 3).map(dateItem).join("");
-    const previewBirthdays = dates.filter((item) => item.kind === "birthday").slice(0, 3).map(birthdayItem).join("");
+    // Дни рождения и значимые даты — разные серверные наборы (PD-DATES-001):
+    // `dates` содержит только kind='date', дни рождения приходят отдельным
+    // массивом `birthdays`. Фильтровать дни рождения из `dates` нельзя —
+    // их там нет (DP-HOME-002). Источники те же, что в datesOfKind().
+    const previewDates = dates.slice(0, 3).map(dateItem).join("");
+    const previewBirthdays = birthdays.slice(0, 3).map(birthdayItem).join("");
     const latestMemory = memories[0];
+
+    // «Все →» в заголовке превью — переход в полный раздел через общий
+    // делегированный обработчик go-tab (PD-HOME-001). data-view — сегмент
+    // внутри вкладки: каждая ссылка открывает именно свой (решение владельца
+    // 2026-11-23), а не тот сегмент, что был открыт в последний раз.
+    const allLink = (tab, view, label) =>
+      `<button class="head-link" type="button" data-action="go-tab" data-tab="${tab}" data-view="${view}" aria-label="${label}">Все →</button>`;
 
     return `
       ${renderTabHeader("home")}
@@ -1727,6 +1770,7 @@
       ${previewTasks ? `
       <div class="section-head-inline">
         <h3>Ближайшие планы</h3>
+        ${allLink("tasks", "plans", "Все планы")}
       </div>
       ${previewTasks}
       ` : ""}
@@ -1734,6 +1778,7 @@
       ${previewDates ? `
       <div class="section-head-inline">
         <h3>Значимые даты</h3>
+        ${allLink("dates", "dates", "Все значимые даты")}
       </div>
       ${previewDates}
       ` : ""}
@@ -1741,6 +1786,7 @@
       ${previewBirthdays ? `
       <div class="section-head-inline">
         <h3>Дни рождения</h3>
+        ${allLink("dates", "birthdays", "Все дни рождения")}
       </div>
       ${previewBirthdays}
       ` : ""}
@@ -1748,6 +1794,7 @@
       ${latestMemory ? `
         <div class="section-head-inline">
           <h3>Из дневника</h3>
+          ${allLink("memories", "memories", "Все записи дневника")}
         </div>
         ${memoryItem(latestMemory)}
       ` : ""}
@@ -1786,8 +1833,34 @@
     `;
   }
 
+  // PD-DATES-002 / BUG-3-01 (аудит 2026-11-23): серая пилюля количества лет на
+  // карточке — зеркало worker.yearsAtOccurrence. Считается на конкретное
+  // наступление (occurrenceDay — календарный день ближайшего наступления в
+  // поясе пары); ноль и «до годовщины» не показываются, 29 февраля попадает
+  // только на фактическое високосное наступление (nextOccurrence его и
+  // возвращает). Год рождения в дате карточки не раскрывается.
+  function yearsChip(item, occurrenceDay) {
+    if (Number(item?.show_years) !== 1) return "";
+    const day = String(item?.day || "");
+    const occ = String(occurrenceDay || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !/^\d{4}-\d{2}-\d{2}$/.test(occ)) return "";
+    const annual = item.kind === "birthday" || (Number(item.recurs) === 1 && Number(item.monthly) !== 1);
+    if (!annual) return "";
+    if (occ.slice(5) !== day.slice(5)) return "";
+    const years = Number(occ.slice(0, 4)) - Number(day.slice(0, 4));
+    if (!(years >= 1)) return "";
+    return `<span class="day-chip is-muted">${years} ${plural(years, "год", "года", "лет")}</span>`;
+  }
+
   function dateItem(item) {
     const next = nextOccurrence(item);
+    // PD-DATES-001: повторяющаяся дата ведёт в календарь на ближайшее
+    // наступление, а не на исходный год якоря (как карточка дня рождения).
+    // PD-DATES-002: тот же день показываем в серой пилюле; исходный год
+    // остаётся в БД и используется только для расчёта количества лет.
+    const calendarDay = (Number(item.monthly) === 1 || item.recurs) && next
+      ? (calendarKeyFromDate(next, pairTimeZone()) || item.day)
+      : item.day;
     // Бактеты «Сегодня/Завтра» у значимых дат — по календарю зрителя,
     // как в чипах планов; сам момент (next) якорится в поясе пары.
     const tz = viewerTimeZone();
@@ -1810,23 +1883,25 @@
     else if (days === 1) label = "Завтра";
     else label = `Через ${days} ${plural(days, "день", "дня", "дней")}`;
     const chip = label ? `<span class="day-chip ${chipClass}"${dataCountdown}>${esc(label)}</span>` : "";
-    const whenText = `<span>${esc(formatDay(item.day))}${item.time ? ` · ${esc(item.time)}` : ""}${Number(item.monthly) === 1 ? " · Ежемесячно" : item.recurs ? " · Ежегодно" : ""}</span>${viewerTimeHint(item.day, item.time) ? `<span class="day-chip is-muted">${esc(viewerTimeHint(item.day, item.time))}</span>` : ""}`;
-    // PD-DATES-001: повторяющаяся дата ведёт в календарь на ближайшее
-    // наступление, а не на исходный год якоря (как карточка дня рождения).
-    const calendarDay = (Number(item.monthly) === 1 || item.recurs) && next
-      ? (calendarKeyFromDate(next, pairTimeZone()) || item.day)
-      : item.day;
+    // Пилюля даты — только дата, без подписи «Отсчёт» (решение владельца
+    // 2026-11-23); «Таймер» со временем остаётся подписанным. Пилюля лет и
+    // подсказка пояса — рядом.
+    // BUG-3-03 (аудит 2026-11-23): подсказка считается по дате ближайшего
+    // наступления (calendarDay), а не по исходному году item.day — иначе
+    // смещение пары/зритателя берётся по правилам DST прошлого года. Один
+    // вызов: результат используется в шаблоне один раз.
+    const tzHint = viewerTimeHint(calendarDay, item.time);
+    const whenText = `<span class="day-chip is-muted">${item.time ? `Таймер · ${esc(formatBirthday(calendarDay))} · ${esc(item.time)}` : esc(formatBirthday(calendarDay))}</span>${yearsChip(item, calendarDay)}${tzHint ? `<span class="day-chip is-muted">${esc(tzHint)}</span>` : ""}`;
     return `
       <article class="card" role="button" tabindex="0" data-action="show-in-calendar" data-day="${esc(calendarDay)}" aria-label="Показать в календаре">
         <div class="item-row">
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
             <div class="item-meta">
-              <div class="item-when">
-                ${item.is_private ? `<div class="item-when-line"><span class="day-chip is-private">Личное</span>${whenText}</div>` : whenText}
-                <div class="item-when-row">
-                  ${chip}
-                </div>
+              <div class="item-when-line">
+                ${item.is_private ? `<span class="day-chip is-private">Личное</span>` : ""}
+                ${whenText}
+                ${chip}
               </div>
             </div>
           </div>
@@ -1934,9 +2009,9 @@
         <div class="ascii-toolbar">
           ${asciiPaletteSelectHtml(st.palette || "detail")}
           ${asciiQualitySelectHtml(st.quality || "high")}
-          <button type="button" class="btn ghost" data-ascii-action="ascii-apply">Применить</button>
-          <button type="button" class="btn ghost" data-ascii-action="ascii-repick">Другое фото</button>
-          <button type="button" class="btn ghost" data-ascii-action="ascii-cancel-preview">Отмена</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-apply">Применить</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-repick">Другое фото</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-cancel-preview">Отмена</button>
         </div>
         ${note}
         <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
@@ -1945,8 +2020,8 @@
       return hiddenFile + `
         <pre class="memory-ascii-peek" data-ascii-peek style="font-size:${asciiFontSizeFor(st.art)}px">${esc(peekOf(st.art))}</pre>
         <div class="ascii-toolbar">
-          <button type="button" class="btn ghost" data-ascii-action="ascii-replace">Заменить изображение</button>
-          <button type="button" class="btn ghost" data-ascii-action="ascii-delete">Удалить изображение</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-replace">Заменить изображение</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-delete">Удалить изображение</button>
         </div>
         ${note}
         <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
@@ -1955,8 +2030,8 @@
       return hiddenFile + `
         <p class="ascii-status is-warn">Изображение будет удалено при сохранении записи.</p>
         <div class="ascii-toolbar">
-          <button type="button" class="btn ghost" data-ascii-action="ascii-undo-delete">Вернуть изображение</button>
-          <button type="button" class="btn ghost" data-ascii-action="ascii-replace">Выбрать другое фото</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-undo-delete">Вернуть изображение</button>
+          <button type="button" class="secondary" data-ascii-action="ascii-replace">Выбрать другое фото</button>
         </div>
         ${note}
         <p class="ascii-status" data-ascii-status aria-live="polite"></p>`;
@@ -2216,10 +2291,56 @@
       if (el === except) return;
       el.classList.remove("is-open");
       const menu = el.querySelector(".item-menu");
-      if (menu) menu.hidden = true;
+      if (menu) {
+        menu.hidden = true;
+        // Направление и предел высоты считаются заново при каждом открытии.
+        el.classList.remove("is-up");
+        menu.style.maxHeight = "";
+      }
       const toggle = el.querySelector(".item-menu-toggle");
       if (toggle) toggle.setAttribute("aria-expanded", "false");
     });
+  }
+
+  // Направление всплывающего меню (решение владельца 2026-11-23): меню
+  // открывается в ту сторону, где для него есть место. По умолчанию — вниз;
+  // вверх — если снизу его не вместить (край экрана, нижняя навигация, граница
+  // прокручиваемого окна диалога). Место считают по факту: сначала меню
+  // показывают, затем измеряют и при необходимости переворачивают.
+  // Если меню не помещается никуда, оно остаётся на большей из сторон и
+  // получает прокрутку. Общее для всех «⋮» — в списках и на карточках в окнах.
+  function placeItemMenu(wrap) {
+    const menu = wrap.querySelector(".item-menu");
+    const toggle = wrap.querySelector(".item-menu-toggle");
+    if (!menu || !toggle) return;
+    const GAP = 4;    // как top/bottom: calc(100% + 4px) в стилях
+    const EDGE = 8;   // отступ от края видимой области
+    // Предыдущий замер не должен влиять на новый: высота — естественная.
+    wrap.classList.remove("is-up");
+    menu.style.maxHeight = "";
+    const anchor = toggle.getBoundingClientRect();
+    const height = menu.getBoundingClientRect().height;
+    // Видимые границы: окно и обрезающие предки (прокручиваемый диалог).
+    let top = EDGE;
+    let bottom = window.innerHeight - EDGE;
+    for (let el = wrap.parentElement; el && el !== document.body; el = el.parentElement) {
+      if (getComputedStyle(el).overflowY === "visible") continue;
+      const box = el.getBoundingClientRect();
+      top = Math.max(top, box.top + EDGE);
+      bottom = Math.min(bottom, box.bottom - EDGE);
+    }
+    // Вне окна диалога снизу место занимает нижняя навигация.
+    if (!wrap.closest("dialog")) {
+      const nav = document.querySelector(".bottom-nav");
+      const navTop = nav ? nav.getBoundingClientRect().top : NaN;
+      if (navTop > 0 && navTop < window.innerHeight) bottom = Math.min(bottom, navTop - EDGE);
+    }
+    const below = bottom - anchor.bottom - GAP;
+    const above = anchor.top - GAP - top;
+    const up = height > below && above > below;
+    wrap.classList.toggle("is-up", up);
+    const room = up ? above : below;
+    if (height > room) menu.style.maxHeight = `${Math.max(Math.floor(room), 96)}px`;
   }
 
   // Монохромный огонёк серии: тонкий штрих в стиле иконок приложения вместо
@@ -2578,7 +2699,11 @@
     // отдаёт, поэтому конкатенируем отдельным списком.
     const openTasks = mergedArchive("tasks", appState.tasks || []);
     const doneTasks = mergedArchive("done_tasks", appState.completedTasks || []);
-    const dates = mergedArchive("dates", appState.dates || []);
+    // DP-ADD-001: /api/state отдаёт дни рождения отдельным набором. Календарь
+    // берёт оба: calendarEventIndex сам раскладывает записи по kind и рисует
+    // для дней рождения свою точку, подпись и легенду.
+    const dates = mergedArchive("dates", appState.dates || [])
+      .concat(mergedArchive("birthdays", appState.birthdays || []));
     // Звёздочка — только мои вручённые желания: чужие подарки в календаре
     // пользователя не показываем (owner_id — владелец желания).
     const myId = Number(appState.user?.tg_id);
@@ -2674,7 +2799,8 @@
     const recent = type === "tasks" ? (appState?.tasks || [])
       : type === "done_tasks" ? (appState?.completedTasks || [])
         : type === "dates" ? (appState?.dates || [])
-          : (appState?.completedWishes || []);
+          : type === "birthdays" ? (appState?.birthdays || [])
+            : (appState?.completedWishes || []);
     // Завершённые планы и вручённые желания живут в «архиве» уже с 10 записей,
     // активные — с 200.
     const threshold = type === "done_wishes" || type === "done_tasks" ? STATE_RECENT_LIMIT : STATE_ACTIVE_LIMIT;
@@ -2686,7 +2812,7 @@
     if (calendarFetching) return;
     calendarFetching = true;
     try {
-      for (const type of ["tasks", "dates", "done_tasks", "done_wishes"]) {
+      for (const type of ["tasks", "dates", "birthdays", "done_tasks", "done_wishes"]) {
         if (!calendarArchivePending(type)) continue;
         const cache = archiveCache[type];
         let guard = 0;
@@ -2734,14 +2860,6 @@
       <section class="card">
         <p class="eyebrow">Настройки</p>
         <h3>Оформление и уведомления</h3>
-        <div class="settings-row">
-          <span class="settings-label">Пол</span>
-          <span class="settings-actions">
-            <button type="button" class="secondary${user.gender === "male" ? " is-active" : ""}" data-action="set-gender" data-gender="male">Мужчина</button>
-            <button type="button" class="secondary${user.gender === "female" ? " is-active" : ""}" data-action="set-gender" data-gender="female">Женщина</button>
-          </span>
-        </div>
-        <p class="settings-hint">Влияет на обращения и календарь Фло; смена требует подтверждения</p>
         <div class="settings-row">
           <span class="settings-label">Акцентный цвет</span>
           <div class="swatch-row">${swatches}</div>
@@ -3899,14 +4017,22 @@
   async function loadFloPartner({ silent = false } = {}) {
     if (floPartnerBusy) return;
     floPartnerBusy = true;
+    // DP-ADD-003: при смене пары syncArchiveCachePair сбрасывает floPartner и
+    // busy-флаг, поэтому новый запрос уходит сразу. Ответ прежней пары,
+    // прилетевший позже, должен быть отброшен, а не перезаписать свежий кэш.
+    const pairIdAtStart = archiveCachePairId;
+    const stale = () => archiveCachePairId !== pairIdAtStart;
     try {
-      floPartner = await request("/api/cycle/partner");
+      const next = await request("/api/cycle/partner");
+      if (stale()) return;
+      floPartner = next;
     } catch (error) {
+      if (stale()) return;
       // При фоновом обновлении сохраняем последний удачно загруженный ответ:
       // кратковременный сбой сети не должен «отключать» выданный доступ.
       if (!silent || !floPartner) floPartner = { shared: false };
     } finally {
-      floPartnerBusy = false;
+      if (!stale()) floPartnerBusy = false;
     }
     if (!silent) render();
   }
@@ -6750,13 +6876,22 @@
   async function loadContacts({ force = false, silent = false } = {}) {
     if (contactsBusy || (contactsState && !force)) return;
     contactsBusy = true;
+    // DP-ADD-002: запрос мог уйти ещё в прежней паре. Ответ, прилетевший
+    // после смены pair.id, отбрасывается — как у страниц архива.
+    const pairIdAtStart = archiveCachePairId;
+    const stale = () => archiveCachePairId !== pairIdAtStart;
     try {
-      contactsState = await request("/api/contacts");
+      const next = await request("/api/contacts");
+      if (stale()) return;
+      contactsState = next;
     } catch (error) {
+      if (stale()) return;
       contactsState = silent ? null : { failed: true };
       if (!silent) handleRequestError(error);
     } finally {
-      contactsBusy = false;
+      // Смена пары уже сбросила флаг в syncArchiveCachePair — старый запрос
+      // не должен разблокировать загрузку, начатую для новой пары.
+      if (!stale()) contactsBusy = false;
     }
     if (!silent) render();
   }
@@ -6970,7 +7105,11 @@
           }
           // Существующий с комментарием — пропускаем без предупреждения.
         }
-        contactsState = await request("/api/contacts", { method: "POST", body });
+        // DP-ADD-002: ответ от прежней пары не должен попасть в новую книгу.
+        const pairIdAtStart = archiveCachePairId;
+        const nextContacts = await request("/api/contacts", { method: "POST", body });
+        if (archiveCachePairId !== pairIdAtStart) return appState;
+        contactsState = nextContacts;
         showToast(source.id ? "Контакт изменён" : "Контакт добавлен");
         return appState;
       }
@@ -7047,7 +7186,10 @@
         submitLabel: "Удалить",
         cancelLabel: "Оставить",
         onSubmit: async () => {
-          contactsState = await request("/api/contacts/delete", { method: "POST", body: { id: contact.id } });
+          const pairIdAtStart = archiveCachePairId;
+          const nextContacts = await request("/api/contacts/delete", { method: "POST", body: { id: contact.id } });
+          if (archiveCachePairId !== pairIdAtStart) return appState;
+          contactsState = nextContacts;
           showToast("Контакт удалён");
           return appState;
         }
@@ -7081,25 +7223,26 @@
   }
 
   function quoteItem(item) {
-    // Кнопки — в одном ряду с автором и датой (item-row): иначе под
-    // коротким блоком меты оставалось много пустого места.
+    // «⋮» — в верхнем ряду карточки рядом с текстом, как в остальных
+    // карточках: item-row + itemActions ставят его в правый верхний угол.
+    // Дата остаётся отдельной строкой ниже. Кто создал запись, не показывается
+    // (решение владельца 2026-11-23) — только автор цитаты (source) и дата.
     return `
       <article class="card quote-card">
         <span class="quote-mark" aria-hidden="true">&ldquo;</span>
-        <p class="quote-text">${renderRichText(item.body || "")}</p>
-        ${item.source ? `<p class="quote-source">— ${esc(item.source)}</p>` : ""}
         <div class="item-row">
           <div class="item-main">
-            <div class="item-meta">
-              ${item.display_name ? `<span class="memory-author">${esc(item.display_name)}</span><span>· </span>` : ""}
-              <span>${esc(formatTimestamp(item.created_at))}</span>
-            </div>
+            <p class="quote-text">${renderRichText(item.body || "")}</p>
+            ${item.source ? `<p class="quote-source">— ${esc(item.source)}</p>` : ""}
           </div>
           ${itemActions([
             itemActionButton({ action: "copy-quote", id: item.id, label: "Скопировать текст", icon: COPY_ICON }),
             itemActionButton({ action: "edit-item", type: "quotes", id: item.id, label: "Редактировать", icon: EDIT_ICON, disabled: partnerMissing() }),
             itemActionButton({ action: "delete-item", type: "quotes", id: item.id, label: "Удалить", icon: DELETE_ICON, disabled: partnerMissing() })
           ].join("\n            "))}
+        </div>
+        <div class="item-meta">
+          <span>${esc(formatTimestamp(item.created_at))}</span>
         </div>
       </article>
     `;
@@ -7147,9 +7290,12 @@
           <div class="item-main">
             <h3 class="item-title">${renderRichText(item.title)}</h3>
             <div class="item-meta">
-              ${item.is_private ? `<span class="day-chip is-private">Личное</span>` : ""}
-              <span>${esc(formatBirthday(item.day))}</span>
-              ${label ? `<span class="day-chip">${esc(label)}</span>` : ""}
+              <div class="item-when-line">
+                ${item.is_private ? `<span class="day-chip is-private">Личное</span>` : ""}
+                <span class="day-chip is-muted">${esc(formatBirthday(targetDay))}</span>
+                ${yearsChip(item, targetDay)}
+                ${label ? `<span class="day-chip">${esc(label)}</span>` : ""}
+              </div>
             </div>
           </div>
           ${itemActions([
@@ -7423,9 +7569,16 @@
   // value="new" — создать общую копилку вместе с поездкой. Блок новых полей
   // показывается переключателем в общем change-обработчике диалога.
   function tripSavingFormFields(savings, selectedId) {
-    const options = savings.map((saving) =>
-      `<option value="${saving.id}"${Number(selectedId) === Number(saving.id) ? " selected" : ""}>${esc(saving.title)} · ${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))}</option>`
-    ).join("");
+    const options = savings.map((saving) => {
+      // BUG-2A-02: текущая копилка поездки может быть недоступна для новой
+      // привязки (заполнена) или скрыта от партнёра (стала личной — сервер
+      // не отдаст её название). Пункт остаётся в списке с честной подписью:
+      // связь сохранится, но выбрать заново нельзя.
+      const label = saving.tripCurrentHidden
+        ? "Текущая копилка (привязку можно только сохранить)"
+        : `${esc(saving.title)} · ${esc(formatAmount(saving.collected))} из ${esc(formatAmount(saving.target))}${saving.tripCurrent ? " · текущая (привязку можно только сохранить)" : ""}`;
+      return `<option value="${saving.id}"${Number(selectedId) === Number(saving.id) ? " selected" : ""}>${label}</option>`;
+    }).join("");
     return `
       <label class="field"><span>Копилка на поездку</span><select name="saving_choice" data-trip-saving-choice>
         <option value=""${selectedId ? "" : " selected"}>Без копилки</option>
@@ -8453,6 +8606,9 @@
     movieGroupDraft = draft;
     openDialog({
       title: "Управление группой",
+      // Тап мимо окна с правками черновика (порядок/название/тип) спрашивает
+      // подтверждение, как и ввод в любом другом окне.
+      isDirty: () => Boolean(movieGroupDraft) && movieGroupDraftChanged(),
       // Метка связывает черновик с этим конкретным открытием диалога:
       // закрытие/отмена очищают его (аудит BUG-10).
       movieGroupDraft: draft,
@@ -9505,20 +9661,54 @@
   // ------------------------------------------------------------------
   // Диалоги создания записей
   // ------------------------------------------------------------------
+  // Чекбокс «Отображать годы» живёт только у дней рождения и ежегодных дат.
+  // Доступность и снятие флага синхронизируются в DOM, а не одним CSS:
+  // отключённый чекбокс не попадает в FormData и уходит как false.
+  function syncShowYearsControl(root) {
+    const form = root?.closest?.("form") || root;
+    const control = form?.querySelector?.('input[name="show_years"]');
+    if (!control) return;
+    const always = control.dataset.showYearsAlways === "1";
+    const monthly = form.querySelector('input[name="monthly"]');
+    const recurs = form.querySelector('input[name="recurs"]');
+    const allowed = always || (Boolean(recurs?.checked) && !Boolean(monthly?.checked));
+    control.disabled = !allowed;
+    if (!allowed) control.checked = false;
+    const field = control.closest("label.field");
+    if (field) field.classList.toggle("is-disabled", !allowed);
+  }
+
   function openDialog(config) {
     dialogContext = config;
     dialogTitle.textContent = config.title;
     dialogFields.innerHTML = config.fields ?? "";
+    syncShowYearsControl(dialogFields);
     if (dialogSubmit) {
       dialogSubmit.textContent = config.submitLabel ?? "Сохранить";
       // submitLabel === null — режим чтения (просмотр дневника): без кнопки
-      // сохранения, только «Закрыть».
+      // сохранения; закрытие — только «×» в закреплённой шапке.
       dialogSubmit.hidden = config.submitLabel === null;
       // Диалоги, которые грузят данные перед сабмитом («Остановились» у сериала),
       // могут оставить кнопку выключенной — следующее окно обязано стартовать чистым.
       dialogSubmit.disabled = false;
     }
-    if (dialogCancel) dialogCancel.textContent = config.cancelLabel ?? "Отмена";
+    // Окно с «×» в шапке не дублирует закрытие текстом в подвале (решение
+    // владельца 2026-11-23): кнопка «Закрыть» не показывается — закрыть такое
+    // окно можно только «×», который закреплён в шапке при прокрутке.
+    // «Отмена», «Нет», «Оставить» и т.п. остаются: это отказ от действия
+    // (удаление, выход), а не второй способ закрыть окно.
+    if (dialogCancel) {
+      dialogCancel.textContent = config.cancelLabel ?? "Отмена";
+      dialogCancel.hidden = dialogCancel.textContent === "Закрыть";
+    }
+    // Подвал без кнопок (режим чтения) не оставляет пустой отступ.
+    const sheetActions = dialogForm?.querySelector(".sheet-actions");
+    if (sheetActions) sheetActions.hidden = Boolean(dialogSubmit?.hidden) && Boolean(dialogCancel?.hidden);
+    // Тап за окном / подтверждение закрытия: каждое открытие стартует чистым —
+    // правки предыдущего окна и его оверлей не должны переходить в новое.
+    dialogDirty = false;
+    dialogAsciiInitialMode = config.ascii?.mode ?? null;
+    hideDialogCloseConfirm();
     hideDialogError();
     dialog.showModal();
     // Нативные фокус-шаги showModal отдают фокус первой кнопке («Закрыть»).
@@ -9558,6 +9748,93 @@
     // мобильном WebView вокруг неё остаётся синее выделение. Снимаем фокус.
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
+
+  // ------------------------------------------------------------------
+  // Закрытие окна тапом за его пределами (решение владельца 2026-11-23).
+  // Чистое окно закрывается сразу; с изменениями — сначала подтверждение
+  // «Продолжить» / «Закрыть» (закрыть без сохранения). Оверлей живёт внутри
+  // того же диалога: второй top-layer диалог над showModal недопустим.
+  // ------------------------------------------------------------------
+  let dialogDirty = false;           // в окне был ввод/правка полей
+  let dialogAsciiInitialMode = null; // режим ASCII-вложения на момент открытия
+
+  function isDialogDirty() {
+    if (!dialog.open || !dialogContext) return false;
+    if (dialogDirty) return true;
+    // ASCII-вложение меняется кнопками, не полями: смена режима = правка.
+    if (dialogContext.ascii && dialogContext.ascii.mode !== dialogAsciiInitialMode) return true;
+    // Диалоги, чьё состояние живёт вне формы (черновик менеджера группы).
+    return Boolean(dialogContext.isDirty?.());
+  }
+
+  function showDialogCloseConfirm() {
+    if (!dialogConfirm) return false;
+    dialogConfirmText.textContent = "В окне есть изменения. Закрыть без сохранения?";
+    dialogConfirm.hidden = false;
+    dialogConfirmStay?.focus();
+    return true;
+  }
+
+  function hideDialogCloseConfirm() {
+    if (dialogConfirm) dialogConfirm.hidden = true;
+  }
+
+  function requestDialogClose() {
+    if (!dialog.open || !dialogContext) return;
+    // Запрос в полёте: исход решит onSubmit — окно не закрываем мимо него.
+    if (dialogSubmitting) return;
+    if (isDialogDirty() && showDialogCloseConfirm()) return;
+    dialog.close();
+  }
+
+  function onDialogBackdropClick(e) {
+    // Клик по затемнению приходит с target = сам <dialog>;
+    // по содержимому окна — с target = дочерний элемент.
+    if (e.target !== dialog) return;
+    // Открытое меню «⋮» — как в списках: тап мимо закрывает только меню,
+    // окно под ним остаётся (общий делегат закроет меню после нас).
+    if (document.querySelector(".item-actions.is-open")) return;
+    requestDialogClose();
+  }
+
+  function onDialogCancel(e) {
+    if (!dialogConfirm) return;
+    if (!dialogConfirm.hidden) {
+      // Повторный Esc при открытом подтверждении — остаться в окне.
+      e.preventDefault();
+      hideDialogCloseConfirm();
+      dialog.focus();
+      return;
+    }
+    // Окно с изменениями Esc не закрывает — только через подтверждение,
+    // как и тап за окном.
+    if (isDialogDirty()) {
+      e.preventDefault();
+      showDialogCloseConfirm();
+    }
+    // Без изменений Esc закрывает окно нативно — как тап по фону.
+  }
+
+  function markDialogDirtyOnEdit(e) {
+    if (!dialog.open) return;
+    // Ввод в ASCII-блоке не считается правкой сам по себе: файл и палитры —
+    // часть режима вложения, он и отслеживается в isDialogDirty.
+    if (e.target.closest?.(".ascii-toolbar")) return;
+    dialogDirty = true;
+  }
+
+  dialog.addEventListener("click", onDialogBackdropClick);
+  dialog.addEventListener("cancel", onDialogCancel);
+  dialogConfirmStay?.addEventListener("click", () => {
+    hideDialogCloseConfirm();
+    dialog.focus();
+  });
+  dialogConfirmLeave?.addEventListener("click", () => {
+    hideDialogCloseConfirm();
+    dialog.close();
+  });
+  dialogForm.addEventListener("input", markDialogDirtyOnEdit);
+  dialogForm.addEventListener("change", markDialogDirtyOnEdit);
 
   function sureLabel() {
     const gender = appState?.user?.gender;
@@ -9636,6 +9913,9 @@
       const other = form?.querySelector(`input[name="${target.dataset.excludes}"]`);
       if (other && target.checked) other.checked = false;
     }
+    // PD-DATES-002: после смены режима повтора чекбокс лет становится
+    // недоступен и снимается — отправляемый payload не расходится с UI.
+    if (target.name === "monthly" || target.name === "recurs") syncShowYearsControl(form);
   });
 
   // «Остановились» у сериала: сезон определяет список серий в следующем поле.
@@ -10156,7 +10436,12 @@
     const field = document.activeElement;
     // btn.hidden держит syncFmtButtons: не разрешённая полю кнопка мертва,
     // даже если тулбар остался висеть от предыдущего поля.
-    if (btn && !btn.hidden && isFmtTarget(field)) applyFmtMarker(field, btn.dataset.fmt);
+    if (btn && !btn.hidden && isFmtTarget(field)) {
+      applyFmtMarker(field, btn.dataset.fmt);
+      // Разметка вписывается в value напрямую, события ввода нет —
+      // правку отмечаем сами, иначе тап мимо окна не спросит подтверждение.
+      dialogDirty = true;
+    }
   });
   dialog?.addEventListener("close", hideFmtToolbar);
 
@@ -10306,6 +10591,7 @@
           wrap.classList.add("is-open");
           menu.hidden = false;
           btn.setAttribute("aria-expanded", "true");
+          placeItemMenu(wrap);
         }
       } else if (action === "seg-switch") {
         // Переключение вида внутри вкладки: меняем только тело, капля и сам
@@ -10366,6 +10652,10 @@
         pairView = "profile";
         switchTab("pair");
       } else if (action === "go-tab") {
+        // data-view — сегмент внутри вкладки («Дни рождения» во вкладке
+        // «Даты» и т.п.). Задаём до переключения: render() соберёт сегмент
+        // уже активным, и капля переключателя встанет на него сама.
+        if (btn.dataset.view) setSwitchValue(btn.dataset.tab, btn.dataset.view);
         switchTab(btn.dataset.tab || "home");
       } else if (action === "create-pair") {
         appState = await request("/api/pair/create", { method: "POST", body: {} });
@@ -10495,10 +10785,11 @@
             <label class="field"><span>Время (необязательно)</span><input type="time" name="time" lang="ru"></label>
             <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs"> Повторять каждый месяц</span></label>
             <label class="field"><span><input type="checkbox" name="recurs" checked data-excludes="monthly"> Повторять каждый год</span></label>
+            <label class="field"><span><input type="checkbox" name="show_years"> Отображать годы</span></label>
             <label class="field"><span><input type="checkbox" name="is_private"> Личная — видите только вы</span></label>
             ${pairTimeHintHtml()}
           `,
-          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: fd.get("is_private") === "on" } })
+          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", show_years: fd.get("show_years") === "on", is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-memory") {
         openDialog({
@@ -10590,9 +10881,10 @@
           fields: `
             <label class="field"><span>Кто именинник?</span><input name="title" data-fmt="none" maxlength="120" required placeholder="Маша"></label>
             <label class="field"><span>Дата рождения</span><input type="date" name="day" required></label>
+            <label class="field"><span><input type="checkbox" name="show_years" data-show-years-always="1"> Отображать годы</span></label>
             <label class="field"><span><input type="checkbox" name="is_private"> Личное — видите только вы</span></label>
           `,
-          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), kind: "birthday", is_private: fd.get("is_private") === "on" } })
+          onSubmit: (fd) => request("/api/dates", { method: "POST", body: { title: fd.get("title"), day: fd.get("day"), kind: "birthday", show_years: fd.get("show_years") === "on", is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "daily-done") {
         // Подтверждение: ритуал дня разовый на сутки и необратим — случайный
@@ -10984,22 +11276,32 @@
           submitLabel: "Пополнить",
           onSubmit: async (fd) => {
             const amount = Number(fd.get("amount"));
-            const state = await request(`/api/savings/${saving.id}/deposit`, {
-              method: "POST",
-              body: { amount }
-            });
-            // Пополнение, закрывающее цель, — маленький праздник.
-            const filled = Number(saving.collected) + amount >= Number(saving.target);
-            haptic(filled ? "medium" : "light");
-            // textContent — экранирование не нужно (и esc() показал бы
-            // сущности буквально).
-            showToast(filled
-              ? `Копилка «${saving.title}» заполнена!`
-              : `Пополнено на ${formatAmount(amount)}`);
-            // collected считает сервер — архивную карточку (201+) освежаем
-            // перекачкой загруженных страниц.
-            revalidateArchiveCache();
-            return state;
+            try {
+              const state = await request(`/api/savings/${saving.id}/deposit`, {
+                method: "POST",
+                body: { amount }
+              });
+              // Пополнение, закрывающее цель, — маленький праздник.
+              const filled = Number(saving.collected) + amount >= Number(saving.target);
+              haptic(filled ? "medium" : "light");
+              // textContent — экранирование не нужно (и esc() показал бы
+              // сущности буквально).
+              showToast(filled
+                ? `Копилка «${saving.title}» заполнена!`
+                : `Пополнено на ${formatAmount(amount)}`);
+              // collected считает сервер — архивную карточку (201+) освежаем
+              // перекачкой загруженных страниц.
+              revalidateArchiveCache();
+              return state;
+            } catch (error) {
+              // BUG-2A-01: пока форма была открыта, копилку заполнил второй
+              // участник. Обновляем данные — карточка уедет в «Накоплено» —
+              // окно закроется (обёртка сабмита), покажем понятный тост.
+              if (error?.code !== "SAVING_FULL") throw error;
+              await revalidateArchiveCache();
+              showToast(`Копилка «${saving.title}» уже заполнена — цель закрыта`);
+              return appState;
+            }
           }
         });
       } else if (action === "edit-saving") {
@@ -11212,10 +11514,11 @@
               fields: `
                 <label class="field"><span>Кто именинник?</span><input name="title" data-fmt="none" maxlength="120" required value="${esc(item.title || "")}"></label>
                 <label class="field"><span>Дата рождения</span><input type="date" name="day" required value="${esc(item.day || "")}"></label>
+                <label class="field"><span><input type="checkbox" name="show_years" data-show-years-always="1" ${Number(item.show_years) === 1 ? "checked" : ""}> Отображать годы</span></label>
                 ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личное — видите только вы</span></label>` : ""}
               `,
               onSubmit: async (fd) => {
-                const body = { title: fd.get("title"), day: fd.get("day"), is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
+                const body = { title: fd.get("title"), day: fd.get("day"), show_years: fd.get("show_years") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
                 const state = await request(`/api/dates/${id}`, { method: "PATCH", body });
                 // PD-DATES-001: смена day меняет позицию в sortDateRows —
                 // точечный patch кэша оставил бы карточку на старом месте.
@@ -11235,11 +11538,12 @@
               <label class="field"><span><input type="checkbox" name="monthly" data-excludes="recurs" ${Number(item.monthly) === 1 ? "checked" : ""}> Повторять каждый месяц</span></label>
               ${Number(String(item.day || "").slice(8)) >= 29 ? `<p class="settings-hint">День ${esc(String(item.day).slice(8))} есть не в каждом месяце — такие месяцы пропускаются.</p>` : ""}
               <label class="field"><span><input type="checkbox" name="recurs" data-excludes="monthly" ${Number(item.monthly) === 1 ? "" : item.recurs ? "checked" : ""}> Повторять каждый год</span></label>
+              <label class="field"><span><input type="checkbox" name="show_years" ${Number(item.show_years) === 1 ? "checked" : ""}> Отображать годы</span></label>
               ${ownsPrivacy ? `<label class="field"><span><input type="checkbox" name="is_private" ${item.is_private ? "checked" : ""}> Личная — видите только вы</span></label>` : ""}
               ${pairTimeHintHtml()}
             `,
             onSubmit: async (fd) => {
-              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
+              const body = { title: fd.get("title"), day: fd.get("day"), time: fd.get("time"), monthly: fd.get("monthly") === "on", recurs: fd.get("recurs") === "on", show_years: fd.get("show_years") === "on", is_private: ownsPrivacy ? fd.get("is_private") === "on" : undefined };
               const state = await request(`/api/dates/${id}`, { method: "PATCH", body });
               // PD-DATES-001: day/time/recurs меняют sortDateRows — обновляем
               // архив целиком, а не точечный patch устаревшей позиции.
@@ -11327,12 +11631,25 @@
             }
           });
         } else if (type === "trips") {
+          // BUG-2A-02: текущая копилка поездки обязана оставаться пунктом
+          // выбора, даже если она больше недоступна для новых привязок
+          // (заполнена) или не видна партнёру (стала личной). Иначе select
+          // выбирал бы первым пунктом «Без копилки», и правка одной заметки
+          // молча отправляла saving_id=null.
+          const currentSavingId = Number(item.saving_id) || null;
+          const tripChoices = availableTripSavings().slice();
+          if (currentSavingId && !tripChoices.some((saving) => Number(saving.id) === currentSavingId)) {
+            const currentSaving = savingsList().find((saving) => Number(saving.id) === currentSavingId);
+            tripChoices.unshift(currentSaving
+              ? { ...currentSaving, tripCurrent: true }
+              : { id: currentSavingId, tripCurrentHidden: true });
+          }
           openDialog({
             title: "Редактировать поездку",
             fields: `
               <label class="field"><span>Куда хотим съездить?</span><input name="title" data-fmt="none" maxlength="120" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Заметка (необязательно)</span><textarea name="note" data-fmt="** _ __" rows="3" maxlength="600">${esc(item.note || "")}</textarea></label>
-              ${tripSavingFormFields(availableTripSavings(), item.saving_id || null).replace('<option value="new">Создать новую копилку</option>', "")}
+              ${tripSavingFormFields(tripChoices, item.saving_id || null).replace('<option value="new">Создать новую копилку</option>', "")}
             `,
             onSubmit: async (fd) => {
               const body = { title: fd.get("title"), note: fd.get("note"), saving_id: fd.get("saving_choice") ? Number(fd.get("saving_choice")) : null };

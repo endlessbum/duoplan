@@ -422,8 +422,13 @@
     .demo-screen .seg-switch-btn.is-active { color: var(--berry); }
     .demo-screen .seg-switch.is-sub { padding: 4px 3px; margin: 0 auto 12px; max-width: 100%; }
     .demo-screen .seg-switch.is-sub .seg-switch-btn { padding: 6px 8px; font-size: 11.5px; letter-spacing: -.2px; white-space: nowrap; }
-    .demo-screen .seg-switch.is-dense { width: 100%; max-width: 100%; padding: 5px; }
-    .demo-screen .seg-switch.is-dense .seg-switch-btn { padding: 7px 3px; white-space: nowrap; overflow: hidden; }
+    .demo-screen .seg-switch.is-dense { width: 100%; max-width: 100%; padding: 4px 3px; }
+    .demo-screen .seg-switch.is-dense .seg-switch-btn {
+      /* В макете экран уже настоящего: 4–5 вкладок в плотном режиме
+         влезают только уменьшенным шрифтом, иначе подписи режутся. */
+      padding: 7px 2px; font-size: 9.5px; letter-spacing: -.2px;
+      white-space: nowrap; overflow: hidden;
+    }
 
     /* --- Нижний бар с жидкой каплей (порт .bottom-nav из app.css) ---
        Позиционирование адаптировано: absolute внутри .demo-screen
@@ -493,6 +498,103 @@
     }
     .demo-screen .pair-exit { margin-top: 2px; display: flex; justify-content: center; }
     .demo-screen .pair-leave { color: var(--berry); width: min(220px, 100%); }
+
+    /* --- Контакты, Фло, Здоровье (порт .contacts-*, .contact-*, .flo-*,
+       .health-* из app.css) — без этого вкладки Контакты/Фло/Здоровье
+       рендерят кнопки и текст дефолтами браузера. --- */
+    .demo-screen .contacts-switch {
+      display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: max-content;
+      padding: 4px; border-radius: 999px; background: var(--glass-bg);
+      border: 1px solid var(--glass-border); outline: 1px solid var(--glass-outer-border);
+      backdrop-filter: blur(26px) saturate(200%); -webkit-backdrop-filter: blur(26px) saturate(200%);
+      box-shadow: var(--glass-shadow); margin: 0 auto 12px; user-select: none;
+      position: relative; isolation: isolate; touch-action: none;
+    }
+    .demo-screen .contacts-switch-btn {
+      position: relative; z-index: 1; touch-action: none; appearance: none; border: 0;
+      background: transparent; color: var(--nav-label, var(--muted)); border-radius: 999px;
+      padding: 6px 12px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      transition: color .2s ease;
+    }
+    .demo-screen .contacts-switch-btn.is-active { color: var(--berry); }
+    .demo-screen .contact-card { padding-bottom: 12px; }
+    .demo-screen .contact-item + .contact-item {
+      margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+    }
+    .demo-screen .contact-name {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      padding: 0; margin: 0 0 6px; font: inherit; font-size: 15px; font-weight: 650;
+      color: var(--ink); cursor: pointer;
+    }
+    .demo-screen .contact-surname { font-weight: 450; color: var(--muted); font-size: 13.5px; }
+    .demo-screen .contact-phones { display: grid; gap: 4px; margin: 0 0 4px; padding-left: 14px; }
+    .demo-screen .contact-phone {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      padding: 2px 0; font: inherit; font-size: 14px; color: var(--ink); cursor: pointer;
+      font-variant-numeric: tabular-nums;
+    }
+    .demo-screen .contact-comment { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+
+    .demo-screen .flo-group { margin-top: 16px; }
+    .demo-screen .flo-line { margin: 4px 0; color: var(--ink); font-size: 13.5px; }
+    .demo-screen .flo-sub { margin: 12px 0 4px; font-size: 11.5px; color: var(--muted); }
+    .demo-screen .flo-disclaimer { margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+    .demo-screen .flo-explain { margin: 6px 0 0; padding-left: 18px; font-size: 11.5px; color: var(--muted); }
+    .demo-screen .flo-fold { border-top: 1px solid var(--line); padding: 6px 0; }
+    .demo-screen .flo-fold.flo-forecast { border-top: 0; padding-top: 0; }
+    .demo-screen .flo-fold-title {
+      cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted);
+      list-style: none; padding: 4px 0;
+    }
+    .demo-screen .flo-fold-title::before { content: "▸ "; }
+    .demo-screen .flo-fold[open] > .flo-fold-title::before { content: "▾ "; }
+    .demo-screen .flo-fold-title::-webkit-details-marker { display: none; }
+    .demo-screen .flo-med-row { padding: 8px 0; border-top: 1px solid var(--line); }
+    .demo-screen .flo-med-row:first-of-type { border-top: 0; }
+    .demo-screen .flo-chip {
+      appearance: none; border: 1px solid var(--line); border-radius: 999px;
+      min-height: 32px; padding: 0 12px; background: var(--surface-2); color: var(--ink);
+      font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer;
+      transition: transform .15s ease, background .16s ease, color .16s ease;
+    }
+    .demo-screen .flo-chip:active { transform: scale(.96); }
+    .demo-screen .health-med-name { margin: 0 0 6px; font-size: 16px; line-height: 1.3; }
+    .demo-screen .health-intake { display: grid; gap: 8px; margin-top: 10px; }
+    .demo-screen .health-intake .card-action { margin: 0; width: 100%; }
+    .demo-screen .health-intake .card-action.is-on { box-shadow: inset 0 0 0 2px var(--berry); }
+    .demo-screen .health-intake .flo-chip { justify-self: center; }
+
+    /* --- Чипы оценок кино и «точка продолжения» (порт из app.css): без них
+       все оценки рисовались одним и тем же серо-зелёным чипом. --- */
+    .demo-screen .day-chip.is-rating-gray { background: var(--surface-2); color: var(--muted); }
+    .demo-screen .day-chip.is-rating-red { background: var(--cherry-soft); color: var(--cherry); }
+    .demo-screen .day-chip.is-rating-yellow { background: var(--amber-bg); color: var(--amber-ink); }
+    .demo-screen .day-chip.is-rating-green { background: var(--sage-soft); color: var(--sage); }
+    .demo-screen .day-chip.is-resume { background: var(--surface-2); color: var(--ink); }
+
+    /* --- Цитата в rich-тексте (порт .rich-quote) и круглые чекбоксы
+       настроек: в приложении checkbox — «ягодный» круг, а не нативный. --- */
+    .demo-screen .rich-quote {
+      margin: 6px 0; padding: 8px 12px; border-left: 3px solid var(--berry);
+      background: var(--berry-soft); border-radius: 8px;
+    }
+    .demo-screen .rich-spoiler {
+      background: var(--surface-2); color: transparent; border-radius: 4px;
+      cursor: pointer; transition: color .15s ease;
+    }
+    .demo-screen .rich-spoiler.is-revealed { color: var(--ink); }
+    .demo-screen .item-actions.is-open .item-menu-toggle {
+      color: var(--ink); background: var(--surface-2); border-radius: 50%;
+    }
+    .demo-screen input[type="checkbox"] {
+      appearance: none; -webkit-appearance: none; flex: none;
+      width: 18px; height: 18px; margin: 0; vertical-align: middle;
+      border: 1.5px solid var(--berry); border-radius: 50%;
+      background: transparent; outline: none; cursor: pointer;
+      transition: background .15s ease, transform .15s ease;
+    }
+    .demo-screen input[type="checkbox"]:checked { border-color: var(--berry); background: var(--berry); }
+    .demo-screen input[type="checkbox"]:active { transform: scale(.88); }
 
     /* Календарь пары (.calendar-card/.cal-*) */
     .demo-screen .calendar-card { display: grid; gap: 8px; }
@@ -984,7 +1086,7 @@
     </section>
   </main>
 
-  <script src="nav.js?v=2026.11.20.119" defer></script>
+  <script src="nav.js?v=2026.11.23.130" defer></script>
   <script src="demo.js" defer></script>
   <footer class="footer">
     <div class="container footer-inner">

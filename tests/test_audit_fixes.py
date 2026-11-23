@@ -533,3 +533,44 @@ async def test_join_attempt_query_uses_index_not_scan(db):
     detail = " | ".join(str(r.get("detail", "")) for r in rows)
     assert "SCAN rate_limits" not in detail, detail
     assert "SEARCH" in detail and "rate_limits" in detail, detail
+
+
+# --------------------------------------- аудит 2026-11-23: BUG-3-02
+
+
+def test_yearly_date_respects_future_source_date():
+    """BUG-3-02: ежегодная дата с началом в будущем не наступает раньше него —
+    первое наступление сама dates.day (worker.nextDateOccurrence)."""
+    from duoplan.services import next_date_occurrence
+
+    source = datetime.now(TZ).date() + timedelta(days=400)
+    occurrence = next_date_occurrence(source.isoformat(), 1, None, TZ)
+    assert occurrence is not None
+    assert occurrence.date() == source
+
+
+def test_yearly_task_respects_future_source_date():
+    """BUG-3-02: ежегодный план с будущим началом не срабатывает годом раньше
+    (worker.nextYearlyOccurrenceMs / services._yearly_occurrence)."""
+    from duoplan.services import task_deadline
+
+    source = datetime.now(TZ).date() + timedelta(days=400)
+    task = {"id": 9, "day": source.isoformat(), "time": None, "monthly": 0, "yearly": 1}
+    deadline = task_deadline(task, TZ)
+    assert deadline != float("inf")
+    assert datetime.fromtimestamp(deadline, TZ).date() == source
+
+
+def test_monthly_occurrence_respects_future_source_date():
+    """BUG-3-02: ежемесячный повтор не наступает раньше исходной даты;
+    прошедший источник продолжает повторяться от сегодняшнего дня."""
+    from duoplan.services import next_date_occurrence
+
+    source = datetime.now(TZ).date() + timedelta(days=45)
+    occurrence = next_date_occurrence(source.isoformat(), 0, None, TZ, monthly=1)
+    assert occurrence is not None
+    assert occurrence.date() == source
+
+    past = next_date_occurrence("2020-01-15", 0, None, TZ, monthly=1)
+    assert past is not None
+    assert past.date() >= datetime.now(TZ).date()

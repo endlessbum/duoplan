@@ -90,9 +90,10 @@ for (const [label, method, path, body] of [
   test(`партнёр не может ${label} чужое желание`, async () => {
     const { route, env, pair, user, calls } = makeHarness({ ownerId: 1 });
     await rejects(route(env, pair, user, method, path, body), notOwner);
-    // до записи дело не дошло: выполнен только SELECT владельца
+    // до записи дело не дошло: выполнен только SELECT владельца (после
+    // BUG-2A-04 он читает и is_private/shared_at для корректного shared_at)
     equal(calls.length, 1);
-    equal(calls[0].sql, "SELECT owner_id FROM wishes WHERE id=? AND pair_id=?");
+    equal(calls[0].sql, "SELECT owner_id,is_private,shared_at FROM wishes WHERE id=? AND pair_id=?");
   });
 }
 

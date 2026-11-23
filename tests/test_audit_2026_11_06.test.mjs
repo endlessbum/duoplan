@@ -56,7 +56,7 @@ test("пустой PATCH несуществующей записи — 404, а �
 
 test("PATCH savings: цель не ниже собранной суммы", () => {
   match(worker, /TARGET_BELOW_COLLECTED/);
-  match(worker, /SELECT id,collected,created_by FROM savings/);
+  match(worker, /SELECT id,collected,created_by,kind FROM savings/);
 });
 
 test("wishes.url нормализуется к NULL при POST и PATCH", () => {
@@ -75,7 +75,9 @@ test("wishes.url нормализуется к NULL при POST и PATCH", () =>
 });
 
 test("PD-DATES-001: yearlyNext и nextOccurrence используют одно окно", () => {
-  const loops = appJs.match(/for \(let year = currentYear; year < currentYear \+ RECURRENCE_YEARS; year\+\+\)/g) || [];
+  // BUG-3-02 (аудит 2026-11-23): окно начинается от max(текущий, исходный год)
+  // — паттерн общий для планов и дат, по-прежнему ровно два цикла.
+  const loops = appJs.match(/for \(let year = startYear; year < startYear \+ RECURRENCE_YEARS; year\+\+\)/g) || [];
   ok(loops.length === 2, "планы и даты должны использовать единое annual-окно");
   ok(appJs.includes("const RECURRENCE_YEARS = 10;"), "нет общей константы окна");
 });

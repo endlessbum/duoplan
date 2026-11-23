@@ -500,6 +500,57 @@ test("app.js парсит dp_*-ссылки уведомлений", () => {
   match(appSource, /dp_target/);
   match(appSource, /cycle_diary/);
   match(appSource, /floSelectedDate = validDay/);
+  // Итоговый экран, а не только состояние: render() отдаёт currentTab === "pair"
+  // в renderPairView(), а pairView === "flo" — в экран Фло.
+  match(appSource, /else if \(currentTab === "pair"\) \{[\s\S]{0,400}?renderPairView\(\)/);
+  match(appSource, /if \(pairView === "flo" && showFloTab\(\)\) return floIsOwner\(\) \? renderFloView\(\)/);
+});
+
+// DP-REPEAT-001: ссылка обязана переключить и верхний раздел. До исправления
+// applyDeepLink() менял только состояние Фло, а первый render() с
+// currentTab === "home" показывал главную — поведение выполняется по-настоящему.
+function applyLink(appState, search) {
+  const start = appSource.indexOf("function applyDeepLink()");
+  const end = appSource.indexOf("function goBack(", start);
+  ok(start !== -1 && end !== -1, "applyDeepLink не найден");
+  // Стартовые значения — как в app.js, кроме floView: "calendar" доказывает,
+  // что вид «Сегодня» ставит именно ссылка.
+  const factory = new Function("appState", "search", `
+    let currentTab = "home", pairView = "profile", floView = "calendar", floSelectedDate = null;
+    const window = { location: { search } };
+    ${appSource.slice(start, end)}
+    return { run: applyDeepLink, state: () => ({ currentTab, pairView, floView, floSelectedDate }) };
+  `);
+  const h = factory(appState, search);
+  h.run();
+  return h.state();
+}
+
+const IDLE_APP = { currentTab: "home", pairView: "profile", floView: "calendar", floSelectedDate: null };
+
+test("deep link cycle_diary открывает «Наша пара → Фло → Сегодня» на дату из ссылки", () => {
+  deepStrictEqual(applyLink({ pair: { id: 1 } }, "?dp_v=1&dp_target=cycle_diary&dp_day=2026-11-22"), {
+    currentTab: "pair", pairView: "flo", floView: "today", floSelectedDate: "2026-11-22"
+  });
+  // Ссылка применяется до первого render(), иначе исправление не сработает.
+  match(appSource, /applyDeepLink\(\);\s*render\(\);/);
+});
+
+test("deep link не переключает раздел без пары, без dp_v=1 или с чужой целью", () => {
+  deepStrictEqual(applyLink({ pair: null }, "?dp_v=1&dp_target=cycle_diary&dp_day=2026-11-22"), IDLE_APP,
+    "без партнёра ссылка не должна открывать Фло");
+  deepStrictEqual(applyLink({ pair: { id: 1 } }, "?dp_target=cycle_diary&dp_day=2026-11-22"), IDLE_APP,
+    "без dp_v=1 ссылка применилась");
+  deepStrictEqual(applyLink({ pair: { id: 1 } }, "?dp_v=1&dp_target=unknown"), IDLE_APP,
+    "неизвестная цель применилась");
+});
+
+// Клиент проверяет у даты только формат ГГГГ-ММ-ДД (дату формирует сервер),
+// поэтому «битая» здесь — не дата в этом формате вовсе.
+test("deep link с датой не в формате ГГГГ-ММ-ДД открывает Фло без выбранного дня", () => {
+  deepStrictEqual(applyLink({ pair: { id: 1 } }, "?dp_v=1&dp_target=cycle_diary&dp_day=22.11.2026"), {
+    ...IDLE_APP, currentTab: "pair", pairView: "flo", floView: "today"
+  }, "битая дата не должна попадать в выбранную дату");
 });
 
 test("webhook принимает widget_query и callback_query, allowed_updates расширен", () => {

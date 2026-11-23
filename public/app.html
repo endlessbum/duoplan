@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.11.20.119">
+  <link rel="stylesheet" href="/app.css?v=2026.11.23.130">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -129,6 +129,18 @@
         <button type="submit" id="dialog-submit" class="primary">Сохранить</button>
       </div>
     </form>
+    <!-- Подтверждение закрытия окна с изменениями по тапу за его пределами
+         (решение 2026-11-23). Живёт внутри того же диалога: второй top-layer
+         диалог над showModal в WebView недопустим. -->
+    <div id="dialog-confirm" class="dialog-confirm" hidden role="alertdialog" aria-modal="true" aria-labelledby="dialog-confirm-text">
+      <div class="dialog-confirm-card">
+        <p id="dialog-confirm-text">В окне есть изменения. Закрыть без сохранения?</p>
+        <div class="dialog-confirm-actions">
+          <button type="button" id="dialog-confirm-stay" class="secondary">Продолжить</button>
+          <button type="button" id="dialog-confirm-leave" class="primary">Закрыть</button>
+        </div>
+      </div>
+    </div>
     <!-- Меню форматирования выделенного текста (в стиле Telegram). Живёт внутри
          dialog: showModal выводит диалог в top-layer, fixed-элементы снаружи
          оказались бы под ним. -->
@@ -147,10 +159,10 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.11.20.119" defer></script>
-  <script src="/nav.js?v=2026.11.20.119" defer></script>
-  <script src="/ascii-converter.js?v=2026.11.20.119" defer></script>
-  <script src="/app.js?v=2026.11.20.119" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.23.130" defer></script>
+  <script src="/nav.js?v=2026.11.23.130" defer></script>
+  <script src="/ascii-converter.js?v=2026.11.23.130" defer></script>
+  <script src="/app.js?v=2026.11.23.130" defer></script>
 </body>
 </html>
 

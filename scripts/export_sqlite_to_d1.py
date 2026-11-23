@@ -38,7 +38,7 @@ TABLES = {
         "created_at, completed_by, completed_at"
     ),
     "dates": (
-        "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at"
+        "id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, show_years, created_at"
     ),
     "memories": "id, pair_id, author_id, title, body, ascii_art, day, created_at",
     "wishes": "id, pair_id, owner_id, body, done, done_at, url, comment, created_at, is_private, shared_at",
@@ -121,6 +121,9 @@ NOT_NULL_FALLBACKS = {
     "is_private": "0",
     "monthly": "0",
     "yearly": "0",
+    # PD-DATES-002 / BUG-3-04: колонки нет в базах до миграции 0053 (v18);
+    # NULL в NOT NULL DEFAULT 0 D1 уронил бы импорт всех дат.
+    "show_years": "0",
     "created_by": "0",
     "digest_enabled": "1",
     "dates_digest_enabled": "1",

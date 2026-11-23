@@ -130,3 +130,40 @@ async def test_legacy_v12_database_gets_show_cycle_calendar(tmp_path):
         assert int(row["user_version"]) == SCHEMA_VERSION
     finally:
         await db.close()
+
+
+async def test_legacy_v18_database_gets_show_years(tmp_path):
+    """BUG-3-04 (аудит 2026-11-23): база user_version=18 без show_years в
+    dates обязана домигрировать до v19 при первом старте; существующие строки
+    получают DEFAULT 0. CREATE TABLE IF NOT EXISTS колонку не добавляет —
+    без миграции 19 старая база навсегда оставалась бы без колонки."""
+    path = tmp_path / "legacy-v18.db"
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '18')")
+    conn.execute(
+        "CREATE TABLE dates (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "pair_id INTEGER NOT NULL, title TEXT NOT NULL, day TEXT NOT NULL, "
+        "time TEXT, recurs INTEGER NOT NULL DEFAULT 1, monthly INTEGER NOT NULL DEFAULT 0, "
+        "is_private INTEGER NOT NULL DEFAULT 0, created_by INTEGER NOT NULL DEFAULT 0, "
+        "kind TEXT NOT NULL DEFAULT 'date', created_at INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO dates(pair_id, title, day, recurs, kind, created_at) "
+        "VALUES(1, 'Годовщина', '2020-05-17', 1, 'date', 1)"
+    )
+    conn.execute("PRAGMA user_version = 18")
+    conn.commit()
+    conn.close()
+
+    db = await connect_database(path)
+    try:
+        row = await db.one("PRAGMA user_version")
+        assert int(row["user_version"]) == SCHEMA_VERSION
+        cols = await db.query("PRAGMA table_info(dates)")
+        assert "show_years" in {c["name"] for c in cols}, "миграция 19 не применилась"
+        legacy = await db.one("SELECT show_years FROM dates WHERE id = 1")
+        assert legacy["show_years"] == 0, "существующая строка не получила DEFAULT 0"
+    finally:
+        await db.close()

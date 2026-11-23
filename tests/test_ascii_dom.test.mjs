@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { equal, ok } from "node:assert/strict";
+import { deepStrictEqual, equal, match, ok } from "node:assert/strict";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 
@@ -126,6 +126,47 @@ test("режим delete: предупреждение об удалении и �
   ok(api.statusEl(), "нет отдельного статус-элемента операции");
   ok(api.statusEl() !== warn, "статус операции не должен перезаписывать предупреждение");
 });
+
+// ---------- Кнопки: классы дизайн-системы (DP-REPEAT-002) ----------
+
+// Раньше кнопки носили class="btn ghost" — таких правил в app.css нет, и в
+// WebView оставался нативный вид кнопки рядом с оформленной «Добавить фото».
+// Проверяется реальная разметка каждого режима, сохранность действий
+// (data-ascii-action) и то, что каждый класс кнопки определён в стилях.
+const cssSource = readFileSync(join(here, "..", "public", "app.css"), "utf8");
+const SYSTEM_BUTTON_CLASSES = ["primary", "secondary"];
+const ASCII_ACTIONS_BY_MODE = {
+  none: ["ascii-pick"],
+  preview: ["ascii-apply", "ascii-repick", "ascii-cancel-preview"],
+  set: ["ascii-replace", "ascii-delete"],
+  keep: ["ascii-replace", "ascii-delete"],
+  delete: ["ascii-undo-delete", "ascii-replace"]
+};
+
+for (const [mode, actions] of Object.entries(ASCII_ACTIONS_BY_MODE)) {
+  test(`режим ${mode}: кнопки на классах дизайн-системы, действия на месте`, () => {
+    const { api } = buildDialog();
+    openWith(api, asciiState({
+      mode,
+      art: mode === "none" ? null : "  @#\n  .  ",
+      file: mode === "preview" ? {} : null
+    }));
+    const buttons = [...api.block().querySelectorAll("button")];
+    deepStrictEqual(buttons.map((b) => b.dataset.asciiAction), actions, "набор действий кнопок изменился");
+    for (const btn of buttons) {
+      const classes = [...btn.classList];
+      ok(classes.some((name) => SYSTEM_BUTTON_CLASSES.includes(name)),
+        `кнопка «${btn.textContent}» без системного класса: ${btn.className}`);
+      ok(!classes.includes("btn") && !classes.includes("ghost"),
+        `кнопка «${btn.textContent}» снова использует классы без CSS-правил`);
+      equal(btn.type, "button", `кнопка «${btn.textContent}» может отправить форму диалога`);
+      // Иначе кнопка останется на нативном стиле WebView.
+      for (const name of classes) {
+        match(cssSource, new RegExp(`\\.${name}(?![\\w-])`), `в app.css нет правила для класса .${name}`);
+      }
+    }
+  });
+}
 
 // ---------- Конвертация: статусы и ошибки в keep/set ----------
 

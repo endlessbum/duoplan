@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.20.119";
+const APP_VERSION = "2026.11.23.130";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.20.119";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.20.119";
+const DB_SCHEMA_VERSION = "2026.11.23.130";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -105,13 +105,13 @@ const ARCHIVE_QUERIES = {
     // Личные даты видит только создатель: фильтр в SQL, а не после запроса —
     // иначе приватная запись успевает попасть в сортируемый набор.
     userScoped: true,
-    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='date' ORDER BY day"
+    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,show_years,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='date' ORDER BY day"
   },
   birthdays: {
     active: true,
     sort: "date",
     userScoped: true,
-    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='birthday' ORDER BY day"
+    sql: "SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,show_years,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='birthday' ORDER BY day"
   },
   wishes: {
     active: true,
@@ -812,6 +812,20 @@ function optionalTime(value) {
   return time;
 }
 
+// PD-DATES-002: число лет показываем только по явному запросу и только для
+// ежегодных событий. Один нормализатор на POST/PATCH/импорт: клиентский
+// checkbox не является источником истины, разовые и ежемесячные даты всегда
+// получают 0, даже если прислали true.
+function showYearsValue(value, kind, recurs, monthly) {
+  const annual = kind === "birthday"
+    || (kind === "date" && Number(recurs) === 1 && Number(monthly) !== 1);
+  return annual && value === true ? 1 : 0;
+}
+function showYearsAllowed(kind, recurs, monthly) {
+  return kind === "birthday"
+    || (kind === "date" && Number(recurs) === 1 && Number(monthly) !== 1);
+}
+
 function planSchedule(body) {
   const day = optionalDay(body?.day);
   const time = optionalTime(body?.time);
@@ -1476,9 +1490,17 @@ function nextMonthlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
     if (Number.isFinite(hh) && Number.isFinite(mm)) { hours = hh; minutes = mm; }
   }
   const now = new Date(nowMs);
-  const startY = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
-  const startM = Number(cachedFormatter("en-US", tz, { month: "2-digit" }).format(now));
   const todayKey = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  // BUG-3-02 (аудит 2026-11-23): dates.day — полная дата начала, а не только
+  // источник месяца-дня: повтор не наступает раньше исходной даты. Если начало
+  // в будущем, поиск начинается с его месяца, а не с текущего.
+  const sourceKey = /^\d{4}-\d{2}-\d{2}$/.test(String(item?.day)) ? String(item.day) : "";
+  let startY = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
+  let startM = Number(cachedFormatter("en-US", tz, { month: "2-digit" }).format(now));
+  if (sourceKey && sourceKey > todayKey) {
+    startY = Number(sourceKey.slice(0, 4));
+    startM = Number(sourceKey.slice(5, 7));
+  }
   const dayFmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
   const keyFmt = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" });
   for (let offset = 0; offset < 25; offset++) {
@@ -1491,7 +1513,8 @@ function nextMonthlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
     const cd = Number(cp.find((p) => p.type === "day")?.value);
     // 31-го не существует в коротких месяцах — candidate уехал на соседний.
     if (cm !== month + 1 || cd !== dayOfMonth) continue;
-    if (keyFmt.format(candidate) >= todayKey) return candidate.getTime();
+    const key = keyFmt.format(candidate);
+    if (key >= todayKey && (!sourceKey || key >= sourceKey)) return candidate.getTime();
   }
   return Number.MAX_SAFE_INTEGER;
 }
@@ -1514,7 +1537,11 @@ function nextYearlyOccurrenceMs(item, timeZone, nowMs = Date.now()) {
   const currentYear = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
   const todayKey = cachedFormatter("en-CA", tz, { year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
   const dayFmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
-  for (let year = currentYear; year <= currentYear + 9; year++) {
+  // BUG-3-02 (аудит 2026-11-23): исходный год — нижняя граница ежегодного
+  // повтора: событие с датой начала в будущем не «срабатывает» годом раньше.
+  const sourceYear = /^\d{4}/.test(String(item?.day)) ? Number(String(item.day).slice(0, 4)) : NaN;
+  const startYear = Number.isFinite(sourceYear) ? Math.max(currentYear, sourceYear) : currentYear;
+  for (let year = startYear; year <= startYear + 9; year++) {
     const candidate = makeDateInTimeZone(year, month, dayOfMonth, hours, minutes, tz);
     const cp = dayFmt.formatToParts(candidate);
     const cm = Number(cp.find((q) => q.type === "month")?.value);
@@ -1589,8 +1616,14 @@ function nextDateOccurrence(item, timeZone) {
   }
   const isRecurring = !!item.recurs;
   const currentYear = Number(cachedFormatter("en-US", tz, { year: "numeric" }).format(now));
+  // BUG-3-02 (аудит 2026-11-23): первое наступление повторяющейся даты — сама
+  // dates.day: поиск не начинается раньше исходного года.
+  const sourceYear = Number(parts[0]);
+  const startYear = isRecurring && Number.isFinite(sourceYear)
+    ? Math.max(currentYear, sourceYear)
+    : currentYear;
   const years = isRecurring
-    ? Array.from({ length: RECURRENCE_YEARS }, (_, index) => currentYear + index)
+    ? Array.from({ length: RECURRENCE_YEARS }, (_, index) => startYear + index)
     : [Number(parts[0])];
   const fmt = cachedFormatter("en-US", tz, { month: "2-digit", day: "2-digit" });
   for (const year of years) {
@@ -1780,7 +1813,7 @@ async function state(env, userId) {
     // Личные даты (is_private=1) уходят из выдачи партнёру ещё в SQL:
     // владелец видит и свои личные, и общие, партнёр — только общие.
     // created_by нужен интерфейсу, чтобы показывать чекбокс приватности только автору.
-    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='date'").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,show_years,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='date'").bind(pair.id, user.tg_id).all(),
     env.DB.prepare(`SELECT m.id,m.author_id,m.title,m.body,m.ascii_art,m.day,m.created_at,u.display_name FROM memories m
       LEFT JOIN users u ON u.tg_id=m.author_id WHERE m.pair_id=? ORDER BY m.day DESC, m.created_at DESC, m.id DESC LIMIT ?`).bind(pair.id, STATE_RECENT_LIMIT).all(),
     env.DB.prepare(`SELECT w.id,w.body,w.owner_id,w.created_at,w.done_at,w.url,w.comment,w.is_private,w.shared_at,u.display_name FROM wishes w
@@ -1824,7 +1857,7 @@ async function state(env, userId) {
     env.DB.prepare("SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.rating_checked_at,m.genres,m.runtime,m.seasons,m.episodes,m.url,m.watched,m.watched_at,m.watched_by,m.resume_position,m.created_by,m.created_at,gi.group_id AS group_id,gi.position AS group_position FROM movies m LEFT JOIN movie_group_items gi ON gi.movie_id=m.id WHERE m.pair_id=? AND m.watched=1 ORDER BY m.watched_at DESC, m.id DESC LIMIT ?").bind(pair.id, STATE_RECENT_LIMIT).all(),
     // PD-DATES-001: дни рождения — отдельный набор для сегмента «Дни рождения».
     // Сервер уже хранит их с recurs=1; sortDateRows ставит по ближайшему дню.
-    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='birthday'").bind(pair.id, user.tg_id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,show_years,created_at FROM dates WHERE pair_id=? AND (is_private=0 OR created_by=?) AND kind='birthday'").bind(pair.id, user.tg_id).all(),
     // Ритуал — совместное действие: пока партнёр не присоединился, карточки нет.
     // dailyFor учитывает отметку текущего пользователя (user.tg_id).
     pair.user_b ? dailyFor(env, pair.id, pair.timezone, user.tg_id) : null,
@@ -2119,18 +2152,21 @@ async function readJson(request) {
 // подтверждает лишь, что запись из общего пространства, а не право на правку
 // (репорт 2026-10-29: чужие желания менялись через API при read-only UI).
 async function ensureWishOwner(env, pair, user, id) {
-  const wish = await env.DB.prepare("SELECT owner_id FROM wishes WHERE id=? AND pair_id=?")
+  const wish = await env.DB.prepare("SELECT owner_id,is_private,shared_at FROM wishes WHERE id=? AND pair_id=?")
     .bind(id, pair.id).first();
   if (!wish) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
   if (Number(wish.owner_id) !== Number(user.tg_id)) {
     throw new HttpError(403, "Желание принадлежит партнёру", "WISH_NOT_OWNER");
   }
+  // PATCH'у нужен прошлый is_private: shared_at должен отражать момент
+  // реального перехода «личное → общее», а не каждого PATCH'а (BUG-2A-04).
+  return wish;
 }
 
 // Копилка видна автору всегда, общая — обоим партнёрам. Личная копилка
 // партнёра по прямому id отвечает 404, как несуществующая запись.
 async function ensureSavingVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT id,collected,created_by FROM savings WHERE id=? AND pair_id=? AND (kind='shared' OR created_by=?)")
+  const row = await env.DB.prepare("SELECT id,collected,created_by,kind FROM savings WHERE id=? AND pair_id=? AND (kind='shared' OR created_by=?)")
     .bind(id, pair.id, user.tg_id).first();
   if (!row) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
   return row;
@@ -2142,7 +2178,7 @@ async function ensureSavingVisible(env, pair, user, id) {
 // даты: PATCH берёт из неё created_by (смена приватности — только автору) и
 // текущее расписание, чтобы частичный PATCH не затирал неприсланные поля.
 async function ensureDateVisible(env, pair, user, id) {
-  const row = await env.DB.prepare("SELECT is_private,created_by,kind,day,time,recurs,monthly FROM dates WHERE id=? AND pair_id=?")
+  const row = await env.DB.prepare("SELECT is_private,created_by,kind,day,time,recurs,monthly,show_years FROM dates WHERE id=? AND pair_id=?")
     .bind(id, pair.id).first();
   if (!row) return null; // 404 отдаст сам UPDATE/DELETE
   if (Number(row.is_private) === 1 && Number(row.created_by) !== Number(user.tg_id)) {
@@ -2190,7 +2226,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
   // wishes — «личный» раздел (гвард по автору). memories/quotes/places/trips
   // сознательно общие: оба партнёра могут править и удалять любые записи пары
   // (решение владельца, 2026-11-10) — гвардов по автору у них нет и не нужно.
-  if (type === "wishes" && mutating) await ensureWishOwner(env, pair, user, id);
+  const wishRow = type === "wishes" && mutating ? await ensureWishOwner(env, pair, user, id) : null;
   const savingRow = type === "savings" && mutating ? await ensureSavingVisible(env, pair, user, id) : null;
   const dateRow = type === "dates" && mutating ? await ensureDateVisible(env, pair, user, id) : null;
   const taskRow = type === "tasks" && mutating ? await ensureTaskVisible(env, pair, user, id) : null;
@@ -2206,16 +2242,26 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       const link = await env.DB.prepare("SELECT group_id FROM movie_group_items WHERE movie_id=?").bind(id).first();
       movieGroupId = link?.group_id || null;
     }
-    // PD-GOALS-001: цель без пунктов не имеет смысла — удаление последнего
-    // пункта запрещено (удалить можно саму цель через delete-item).
+    // PD-GOALS-001 (BUG-2A-05): цель без пунктов не имеет смысла — удаление
+    // последнего пункта запрещено. Проверка минимального состава — условие
+    // самого DELETE, а не отдельный SELECT COUNT: раздельные операции
+    // открывали гонку, где два параллельных запроса при цели из двух пунктов
+    // оба проходили проверку и оставляли пустую цель, исчезавшую из списков.
     if (type === "goal_items") {
-      const row = await env.DB.prepare("SELECT goal_id FROM goal_items WHERE id=? AND pair_id=?").bind(id, pair.id).first();
-      if (row) {
-        const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM goal_items WHERE goal_id=?").bind(row.goal_id).first();
-        if (Number(count?.n || 0) <= 1) {
+      const itemRow = await env.DB.prepare("SELECT goal_id FROM goal_items WHERE id=? AND pair_id=?").bind(id, pair.id).first();
+      if (itemRow) {
+        const deleted = await env.DB.prepare("DELETE FROM goal_items WHERE id=? AND pair_id=? AND (SELECT COUNT(*) FROM goal_items WHERE goal_id=?)>1")
+          .bind(id, pair.id, itemRow.goal_id).run();
+        if (!deleted.meta.changes) {
+          // Сосед мог удалить этот же пункт между SELECT и DELETE — тогда
+          // честный 404, а не ложное «последний пункт».
+          const still = await env.DB.prepare("SELECT id FROM goal_items WHERE id=? AND pair_id=?").bind(id, pair.id).first();
+          if (!still) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
           throw new HttpError(400, "Нельзя удалить последний пункт цели", "LAST_GOAL_ITEM");
         }
+        return true;
       }
+      // itemRow не найдена — 404 отдаст общий DELETE ниже.
     }
     const result = await env.DB.prepare(`DELETE FROM ${table} WHERE id=? AND pair_id=?`).bind(id, pair.id).run();
     if (!result.meta.changes) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
@@ -2239,7 +2285,7 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       goals: { title: { type: "string", maxLength: 180 }, is_private: { type: "boolean" } },
       goal_items: { title: { type: "string", maxLength: 180 } },
       tasks: { title: { type: "string", maxLength: 180 }, day: { type: "string" }, time: { type: "string" }, monthly: { type: "boolean" }, yearly: { type: "boolean" }, is_private: { type: "boolean" } },
-      dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" } },
+      dates: { title: { type: "string", maxLength: 120 }, day: { type: "string" }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" }, show_years: { type: "boolean" } },
       memories: { body: { type: "string", maxLength: 2000 }, title: { type: "string", maxLength: 180 }, ascii_art: { type: "string" }, day: { type: "string" } },
       wishes: { body: { type: "string", maxLength: 300 }, url: { type: "string" }, comment: { type: "string", maxLength: 500 }, is_private: { type: "boolean" } },
       quotes: { body: { type: "string", maxLength: 600 }, source: { type: "string", maxLength: 120 } },
@@ -2303,9 +2349,26 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       // dateRow?.day → undefined и отвечал 400 «Проверьте дату» вместо 404
       // «Запись не найдена», как у DELETE и пустого PATCH.
       if (!dateRow) throw new HttpError(404, "Запись не найдена", "NOT_FOUND");
+      // BUG-2A-03: у дня рождения времени не существует ни в одной форме.
+      // пишем NULL при любом PATCH — прямой запрос с body.time и
+      // legacy-строки со временем вычищаются даже правкой одного названия.
+      const isBirthday = dateRow?.kind === "birthday";
+      if (isBirthday) field("time", null);
       if (body.title !== undefined) {
         field("title", textField(body, "title", 120, "Название"));
       }
+      // Итоговое расписание нужно и для UPDATE, и для нормализации show_years:
+      // если дату переключили на monthly/разовый режим, флаг лет сбрасываем
+      // принудительно, даже когда клиент прислал true.
+      // monthly перекрывает recurs: ежемесячная дата не может быть ежегодной.
+      // У дня рождения повтор всегда ежегодный — флаги из формы игнорируем,
+      // иначе правка карточки могла бы «отключить» сам день рождения.
+      const monthly = isBirthday ? 0 : (body.monthly !== undefined
+        ? (body.monthly === true ? 1 : 0)
+        : (Number(dateRow?.monthly) === 1 ? 1 : 0));
+      const recurs = isBirthday ? 1 : (monthly === 1 ? 0 : (body.recurs !== undefined
+        ? (body.recurs === false || body.recurs === 0 ? 0 : 1)
+        : (Number(dateRow?.recurs) === 1 ? 1 : 0)));
       // День/время/повтор — одна группа: правка названия не должна сбрасывать
       // расписание, а перенос даты — терять время и флаги повтора.
       const scheduleTouched = body.day !== undefined || body.time !== undefined ||
@@ -2313,24 +2376,24 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (scheduleTouched) {
         const dayValue = body.day !== undefined ? clean(body.day) : dateRow?.day;
         if (!validDate(dayValue)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
-        // monthly перекрывает recurs: ежемесячная дата не может быть ежегодной.
-        // У дня рождения повтор всегда ежегодный — флаги из формы игнорируем,
-        // иначе правка карточки могла бы «отключить» сам день рождения.
-        const isBirthday = dateRow?.kind === "birthday";
-        const monthly = isBirthday ? 0 : (body.monthly !== undefined
-          ? (body.monthly === true ? 1 : 0)
-          : (Number(dateRow?.monthly) === 1 ? 1 : 0));
-        const recurs = isBirthday ? 1 : (monthly === 1 ? 0 : (body.recurs !== undefined
-          ? (body.recurs === false || body.recurs === 0 ? 0 : 1)
-          : (Number(dateRow?.recurs) === 1 ? 1 : 0)));
         field("day", dayValue);
         field("recurs", recurs);
-        field("time", optionalTime(body.time !== undefined ? body.time : dateRow?.time));
+        field("time", isBirthday ? null : optionalTime(body.time !== undefined ? body.time : dateRow?.time));
         // У дня рождения monthly пишется всегда (как и раньше); у обычной даты —
         // только когда поле пришло, иначе PATCH названия трогал бы флаг.
         if (isBirthday || body.monthly !== undefined) {
           field("monthly", monthly);
         }
+      }
+      // PD-DATES-002: отсутствие поля не трогает сохранённый флаг; явное
+      // значение нормализуется по серверному правилу; смена режима на
+      // ежемесячный/разовый очищает флаг, даже если клиент его не прислал.
+      if (body.show_years !== undefined) {
+        field("show_years", showYearsValue(body.show_years, dateRow.kind, recurs, monthly));
+      } else if (!showYearsAllowed(dateRow.kind, recurs, monthly)
+        && (showYearsAllowed(dateRow.kind, dateRow.recurs, dateRow.monthly)
+          || Number(dateRow.show_years) === 1)) {
+        field("show_years", 0);
       }
       // Приватность переключает только автор: партнёр, пометивший чужую общую
       // дату личной, мгновенно терял бы её из своих списков, а у дат без автора
@@ -2435,10 +2498,14 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (body.comment !== undefined) {
         field("comment", clean(body.comment) || null);
       }
-      // PD-WISHES-001: флаг приватности меняет только владелец (guard выше).
+      // PD-WISHES-001 (BUG-2A-04): флаг приватности меняет только владелец (guard выше).
+      // shared_at — именно момент шеринга: возврат желания в личные обязан его
+      // обнулять, а повторный PATCH уже общего желания не переписывает время
+      // первого шеринга.
       if (body.is_private !== undefined) {
         field("is_private", body.is_private === true ? 1 : 0);
-        if (body.is_private === false) field("shared_at", now());
+        if (body.is_private === true) field("shared_at", null);
+        else if (Number(wishRow?.is_private) === 1) field("shared_at", now());
       }
     }
     function patchGoalFields() {
@@ -2457,16 +2524,40 @@ async function itemRoute(env, pair, user, method, pathname, body) {
     // Проверка копилки для поездки делается здесь (async-контекст), а не в
     // синхронном patchTripFields: null/0 снимает привязку, иначе — только
     // общая активная копилка этой пары.
+    // BUG-2A-02: текущая связь поездки сохраняется, даже если копилка уже
+    // заполнена или переведена в личные, — иначе правка одной заметки молча
+    // отправляла saving_id=NULL. Новый выбор по-прежнему ограничен общими
+    // незавершёнными копилками.
     let tripSavingId = null;
     if (type === "trips" && body.saving_id !== undefined) {
       if (body.saving_id === null || body.saving_id === 0 || body.saving_id === "") {
         tripSavingId = null;
       } else {
         if (!positiveId(body.saving_id)) throw new HttpError(400, "Некорректная копилка", "INVALID_SAVING");
-        const saving = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=? AND kind='shared' AND collected<target")
+        const tripRow = await env.DB.prepare("SELECT saving_id FROM trips WHERE id=? AND pair_id=?").bind(id, pair.id).first();
+        const keepsCurrent = Boolean(tripRow && Number(tripRow.saving_id) > 0
+          && Number(tripRow.saving_id) === Number(body.saving_id));
+        // Прошлую связь принимаем как есть; новую — только общая и незавершённая.
+        const saving = await env.DB.prepare(keepsCurrent
+          ? "SELECT id FROM savings WHERE id=? AND pair_id=?"
+          : "SELECT id FROM savings WHERE id=? AND pair_id=? AND kind='shared' AND collected<target")
           .bind(Number(body.saving_id), pair.id).first();
         if (!saving) throw new HttpError(404, "Доступная копилка не найдена", "NOT_FOUND");
         tripSavingId = saving.id;
+      }
+    }
+    // BUG-2A-02 (политика смены вида копилки): перевод общей копилки в личные
+    // запрещён, пока к ней привязана поездка. Иначе общая поездка партнёра
+    // молча теряла бы привязку (личная копилка партнёру не видна), а форма
+    // правки поездки не могла бы показать текущую связь ни одним пунктом.
+    // Проверка только для автора: партнёру 403 NOT_OWNER вернёт
+    // patchSavingFields, как и раньше.
+    if (type === "savings" && body.kind === "personal" && savingRow && savingRow.kind === "shared"
+      && Number(savingRow.created_by) === Number(user.tg_id)) {
+      const linkedTrip = await env.DB.prepare("SELECT id FROM trips WHERE pair_id=? AND saving_id=? LIMIT 1")
+        .bind(pair.id, id).first();
+      if (linkedTrip) {
+        throw new HttpError(409, "Копилка привязана к поездке — сначала отвяжите её или перецепите поездку к другой копилке", "SAVING_TRIP_LINKED");
       }
     }
     if (type === "goals") patchGoalFields();
@@ -2623,15 +2714,26 @@ async function itemRoute(env, pair, user, method, pathname, body) {
       if (action !== "deposit") throw new HttpError(404, "Действие недоступно", "NOT_FOUND");
       validateSchema(body, { amount: { type: "number", required: true, errorCode: "INVALID_AMOUNT" } });
       const amount = moneyAmount(body.amount, "Сумма");
-      // UPDATE первым, INSERT — под EXISTS в той же транзакции: если копилку
-      // удалили в гонке, голый INSERT упал бы по FK на 500 вместо честного 404.
+      // BUG-2A-01: заполненную копилку пополнять нельзя — UI скрывает
+      // «Пополнить», но прямой запрос без guard'а обходил это и растил
+      // collected после достижения цели. UPDATE захватывает только
+      // незавершённую копилку; INSERT в историю согласован атомарно с
+      // изменением суммы: (SELECT changes())>0 ссылается на результат UPDATE
+      // предыдущего оператора того же batch'а (приём completeDaily).
       const batchResults = await env.DB.batch([
-        env.DB.prepare("UPDATE savings SET collected=collected+? WHERE id=? AND pair_id=?")
+        env.DB.prepare("UPDATE savings SET collected=collected+? WHERE id=? AND pair_id=? AND collected<target")
           .bind(amount, id, pair.id),
-        env.DB.prepare("INSERT INTO savings_deposits(saving_id,tg_id,amount,created_at) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM savings WHERE id=? AND pair_id=?)")
-          .bind(id, user.tg_id, amount, now(), id, pair.id)
+        env.DB.prepare("INSERT INTO savings_deposits(saving_id,tg_id,amount,created_at) SELECT ?,?,?,? WHERE (SELECT changes())>0")
+          .bind(id, user.tg_id, amount, now())
       ]);
-      if (!batchResults[0].meta.changes) throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
+      if (!batchResults[0].meta.changes) {
+        // Заполненная и удалённая копилка — разные ошибки: гонка с удалением
+        // тоже даёт changes=0, отличаем их отдельным SELECT.
+        const saving = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=?")
+          .bind(id, pair.id).first();
+        if (saving) throw new HttpError(409, "Копилка уже заполнена — увеличьте цель, чтобы продолжить копить", "SAVING_FULL");
+        throw new HttpError(404, "Копилка не найдена", "NOT_FOUND");
+      }
       return true;
     }
   };
@@ -3550,6 +3652,12 @@ async function api(request, env, url, ctx = null) {
   }
   if (request.method === "POST" && url.pathname === "/api/gender") {
     validateSchema(body, { gender: { type: "string", required: true, enum: ["male", "female"], errorCode: "INVALID_GENDER" } });
+    // Пол задаётся один раз — при первом входе, гейтом до онбординга —
+    // и больше не меняется (решение владельца 2026-11-23): блока смены в
+    // настройках больше нет, сервер отвергает повторную установку.
+    if (user.gender) {
+      throw new HttpError(409, "Пол уже задан и не меняется", "GENDER_IMMUTABLE");
+    }
     const gender = clean(body.gender);
     await env.DB.prepare("UPDATE users SET gender = ?, updated_at = ? WHERE tg_id = ?").bind(gender, now(), user.tg_id).run();
     return json(await state(env, user.tg_id));
@@ -3948,10 +4056,17 @@ async function api(request, env, url, ctx = null) {
       for (const row of requested[sectionKey]) {
         const title = rowText(row, "title", { label: "Название даты", max: 120, required: true });
         const day = rowDate(row, "day", { label: "Дата", required: true });
+        // BUG-2A-03: у дня рождения времени нет — импорт очищает его так же,
+        // как POST/PATCH, чтобы legacy-файл не вернул запрещённое значение.
+        const recurs = rowBool(row, "recurs");
+        const monthly = rowBool(row, "monthly");
+        // PD-DATES-002: старый экспорт без поля и некорректное значение дают
+        // false; флаг не включается для разовых и ежемесячных дат.
+        const showYears = showYearsValue(row?.show_years === true || row?.show_years === 1, kind, recurs, monthly);
         work.push({
           section: sectionKey,
-          sql: "INSERT INTO dates(pair_id,title,day,time,recurs,monthly,kind,is_private,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-          binds: [pair.id, title, day, optionalTime(row?.time ?? null), rowBool(row, "recurs"), rowBool(row, "monthly"), kind, rowBool(row, "is_private"), user.tg_id, rowStamp(row)]
+          sql: "INSERT INTO dates(pair_id,title,day,time,recurs,monthly,kind,is_private,created_by,show_years,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+          binds: [pair.id, title, day, kind === "birthday" ? null : optionalTime(row?.time ?? null), recurs, monthly, kind, rowBool(row, "is_private"), user.tg_id, showYears, rowStamp(row)]
         });
       }
     }
@@ -4215,19 +4330,24 @@ async function api(request, env, url, ctx = null) {
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/dates") {
-    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" }, kind: { type: "string", enum: ["date", "birthday"] } });
+    validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, day: { type: "string", required: true }, time: { type: "string" }, recurs: { type: "boolean" }, monthly: { type: "boolean" }, is_private: { type: "boolean" }, kind: { type: "string", enum: ["date", "birthday"] }, show_years: { type: "boolean" } });
     const title = textField(body, "title", 120, "Название");
     if (!validDate(body.day)) throw new HttpError(400, "Проверьте дату", "INVALID_DATE");
-    const time = optionalTime(body.time);
-    const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
     // День рождения — та же дата, но повтор всегда ежегодный: monthly из
     // формы игнорируем, recurs принудительно 1.
     const kind = body.kind === "birthday" ? "birthday" : "date";
+    // BUG-2A-03: у дня рождения времени нет ни в одной форме — прямой
+    // запрос с body.time не может создать «день рождения в 19:00».
+    const time = kind === "birthday" ? null : optionalTime(body.time);
+    const isPrivate = body.is_private === true || body.is_private === 1 ? 1 : 0;
     // Ежемесячный повтор и ежегодный взаимоисключающие: monthly перекрывает recurs.
     const monthly = kind === "birthday" ? 0 : (body.monthly === true ? 1 : 0);
     const recurs = kind === "birthday" ? 1 : (monthly ? 0 : (body.recurs === false || body.recurs === 0 ? 0 : 1));
-    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,monthly,is_private,created_by,kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-      .bind(pair.id, title, clean(body.day), time, recurs, monthly, isPrivate, user.tg_id, kind, now()).run();
+    // PD-DATES-002: флаг лет — только для birthday/ежегодной даты и только
+    // по явному boolean true; разовый и ежемесячный режимы всегда дают 0.
+    const showYears = showYearsValue(body.show_years, kind, recurs, monthly);
+    await env.DB.prepare("INSERT INTO dates(pair_id,title,day,time,recurs,monthly,is_private,created_by,kind,show_years,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(pair.id, title, clean(body.day), time, recurs, monthly, isPrivate, user.tg_id, kind, showYears, now()).run();
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/memories") {
@@ -4279,44 +4399,49 @@ async function api(request, env, url, ctx = null) {
     return json(await state(env, user.tg_id));
   }
   // Поездка может быть сразу привязана к общей активной копилке. Если нужной
-  // копилки ещё нет, клиент шлёт new_saving: обе записи создаются одной операцией
-  // с компенсирующим удалением копилки при сбое вставки поездки (не остаётся
-  // копилки, которую пользователь не просил создавать отдельно).
-  async function attachableSaving(savingId, newSaving) {
-    if (newSaving) {
-      validateSchema(newSaving, { title: { type: "string", required: true, maxLength: 120 }, target: { type: "number", required: true, errorCode: "INVALID_AMOUNT" } });
-      const savingTitle = textField(newSaving, "title", 120, "Название копилки");
-      const target = moneyAmount(newSaving.target, "Цель");
-      const result = await env.DB.prepare("INSERT INTO savings(pair_id,created_by,kind,title,target,collected,created_at) VALUES(?,?,?,?,?,0,?)")
-        .bind(pair.id, user.tg_id, "shared", savingTitle, target, now()).run();
-      if (!positiveId(result.meta.last_row_id)) throw new HttpError(500, "Не удалось создать копилку", "SAVING_ID_MISSING");
-      return result.meta.last_row_id;
+  // копилки ещё нет, клиент шлёт new_saving: копилка и поездка создаются одним
+  // batch'ем (REL-2B-02) — аварийное завершение между INSERT'ами больше не
+  // оставляет копилки без поездки, компенсирующее удаление не нужно.
+  // saving_id и new_saving вместе запрещены (BUG-2A-08): запрос выбирает ровно
+  // один вариант — существующая копилка, новая копилка или без копилки.
+  async function tripSavingPlan() {
+    if (body.new_saving) {
+      if (body.saving_id !== undefined && body.saving_id !== null && body.saving_id !== "") {
+        throw new HttpError(400, "Выберите существующую копилку или создание новой — оба варианта сразу указать нельзя", "INVALID_SAVING_CHOICE");
+      }
+      validateSchema(body.new_saving, { title: { type: "string", required: true, maxLength: 120 }, target: { type: "number", required: true, errorCode: "INVALID_AMOUNT" } });
+      return {
+        mode: "new",
+        savingTitle: textField(body.new_saving, "title", 120, "Название копилки"),
+        target: moneyAmount(body.new_saving.target, "Цель")
+      };
     }
-    if (savingId === undefined || savingId === null || savingId === "") return null;
-    if (!positiveId(savingId)) throw new HttpError(400, "Некорректная копилка", "INVALID_SAVING");
+    if (body.saving_id === undefined || body.saving_id === null || body.saving_id === "") return { mode: "none" };
+    if (!positiveId(body.saving_id)) throw new HttpError(400, "Некорректная копилка", "INVALID_SAVING");
     // Только общая незавершённая копилка этой пары: личные и чужие не доступны,
     // завершённую нельзя прикрепить к новой поездке.
-    const row = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=? AND kind='shared' AND collected<target").bind(Number(savingId), pair.id).first();
+    const row = await env.DB.prepare("SELECT id FROM savings WHERE id=? AND pair_id=? AND kind='shared' AND collected<target").bind(Number(body.saving_id), pair.id).first();
     if (!row) throw new HttpError(404, "Доступная копилка не найдена", "NOT_FOUND");
-    return row.id;
+    return { mode: "existing", savingId: row.id };
   }
   if (request.method === "POST" && url.pathname === "/api/trips") {
     validateSchema(body, { title: { type: "string", required: true, maxLength: 120 }, note: { type: "string", maxLength: 600 }, saving_id: { type: "number" }, new_saving: { type: "object" } });
     const title = textField(body, "title", 120, "Поездка");
     const note = clean(body.note) || null;
-    const savingId = await attachableSaving(body.saving_id, body.new_saving);
-    try {
+    const savingPlan = await tripSavingPlan();
+    if (savingPlan.mode === "new") {
+      // last_insert_rowid() — связь уровня соединения: в той же транзакции
+      // batch'а он читает rowid копилки, вставленной предыдущим оператором,
+      // INSERT поездки идёт сразу после INSERT копилки.
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO savings(pair_id,created_by,kind,title,target,collected,created_at) VALUES(?,?,?,?,?,0,?)")
+          .bind(pair.id, user.tg_id, "shared", savingPlan.savingTitle, savingPlan.target, now()),
+        env.DB.prepare("INSERT INTO trips(pair_id,created_by,title,note,created_at,saving_id) VALUES(?,?,?,?,?,(SELECT last_insert_rowid()))")
+          .bind(pair.id, user.tg_id, title, note, now())
+      ]);
+    } else {
       await env.DB.prepare("INSERT INTO trips(pair_id,created_by,title,note,created_at,saving_id) VALUES(?,?,?,?,?,?)")
-        .bind(pair.id, user.tg_id, title, note, now(), savingId).run();
-    } catch (error) {
-      if (body.new_saving && savingId) {
-        try {
-          await env.DB.prepare("DELETE FROM savings WHERE id=? AND pair_id=?").bind(savingId, pair.id).run();
-        } catch (cleanupError) {
-          console.error("trip saving cleanup failed", cleanupError);
-        }
-      }
-      throw error;
+        .bind(pair.id, user.tg_id, title, note, now(), savingPlan.mode === "existing" ? savingPlan.savingId : null).run();
     }
     return json(await state(env, user.tg_id));
   }
@@ -4335,33 +4460,19 @@ async function api(request, env, url, ctx = null) {
     for (const item of items) {
       if (Array.from(item).length > 180) throw new HttpError(400, "Пункт превышает 180 символов", "INVALID_ITEMS");
     }
-    // Атомарность создания: пункты уходят одним batch (D1 исполняет его
-    // единой транзакцией — либо все пункты, либо ни одного), а при его сбое
-    // цель удаляется компенсирующе. «Осиротевшая» цель без пунктов не
-    // остаётся. Один общий batch здесь невозможен: goal_id для пунктов — это
-    // meta.last_row_id цели, а last_insert_rowid() внутри batch после первого
-    // же пункта возвращал бы rowid пункта, не цели.
-    const goalResult = await env.DB.prepare("INSERT INTO goals(pair_id,created_by,title,is_private,created_at) VALUES(?,?,?,?,?)")
-      .bind(pair.id, user.tg_id, title, body.is_private === true ? 1 : 0, now()).run();
-    const goalId = goalResult.meta.last_row_id;
-    // last_row_id=0/undefined (D1-квирк) дал бы пункты с goal_id=0 —
-    // вечные сироты, невидимые ни в одном списке. Падаем до компенсации.
-    if (!positiveId(goalId)) throw new HttpError(500, "Не удалось создать цель", "GOAL_ID_MISSING");
-    try {
-      await env.DB.batch(items.map((item) =>
-        env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
-          .bind(goalId, pair.id, user.tg_id, item, now())
-      ));
-    } catch (error) {
-      // Компенсация откатывает цель, если пункты не записались. Сбой самой
-      // компенсации логируем — исходная ошибка важнее.
-      try {
-        await env.DB.prepare("DELETE FROM goals WHERE id=? AND pair_id=?").bind(goalId, pair.id).run();
-      } catch (cleanupError) {
-        console.error("goal cleanup failed", cleanupError);
-      }
-      throw error;
-    }
+    // Атомарность создания (REL-2B-01): цель и пункты — один batch, D1
+    // исполняет его единой транзакцией. Аварийное завершение воркера между
+    // INSERT'ами больше не оставляет «невидимой» цели без пунктов, поэтому
+    // компенсирующее удаление не нужно. goal_id для пунктов берётся
+    // last_insert_rowid(): предыдущий оператор batch'а — INSERT цели, между
+    // ними нет других INSERT'ов, а json_each разворачивает пункты в строки
+    // без единого выстрела в rowid.
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO goals(pair_id,created_by,title,is_private,created_at) VALUES(?,?,?,?,?)")
+        .bind(pair.id, user.tg_id, title, body.is_private === true ? 1 : 0, now()),
+      env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) SELECT (SELECT last_insert_rowid()), ?, ?, je.value, ? FROM json_each(?) AS je WHERE je.value<>''")
+        .bind(pair.id, user.tg_id, now(), JSON.stringify(items))
+    ]);
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && url.pathname === "/api/goals") {
@@ -4376,10 +4487,12 @@ async function api(request, env, url, ctx = null) {
     await ensureGoalVisible(env, pair, user, goalId);
     validateSchema(body, { title: { type: "string", required: true, maxLength: 180 } });
     const title = textField(body, "title", 180, "Пункт цели");
-    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM goal_items WHERE goal_id=?").bind(goalId).first();
-    if (Number(count?.n || 0) >= 30) throw new HttpError(400, "Не больше 30 пунктов на цель", "INVALID_ITEMS");
-    await env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) VALUES(?,?,?,?,?)")
-      .bind(goalId, pair.id, user.tg_id, title, now()).run();
+    // BUG-2A-06: лимит 30 — условие самого INSERT'а, а не отдельный SELECT
+    // COUNT: два параллельных добавления при 29 пунктах оба проходили
+    // проверку и давали 31 пункт. ensureGoalVisible уже отсек чужую цель.
+    const inserted = await env.DB.prepare("INSERT INTO goal_items(goal_id,pair_id,created_by,title,created_at) SELECT ?,?,?,?,? WHERE (SELECT COUNT(*) FROM goal_items WHERE goal_id=?)<30")
+      .bind(goalId, pair.id, user.tg_id, title, now(), goalId).run();
+    if (!inserted.meta.changes) throw new HttpError(409, "Не больше 30 пунктов на цель", "GOAL_ITEMS_LIMIT");
     return json(await state(env, user.tg_id));
   }
   if (request.method === "POST" && /^\/api\/goals\/\d+\/items$/.test(url.pathname)) {
@@ -4628,15 +4741,21 @@ async function api(request, env, url, ctx = null) {
       const item = await env.DB.prepare("SELECT movie_id FROM movie_group_items WHERE group_id=? AND movie_id=? AND pair_id=?")
         .bind(groupId, itemMovieId, pair.id).first();
       if (!item) throw new HttpError(404, "Часть не найдена в группе", "NOT_FOUND");
-      const countRow = await env.DB.prepare("SELECT COUNT(*) AS n FROM movie_group_items WHERE group_id=? AND pair_id=?")
-        .bind(groupId, pair.id).first();
-      const ops = [env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND movie_id=? AND pair_id=?")
-        .bind(groupId, itemMovieId, pair.id)];
-      // Меньше двух частей — группа расформировывается, фильм остаётся.
-      if (Number(countRow?.n || 0) <= 2) {
-        ops.push(env.DB.prepare("DELETE FROM movie_groups WHERE id=? AND pair_id=?").bind(groupId, pair.id));
-      }
-      await env.DB.batch(ops);
+      // BUG-2A-07: минимальный состав проверяется не устаревшим предварительным
+      // COUNT, а состоянием после удаления связи. Два параллельных удаления из
+      // группы из трёх частей оба проходили проверку «нас трое» и оба не
+      // запускали уборку, оставляя singleton-группу. batch атомарен и
+      // изолирован, поэтому операции внутри него гоночных окон не образуют:
+      // после удаления выбранной связи группа с одной частью расформировывается
+      // той же транзакцией (связи и строка группы), фильмы остаются в списке.
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND movie_id=? AND pair_id=?")
+          .bind(groupId, itemMovieId, pair.id),
+        env.DB.prepare("DELETE FROM movie_group_items WHERE group_id=? AND pair_id=? AND (SELECT COUNT(*) FROM movie_group_items WHERE group_id=?)<2")
+          .bind(groupId, pair.id, groupId),
+        env.DB.prepare("DELETE FROM movie_groups WHERE id=? AND pair_id=? AND (SELECT COUNT(*) FROM movie_group_items WHERE group_id=?)<2")
+          .bind(groupId, pair.id, groupId)
+      ]);
       return json(await state(env, user.tg_id));
     }
   }
@@ -5456,8 +5575,46 @@ function dateOccursOnDay(item, targetDay) {
   const day = String(item?.day || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
   if (day === targetDay) return true;
+  // BUG-3-02 (аудит 2026-11-23): повтор не наступает раньше исходной даты —
+  // совпадение по месяцу-дню (или дню месяца у monthly) засчитывается только
+  // от dates.day и позже. День рождения с прошедшей датой не затронут.
+  if (targetDay < day) return false;
   if (monthlyOccursOnDay(item, targetDay)) return true;
   return Boolean(item.recurs) && Number(item.monthly) !== 1 && day.slice(5) === targetDay.slice(5);
+}
+
+// PD-DATES-002: число лет считается на КОНКРЕТНОЕ наступление, а не на момент
+// тика cron и не по поясу устройства. Исходный год остаётся в dates.day —
+// именно он здесь точка отсчёта. Возвращаем null, если показывать нечего:
+// флаг выключен, событие не ежегодное, дата битая, наступление не наступило
+// или полных лет ещё нет (первая годовщина в исходном году не считается).
+function yearsAtOccurrence(item, occurrenceDay) {
+  if (!item || Number(item.show_years) !== 1) return null;
+  if (item.kind !== "birthday" && !(Number(item.recurs) === 1 && Number(item.monthly) !== 1)) return null;
+  if (!validDate(item.day) || !validDate(occurrenceDay)) return null;
+  // День рождения ежегоден по продукту даже в старых строках без recurs=1
+  // (карточка тоже считает его ежегодным принудительно). Остальные правила
+  // совпадения дня — включая 29 февраля — берём из dateOccursOnDay.
+  const occurrenceItem = item.kind === "birthday" ? { ...item, recurs: 1, monthly: 0 } : item;
+  if (!dateOccursOnDay(occurrenceItem, occurrenceDay)) return null;
+  const years = Number(occurrenceDay.slice(0, 4)) - Number(item.day.slice(0, 4));
+  return years >= 1 ? years : null;
+}
+
+function yearsWord(years) {
+  const mod100 = years % 100;
+  const mod10 = years % 10;
+  if (mod100 >= 11 && mod100 <= 14) return "лет";
+  if (mod10 === 1) return "год";
+  if (mod10 >= 2 && mod10 <= 4) return "года";
+  return "лет";
+}
+
+// Telegram не умеет произвольный фон для фрагмента текста — в уведомлениях
+// это короткий текстовый суффикс, а не HTML-пилюля Mini App.
+function yearsSuffix(item, occurrenceDay) {
+  const years = yearsAtOccurrence(item, occurrenceDay);
+  return years === null ? "" : ` · ${years} ${yearsWord(years)}`;
 }
 
 function parseTimeMinutes(value, fallbackMinutes = 9 * 60) {
@@ -5615,8 +5772,8 @@ function digestText(today, tomorrow, dates, tasks) {
   const birthdayLines = [
     // Своё личное напоминание не маскируем: сообщение уходит только автору,
     // а «Скрытый» в строке «день рождения у Скрытый» бесполезен.
-    ...dates.filter(d => birthday(d) && dateOccursOnDay(d, today)).map(d => `• Сегодня — ${richToHtml(d.title)}`),
-    ...dates.filter(d => birthday(d) && dateOccursOnDay(d, tomorrow)).map(d => `• Завтра — ${richToHtml(d.title)}`)
+    ...dates.filter(d => birthday(d) && dateOccursOnDay(d, today)).map(d => `• Сегодня — ${richToHtml(d.title)}${yearsSuffix(d, today)}`),
+    ...dates.filter(d => birthday(d) && dateOccursOnDay(d, tomorrow)).map(d => `• Завтра — ${richToHtml(d.title)}${yearsSuffix(d, tomorrow)}`)
   ];
   const occurs = (task, day) =>
     String(task.day) === day ||
@@ -5626,8 +5783,8 @@ function digestText(today, tomorrow, dates, tasks) {
   const tomorrowTasks = tasks.filter(t => occurs(t, tomorrow));
   if (!todayDates.length && !tomorrowDates.length && !birthdayLines.length && !todayTasks.length && !tomorrowTasks.length) return "";
   const dateLines = [
-    ...todayDates.map(d => `• Сегодня — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}`),
-    ...tomorrowDates.map(d => `• Завтра — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}`)
+    ...todayDates.map(d => `• Сегодня — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}${yearsSuffix(d, today)}`),
+    ...tomorrowDates.map(d => `• Завтра — ${maskTitle(d)}${d.time ? ` (${d.time})` : ""}${yearsSuffix(d, tomorrow)}`)
   ];
   const taskLines = [
     ...todayTasks.map(t => `• Сегодня${t.time ? `, до ${t.time}` : ""} — ${maskTitle(t)}`),
@@ -5670,7 +5827,7 @@ function datesDigestText(timeZone, tomorrow, dates) {
   let hidden = 0;
   let used = lines[0].length + 30;
   for (const item of tomorrowDates) {
-    const line = `• ${item.kind === "birthday" ? "День рождения — " : ""}${item.kind === "birthday" ? richToHtml(item.title) : maskTitle(item)}${item.time ? ` (${item.time})` : ""}`;
+    const line = `• ${item.kind === "birthday" ? "День рождения — " : ""}${item.kind === "birthday" ? richToHtml(item.title) : maskTitle(item)}${item.time ? ` (${item.time})` : ""}${yearsSuffix(item, tomorrow)}`;
     if (shown < DIGEST_MAX_ITEMS && used + line.length + 1 <= DIGEST_MAX_CHARS) { lines.push(line); used += line.length + 1; shown++; }
     else hidden++;
   }
@@ -5717,7 +5874,7 @@ function weeklyDigestText(weekStart, weekEnd, dates, tasks) {
     const label = fmtDay(day);
     for (const d of dates) {
       if (!dateOccursOnDay(d, day)) continue;
-      const line = `• ${label}${d.time ? `, ${d.time}` : ""} — ${birthday(d) ? richToHtml(d.title) : maskTitle(d)}`;
+      const line = `• ${label}${d.time ? `, ${d.time}` : ""} — ${birthday(d) ? richToHtml(d.title) : maskTitle(d)}${yearsSuffix(d, day)}`;
       (birthday(d) ? birthdayLines : dateLines).push(line);
     }
     for (const t of tasks) {
@@ -5805,9 +5962,9 @@ const EXPORT_SQL = {
     LEFT JOIN users u ON u.tg_id=t.created_by WHERE t.pair_id=? AND t.status='open'${scope === "private" ? " AND t.is_private=1 AND t.created_by=?" : " AND (t.is_private=0 OR t.created_by=?)"} ORDER BY COALESCE(t.day,'9999-99-99') ASC, t.id ASC`,
   movies: () => `SELECT m.id,m.imdb_id,m.title,m.year,m.kind,m.rating,m.rating_source,m.runtime,m.seasons,m.episodes,m.url,m.resume_position,m.created_at,(SELECT ROUND(AVG(r.rating),1) FROM movie_ratings r WHERE r.movie_id=m.id) AS pair_rating,u.display_name AS author,(SELECT g.title FROM movie_group_items i JOIN movie_groups g ON g.id=i.group_id AND g.pair_id=i.pair_id WHERE i.movie_id=m.id) AS group_title FROM movies m
     LEFT JOIN users u ON u.tg_id=m.created_by WHERE m.pair_id=? AND m.watched=0 ORDER BY m.created_at ASC, m.id ASC`,
-  dates: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
+  dates: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.show_years,d.created_at,u.display_name AS author FROM dates d
     LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.kind='date'${scope === "private" ? " AND d.is_private=1 AND d.created_by=?" : " AND (d.is_private=0 OR d.created_by=?)"} ORDER BY d.day ASC, d.id ASC`,
-  birthdays: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.created_at,u.display_name AS author FROM dates d
+  birthdays: (scope) => `SELECT d.id,d.title,d.day,d.time,d.recurs,d.monthly,d.is_private,d.kind,d.show_years,d.created_at,u.display_name AS author FROM dates d
     LEFT JOIN users u ON u.tg_id=d.created_by WHERE d.pair_id=? AND d.kind='birthday'${scope === "private" ? " AND d.is_private=1 AND d.created_by=?" : " AND (d.is_private=0 OR d.created_by=?)"} ORDER BY d.day ASC, d.id ASC`,
   places: (scope) => `SELECT p.id,p.title,p.note,p.url,p.visited,p.visited_at,p.created_at,u.display_name AS author FROM places p
     LEFT JOIN users u ON u.tg_id=p.created_by WHERE p.pair_id=?${scope === "mine" ? " AND p.created_by=?" : ""} ORDER BY p.created_at ASC, p.id ASC`,
@@ -5946,6 +6103,7 @@ function exportDateRow(row) {
     recurs: Number(row.recurs) === 1,
     monthly: Number(row.monthly) === 1,
     is_private: Number(row.is_private) === 1,
+    show_years: Number(row.show_years) === 1,
     author: clean(row.author) || "Партнёр",
     created_at: row.created_at
   };
@@ -6217,7 +6375,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
   budget.left -= 3; // пользователи + даты + планы
   const [userRows, dateRows, taskRows] = await Promise.all([
     env.DB.prepare(`SELECT * FROM users WHERE tg_id IN (${members.map(() => "?").join(",")})`).bind(...members).all(),
-    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind FROM dates WHERE pair_id=?").bind(pair.id).all(),
+    env.DB.prepare("SELECT id,title,day,time,recurs,monthly,is_private,created_by,kind,show_years FROM dates WHERE pair_id=?").bind(pair.id).all(),
     env.DB.prepare("SELECT id,title,day,time,monthly,yearly,is_private,created_by FROM tasks WHERE pair_id=? AND status='open' AND day IS NOT NULL").bind(pair.id).all()
   ]);
   const users = userRows.results || [];
@@ -6256,7 +6414,7 @@ async function processPairNotifications(env, pair, stamp, budget) {
       if (date.kind !== "birthday" || !dateOccursOnDay(date, inThreeDays)) continue;
       if (budget.left < 2) break;
       budget.left -= 2;
-      await deliverNotification(env, member, today, `birthday3d:${date.id}`, `Через 3 дня — день рождения: ${richToHtml(date.title)}`);
+      await deliverNotification(env, member, today, `birthday3d:${date.id}`, `Через 3 дня — день рождения: ${richToHtml(date.title)}${yearsSuffix(date, inThreeDays)}`);
     }
   }
 
@@ -7961,6 +8119,7 @@ async function ensureSchema(env) {
           ["wishes", "is_private"],
           ["wishes", "shared_at"],
           ["dates", "is_private"],
+          ["dates", "show_years"],
           ["tasks", "is_private"],
           ["memories", "ascii_art"],
           ["trips", "saving_id"]
@@ -8007,7 +8166,7 @@ async function ensureSchema(env) {
     // Снимки статистики «Ваша история» по парам (migrations/0030).
     `CREATE TABLE IF NOT EXISTS member_stats (pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,tg_id INTEGER NOT NULL,points INTEGER NOT NULL DEFAULT 0,streak INTEGER NOT NULL DEFAULT 0,best_streak INTEGER NOT NULL DEFAULT 0,last_activity TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY (pair_id,tg_id))`,
     `CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',day TEXT,time TEXT,monthly INTEGER NOT NULL DEFAULT 0,yearly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_by INTEGER,completed_at INTEGER)`,
-    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',created_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS dates (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,title TEXT NOT NULL,day TEXT NOT NULL,time TEXT,recurs INTEGER NOT NULL DEFAULT 1,monthly INTEGER NOT NULL DEFAULT 0,is_private INTEGER NOT NULL DEFAULT 0,created_by INTEGER NOT NULL DEFAULT 0,kind TEXT NOT NULL DEFAULT 'date',show_years INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,title TEXT,body TEXT NOT NULL,ascii_art TEXT,day TEXT NOT NULL,created_at INTEGER NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wishes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,owner_id INTEGER NOT NULL,body TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,done_at INTEGER,created_at INTEGER NOT NULL,url TEXT,comment TEXT,is_private INTEGER NOT NULL DEFAULT 0,shared_at INTEGER)`,
     `CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT,pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,author_id INTEGER NOT NULL,body TEXT NOT NULL,source TEXT,created_at INTEGER NOT NULL)`,
@@ -8122,6 +8281,8 @@ async function ensureSchema(env) {
     ["tasks", "yearly", "INTEGER NOT NULL DEFAULT 0"],
     ["dates", "monthly", "INTEGER NOT NULL DEFAULT 0"],
     ["dates", "kind", "TEXT NOT NULL DEFAULT 'date'"],
+    // PD-DATES-002: число лет для дней рождения и ежегодных дат (migrations/0053).
+    ["dates", "show_years", "INTEGER NOT NULL DEFAULT 0"],
     ["movies", "rating_source", "TEXT"],
     ["movies", "rating_checked_at", "INTEGER"],
     ["movies", "details", "TEXT"],

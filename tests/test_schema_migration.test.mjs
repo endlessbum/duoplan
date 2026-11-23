@@ -127,7 +127,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
     "is_private", "is_private", "kind", "last_partner", "leakage", "life_impact", "monthly", "monthly", "movie_pick_id", "mucus",
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url", "place_pick_id",
-    "rating_checked_at", "rating_source", "resume_position", "saving_id", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "shared_at", "show_avatar", "show_cycle_calendar", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
+    "rating_checked_at", "rating_source", "resume_position", "saving_id", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "shared_at", "show_avatar", "show_cycle_calendar", "show_years", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
     "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
@@ -158,7 +158,8 @@ test("чистый проход миграции без гонки записы�
   // + resume_position (movies, «Остановились» — migrations/0048)
   // + place_pick_id/movie_pick_id (pairs, общий рандом — migrations/0049)
   // + ascii_art (memories, ASCII-вложение дневника — migrations/0050)
-  deepStrictEqual(log.alters.length, 68); // +1: trips.saving_id (поездка → копилка)
+  // +1: show_years (PD-DATES-002, migrations/0053), +2: trips.saving_id (поездка → копилка)
+  deepStrictEqual(log.alters.length, 69);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

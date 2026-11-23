@@ -45,6 +45,10 @@ const bundle = [
   "const DIGEST_MAX_CHARS = 3400;",
   extractBraced("function monthlyOccursOnDay("),
   extractBraced("function dateOccursOnDay("),
+  extractBraced("function validDate("),
+  extractBraced("function yearsAtOccurrence("),
+  extractBraced("function yearsWord("),
+  extractBraced("function yearsSuffix("),
   extractBraced("function upcomingWeekWindow("),
   extractBraced("function weeklyDigestText(")
 ].join("\n");

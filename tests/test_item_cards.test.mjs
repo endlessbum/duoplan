@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { equal, ok } from "node:assert/strict";
+import { equal, notEqual, ok } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -79,13 +79,15 @@ const RENDER_DEPS = [
     extractBraced("function calendarKeyFromDate"),
     extractBraced("function formatBirthday"),
     extractBraced("function nextDaysLabel"),
+    extractBraced("function yearsChip"),
     extractBraced("function taskItem"),
     extractBraced("function dateItem"),
     extractBraced("function birthdayItem"),
+    extractBraced("function quoteItem"),
     extractBraced("function wishItem"),
     extractBraced("function completedTaskItem"),
     extractBraced("function completedWishItem"),
-    "return { taskItem, dateItem, birthdayItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay };"
+    "return { taskItem, dateItem, birthdayItem, quoteItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay, monthlyNext, yearlyNext, nextOccurrence, calendarKeyFromDate, viewerTimeHint };"
   ];
 
 const load = () => new Function([
@@ -94,7 +96,7 @@ const load = () => new Function([
   ].join("\n"))();
 // Вариант с разными поясами пары и зрителя — для проверок data-day.
 const loadTZ = (stateLine) => new Function([stateLine, ...RENDER_DEPS].join("\n"))();
-const { taskItem, dateItem, birthdayItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay } = load();
+const { taskItem, dateItem, birthdayItem, quoteItem, wishItem, completedTaskItem, completedWishItem, countdownChip, REOPEN_ICON, formatDay, monthlyNext, yearlyNext, nextOccurrence, calendarKeyFromDate, viewerTimeHint } = load();
 
 test("у плана с датой карточка-кнопка календаря, у плана без даты — нет", () => {
   const withDay = taskItem({ id: 1, title: "План", day: "2026-11-05", time: "19:30", is_private: 0 });
@@ -279,6 +281,29 @@ test("PD-QUOTES-001: карточка цитаты копируется, мен�
   const quoteCard = source.slice(source.indexOf("function quoteItem("), source.indexOf("function formatBirthday"));
   ok((quoteCard.match(/disabled: partnerMissing\(\)/g) || []).length === 2,
     "меню цитаты не заблокировано без партнёра");
+  ok(!quoteCard.includes("memory-author") && !quoteCard.includes("display_name"),
+    "карточка цитаты показывает создателя записи — убрано решением 2026-11-23");
+});
+
+test("PD-QUOTES-001: в карточке цитаты — только автор и дата, без создателя записи", () => {
+  const html = quoteItem({ id: 7, body: "Скаловские", source: "Ди", author_id: 100002, display_name: "Dev100002", created_at: 1793995140 });
+  ok(html.includes("quote-source") && html.includes("— Ди"), "подпись автора цитаты пропала");
+  ok(!html.includes("Dev100002") && !html.includes("memory-author"), "создатель записи показан в карточке");
+  const noSource = quoteItem({ id: 8, body: "Без автора", source: null, author_id: 1, display_name: "Dev100001", created_at: 1793995140 });
+  ok(!noSource.includes("quote-source"), "пустой источник рисуется");
+  ok(!noSource.includes("Dev100001"), "создатель показан без источника");
+});
+
+test("PD-MENU-001: ⋮ карточки цитаты — в правом верхнем углу, как у других карточек", () => {
+  const html = quoteItem({ id: 9, body: "Цитата", source: "Ди", created_at: 1793995140 });
+  const rowStart = html.indexOf('<div class="item-row">');
+  const menuPos = html.indexOf('class="item-actions"');
+  const datePos = html.indexOf('class="item-meta"');
+  ok(rowStart !== -1 && menuPos > rowStart && menuPos < datePos,
+    "⋮ должен быть в верхнем ряду карточки, до даты");
+  ok(html.indexOf("quote-text") < menuPos, "текст цитаты должен быть в том же верхнем ряду слева от ⋮");
+  ok(!/\.quote-card \.item-row\s*\{[^}]*align-items:\s*center/.test(cssSource),
+    "ряд цитаты по-прежнему центрирует ⋮ по строке даты");
 });
 
 test("у чужого исполненного желания кнопок нет, у своего — есть", () => {
@@ -655,4 +680,130 @@ test("PD-MOVIES-001: карточка показывает отметившег�
   const own = load({ id: 91, title: "Дюна", watched: 1, watched_at: 1730000000, watched_by: 1, my_rating: 8, pair_rating: 8 });
   ok(!own.includes("отметил партнёр"), "своя отметка названа чужой");
   ok(source.includes("disabled: locked"), "действия карточки не блокируются без партнёра");
+});
+
+test("PD-DATES-002: карточка даты — заголовок, Личное, серая пилюля ближайшего наступления", () => {
+  const html = dateItem({
+    id: 31, title: "День знакомства", day: "2020-11-20", time: "19:30",
+    recurs: 1, monthly: 0, is_private: 1
+  });
+  const title = html.indexOf('<h3 class="item-title"');
+  const privateChip = html.indexOf(">Личное</span>");
+  const datePill = html.indexOf('class="day-chip is-muted"');
+  ok(title !== -1 && privateChip !== -1 && datePill !== -1, "не все части карточки на месте");
+  ok(title < privateChip && privateChip < datePill, "порядок карточки: заголовок → Личное → дата");
+  ok(html.includes("Таймер · 20 ноября · 19:30"), "пилюля не показывает ближайшее наступление со временем");
+  ok(!html.includes("2020-11-20"), "CARD раскрыла технический год якоря");
+  ok(html.includes('class="item-when-line"'), "пилюли не собраны в одну строку");
+});
+
+test("PD-DATES-002: без времени пилюля — только дата, без «Отсчёта»", () => {
+  const html = dateItem({ id: 32, title: "Годовщина", day: "2021-05-17", time: "", recurs: 1, monthly: 0, is_private: 0 });
+  ok(html.includes(">17 мая</span>"), "пилюля без времени не показывает просто дату");
+  ok(!html.includes("Отсчёт"), "подпись Отсчёт осталась в пилюле (решение 2026-11-23: убрать)");
+  ok(!html.includes(" · Ежегодно"), "старая подпись повтора осталась");
+  ok(!html.includes(">Личное</span>"), "Личное показано у общей даты");
+  ok(!html.includes("Таймер"), "Таймер показан без времени");
+});
+
+test("PD-DATES-002: карточка дня рождения показывает имя и день/месяц без года", () => {
+  const html = birthdayItem({ id: 33, title: "Маша", day: "1990-05-14", time: "", is_private: 0 });
+  const title = html.indexOf('<h3 class="item-title"');
+  const datePill = html.indexOf(">14 мая</span>");
+  ok(title !== -1 && datePill > title, "заголовок должен быть до пилюли");
+  ok(!html.includes("Отсчёт"), "подпись Отсчёт осталась в пилюле дня рождения (решение 2026-11-23: убрать)");
+  ok(!html.includes("1990"), "карточка раскрыла год рождения");
+  ok(html.includes('class="day-chip is-muted"'), "пилюля не нейтральная");
+});
+
+// ------------------------------------------------------------------
+// BUG-3-01 (аудит 2026-11-23): серая пилюля лет в Mini App
+// ------------------------------------------------------------------
+
+function pluralYears(n) {
+  const mod100 = n % 100, mod10 = n % 10;
+  if (mod100 >= 11 && mod100 <= 14) return "лет";
+  if (mod10 === 1) return "год";
+  if (mod10 >= 2 && mod10 <= 4) return "года";
+  return "лет";
+}
+
+// Дата «N лет назад сегодня» в поясе пары: наступление — сегодня, поэтому
+// количество лет детерминировано в любой день запуска теста.
+function dayYearsAgo(n) {
+  const key = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  return `${Number(key.slice(0, 4)) - n}${key.slice(4)}`;
+}
+
+test("BUG-3-01: день рождения с show_years показывает серую пилюлю лет", () => {
+  const years = 20;
+  const html = birthdayItem({ id: 40, title: "Маша", day: dayYearsAgo(years), kind: "birthday", show_years: 1, is_private: 0 });
+  ok(html.includes(`is-muted">${years} ${pluralYears(years)}</span>`), `нет пилюли «${years}»: ${html}`);
+  const pill = html.indexOf(`is-muted">${years} `);
+  ok(pill !== -1, "нет пилюли лет");
+  ok(!html.includes("Отсчёт"), "подпись Отсчёт осталась в пилюле (решение 2026-11-23: убрать)");
+  ok(!html.includes(dayYearsAgo(years)), "пилюля лет раскрыла исходный год");
+});
+
+test("BUG-3-01: ежегодная дата с show_years показывает годы, год якоря не раскрывается", () => {
+  const years = 6;
+  const item = { id: 41, title: "Годовщина", day: dayYearsAgo(years), time: "", recurs: 1, monthly: 0, kind: "date", show_years: 1, is_private: 0 };
+  const html = dateItem(item);
+  ok(html.includes(`is-muted">${years} ${pluralYears(years)}</span>`), "нет пилюли лет у ежегодной даты");
+  ok(!html.includes(item.day), "карточка раскрыла технический год якоря");
+});
+
+test("BUG-3-01: без show_years пилюли лет нет", () => {
+  const pill = /is-muted">\d+ (?:год|года|лет)</;
+  ok(!pill.test(birthdayItem({ id: 42, title: "Маша", day: dayYearsAgo(20), kind: "birthday", show_years: 0, is_private: 0 })), "пилюля лет у birthday без флага");
+  ok(!pill.test(dateItem({ id: 43, title: "Годовщина", day: dayYearsAgo(6), time: "", recurs: 1, monthly: 0, kind: "date", show_years: 0, is_private: 0 })), "пилюля лет у даты без флага");
+});
+
+test("BUG-3-01: monthly и разовая даты не показывают годы даже с флагом", () => {
+  const pill = /is-muted">\d+ (?:год|года|лет)</;
+  ok(!pill.test(dateItem({ id: 44, title: "Ежемесячно", day: dayYearsAgo(3), time: "", recurs: 1, monthly: 1, kind: "date", show_years: 1, is_private: 0 })), "пилюля лет у ежемесячной даты");
+  ok(!pill.test(dateItem({ id: 45, title: "Разовая", day: dayYearsAgo(3), time: "", recurs: 0, monthly: 0, kind: "date", show_years: 1, is_private: 0 })), "пилюля лет у разовой даты");
+});
+
+// ------------------------------------------------------------------
+// BUG-3-02 (аудит 2026-11-23): повтор не раньше исходной даты (Mini App)
+// ------------------------------------------------------------------
+
+test("BUG-3-02: ежегодная дата с будущим началом не наступает раньше него", () => {
+  const next = nextOccurrence({ id: 46, title: "Годовщина", day: "2033-06-10", time: "", recurs: 1, monthly: 0, is_private: 0 });
+  ok(next, "наступление не найдено");
+  equal(calendarKeyFromDate(next, "Europe/Moscow"), "2033-06-10");
+});
+
+test("BUG-3-02: ежемесячная дата с будущим началом не наступает раньше него", () => {
+  const next = monthlyNext("2033-06-10", "");
+  ok(next, "наступление не найдено");
+  equal(calendarKeyFromDate(next, "Europe/Moscow"), "2033-06-10");
+});
+
+test("BUG-3-02: ежегодный план с будущим началом не срабатывает годом раньше", () => {
+  const next = yearlyNext("2033-06-10", "");
+  ok(next, "наступление не найдено");
+  equal(calendarKeyFromDate(next, "Europe/Moscow"), "2033-06-10");
+});
+
+// ------------------------------------------------------------------
+// BUG-3-03 (аудит 2026-11-23): подсказка пояса по дате наступления
+// ------------------------------------------------------------------
+
+test("BUG-3-03: подсказка пояса считается по ближайшему наступлению, не по исходному году", () => {
+  const { dateItem: dateItemTZ, viewerTimeHint: hintTZ } = loadTZ(
+    'const appState = { pair: { timezone: "Europe/Warsaw", user_b: 2 }, user: { tg_id: 1, timezone: "America/New_York" } };'
+  );
+  // 29 марта 01:30 в Варшаве: 2020 — ещё CET (+1), 2027 — уже CEST (+2).
+  // Значит подсказка обязана зависеть от года наступления.
+  notEqual(hintTZ("2020-03-29", "01:30"), hintTZ("2027-03-29", "01:30"),
+    "подсказка не зависит от года — тест потерял смысл");
+  const item = { id: 50, title: "Годовщина", day: "2020-03-29", time: "01:30", recurs: 1, monthly: 0, kind: "date", is_private: 0 };
+  const html = dateItemTZ(item);
+  const occDay = /data-day="(\d{4}-\d{2}-\d{2})"/.exec(html)?.[1];
+  ok(occDay, "нет data-day");
+  ok(html.includes(`>${hintTZ(occDay, "01:30")}</span>`),
+    `подсказка не по наступлению ${occDay}: ожидалось «${hintTZ(occDay, "01:30")}»`);
+  ok(html.split(hintTZ(occDay, "01:30")).length === 2, "подсказка отрендерена дважды");
 });

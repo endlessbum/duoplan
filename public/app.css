@@ -1464,6 +1464,8 @@ select.settings-select {
   z-index: 30;
   min-width: 200px;
   max-width: min(280px, 80vw);
+  /* Предел высоты задаёт placeItemMenu(), когда меню не помещается ни вниз, ни вверх. */
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--glass-border, var(--line));
   border-radius: 14px;
@@ -1476,6 +1478,12 @@ select.settings-select {
 
 .item-menu[hidden] {
   display: none;
+}
+
+/* Снизу меню не помещается — открывается вверх от «⋮» (placeItemMenu в app.js). */
+.item-actions.is-up > .item-menu {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 .item-menu-item {
@@ -1559,6 +1567,31 @@ select.settings-select {
   color: var(--muted);
 }
 
+/* «Все →» справа от заголовка превью на главной (PD-HOME-001). Цвет — акцент
+   пары, как у .primary; тап-зона больше текста, стрелка не переносится. */
+.section-head-inline .head-link {
+  flex: none;
+  /* Отрицательные поля компенсируют внутренние отступы: высота заголовка и
+     оптика не меняются, а текст ссылки встаёт по краю карточки. */
+  margin: -6px -6px -6px 8px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--berry);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.section-head-inline .head-link:hover,
+.section-head-inline .head-link:focus-visible {
+  background: var(--surface-2);
+}
+
 .sheet-dialog {
   width: min(480px, calc(100% - 24px));
   /* Длинные диалоги (экспорт: восемь секций) не вылезают за экран —
@@ -1600,16 +1633,67 @@ select.settings-select {
   text-align: center;
 }
 
+/* Шапка окна закреплена (решение владельца 2026-11-23): «×» не уезжает
+   вместе с длинным содержимым и всегда доступен. Скролл-контейнер — сама
+   форма с padding 20px, поэтому шапка расширяется на эту полосу
+   отрицательными полями и держит отступ сама: визуально она стоит там же,
+   где и раньше, а содержимое уходит под её непрозрачный фон. */
 .sheet-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: -20px -20px 0;
+  padding: 20px 20px 14px;
+  background: var(--surface);
 }
 
 .sheet-head h2 {
   margin: 0;
   font-size: 19px;
+}
+
+/* Подтверждение закрытия окна с изменениями (тап за его пределами, решение
+   2026-11-23): затемнение с карточкой поверх содержимого окна. Оверлей —
+   абсолютный внутри самого диалога: второй top-layer диалог недопустим,
+   поэтому «Продолжить»/«Закрыть» живут здесь. */
+.dialog-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  border-radius: inherit;
+  background: rgba(15, 14, 13, 0.35);
+}
+
+.dialog-confirm-card {
+  width: min(320px, 100%);
+  padding: 18px;
+  border-radius: 18px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+}
+
+.dialog-confirm-card p {
+  margin: 0 0 14px;
+  font-size: 15px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.dialog-confirm-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.dialog-confirm-actions .primary,
+.dialog-confirm-actions .secondary {
+  flex: 1;
 }
 
 .icon-close {
@@ -1637,6 +1721,13 @@ select.settings-select {
   font-size: 12.5px;
   font-weight: 500;
   color: var(--muted);
+}
+
+/* PD-DATES-002: «Отображать годы» недоступно у разовых/ежемесячных дат.
+   Сам чекбокс отключается в DOM (иначе уходил бы в payload), здесь только
+   визуальное приглушение строки. */
+.field.is-disabled {
+  opacity: 0.5;
 }
 
 .field > input,
@@ -2385,19 +2476,12 @@ input[type="checkbox"]:active {
   font-size: 14px;
 }
 
-/* Автор с датой — «через пустую строку» ниже цитаты (двойной Enter):
-   блок не сливается с текстом. Кнопки редактирования живут в том же
-   ряду (.item-row) — по центру против строки меты. */
+/* Дата — «через пустую строку» ниже цитаты (двойной Enter): блок не
+   сливается с текстом. «⋮» живёт в верхнем .item-row рядом с текстом —
+   как в остальных карточках, в правом верхнем углу. */
 .quote-card .item-meta {
   margin-top: 14px;
 }
-
-.quote-card .item-row {
-  align-items: center;
-}
-
-/* Устаревший отдельный ряд кнопок цитаты заменён на .item-row против
-   автора с датой — здесь правило больше не нужно. */
 
 /* День рождения в календаре — своя точка, чтобы не сливаться со значимыми
    датами: у них красный, у дней рождения фиолетовый. */

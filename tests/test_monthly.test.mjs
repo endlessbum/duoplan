@@ -104,6 +104,32 @@ test("dateOccursOnDay: monthly-дата совпадает по дню меся�
 });
 
 // ------------------------------------------------------------------
+// BUG-3-02 (аудит 2026-11-23): повтор не наступает раньше исходной даты
+// ------------------------------------------------------------------
+
+test("yearly: дата начала в будущем не срабатывает годом раньше (BUG-3-02)", () => {
+  // Фиксированное «сейчас» — 2026-10-31: источник 2027-12-31 — ближайшее
+  // наступление только 2027-12-31, а не 2026-12-31.
+  const ms = nextYearlyOccurrenceMs({ day: "2027-12-31", time: "", yearly: 1 }, TZ, NOW);
+  equal(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)), "2027-12-31");
+});
+
+test("monthly: дата начала в будущем не даёт наступление раньше неё (BUG-3-02)", () => {
+  const ms = nextMonthlyOccurrenceMs({ day: "2027-12-15", time: "", monthly: 1 }, TZ, NOW);
+  equal(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)), "2027-12-15");
+});
+
+test("dateOccursOnDay: повтор не засчитывается до исходной даты (BUG-3-02)", () => {
+  equal(dateOccursOnDay({ day: "2027-06-10", recurs: 1 }, "2026-06-10"), false);
+  equal(dateOccursOnDay({ day: "2027-06-10", recurs: 1 }, "2027-06-10"), true);
+  equal(dateOccursOnDay({ day: "2027-06-10", recurs: 1 }, "2028-06-10"), true);
+  equal(dateOccursOnDay({ day: "2027-06-10", monthly: 1 }, "2026-06-10"), false);
+  equal(dateOccursOnDay({ day: "2027-06-10", monthly: 1 }, "2027-06-10"), true);
+  // Прошедший источник повторяется как раньше (день рождения и ежегодные даты).
+  equal(dateOccursOnDay({ day: "2021-06-12", recurs: 1 }, "2026-06-12"), true);
+});
+
+// ------------------------------------------------------------------
 // API: POST /api/tasks и /api/dates с monthly
 // ------------------------------------------------------------------
 const buildApi = new Function(
@@ -119,6 +145,7 @@ const buildApi = new Function(
     extractBraced("function validDate"),
     extractBraced("function optionalDay"),
     extractBraced("function optionalTime"),
+    extractBraced("function showYearsValue"),
     extractBraced("function planSchedule"),
     extractBraced("function wishUrl"),
     extractBraced("async function ensureWishOwner"),
@@ -188,7 +215,7 @@ test("POST /api/dates: monthly перекрывает recurs", async () => {
   });
   await api(request, env, new URL("https://duoplan.test/api/dates"));
   const insert = queries.find((q) => q.sql.startsWith("INSERT INTO dates"));
-  equal(insert.args.length, 10); // + kind (дата или день рождения)
+  equal(insert.args.length, 11); // + kind и show_years (PD-DATES-002)
   equal(insert.args[4], 0); // recurs погашен
   equal(insert.args[5], 1); // monthly
 });

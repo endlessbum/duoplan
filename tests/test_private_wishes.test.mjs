@@ -30,7 +30,7 @@ test("worker: личные желания отфильтрованы в state и
 test("worker: шеринг — явное действие владельца", () => {
   ok(worker.includes("deposit|share))?$"), "share не разрешён в itemRoute");
   ok(worker.includes("UPDATE wishes SET is_private=0,shared_at=? WHERE id=? AND pair_id=? AND owner_id=? AND is_private=1"), "нет UPDATE на шеринг");
-  ok(worker.includes('if (type === "wishes" && mutating) await ensureWishOwner'), "ensureWishOwner снят");
+  ok(worker.includes('type === "wishes" && mutating ? await ensureWishOwner(env, pair, user, id) : null'), "ensureWishOwner снят");
   ok(worker.includes('field("is_private", body.is_private === true ? 1 : 0)'), "PATCH не меняет приватность");
 });
 

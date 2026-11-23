@@ -97,6 +97,9 @@ test("loadFloPartner silent: кратковременный сбой не отк
     [
       "let floPartnerBusy = false;",
       "let floPartner = null;",
+      // DP-ADD-003: загрузка сверяет пару с архивным кэшем, чтобы старый
+      // ответ не перезаписал данные другой пары.
+      "let archiveCachePairId = null;",
       extractWithOptions("async function loadFloPartner"),
       "return { loadFloPartner, set: (v) => { floPartner = v; }, get: () => floPartner };"
     ].join("\n")

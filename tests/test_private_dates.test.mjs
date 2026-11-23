@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { deepStrictEqual, equal, match, rejects } from "node:assert/strict";
+import { deepStrictEqual, equal, match, ok, rejects } from "node:assert/strict";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +55,7 @@ const buildApi = new Function(
     extractBraced("function textField"),
     extractBraced("function validDate"),
     extractBraced("function optionalTime"),
+    extractBraced("function showYearsValue"),
     extractBraced("function ownerIds"),
     extractBraced("async function api"),
     "return api;"
@@ -97,12 +98,13 @@ test("POST /api/dates с is_private пишет метку приватности
   });
   await api(request, env, new URL("https://duoplan.test/api/dates"));
   const insert = queries.find(q => q.sql.startsWith("INSERT INTO dates"));
-  deepStrictEqual(insert.args.length, 10);
+  deepStrictEqual(insert.args.length, 11);
   equal(insert.args[4], 1); // recurs
   equal(insert.args[5], 0); // monthly не включён
   equal(insert.args[6], 1); // is_private
   equal(insert.args[7], 777); // created_by — автор
   equal(insert.args[8], "date"); // kind — обычная дата, не день рождения
+  equal(insert.args[9], 0); // show_years по умолчанию выключен
 });
 
 test("POST /api/dates без is_private остаётся общей, created_by всё равно пишется", async () => {
@@ -314,6 +316,8 @@ const loadItemRoute = new Function(
     extractBraced("function validDate"),
     extractBraced("function optionalDay"),
     extractBraced("function optionalTime"),
+    extractBraced("function showYearsValue"),
+    extractBraced("function showYearsAllowed"),
     extractBraced("function planSchedule"),
     extractBraced("async function ensureWishOwner"),
     extractBraced("async function ensureDateVisible"),
@@ -460,6 +464,10 @@ const loadDigest = new Function(
     extractBraced("function monthlyOccursOnDay"),
     extractBraced("function nextMonthlyOccurrenceMs"),
     extractBraced("function dateOccursOnDay"),
+    extractBraced("function validDate"),
+    extractBraced("function yearsAtOccurrence"),
+    extractBraced("function yearsWord"),
+    extractBraced("function yearsSuffix"),
     extractBraced("function digestText"),
     extractBraced("function datesDigestText"),
     "return { dateOccursOnDay, digestText, datesDigestText, richToHtml, maskTitle };"
@@ -618,6 +626,7 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
     "openApp", "sendActionNotification", "now", "positiveId",
     [
       'const DEFAULT_TZ = "Europe/Moscow";',
+      extractLine("const clean = "),
       extractBraced("function escapeHtml"),
       extractLine("const RICH_TOKENS"),
       extractBraced("function richInline"),
@@ -638,6 +647,10 @@ function notificationHarness({ dates = [], tasks = [], users = [U111, U222], log
       extractLine("const REMINDER_1H"),
       extractBraced("function planTaskReminders"),
       extractBraced("function dateOccursOnDay"),
+      extractBraced("function validDate"),
+      extractBraced("function yearsAtOccurrence"),
+      extractBraced("function yearsWord"),
+      extractBraced("function yearsSuffix"),
       extractBraced("function parseTimeMinutes"),
       extractLine("const CRON_TICK_MINUTES"),
       extractBraced("function timeDueWithRollover"),
@@ -669,6 +682,19 @@ const N_DATES = [
   { id: 3, title: "Личная второго", day: "2020-03-02", time: null, recurs: 1, is_private: 1, created_by: 222 },
   { id: 4, title: "Завтрашняя общая", day: "2020-03-03", time: "18:00", recurs: 1, is_private: 0, created_by: 111 }
 ];
+
+test("день рождения за 3 дня: годы считаются на inThreeDays, а не на сегодня", async () => {
+  // PAIR_TODAY = 2026-03-02, наступление 2026-03-05 → исполняется 36 лет.
+  const birthday = {
+    id: 9, title: "Маша", day: "1990-03-05", time: null, recurs: 1, monthly: 0,
+    kind: "birthday", show_years: 1, is_private: 0, created_by: 111
+  };
+  const h = notificationHarness({ dates: [birthday] });
+  await h.run();
+  const reminder = h.sent.find(s => s.text.startsWith("Через 3 дня — день рождения:"));
+  ok(reminder, "напоминание за 3 дня не отправлено");
+  ok(reminder.text.endsWith("· 36 лет"), `неверный суффикс лет: ${reminder.text}`);
+});
 
 test("утренняя сводка: каждый видит только свои личные даты, формат — два абзаца", async () => {
   const h = notificationHarness({ dates: N_DATES });

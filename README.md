@@ -12,7 +12,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
   (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
-- Текущая версия — `2026.11.20.119` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.23.130` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -66,7 +66,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 52 миграция схемы D1 |
+| `migrations/` | 53 миграции схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
@@ -161,6 +161,7 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0050_memory_ascii` | `memories.ascii_art` — ASCII-вложение записи дневника (генерируется в браузере, оригинал фото не хранится) |
 | `0051_private_wishes` | `wishes.is_private`, `wishes.shared_at` — личные желания видит только автор; публикация в общие — явное действие «Поделиться с партнёром» |
 | `0052_trip_savings` | `trips.saving_id` — поездка может быть прикреплена к общей активной копилке; новая копилка создаётся вместе с поездкой |
+| `0053_dates_show_years` | `dates.show_years` — явный показ количества лет для дней рождения и ежегодных дат; разовые и ежемесячные даты держат флаг выключенным |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.
@@ -288,7 +289,7 @@ assets; в `public/_headers` им выставлен
 `Cache-Control: public, max-age=31536000, immutable`. HTML-страницы, `/` и `/app`
 помечены `no-cache`, setup-ассеты тоже (они не версионируются).
 
-Чтобы деплой не оставлял пользователей на старом скрипте, все четыре ассета
+Чтобы деплой не оставлял пользователей на старом скрипте, все пять ассетов
 подключаются с query-string: `/app.js?v=<APP_VERSION>` (значение берётся из
 `const APP_VERSION` в `worker.js` и дублируется в `public/app.html`). Новый
 деплой → новый URL → новый cache entry; HTML не кэшируется, поэтому свежая
@@ -299,6 +300,19 @@ assets; в `public/_headers` им выставлен
 манифеста валит прогон (манифест тест перезаписывает сам — его коммитят вместе
 с новой версией), а сам манифест проверяет, что `?v=` в `app.html` совпадает
 с `APP_VERSION`.
+
+Поскольку манифест хешей перезаписывается автоматически, он сам по себе не
+заставляет сменить URL. Поэтому релизный манифест `tests/asset-release.json`
+хранит хеши всех пяти версионированных ассетов (включая `ascii-converter.js`)
+по версиям релизов, а `tests/test_asset_release.test.mjs`
+проверяет: содержимое файлов совпадает с последней записью релиза, последняя
+запись — текущий `APP_VERSION`, и все `?v=` в `app.html` и `index.html`
+указывают на него
+(BUG-4-01: правка `app.js` без подъёма версии оставляла пользователей на
+годовом `immutable`-кэше старого URL; BUG-5-01: проверка обеих HTML-точек
+входа и `ascii-converter.js`). При изменении любого ассета добавьте
+в `releases` новую запись с новой версией и новыми хешами — записи только
+добавляются, не переписываются.
 
 В `public/_headers` также заданы `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, `Permissions-Policy` и CSP с `frame-ancestors`
@@ -1077,15 +1091,15 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 (приватность и новые колонки при переносе в D1).
 
 Прогон `node --test` перегенерирует `tests/asset-hashes.json`: если манифест
-изменился, закоммитьте его вместе с правкой ассетов и поднятой версией
-(см. «Кэш статики Mini App»).
+изменился, закоммитьте его вместе с правкой ассетов, новой записью в
+`tests/asset-release.json` и поднятой версией (см. «Кэш статики Mini App»).
 
 ## Версия
 
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
 `duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.20.119`), она же подставляется в `?v=` у ассетов и должна совпадать с
+(`2026.11.23.130`), она же подставляется в `?v=` у ассетов и должна совпадать с
 `DB_SCHEMA_VERSION` на релизе.
 
 ### Воспроизводимость окружения

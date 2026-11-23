@@ -58,7 +58,7 @@ const buildApi = new Function(
   ].join("\n")
 );
 
-function makeEnv({ pair = null, body = {} } = {}) {
+function makeEnv({ pair = null, body = {}, gender = null } = {}) {
   const queries = [];
   const calls = { accentSync: 0 };
   const db = {
@@ -77,7 +77,7 @@ function makeEnv({ pair = null, body = {} } = {}) {
     async () => {},
     async () => ({ id: 777, first_name: "Тест" }),
     () => "Europe/Moscow",
-    async () => ({ tg_id: 777, gender: null }),
+    async () => ({ tg_id: 777, gender }),
     async () => {},
     async () => body,
     async () => ({ user: { tg_id: 777 }, pair }),
@@ -119,6 +119,17 @@ test("POST /api/gender работает и для пользователя в п
   await api(request, env, new URL("https://duoplan.test/api/gender"));
   const update = queries.find(q => q.sql.startsWith("UPDATE users SET gender"));
   equal(update.args[0], "male");
+});
+
+test("POST /api/gender отвергает смену: пол задаётся один раз при входе", async () => {
+  // Решение владельца 2026-11-23: блока смены пола в настройках больше нет,
+  // сервер не даёт перезаписать уже заданный пол.
+  const { api, env, request, queries } = makeEnv({ pair: { id: 1 }, body: { gender: "female" }, gender: "male" });
+  await rejects(
+    api(request, env, new URL("https://duoplan.test/api/gender")),
+    error => error.status === 409 && error.code === "GENDER_IMMUTABLE"
+  );
+  equal(queries.length, 0, "смена пола дошла до UPDATE");
 });
 
 // Партнёр вышел (awaiting_return=1): контент заморожен до его возвращения.

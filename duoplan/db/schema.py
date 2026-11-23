@@ -71,7 +71,7 @@ SCHEMA: list[str] = [
         "day TEXT NOT NULL, time TEXT, recurs INTEGER NOT NULL DEFAULT 1, "
         "monthly INTEGER NOT NULL DEFAULT 0, is_private INTEGER NOT NULL DEFAULT 0, "
         "created_by INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'date', "
-        "created_at INTEGER NOT NULL)"
+        "show_years INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)"
     ),
     (
         "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, "

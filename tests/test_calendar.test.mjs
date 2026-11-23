@@ -167,6 +167,30 @@ test("29 февраля: только в високосные годы, без �
   equal(calendarEventIndex([], dates, [], 2027, 2).get("2027-02-28"), undefined);
 });
 
+// DP-ADD-001: дни рождения приходят отдельным набором /api/state, но в
+// индексе календаря должны занимать свою дорожку (birthdays), а не dates.
+const birthday = (id, day) => ({ id, title: `День рождения ${id}`, day, recurs: 1, monthly: 0, kind: "birthday", time: null, is_private: 0 });
+
+test("день рождения попадает в birthdays, а не в dates", () => {
+  const b = birthday(7, "1990-05-15");
+  const index = calendarEventIndex([], [date(3, "2024-05-15", 1), b], [], 2026, 5);
+  const bucket = index.get("2026-05-15");
+  equal(bucket.birthdays.length, 1);
+  equal(bucket.birthdays[0].id, 7);
+  equal(bucket.dates.length, 1);
+  equal(bucket.dates[0].id, 3);
+  // В другом месяце/году до дня рождения точки нет.
+  equal(calendarEventIndex([], [b], [], 2026, 6).size, 0);
+  equal(calendarEventIndex([], [b], [], 1989, 5).size, 0);
+});
+
+test("день рождения даёт точку и отдельный kind в списке событий", () => {
+  const bucket = calendarEventIndex([], [birthday(7, "1990-05-15")], [], 2026, 5).get("2026-05-15");
+  const rows = calendarEventRows(bucket);
+  deepStrictEqual(rows.map((row) => row.kind), ["birthday"]);
+  equal(calendarCellDots(bucket).includes(`<i class="cal-dot is-birthday"></i>`), true);
+});
+
 test("план и дата в один день дают обе группы событий", () => {
   const index = calendarEventIndex([task(1, "2026-05-15")], [date(2, "2024-05-15", 1)], [], 2026, 5);
   const bucket = index.get("2026-05-15");
@@ -314,7 +338,11 @@ test("календарь подмешивает завершённые план�
   const calFn = source.slice(source.indexOf("function renderPairCalendar"), source.indexOf("function calendarArchivePending"));
   equal(calFn.includes('mergedArchive("done_tasks"'), true, "нет подмеса done_tasks в календарь");
   equal(calFn.includes("openTasks.concat(doneTasks)"), true, "завершённые не склеены с предстоящими");
-  equal(source.includes('for (const type of ["tasks", "dates", "done_tasks", "done_wishes"])'), true, "ensureCalendarArchive не догружает done_tasks");
+  // DP-ADD-001: дни рождения приходят отдельным массивом state — без подмеса
+  // их точки и подпись в календаре не появятся.
+  equal(calFn.includes('mergedArchive("birthdays", appState.birthdays || [])'), true, "нет подмеса birthdays в календарь");
+  equal(calFn.includes('"День рождения"'), true, "нет подписи дня рождения в списке событий");
+  equal(source.includes('for (const type of ["tasks", "dates", "birthdays", "done_tasks", "done_wishes"])'), true, "ensureCalendarArchive не догружает birthdays/done_tasks");
   // Порог ожидания: done_tasks сравнивается с completedTasks и лимитом 10,
   // а не с completedWishes/200 — иначе архив завершённых никогда не догрузится.
   equal(source.includes('type === "done_tasks" ? (appState?.completedTasks || [])'), true, "calendarArchivePending не знает done_tasks");

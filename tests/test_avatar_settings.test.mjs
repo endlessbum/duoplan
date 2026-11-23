@@ -550,8 +550,14 @@ test("publicUser: show_cycle_calendar — авто по полу при NULL, я
   equal(on.show_cycle_calendar, true);
 });
 
-test("PD-PROFILE-001: пол, время сводок, акцент и PIN в настройках", () => {
-  ok(appSource.includes('data-action="set-gender" data-gender="male"'), "нет смены пола в настройках");
+test("PD-PROFILE-001: время сводок, акцент и PIN в настройках; смены пола нет", () => {
+  // Пол задаётся гейтом при первом входе и больше не меняется (решение
+  // владельца 2026-11-23): в настройках строки пола быть не должно.
+  const settings = extractBraced(appSource, "function renderPairSettings()");
+  ok(!settings.includes("set-gender"), "смена пола вернулась в настройки");
+  ok(!settings.includes('settings-label">Пол'), "строка пола вернулась в настройки");
+  const gate = extractBraced(appSource, "function renderGenderGate()");
+  ok(gate.includes('data-action="set-gender" data-gender="male"'), "гейт пола при первом входе потерял кнопки");
   ok(appSource.includes("const keepTime = (id, previous) =>"), "пустое время обнуляет настройку");
   ok(appSource.includes("if (cycleBox && !cycleBox.disabled) body.show_cycle_calendar = cycleBox.checked"),
     "disabled-чекбокс тихо меняет настройку");

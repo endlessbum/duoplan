@@ -290,7 +290,7 @@
   }
 
   function dateCard(d) {
-    const [month, day] = d.day.split("-").map(Number);
+    const [, month, day] = d.day.split("-").map(Number);
     const chip = recurringChip(month, day);
     const whenText = `<span>${esc(formatDay(d.day))}${d.time ? ` · ${esc(d.time)}` : ""}${d.recurs ? " · Ежегодно" : ""}</span>`;
     return `
@@ -314,7 +314,7 @@
   }
 
   function birthdayCard(b) {
-    const [month, day] = b.day.split("-").map(Number);
+    const [, month, day] = b.day.split("-").map(Number);
     const chip = recurringChip(month, day);
     const next = nextOccurrenceMD(month, day);
     const targetDay = dayKey(next);

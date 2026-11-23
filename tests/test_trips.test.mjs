@@ -184,11 +184,14 @@ test("диалог поездки: выбор копилки и создание
 });
 
 test("worker: поездка создаётся с копилкой и проверяет доступ", () => {
-  ok(workerSource.includes("async function attachableSaving"), "нет проверки копилки");
+  ok(workerSource.includes("async function tripSavingPlan"), "нет проверки копилки");
   ok(workerSource.includes("INSERT INTO trips(pair_id,created_by,title,note,created_at,saving_id)"), "INSERT поездки без saving_id");
   ok(workerSource.includes("kind='shared' AND collected<target"), "нет фильтра доступных копилок");
   ok(workerSource.includes("new_saving: { type: \"object\" }"), "POST не принимает новую копилку");
-  ok(workerSource.includes('DELETE FROM savings WHERE id=? AND pair_id=?'), "нет компенсации при сбое");
+  // Аудит 2026-11-23 (REL-2B-02): копилка и поездка — один batch,
+  // компенсирующее удаление больше не нужно; BUG-2A-08: двойной выбор запрещён.
+  ok(workerSource.includes("(SELECT last_insert_rowid())"), "saving_id новой копилки не связан с INSERT'ом поездки в одном batch");
+  ok(workerSource.includes('"INVALID_SAVING_CHOICE"'), "нет запрета одновременных saving_id и new_saving");
   ok(workerSource.includes("saving_id INTEGER REFERENCES savings(id) ON DELETE SET NULL"), "схема trips без связи");
 });
 

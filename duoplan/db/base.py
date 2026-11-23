@@ -25,7 +25,7 @@ import aiosqlite
 
 from duoplan.db.schema import SCHEMA
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Миграции вида {версия: [sql]}. Версия 1 — базовая схема из ``SCHEMA``,
 # поэтому здесь описаны только шаги начиная с 2. Все statements идемпотентны,
@@ -162,6 +162,12 @@ MIGRATIONS: dict[int, Sequence[str]] = {
         "ALTER TABLE wishes ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE wishes ADD COLUMN shared_at INTEGER",
     ),
+    # PD-DATES-002: флаг «Отображать годы» (migrations/0053). Тот же ALTER,
+    # что в D1 и worker ensureSchema. Повторное применение глушится duplicate
+    # column. Без него база прошлого релиза (v18) навсегда остаётся без
+    # колонки: CREATE TABLE IF NOT EXISTS её не добавляет, а экспортёр строит
+    # NULL AS show_years и роняет импорт на NOT NULL в D1 (BUG-3-04).
+    19: ("ALTER TABLE dates ADD COLUMN show_years INTEGER NOT NULL DEFAULT 0",),
 }
 
 

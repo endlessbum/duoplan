@@ -187,11 +187,15 @@ test("moneyAmount: дробная сумма — 400, данные не иска
   equal(moneyAmount("30000", "Цель"), 30000);
 });
 
-// Пополнение при гонке «копилку удалили»: UPDATE первым, INSERT под EXISTS —
-// FK-отказ давал 500 вместо честного 404 (репорт аудита 2026-11-06).
-test("deposit: INSERT под EXISTS, UPDATE решает 404", () => {
-  ok(workerSource.includes("WHERE EXISTS(SELECT 1 FROM savings WHERE id=? AND pair_id=?)"),
-    "INSERT пополнения не защищён EXISTS");
-  ok(workerSource.includes('if (!batchResults[0].meta.changes) throw new HttpError(404, "Копилка не найдена"'),
-    "404 должен решаться по UPDATE, а не по второму элементу batch");
+// Пополнение: UPDATE первым и атомарно согласован с историей (репорт аудита
+// 2026-11-06: FK-отказ давал 500 вместо честного 404). Аудит 2026-11-23
+// (BUG-2A-01): guard collected<target перенесён в UPDATE — заполненная
+// копилка не пополняется даже прямым запросом.
+test("deposit: UPDATE решает 404/409 SAVING_FULL, история согласована атомарно", () => {
+  ok(workerSource.includes("UPDATE savings SET collected=collected+? WHERE id=? AND pair_id=? AND collected<target"),
+    "UPDATE должен захватывать только незавершённую копилку");
+  ok(workerSource.includes("INSERT INTO savings_deposits(saving_id,tg_id,amount,created_at) SELECT ?,?,?,? WHERE (SELECT changes())>0"),
+    "INSERT истории не должен писать строку, если UPDATE не захватил копилку");
+  ok(workerSource.includes('throw new HttpError(409, "Копилка уже заполнена — увеличьте цель, чтобы продолжить копить", "SAVING_FULL")'),
+    "заполненная копилка должна отвечать 409 SAVING_FULL, отличимым от 404");
 });

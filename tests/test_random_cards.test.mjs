@@ -9,13 +9,14 @@
 //   (data-action="close-pick"), которая сбрасывает выбор и перерисовывает
 //   экран.
 // * На главной дни рождения и значимые даты — разные секции: birthdayItem
-//   под заголовком «Дни рождения», dateItem — под «Значимые даты».
+//   под заголовком «Дни рождения» (источник — appState.birthdays, отдельно
+//   от dates), dateItem — под «Значимые даты».
 //
 // Запуск: node --test tests/test_random_cards.test.mjs
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { ok, match, equal } from "node:assert/strict";
+import { ok, match, equal, deepStrictEqual } from "node:assert/strict";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 
@@ -135,11 +136,102 @@ test("«Рандом» — отдельная кнопка под «Добави
     "обработчик должен помечать первый запуск");
 });
 
-test("главная: дни рождения под своим заголовком", () => {
+// DP-HOME-002 (аудит 2026-11-23): сервер отдаёт дни рождения отдельным
+// массивом `birthdays`, а `dates` содержит только kind='date' (PD-DATES-001).
+// Собираем renderHome() в linkedom на раздельных наборах: карточка дня
+// рождения должна приходить из appState.birthdays, а не из dates.
+function homeFactory() {
+  const body = sliceBetween(appJs, "function renderHome()", "function taskItem(");
+  const card = (kind) => (item) => `<article class="card" data-kind="${kind}" data-id="${item.id}"></article>`;
+  const factory = new Function(
+    "appState", "esc", "FLAME_ICON", "renderTabHeader", "sortByTaskDeadline",
+    "taskItem", "dateItem", "birthdayItem", "memoryItem",
+    `${body}\nreturn renderHome();`
+  );
+  return (state) => parseHTML(`<div id="root">${factory(
+    state,
+    (s) => String(s ?? ""),
+    "",
+    () => "",
+    (tasks) => tasks,
+    card("task"), card("date"), card("birthday"), card("memory")
+  )}</div>`).document.getElementById("root");
+}
+
+function homeState(overrides = {}) {
+  return {
+    pair: { user_b: 1, name1: "Аня", name2: "Борис", together_pts: 0 },
+    user: { streak: 0, points: 0 },
+    daily: null,
+    tasks: [],
+    dates: [],
+    birthdays: [],
+    memories: [],
+    ...overrides,
+  };
+}
+
+test("главная: дни рождения берутся из appState.birthdays", () => {
+  const render = homeFactory();
+  // Контракт /api/state: в dates — только значимые даты, дни рождения — отдельно.
+  const root = render(homeState({
+    dates: [{ id: "d1", kind: "date" }, { id: "d2", kind: "date" }],
+    birthdays: [{ id: "b1", kind: "birthday" }, { id: "b2", kind: "birthday" }],
+  }));
+  const birthdays = [...root.querySelectorAll('[data-kind="birthday"]')].map((el) => el.dataset.id);
+  deepStrictEqual(birthdays, ["b1", "b2"], "превью дней рождения не построено из appState.birthdays");
+  deepStrictEqual([...root.querySelectorAll('[data-kind="date"]')].map((el) => el.dataset.id), ["d1", "d2"],
+    "превью значимых дат построено не из appState.dates");
+  const heads = [...root.querySelectorAll(".section-head-inline h3")].map((el) => el.textContent);
+  deepStrictEqual(heads, ["Значимые даты", "Дни рождения"], "заголовки секций главной изменились");
+  // Каждая ссылка ведёт в свой сегмент вкладки «Даты» (решение владельца 2026-11-23).
+  const targets = [...root.querySelectorAll(".section-head-inline")].map((head) => {
+    const link = head.querySelector(".head-link");
+    return `${head.querySelector("h3").textContent} → ${link?.dataset.tab}/${link?.dataset.view}`;
+  });
+  deepStrictEqual(targets, ["Значимые даты → dates/dates", "Дни рождения → dates/birthdays"],
+    "ссылки «Все →» ведут не в свои сегменты");
+});
+
+test("главная: без дней рождения секции нет, превью — не больше трёх карточек", () => {
+  const render = homeFactory();
+  const empty = render(homeState({ dates: [{ id: "d1", kind: "date" }] }));
+  ok(!empty.textContent.includes("Дни рождения"), "секция «Дни рождения» показана без записей");
+  equal(empty.querySelectorAll('[data-kind="birthday"]').length, 0, "карточка дня рождения нарисовалась из пустого набора");
+  const many = render(homeState({
+    birthdays: ["b1", "b2", "b3", "b4", "b5"].map((id) => ({ id, kind: "birthday" })),
+  }));
+  equal(many.querySelectorAll('[data-kind="birthday"]').length, 3, "на главной больше трёх карточек дней рождения");
+  // Секций без карточек на главной нет — вместе с их ссылками.
+  deepStrictEqual([...many.querySelectorAll(".section-head-inline h3")].map((el) => el.textContent), ["Дни рождения"],
+    "пустые секции выведены на главную");
+});
+
+test("главная: четыре ссылки «Все →» открывают свои вкладку и сегмент", () => {
+  const root = homeFactory()(homeState({
+    tasks: [{ id: "t1" }, { id: "t2" }, { id: "t3" }, { id: "t4" }],
+    dates: [{ id: "d1", kind: "date" }],
+    birthdays: [{ id: "b1", kind: "birthday" }],
+    memories: [{ id: "m1" }],
+  }));
+  const targets = [...root.querySelectorAll(".section-head-inline")].map((head) => {
+    const link = head.querySelector(".head-link");
+    return `${head.querySelector("h3").textContent} → ${link?.dataset.action}/${link?.dataset.tab}/${link?.dataset.view}`;
+  });
+  deepStrictEqual(targets, [
+    "Ближайшие планы → go-tab/tasks/plans",
+    "Значимые даты → go-tab/dates/dates",
+    "Дни рождения → go-tab/dates/birthdays",
+    "Из дневника → go-tab/memories/memories",
+  ], "ссылки «Все →» ведут не в свои разделы");
+  equal([...root.querySelectorAll('[data-kind="task"]')].map((el) => el.dataset.id).length, 3, "превью планов — не больше трёх карточек");
+});
+
+test("главная: в превью не осталось фильтра дней рождения по dates", () => {
   const home = sliceBetween(appJs, "function renderHome()", "function taskItem(");
-  ok(home.includes('item.kind === "birthday"'), "фильтр по kind потерян");
-  ok(home.includes("previewBirthdays"), "previewBirthdays не собран");
   ok(home.includes("<h3>Дни рождения</h3>"), "нет секции «Дни рождения»");
   ok(home.includes("<h3>Значимые даты</h3>"), "нет секции «Значимые даты»");
-  match(home, /dates\.filter\(\(item\) => item\.kind === "birthday"\)/);
+  ok(!/dates\.filter\([^;]*birthday/.test(home), "дни рождения снова ищутся в dates");
+  match(home, /birthdays = \[\]/, "в деструктуризации состояния нет birthdays");
+  match(home, /birthdays\.slice\(0, 3\)\.map\(birthdayItem\)/);
 });

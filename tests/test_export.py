@@ -182,7 +182,7 @@ def test_export_keeps_private_flags_and_new_columns(tmp_path):
     # Личный план остаётся личным.
     assert "INSERT OR REPLACE INTO tasks(id, pair_id, title, status, day, time, monthly, yearly, is_private, created_by, created_at, completed_by, completed_at) VALUES(1, 1, 'Сюрприз', 'open', '2026-12-01', '18:00', 0, 0, 1, 10, 1, NULL, NULL);" in sql
     # Личная дата остаётся личной; kind по умолчанию — обычная дата.
-    assert "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, created_at) VALUES(1, 1, 'Годовщина', '2026-12-01', '18:00', 0, 0, 1, 10, 'date', 1);" in sql
+    assert "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, monthly, is_private, created_by, kind, show_years, created_at) VALUES(1, 1, 'Годовщина', '2026-12-01', '18:00', 0, 0, 1, 10, 'date', 0, 1);" in sql
     # place_pick_id и movie_pick_id (SCHEMA-12) могут быть NULL в старых базах,
     # экспортёр должен включать их в список колонок для pairs.
     assert "INSERT OR REPLACE INTO pairs(id, code, name1, name2, user_a, user_b, started_at, together_pts, timezone, awaiting_return, last_partner, place_pick_id, movie_pick_id, created_at, updated_at) VALUES(1, 'ABC', 'Владелец', '', 10, 0, '2026-01-01', 0, 'Europe/Moscow', 0, 0, NULL, NULL, 1, 1);" in sql
@@ -344,3 +344,18 @@ def test_export_refuses_duplicate_pair_codes(tmp_path):
     con.close()
     with pytest.raises(RuntimeError, match="дублируются коды"):
         dump(db_path)
+
+
+def test_export_fills_show_years_for_pre_0053_schema(tmp_path):
+    """BUG-3-04 (аудит 2026-11-23): база до миграции show_years (v18) не
+    экспортирует NULL в NOT NULL-колонку D1 — вместо NULL подставляется 0.
+    Раньше отсутствующая колонка превращалась в NULL AS show_years, и импорт
+    всех дат падал на NOT NULL constraint."""
+    db = tmp_path / "source.db"
+    _make_db(db)  # dates без show_years — ровно состояние до миграции 0053
+    sql = dump(db)
+    assert (
+        "INSERT OR REPLACE INTO dates(id, pair_id, title, day, time, recurs, monthly, "
+        "is_private, created_by, kind, show_years, created_at) "
+        "VALUES(1, 1, 'Знакомство', '2020-05-17', '18:00', 1, 0, 0, 0, NULL, 0, 1);"
+    ) in sql

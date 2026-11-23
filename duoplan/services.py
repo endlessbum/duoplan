@@ -171,10 +171,21 @@ def _monthly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | Non
     now_local = datetime.now(tz)
     hours, minutes = _time_parts(time)
 
+    # BUG-3-02 (аудит 2026-11-23): исходная дата — нижняя граница повтора
+    # (worker.nextMonthlyOccurrenceMs): если начало в будущем, поиск
+    # начинается с его месяца, а не с текущего.
+    base = now_local
+    try:
+        source = date(int(parts[0]), int(parts[1]), int(parts[2]))
+        if source > now_local.date():
+            base = datetime(source.year, source.month, 1, tzinfo=tz)
+    except ValueError:
+        pass
+
     def candidates():
         for offset in range(25):
-            month_index = now_local.month - 1 + offset
-            year = now_local.year + month_index // 12
+            month_index = base.month - 1 + offset
+            year = base.year + month_index // 12
             month = month_index % 12 + 1
             try:
                 yield _zoned_local(year, month, day_of_month, hours, minutes, tz)
@@ -197,10 +208,17 @@ def _yearly_occurrence(day: object, time: object, tz: tzinfo) -> datetime | None
     now_local = datetime.now(tz)
     hours, minutes = _time_parts(time)
 
+    # BUG-3-02 (аудит 2026-11-23): ежегодный повтор не начинается раньше
+    # исходного года (worker.nextYearlyOccurrenceMs).
+    try:
+        base_year = max(now_local.year, int(parts[0]))
+    except ValueError:
+        base_year = now_local.year
+
     def candidates():
         for offset in range(10):
             try:
-                yield _zoned_local(now_local.year + offset, month, day_of_month, hours, minutes, tz)
+                yield _zoned_local(base_year + offset, month, day_of_month, hours, minutes, tz)
             except ValueError:
                 yield None
 
@@ -245,8 +263,9 @@ def next_date_occurrence(
 ) -> datetime | None:
     """Следующее наступление даты (worker.nextDateOccurrence).
 
-    Ежемесячная — ближайший месяц, где день существует; у ежегодной — ближайший
-    год из текущего..текущий+8, у разовой — сама дата. У «невозможной» даты
+    Ежемесячная — ближайший месяц, где день существует (не раньше исходной
+    даты); у ежегодной — ближайший год от max(текущий, исходный) в окне 9 лет,
+    у разовой — сама дата. У «невозможной» даты
     (например, разовая 2024-02-30) возвращается ``None``, worker же в этом
     месте перекатывает Date.UTC до реального дня — расхождение недостижимо:
     такие строки не проходят валидацию ни на одной поверхности.
@@ -268,8 +287,11 @@ def next_date_occurrence(
     if _as_int(recurs) == 0:
         return first
     today = datetime.now(tz).date()
+    # BUG-3-02 (аудит 2026-11-23): первое наступление ежегодной даты — сама
+    # dates.day, поиск не начинается раньше исходного года.
+    start_year = max(today.year, year)
     for offset in range(9):
-        candidate_year = today.year + offset
+        candidate_year = start_year + offset
         try:
             candidate = datetime(
                 candidate_year, month, day_of_month, *_time_parts(time)
