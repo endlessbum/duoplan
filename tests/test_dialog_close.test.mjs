@@ -1,9 +1,13 @@
 // Закрытие окон (решение владельца 2026-11-23).
 //
-// Окно с «×» в шапке не дублирует закрытие текстовой кнопкой «Закрыть»
+// Окно с плавающей «×» не дублирует закрытие текстовой кнопкой «Закрыть»
 // в подвале: закрыть можно только «×». Кнопки «Отмена», «Нет», «Оставить»
 // и т.п. остаются — это отказ от действия, а не второй способ закрыть окно.
-// Сам «×» закреплён в шапке при прокрутке длинного содержимого.
+// «×» лежит вне прокручиваемой формы и остаётся в правом верхнем углу окна
+// при скролле и свайпе; остальные элементы едут вместе с содержимым
+// (уточнение владельца 2026-11-23, заменило закреплённую полосу-шапку).
+// Нажатие «×» защищено подтверждением так же, как тап по фону и «Назад»;
+// «Отмена» остаётся прямым закрытием.
 //
 // Фрагмент openDialog() выполняется по-настоящему на разметке диалога
 // из public/app.html.
@@ -81,19 +85,46 @@ test("«Отмена» и значение по умолчанию остают�
   equal(openWith({ title: "Правка" }).cancel.textContent, "Отмена", "значение по умолчанию изменилось");
 });
 
-test("«×» есть в шапке и закрывает окно тем же обработчиком, что и отмена", () => {
-  match(dialogHtml, /class="icon-close" data-action="close-dialog" aria-label="Закрыть"/);
+function cssBlock(selector) {
+  const start = appCss.indexOf(selector);
+  ok(start !== -1, `в CSS нет правила ${selector}`);
+  return appCss.slice(start, appCss.indexOf("}", start) + 1);
+}
+
+test("«×» запрашивает закрытие с подтверждением, «Отмена» закрывает напрямую", () => {
+  const { document } = parseHTML(dialogHtml);
+  const close = document.getElementById("item-dialog").querySelector(".icon-close");
+  ok(close, "в разметке диалога нет «×»");
+  equal(close.dataset.action, "request-dialog-close", "«×» не идёт через подтверждение");
+  equal(close.getAttribute("aria-label"), "Закрыть", "у «×» нет подписи");
+  equal(document.getElementById("dialog-cancel").dataset.action, "close-dialog", "«Отмена» перестала быть прямым закрытием");
+  match(appJs, /action === "request-dialog-close"\) \{\s*requestDialogClose\(\);/);
   match(appJs, /action === "close-dialog"\) \{\s*dialog\.close\(\);/);
+  // Тот же путь, что у тапа по фону и «Назад»: с правками — подтверждение.
+  match(appJs, /if \(isDialogDirty\(\) && showDialogCloseConfirm\(\)\) return;/);
 });
 
-test("шапка с «×» закреплена при прокрутке и непрозрачна", () => {
-  const head = appCss.slice(appCss.indexOf(".sheet-head {"), appCss.indexOf("}", appCss.indexOf(".sheet-head {")) + 1);
-  match(head, /position: sticky;/);
-  match(head, /top: 0;/);
-  // Отрицательные поля компенсируют padding формы: шапка визуально там же,
-  // где была до закрепления, и закрывает прокручиваемое содержимое фоном.
-  match(head, /margin: -20px -20px 0;/);
-  match(head, /background: var\(--surface\);/);
-  // «×» не уезжает только если скролл-контейнер — форма с прокруткой.
+test("«×» плавает в углу окна, заголовок и содержимое прокручиваются обычно", () => {
+  const { document } = parseHTML(dialogHtml);
+  const dialog = document.getElementById("item-dialog");
+  const close = dialog.querySelector(".icon-close");
+  // Кнопка — прямой ребёнок dialog, а не потомок формы: скролл формы её не двигает.
+  ok(Array.from(dialog.children).includes(close), "«×» лежит внутри прокручиваемой формы");
+  equal(document.getElementById("item-form").querySelector(".icon-close"), null, "«×» осталась в форме");
+  // Заголовок — в обычном потоке: никакой закреплённой полосы во всю ширину.
+  const head = cssBlock(".sheet-head {");
+  ok(!/position:\s*sticky/.test(head), "шапка снова закреплена полосой");
+  ok(!/background:/.test(head), "шапка снова рисует полосу фоном");
+  match(head, /padding-right: 40px;/, "заголовку не оставлено место под «×»");
+  // «×» привязана к окну, а не к вьюпорту, и лежит выше содержимого формы.
+  const closeCss = cssBlock(".icon-close {");
+  match(closeCss, /position: absolute;/);
+  match(closeCss, /top: 14px;/);
+  match(closeCss, /right: 14px;/);
+  const z = Number(closeCss.match(/z-index:\s*(\d+);/)?.[1]);
+  ok(z > 0 && z < 40, `слой «×» (${z}) должен быть выше содержимого и ниже подтверждения`);
+  // В печати плавающая кнопка не нужна.
+  match(appCss, /#item-dialog > \.icon-close[^}]*display: none !important;/);
+  // Скролл-контейнер — форма: все остальные элементы едут вместе с ней.
   ok(/\.sheet-form \{[^}]*overflow-y: auto;/.test(appCss), "форма окна не прокручивается");
 });

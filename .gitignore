@@ -23,6 +23,7 @@ _smoke.py
 DuoPlan.zip
 desktop.ini
 .zcode/
+.zwork/
 .ruff_cache/
 .devin/config.local.json
 .idea/

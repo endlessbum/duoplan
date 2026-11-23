@@ -5,7 +5,8 @@
 // сохранения). Открытое меню «⋮» в окне ведёт себя как в списках: тап мимо
 // закрывает только меню. Окно с изменениями не закрывает и Esc — только
 // через то же подтверждение; повторный Esc при открытом подтверждении
-// остаёт в окне.
+// остаёт в окне. Плавающая «×» (PD-DIALOG-001) идёт тем же путём: с правками
+// показывает то же подтверждение. «Отмена» закрывает напрямую.
 //
 // Функции извлекаются из public/app.js и выполняются на макете состояния:
 // dialog/context/confirm — простые объекты, слушатели фиксируются.
@@ -139,6 +140,15 @@ test("ввод отмечает окно изменённым, кроме ASCII-
   equal(closed.api.isDialogDirty(), false, "ввод при закрытом окне что-то отметил");
 });
 
+test("плавающая «×» идёт через requestDialogClose, как фон и «Назад»", () => {
+  match(appHtml, /class="icon-close" data-action="request-dialog-close" aria-label="Закрыть"/);
+  match(appJs, /action === "request-dialog-close"\) \{\s*requestDialogClose\(\);/);
+  const { api, dialog, confirm } = makeEnv({ dirty: true });
+  api.requestDialogClose();
+  equal(dialog.closed, false, "«×» закрыла окно с правками мимо подтверждения");
+  equal(confirm.hidden, false, "подтверждение при закрытии «×» не показано");
+});
+
 test("слушатели навешаны: клик и cancel на окно, ввод на форму", () => {
   const { listeners } = makeEnv();
   deepStrictEqual(listeners.dialog.map(([n]) => n), ["click", "cancel"]);
@@ -167,6 +177,6 @@ test("разметка и стили подтверждения на месте"
   match(css, /position: absolute;/);
   match(css, /z-index: 40;/);
   match(css, /background: var\(--surface\);/);
-  // Оверлей поверх закреплённой шапки, но под всплывающим меню карточек (z-index 30)? нет — меню выше.
+  // Оверлей поверх плавающей «×» (z-index 20), но под всплывающим меню карточек (z-index 30).
   ok(!/z-index: 4[0-9];[\s\S]{0,200}z-index: 30;/.test(appCss), "меню «⋮» должно оставаться над оверлеем при его открытии");
 });

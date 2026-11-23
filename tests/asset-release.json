@@ -109,6 +109,26 @@
         "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c",
         "ascii-converter.js": "6df2f397d9f16e86a3ebefad543d608f52b8f2eeafac3f886bc86a8ca0b7842b"
       }
+    },
+    {
+      "version": "2026.11.23.131",
+      "assets": {
+        "app.js": "bd469dcc56c47867c33e936f26f35482cb480128ab24d59c0d3be04c61531dc6",
+        "app.css": "a24a7e0182fcc05e1bf0cb06c6e295955cdb9dda21f525764578034b89dc1fbf",
+        "nav.js": "262e73cabbba251433a6c09aa6809b98be428fa3567a4accb9fe976cc0445342",
+        "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c",
+        "ascii-converter.js": "6df2f397d9f16e86a3ebefad543d608f52b8f2eeafac3f886bc86a8ca0b7842b"
+      }
+    },
+    {
+      "version": "2026.11.23.132",
+      "assets": {
+        "app.js": "e2decf5535f9b6629c468ac2c9f16d41779dd284593ad77bf043e409dd51c9b1",
+        "app.css": "a24a7e0182fcc05e1bf0cb06c6e295955cdb9dda21f525764578034b89dc1fbf",
+        "nav.js": "262e73cabbba251433a6c09aa6809b98be428fa3567a4accb9fe976cc0445342",
+        "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c",
+        "ascii-converter.js": "6df2f397d9f16e86a3ebefad543d608f52b8f2eeafac3f886bc86a8ca0b7842b"
+      }
     }
   ]
 }

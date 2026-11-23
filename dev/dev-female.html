@@ -111,14 +111,15 @@
        самому диалогу, а не кнопке «Закрыть» и не строке ввода (автофокус на
        полях убран — клавиатура выезжает только по тапу пользователя). -->
   <dialog id="item-dialog" class="sheet-dialog" tabindex="-1" autofocus>
+    <!-- Плавающая «×» вне прокручиваемой формы, как в public/app.html. -->
+    <button type="button" class="icon-close" data-action="request-dialog-close" aria-label="Закрыть">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
+        <path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>
+      </svg>
+    </button>
     <form id="item-form" method="dialog" class="sheet-form">
       <div class="sheet-head">
         <h2 id="dialog-title">Новая запись</h2>
-        <button type="button" class="icon-close" data-action="close-dialog" aria-label="Закрыть">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">
-            <path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>
-          </svg>
-        </button>
       </div>
       <div id="dialog-fields"></div>
       <div class="sheet-actions">
