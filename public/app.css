@@ -873,10 +873,12 @@ html.dialog-locked {
   overflow-wrap: anywhere;
 }
 
-/* Диалог чтения с длинным текстом: не выше вьюпорта, содержимое скроллится. */
+/* Диалог чтения с длинным текстом: не выше доступной площади окна,
+   содержимое скроллится внутри формы (не самого dialog). --dialog-v-gap
+   объявлен на .sheet-dialog и наследуется сюда. */
 .sheet-form {
-  max-height: min(86vh, 760px);
-  max-height: min(86dvh, 760px);
+  max-height: min(760px, calc(100vh - var(--dialog-v-gap) - var(--dialog-v-gap) - 16px));
+  max-height: min(760px, calc(100dvh - var(--dialog-v-gap) - var(--dialog-v-gap) - 16px));
   overflow-y: auto;
   /* Страховка: сколько бы ни занял нативный контрол, горизонтального
      скролла в диалоге не бывает — содержимое подрезается по ширине формы. */
@@ -1594,10 +1596,19 @@ select.settings-select {
 
 .sheet-dialog {
   width: min(480px, calc(100% - 24px));
+  /* Окно не должно заходить на нативные кнопки Telegram: сверху — полоса
+     шапки (54px, как у .top-glass-bar), снизу — нижняя панель (88px:
+     мобильный бар начинается на 49px, десктопный — на 82px).
+     Safe-area берём по тем же переменным, что и остальной интерфейс.
+     Запас симметричный (максимум из сторон), поэтому dialog по-прежнему
+     центрируется через margin: auto и не лезет ни вверх, ни вниз. */
+  --dialog-top-gap: calc(max(var(--tg-content-safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)) + 54px);
+  --dialog-bottom-gap: calc(max(var(--tg-content-safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 88px);
+  --dialog-v-gap: max(var(--dialog-top-gap), var(--dialog-bottom-gap));
   /* Длинные диалоги (экспорт: восемь секций) не вылезают за экран —
-     прокручиваются внутри, не двигая страницу за собой. */
-  max-height: 92vh;
-  max-height: min(92dvh, 100% - 24px);
+     прокручиваются внутри формы, не двигая страницу за собой. */
+  max-height: calc(100vh - var(--dialog-v-gap) - var(--dialog-v-gap));
+  max-height: calc(100dvh - var(--dialog-v-gap) - var(--dialog-v-gap));
   overflow-y: auto;
   border: 1px solid var(--glass-border);
   border-radius: 24px;

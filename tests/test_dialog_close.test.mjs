@@ -128,3 +128,16 @@ test("«×» плавает в углу окна, заголовок и соде
   // Скролл-контейнер — форма: все остальные элементы едут вместе с ней.
   ok(/\.sheet-form \{[^}]*overflow-y: auto;/.test(appCss), "форма окна не прокручивается");
 });
+
+test("высота окна ограничена запасом под кнопки Telegram сверху и снизу", () => {
+  const dialogCss = cssBlock(".sheet-dialog {");
+  match(dialogCss, /--dialog-top-gap: calc\(max\(var\(--tg-content-safe-area-inset-top/);
+  match(dialogCss, /\+ 54px\)/);
+  match(dialogCss, /--dialog-bottom-gap: calc\(max\(var\(--tg-content-safe-area-inset-bottom/);
+  match(dialogCss, /\+ 88px\)/);
+  match(dialogCss, /--dialog-v-gap: max\(var\(--dialog-top-gap\), var\(--dialog-bottom-gap\)\)/);
+  match(dialogCss, /max-height: calc\(100dvh - var\(--dialog-v-gap\) - var\(--dialog-v-gap\)\);/);
+  // Форма чуть ниже dialog: прокручивается она, а не само окно.
+  const formCss = cssBlock(".sheet-form {");
+  match(formCss, /max-height: min\(760px, calc\(100dvh - var\(--dialog-v-gap\) - var\(--dialog-v-gap\) - 16px\)\);/);
+});
