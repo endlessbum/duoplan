@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f3ed">
   <title>DuoPlan — Наше пространство</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/app.css?v=2026.11.23.133">
+  <link rel="stylesheet" href="/app.css?v=2026.11.23.135">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -124,8 +124,9 @@
         <h2 id="dialog-title">Новая запись</h2>
       </div>
       <div id="dialog-fields"></div>
-      <!-- Ошибки сабмита живут внутри диалога: тост снаружи уходит под
-           top-layer <dialog> и блюрится (репорт: «размытый» комментарий). -->
+      <!-- Ошибка сабмита привязана к форме: она остаётся рядом с полями,
+           даже когда окно прокручено. Тост теперь тоже рисуется поверх окна
+           (syncToastLayer переносит его в dialog), но inline-текст нагляднее. -->
       <p id="dialog-error" class="dialog-error" role="alert" hidden></p>
       <div class="sheet-actions">
         <button type="button" id="dialog-cancel" class="secondary" data-action="close-dialog">Отмена</button>
@@ -161,11 +162,14 @@
     </div>
   </dialog>
 
+  <!-- Единственный тост стартует в body; при открытом <dialog> app.js
+       переносит его внутрь окна, иначе top-layer с блюром перекрыл бы
+       уведомление (например, «Номер скопирован» из окна контакта). -->
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/zoom-guard.js?v=2026.11.23.133" defer></script>
-  <script src="/nav.js?v=2026.11.23.133" defer></script>
-  <script src="/ascii-converter.js?v=2026.11.23.133" defer></script>
-  <script src="/app.js?v=2026.11.23.133" defer></script>
+  <script src="/zoom-guard.js?v=2026.11.23.135" defer></script>
+  <script src="/nav.js?v=2026.11.23.135" defer></script>
+  <script src="/ascii-converter.js?v=2026.11.23.135" defer></script>
+  <script src="/app.js?v=2026.11.23.135" defer></script>
 </body>
 </html>
 

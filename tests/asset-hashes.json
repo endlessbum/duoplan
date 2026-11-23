@@ -1,6 +1,7 @@
 {
-  "app.js": "e2decf5535f9b6629c468ac2c9f16d41779dd284593ad77bf043e409dd51c9b1",
-  "app.css": "9e4307206f079d24a35fddcc9ea80a4411ecead4b3fb7c19916fae37032451bb",
+  "app.js": "29f4cdd027aa3f3485cba0f50ca7eecb2851f07b64fd4a7d2262f12b8b967cc6",
+  "app.css": "b02e121920eea0d74d19e32e501f9eeb4ac17e9a5aa64973491f3af8cd870788",
   "nav.js": "262e73cabbba251433a6c09aa6809b98be428fa3567a4accb9fe976cc0445342",
-  "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c"
+  "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c",
+  "ascii-converter.js": "6df2f397d9f16e86a3ebefad543d608f52b8f2eeafac3f886bc86a8ca0b7842b"
 }

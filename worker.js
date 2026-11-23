@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.23.133";
+const APP_VERSION = "2026.11.23.135";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.23.133";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.23.133";
+const DB_SCHEMA_VERSION = "2026.11.23.135";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -1169,7 +1169,9 @@ async function joinPair(env, user, rawCode, requestUrl = null, ctx = null) {
     const notify = openApp(env, pair.user_a, requestUrl || { origin: "" },
       `<b>${escapeHtml(returnerName)}</b> снова в вашем пространстве.\n\n`
       + "Общие планы, даты и воспоминания на месте — можно продолжать.")
-      .catch(() => {}); // Молча: уведомление вторично по отношению к самому входу.
+      // Уведомление вторично: сбой Telegram не отменяет вход, но причину
+      // пишем в логи — молчаливый catch скрывал деградацию бота.
+      .catch((error) => console.error("join notification failed", error));
     if (ctx?.waitUntil) ctx.waitUntil(notify);
     else await notify;
   }
@@ -1303,7 +1305,9 @@ async function leavePair(env, member, requestUrl, ctx = null) {
         `<b>${escapeHtml(leaverName)}</b> больше не в вашем пространстве.\n\n`
         + "Общие планы, даты и воспоминания остались у вас. "
         + "Чтобы позвать партнёра снова, отправьте ему код приглашения.")
-        .catch(() => {}); // Молча: уведомление вторично по отношению к самому выходу.
+        // Выход уже применён к базе: сбой уведомления не отменяет его,
+        // но пишем причину в логи (как и при входе).
+        .catch((error) => console.error("leave notification failed", error));
       if (ctx?.waitUntil) ctx.waitUntil(notify);
       else await notify;
     }

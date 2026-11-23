@@ -34,5 +34,7 @@ test("close-обработчик не затирает контекст уже �
   // прилетало из отдельной задачи после открытия второго («Вы точно
   // уверены?») и обнуляло его dialogContext — сабмит второго шага молча
   // умирал на гейте !dialogContext, выйти из пространства было нельзя.
-  match(app, /addEventListener\("close", \(\) => \{\s*\n\s*if \(dialog\.open\) return;\s*\n\s*const closedContext = dialogContext;\s*\n\s*dialogContext = null;/);
+  // Между гардом и контекстом теперь живёт syncToastLayer() (слой уведомлений),
+  // поэтому допускаем комментарии и вызов, но сохраняем сам гард и порядок.
+  match(app, /addEventListener\("close", \(\) => \{\s*\n\s*if \(dialog\.open\) return;[\s\S]{0,300}?const closedContext = dialogContext;\s*\n\s*dialogContext = null;/);
 });

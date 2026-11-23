@@ -30,9 +30,22 @@ test("общее правило /* не задаёт Cache-Control", () => {
 });
 
 test("статические ассеты задают Cache-Control отдельно", () => {
-  for (const asset of ["/app.js", "/app.css", "/nav.js", "/zoom-guard.js"]) {
+  for (const asset of ["/app.js", "/app.css", "/nav.js", "/zoom-guard.js", "/ascii-converter.js"]) {
     ok(blockFor(asset).some((l) => /^Cache-Control:\s*public, max-age=31536000, immutable$/i.test(l)), asset);
   }
+});
+
+test("CSP разрешает blob: для изображений — fallback ASCII-конвертера", () => {
+  // decodeViaImg() создаёт Blob URL через URL.createObjectURL(file). Без blob:
+  // в img-src старые WebView не смогут декодировать фото вторым путём.
+  const csp = blockFor("/*").find((l) => /^Content-Security-Policy:/i.test(l)) || "";
+  const imgSrc = csp.match(/img-src\s+([^;]+)/i)?.[1] || "";
+  ok(/(^|\s)blob:(\s|$)/.test(imgSrc), "img-src не разрешает blob: — fallback decoding сломан");
+  const converter = readFileSync(join(root, "public", "ascii-converter.js"), "utf8");
+  ok(converter.includes("URL.createObjectURL("), "конвертер больше не использует Blob URL — проверку можно убрать");
+  // Остальные директивы расширять не нужно: blob: нужен только картинкам.
+  ok(!/\bdefault-src[^;]*blob:/i.test(csp), "blob: попал в default-src");
+  ok(!/\bscript-src[^;]*blob:/i.test(csp), "blob: попал в script-src");
 });
 
 test("HTML-страницы явно помечены no-cache", () => {
@@ -52,7 +65,7 @@ test("все локальные JS/CSS Mini App версионированы и 
   const workerSource = readFileSync(join(root, "worker.js"), "utf8");
   const version = workerSource.match(/const APP_VERSION = "([^"]+)";/)?.[1];
   ok(version, "APP_VERSION в worker.js не найден");
-  for (const asset of ["app.js", "app.css", "zoom-guard.js"]) {
+  for (const asset of ["app.js", "app.css", "zoom-guard.js", "ascii-converter.js"]) {
     const ext = asset.split(".").pop();
     const attr = ext === "css" ? "href" : "src";
     const re = new RegExp(`${attr}="/${asset.replace(".", "\\.")}\\?v=${version.replace(/\./g, "\\.")}"`);
@@ -62,7 +75,7 @@ test("все локальные JS/CSS Mini App версионированы и 
 
 test("изменение содержимого ассета без изменения версии обнаруживается", () => {
   const manifestPath = join(here, "asset-hashes.json");
-  const assets = ["app.js", "app.css", "nav.js", "zoom-guard.js"];
+  const assets = ["app.js", "app.css", "nav.js", "zoom-guard.js", "ascii-converter.js"];
   let manifest = {};
   try {
     manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

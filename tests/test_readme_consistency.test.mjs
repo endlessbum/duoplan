@@ -24,6 +24,16 @@ test("версия в README совпадает с APP_VERSION и DB_SCHEMA_VERS
   equal(current, appVersion, `README: текущая версия ${current} ≠ APP_VERSION ${appVersion}`);
 });
 
+test("раздел «Версия» не дублирует номер релиза вручную", () => {
+  // Раньше здесь застывал старый номер (2026.11.23.130) и тест above его не
+  // ловил: он читал только поле «Текущая версия» в начале README.
+  const start = readme.indexOf("## Версия");
+  ok(start !== -1, "раздел «Версия» не найден");
+  const section = readme.slice(start).split(/\r?\n## /)[0];
+  const literals = [...section.matchAll(/\b20\d\d\.\d\d\.\d\d\.\d+\b/g)].map((m) => m[0]);
+  deepStrictEqual(literals, [], `в разделе «Версия» застыл номер: ${literals.join(", ")}`);
+});
+
 test("граница backfill в README совпадает с SHARE_BACKFILL_INTRODUCED", () => {
   // Историческая контрольная версия одноразового backfill категорий —
   // полезна в документации, но должна совпадать с константой в worker.js.

@@ -29,6 +29,9 @@
   // !dialogContext, и выйти из пространства было невозможно (репорт 2026-11-01).
   dialog.addEventListener("close", () => {
     if (dialog.open) return;
+    // Окно закрылось — тост возвращается в body. Текст и таймер не сбрасываем:
+    // уведомление, показанное перед закрытием, должно дочитаться.
+    syncToastLayer();
     const closedContext = dialogContext;
     dialogContext = null;
     // Черновик менеджера группы принадлежит конкретному открытию диалога:
@@ -48,6 +51,11 @@
   const dialogConfirmLeave = document.getElementById("dialog-confirm-leave");
   const dialogError = document.getElementById("dialog-error");
   const toastEl = document.getElementById("toast");
+  // Тост стартует в body (там он виден без окна). Модальный <dialog> уходит
+  // в top-layer, и любой fixed-элемент снаружи оказывается под его блюром —
+  // независимо от z-index. Поэтому на время окна тост переезжает внутрь
+  // dialog, как это уже делают #fmt-toolbar и #dialog-confirm.
+  const toastHome = toastEl?.parentElement || document.body;
 
   // Пять слотов дока: «Желания» переехали в «Нашу пару» (переключатель
   // «Профиль / Желания»), «Цитаты» — в «Дневник», «Дни рождения» — в «Даты».
@@ -983,8 +991,20 @@
     return clean ? Array.from(clean)[0].toUpperCase() : fallback;
   }
 
+  // Уведомление всегда рисуется в активном слое: при открытом окне — внутри
+  // его top-layer, иначе — в body. Один и тот же элемент сохраняет текст и
+  // таймер при переезде, поэтому «Номер скопирован» из окна контакта теперь
+  // виден над блюром, а после закрытия окна остаётся на обычном месте.
+  function syncToastLayer() {
+    if (!toastEl) return;
+    const host = dialog?.open ? dialog : toastHome;
+    if (!host || toastEl.parentElement === host) return;
+    host.appendChild(toastEl);
+  }
+
   function showToast(message, { sticky = false } = {}) {
     if (!toastEl) return;
+    syncToastLayer();
     toastEl.textContent = message;
     toastEl.hidden = false;
     clearTimeout(toastTimer);
@@ -995,6 +1015,32 @@
         toastEl.hidden = true;
       }, Math.min(1500 + message.length * 20, 6000));
     }
+  }
+
+  // HttpError несёт готовый русский текст, но не у всех кодов сказано,
+  // что делать дальше. Подсказки добавляются к сообщению только для известных
+  // кодов (аудит 2026-11-23, п. 5.1): остальные ошибки показываются как есть.
+  const API_ERROR_HINTS = {
+    LAST_GOAL_ITEM: "Добавьте новый пункт перед удалением.",
+    GOAL_ITEMS_LIMIT: "Разбейте цель на несколько.",
+    INVALID_SAVING_CHOICE: "Оставьте только одно поле — существующую копилку или новую.",
+    SAVING_FULL: "Увеличьте цель в редактировании копилки.",
+    TARGET_BELOW_COLLECTED: "Введите большее значение.",
+    JOIN_RATE_LIMITED: "Защита от подбора кода — повторите позже.",
+    PAIR_RESERVED: "Старый код не подойдёт.",
+    GENDER_IMMUTABLE: "Пол задаётся в гейте при первом входе."
+  };
+
+  function apiErrorMessage(error) {
+    const known = error?.status !== undefined || error?.code;
+    const hint = API_ERROR_HINTS[error?.code];
+    const base = known && error.message ? error.message : "";
+    const fallback = "Что-то пошло не так, попробуйте ещё раз";
+    // Код без текста сервера — показываем хотя бы подсказку, но никогда не
+    // возвращаем undefined: тост и #dialog-error обязаны иметь содержимое.
+    if (!base) return hint || fallback;
+    if (!hint || base.includes(hint)) return base;
+    return `${base} ${hint}`;
   }
 
   // 401 нельзя глотать в фоне: иначе интерфейс молча показывает устаревшие
@@ -1008,11 +1054,11 @@
     }
     // HTTP-ошибки несут готовый русский текст; остальное (TypeError и т.п.)
     // наружу не показываем — сырой машинный текст только пугает.
-    showToast(error?.status !== undefined || error?.code ? error.message : "Что-то пошло не так, попробуйте ещё раз");
+    showToast(apiErrorMessage(error));
   }
 
-  // Ошибка внутри открытого диалога: тост лежит под top-layer <dialog>
-  // и размывается блюром — текст показываем элементом #dialog-error.
+  // Ошибка сабмита показывается в форме (#dialog-error), чтобы текст был
+  // рядом с полями; тост тоже виден поверх окна после syncToastLayer.
   // Тот же фильтр текста, что в handleRequestError; 401 помечает сессию.
   function showDialogError(error) {
     if (!dialogError) return;
@@ -1022,9 +1068,7 @@
       // сама, и пользователь должен это видеть.
       showToast(error.message, { sticky: true });
     }
-    dialogError.textContent = error?.status !== undefined || error?.code
-      ? error.message
-      : "Что-то пошло не так, попробуйте ещё раз";
+    dialogError.textContent = apiErrorMessage(error);
     dialogError.hidden = false;
   }
 
@@ -7012,7 +7056,7 @@
       if (del) del.hidden = rows.length <= 1;
     }
     // Третий номер — предел: «+» прячем, вместо него подсказка в самом
-    // диалоге (тост уходил под блюр окна и был не виден).
+    // диалоге, рядом с полями.
     const full = rows.length >= 3;
     const addBtn = dialogFields.querySelector("[data-action='add-contact-phone']");
     if (addBtn) addBtn.hidden = full;
@@ -8335,8 +8379,8 @@
   async function afterGroupPartAdded(groupId, returnToManager, message) {
     await refreshMovieGroupDetails(groupId);
     if (returnToManager && movieGroupMap().has(groupId)) {
-      // Тост под модальным <dialog> не виден — показываем результат внутри
-      // самого менеджера, куда только что вернулись.
+      // Результат показываем внутри менеджера, куда только что вернулись:
+      // уведомление привязано к списку, а не к закрывшемуся окну поиска.
       await openMovieGroupManager(groupId, { notice: message });
     } else {
       if (message) showToast(message);
@@ -9713,6 +9757,9 @@
     hideDialogCloseConfirm();
     hideDialogError();
     dialog.showModal();
+    // Пока диалог не открыт, тост ушёл бы обратно в body — поэтому
+    // переезд делаем сразу после showModal, в той же задаче до первой отрисовки.
+    syncToastLayer();
     // Нативные фокус-шаги showModal отдают фокус первой кнопке («Закрыть»).
     // Забираем его на контейнер диалога: никакая строка ввода фокус не
     // получает — клавиатура выезжает только по тапу пользователя; визуально
@@ -10259,7 +10306,7 @@
     } catch (error) {
       if (operationOwnsDialog(operation, dialogContext) && dialog.open) {
         // 409 «уже в списке» и прочие ошибки показываем внутри диалога —
-        // тост ушёл бы под top-layer и слился бы с блюром.
+        // текст остаётся рядом с disabled-кнопками, которые надо разблокировать.
         showDialogError(error);
         dialogFields.querySelectorAll(".movie-suggest-item").forEach((item) => { item.disabled = false; });
       } else {

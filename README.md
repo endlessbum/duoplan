@@ -12,7 +12,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
   (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
-- Текущая версия — `2026.11.23.133` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.23.135` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -1098,9 +1098,10 @@ Node-часть проверяет Worker и Mini App на извлечённо�
 
 Версия Python-пакета — `duoplan/__init__.py` (`__version__ = "1.0.0"`);
 `pyproject.toml` читает её через `dynamic = ["version"]`, точка входа —
-`duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`
-(`2026.11.23.130`), она же подставляется в `?v=` у ассетов и должна совпадать с
-`DB_SCHEMA_VERSION` на релизе.
+`duoplan = duoplan.__main__:run`. Версия Worker — `APP_VERSION` в `worker.js`;
+ее текущее значение указано в начале README в строке «Текущая версия» — номер
+не дублируем, чтобы он не расходился при релизе. Она же подставляется в `?v=`
+у ассетов и должна совпадать с `DB_SCHEMA_VERSION`.
 
 ### Воспроизводимость окружения
 

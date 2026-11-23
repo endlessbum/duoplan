@@ -1629,9 +1629,9 @@ select.settings-select {
   padding: 20px;
 }
 
-/* Ошибка сабмита внутри диалога (#dialog-error в app.html): тост снаружи
-   уходит под top-layer <dialog> и блюрится, поэтому текст живёт здесь —
-   над блюром и не заходит на нижний бар. */
+/* Ошибка сабмита внутри диалога (#dialog-error в app.html): текст привязан
+   к форме и не заходит на нижний бар. Тост тоже показывается поверх окна —
+   syncToastLayer переносит его в dialog (z-index 70). */
 .dialog-error {
   margin: 0 0 12px;
   padding: 8px 12px;
@@ -1986,7 +1986,11 @@ input[type="checkbox"]:active {
   max-width: calc(100vw - 32px);
   text-align: center;
   text-wrap: balance;
-  z-index: 60;
+  /* Выше всех слоёв внутри окна: #fmt-toolbar (60), #dialog-confirm (40),
+     плавающая «×» (20). Сам элемент переезжает в top-layer dialog при его
+     открытии (syncToastLayer в app.js), поэтому z-index работает уже внутри
+     одного окна. */
+  z-index: 70;
 }
 
 /* Десктоп: нижний бар поднят на +20px (см. .is-desktop-app .bottom-nav),
@@ -3500,8 +3504,8 @@ tr[data-action="flo-day-pick"]:hover td { background: var(--surface-2); }
   font-size: 13px;
 }
 
-/* Результат добавления/удаления части внутри снова открытого менеджера: обычный
-   тост оказался бы под модальным <dialog> и был бы не виден. */
+/* Результат добавления/удаления части внутри снова открытого менеджера:
+   подсказка живёт в самом списке, рядом с изменённой записью. */
 .movie-group-notice {
   margin: 0 0 12px;
   padding: 10px 12px;
