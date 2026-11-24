@@ -45,8 +45,8 @@ function makeLoader() {
       "let appState = null;",
       "let archiveCachePairId = null;",
       "const viewerTimeZone = () => 'Europe/Moscow';",
-      "const archiveCache = { tasks: { items: [], page: -1, hasMore: null, remaining: null }, dates: { items: [], page: -1, hasMore: null, remaining: null }, wishes: { items: [], page: -1, hasMore: null, remaining: null }, memories: { items: [], page: -1, hasMore: null, remaining: null }, done_tasks: { items: [], page: -1, hasMore: null, remaining: null }, done_wishes: { items: [], page: -1, hasMore: null, remaining: null } };",
-      "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes'] };",
+      "const archiveCache = { tasks: { items: [], page: -1, hasMore: null, remaining: null }, dates: { items: [], page: -1, hasMore: null, remaining: null }, wishes: { items: [], page: -1, hasMore: null, remaining: null }, private_wishes: { items: [], page: -1, hasMore: null, remaining: null }, memories: { items: [], page: -1, hasMore: null, remaining: null }, done_tasks: { items: [], page: -1, hasMore: null, remaining: null }, done_wishes: { items: [], page: -1, hasMore: null, remaining: null } };",
+      "const ARCHIVE_KEYS_BY_TYPE = { memories: ['memories'], dates: ['dates'], tasks: ['tasks', 'done_tasks'], wishes: ['wishes', 'done_wishes', 'private_wishes'] };",
       extractBraced("function esc"),
       extractBraced("function itemActionButton"),
       extractBraced("function itemActions"),
@@ -57,6 +57,7 @@ function makeLoader() {
       extractLine("  const DELETE_ICON"),
       extractLine("  const COPY_ICON"),
       extractLine("  const LINK_TEXT_ICON"),
+      extractLine("  const LINK_ICON"),
       extractBraced("function richInline"),
       extractBraced("function renderRichText"),
       extractBraced("function partnerMissing"),
@@ -172,4 +173,69 @@ test("архивная кнопка «Показать ещё» остаётся
   }));
   const html = renderLists({ ...RICH, completedWishes: many }, "mine", "done");
   ok(html.includes("load-archive"), "архивные кнопки потерялись при выносе списков");
+});
+
+// PD-WISHES-001 (уточнение 2026-11-24): вкладка «Личные» удалена — личные
+// желания показываются внутри «Мои» с серой пилюлей, в обоих видах.
+test("вкладка «Личные» удалена из бара «Мои / партнёр»", () => {
+  const lists = makeLoader()(10, 200, 20);
+  lists.setAppState(RICH);
+  lists.setWishView("mine");
+  const html = lists.renderWishBlock();
+  ok(!html.includes('data-view="private"'), "кнопка «Личные» осталась в баре");
+  ok(!html.includes('data-tab="private"'), "вкладка «Личные» осталась в разметке");
+  ok(html.includes('data-view="mine"') && html.includes('data-view="partner"'), "бар «Мои / партнёр» сломан");
+});
+
+test("личное желание показывается в «Мои/Загадано» с пилюлей «Личное»", () => {
+  const state = {
+    ...RICH,
+    privateWishes: [
+      { id: 20, body: "Секретное желание", owner_id: 1, url: "", done: 0, done_at: null, created_at: 9, is_private: 1, display_name: "Оля" }
+    ]
+  };
+  const html = renderLists(state, "mine");
+  ok(html.includes("Секретное желание"), "личное желание не попало в «Мои»");
+  ok(html.includes(">Личное</span>"), "нет серой пилюли «Личное»");
+  ok(html.includes("is-private"), "пилюля без класса is-private");
+  // Личное — только в «Мои»: партнёр его не видит.
+  const partner = renderLists(state, "partner");
+  ok(!partner.includes("Секретное желание"), "личное желание утекло в вид партнёра");
+});
+
+test("исполненное личное желание переходит в «Мои/Исполнено» с пилюлей", () => {
+  const state = {
+    ...RICH,
+    privateWishes: [
+      { id: 21, body: "Секретное исполненное", owner_id: 1, url: "", done: 1, done_at: 7, created_at: 9, is_private: 1, display_name: "Оля" }
+    ]
+  };
+  const html = renderLists(state, "mine", "done");
+  ok(html.includes("Секретное исполненное"), "исполненное личное не попало в «Исполнено»");
+  ok(html.includes(">Личное</span>"), "нет пилюли «Личное» на исполненном");
+  const open = renderLists(state, "mine", "open");
+  ok(!open.includes("Секретное исполненное"), "исполненное личное осталось в «Загадано»");
+});
+
+test("личные и общие желания «Мои» перемешаны по времени создания", () => {
+  const state = {
+    ...RICH,
+    privateWishes: [
+      { id: 20, body: "Секретное желание", owner_id: 1, url: "", done: 0, done_at: null, created_at: 5, is_private: 1, display_name: "Оля" }
+    ]
+  };
+  const html = renderLists(state, "mine");
+  // created_at: личное 5 > общее 1 → личное выше общего.
+  ok(html.indexOf("Секретное желание") < html.indexOf("Моё желание"), "слияние списков не сортируется по свежести");
+});
+
+test("кнопка «Поделиться с партнёром» сохраняется у личного желания", () => {
+  const state = {
+    ...RICH,
+    privateWishes: [
+      { id: 20, body: "Секретное желание", owner_id: 1, url: "", done: 0, done_at: null, created_at: 9, is_private: 1, display_name: "Оля" }
+    ]
+  };
+  const html = renderLists(state, "mine");
+  ok(html.includes('data-action="share-private-wish"'), "шеринг личного желания пропал");
 });

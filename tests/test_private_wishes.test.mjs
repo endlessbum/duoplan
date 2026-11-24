@@ -40,12 +40,15 @@ test("worker: схема и миграция 0051", () => {
   ok(readFileSync(join(root, "migrations/0051_private_wishes.sql"), "utf8").includes("shared_at"));
 });
 
-test("app: вкладка «Личные» и карточка с шерингом", () => {
-  ok(app.includes('data-action="wish-view" data-view="private"'), "нет вкладки личных желаний");
+test("app: личные желания внутри «Мои», карточка с шерингом (уточнение 2026-11-24)", () => {
+  ok(!app.includes('data-action="wish-view" data-view="private"'), "вкладка «Личные» не удалена из бара");
+  ok(!app.includes('data-view="private"'), "осталась разметка вкладки «Личные»");
   ok(app.includes('action: "share-private-wish"'), "нет действия шеринга");
   ok(app.includes('mergedArchive("private_wishes"'), "личный архив не мержится");
   ok(app.includes("/share`, { method: \"POST\", body: {} }"), "нет запроса /share");
   ok(app.includes('is_private: fd.get("is_private") === "on"'), "форма не передаёт приватность");
+  // Пилюля «Личное» на карточках обоих видов.
+  ok(app.includes('<span class="day-chip is-private">Личное</span>'), "нет серой пилюли «Личное»");
 });
 
 test("app: технические правки 1–5,7,8", () => {

@@ -127,6 +127,13 @@
   let contactsSwitchPrevView = null;
   let datesView = "dates";
   let memoriesView = "memories";
+  // Заметки («Дневник → Записи → Заметки»): личные записи под паролем
+  // заметок. Данные грузятся отдельным /api/notes только после разблокировки —
+  // в /api/state заметок нет.
+  let diaryView = "memories"; // вид под-бара «Записи»: воспоминания/заметки
+  let notesState = null;
+  let notesBusy = false;
+  let notesUnlocked = false;  // пароль введён в текущей сессии
   // «Планы / Цели / Кино» — виды вкладки «Планы».
   let tasksView = "plans";
   // «Предстоящие / Выполненные» — виды сегмента «Цели».
@@ -843,6 +850,16 @@
   function storedPin() {
     try {
       const value = String(localStorage.getItem(PIN_KEY) || "");
+      return /^\d{4}$/.test(value) ? value : "";
+    } catch { return ""; }
+  }
+  // Пароль заметок: отдельный 4-значный код для личных заметок. Задаётся
+  // независимо от пароля на вход — один без другого работает. Так же, как
+  // пароль на вход, живёт только в localStorage этого устройства.
+  const NOTES_PIN_KEY = "duoplan.notesPin";
+  function storedNotesPin() {
+    try {
+      const value = String(localStorage.getItem(NOTES_PIN_KEY) || "");
       return /^\d{4}$/.test(value) ? value : "";
     } catch { return ""; }
   }
@@ -2196,8 +2213,9 @@
     `;
   }
 
-  function wishItem(item, editable = true, isPrivate = false) {
+  function wishItem(item, editable = true) {
     const canEdit = editable && Number(item.owner_id) === Number(appState.user.tg_id);
+    const isPrivate = Number(item.is_private) === 1;
     // «Скопировать» — чтение, доступно обоим партнёрам: мутации (исполнено/
     // правка/удаление) остаются только владельцу, копирование — всем.
     // Без ссылки в меню только «Скопировать название»; со ссылкой —
@@ -2229,6 +2247,7 @@
       <article class="card">
         <div class="item-row">
           <div class="item-main">
+            ${isPrivate ? `<div class="item-meta"><span class="day-chip is-private">Личное</span></div>` : ""}
             <h3 class="item-title">${renderRichText(item.body)}</h3>
             ${item.comment ? `<div class="wish-comment">${renderRichText(item.comment)}</div>` : ""}
           </div>
@@ -2277,7 +2296,8 @@
       trips: mergedArchive("trips", appState?.trips || []),
       goals: [...mergedArchive("goals", appState?.goals || []), ...mergedArchive("done_goals", appState?.completedGoals || [])],
       movies: [...mergedArchive("movies", appState?.movies || []), ...mergedArchive("watched_movies", appState?.completedMovies || [])],
-      savings: mergedArchive("savings", appState?.savings || [])
+      savings: mergedArchive("savings", appState?.savings || []),
+      notes: notesState?.notes || []
     };
     return (collections[type] || []).find((x) => Number(x.id) === Number(id));
   }
@@ -2464,6 +2484,7 @@
       <article class="card" style="opacity:0.72;">
         <div class="item-row">
           <div class="item-main">
+            ${Number(item.is_private) === 1 ? `<div class="item-meta"><span class="day-chip is-private">Личное</span></div>` : ""}
             <h3 class="item-title" style="text-decoration:line-through;">${renderRichText(item.body)}</h3>
             ${item.comment ? `<div class="wish-comment">${renderRichText(item.comment)}</div>` : ""}
             ${completionMeta(created, completed)}
@@ -2476,9 +2497,10 @@
   }
 
   // Тело списочной вкладки без шапки: шапка и сегмент-переключатель живут в
-  // render() и не перерисовываются при смене вида.
-  function renderListTab(items, addAction, addLabel, emptyTitle, emptyCopy, renderer) {
-    const disabledClass = partnerMissing() ? " is-disabled" : "";
+  // render() и не перерисовываются при смене вида. allowWithoutPartner —
+  // для личных разделов (заметки): кнопка добавления активна и без партнёра.
+  function renderListTab(items, addAction, addLabel, emptyTitle, emptyCopy, renderer, allowWithoutPartner = false) {
+    const disabledClass = !allowWithoutPartner && partnerMissing() ? " is-disabled" : "";
     return `
       ${items.length ? `<button class="primary full add-button${disabledClass}" type="button" data-action="${addAction}">${esc(addLabel)}</button>` : ""}
       ${items.length ? items.map(renderer).join("") : `
@@ -2971,6 +2993,8 @@
   // Пароль на вход — отдельная карточка (item 56): это локальная блокировка
   // экрана устройства, а не настройка оформления/уведомлений, и её состояние
   // живёт в localStorage, а не в POST /api/settings.
+  // Рядом — пароль заметок: отдельный код для личных заметок, задаётся
+  // независимо (пароль на вход не обязателен) и тоже живёт в localStorage.
   function renderPairLock() {
     return `
       <section class="card">
@@ -2981,6 +3005,12 @@
         ${storedPin()
           ? `<button class="secondary full card-action" type="button" data-action="clear-pin">Удалить</button>`
           : `<button class="secondary full card-action" type="button" data-action="save-pin">Задать</button>`}
+        <h3 style="margin-top:18px;">Пароль заметок</h3>
+        ${pinField("notes-pin-input")}
+        <p class="settings-hint">Четырёхзначный пароль для личных заметок во вкладке «Записи → Заметки». Задаётся отдельно: пароль на вход не обязателен. Хранится только на этом устройстве</p>
+        ${storedNotesPin()
+          ? `<button class="secondary full card-action" type="button" data-action="clear-notes-pin">Удалить</button>`
+          : `<button class="secondary full card-action" type="button" data-action="save-notes-pin">Задать</button>`}
       </section>
     `;
   }
@@ -6280,23 +6310,20 @@
   }
 
   // Желания внутри «Нашей пары»: бар «Загадано / Исполнено», переключатель
-  // «Мои / Её» и списки.
+  // «Мои / Её» и списки. Отдельной вкладки «Личные» больше нет (уточнение
+  // владельца 2026-11-24): личные желания живут в «Мои» с пилюлей «Личное».
   function renderWishBlock() {
     const hasPartner = Boolean(appState.pair?.user_b);
     if (wishView === "partner" && !hasPartner) wishView = "mine";
     const isMine = wishView === "mine";
     const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
     let html = renderSegment("wishesView", wishesView, [["open", "Загадано"], ["done", "Исполнено"]], "is-sub");
-    {
-      const isPrivate = wishView === "private";
-      html += `
-        <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
-          <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine" data-tab="mine">Мои</button>
-          ${hasPartner ? `<button class="wish-switch-btn${!isMine && !isPrivate ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine && !isPrivate}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>` : ""}
-          <button class="wish-switch-btn${isPrivate ? " is-active" : ""}" type="button" role="tab" aria-selected="${isPrivate}" data-action="wish-view" data-view="private" data-tab="private">Личные</button>
-        </div>
-      `;
-    }
+    html += `
+      <div class="wish-switch" role="tablist" aria-label="Чьи желания показывать">
+        <button class="wish-switch-btn${isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${isMine}" data-action="wish-view" data-view="mine" data-tab="mine">Мои</button>
+        ${hasPartner ? `<button class="wish-switch-btn${!isMine ? " is-active" : ""}" type="button" role="tab" aria-selected="${!isMine}" data-action="wish-view" data-view="partner" data-tab="partner">${partnerLabel}</button>` : ""}
+      </div>
+    `;
     html += `<div id="wish-lists">${renderWishLists()}</div>`;
     return html;
   }
@@ -6518,9 +6545,131 @@
       if (!contactsState && !contactsBusy) loadContacts();
       return renderContactsBody();
     }
+    // Под-бар «Воспоминания / Заметки» появляется только в виде «Записи»,
+    // как внутренний бар «Предстоящие / Выполненные» у планов.
+    return `
+      ${renderSegment("diary", diaryView, [["memories", "Воспоминания"], ["notes", "Заметки"]], "is-sub")}
+      <div id="diary-body">${diaryView === "notes" ? renderNotesBody() : renderMemoriesList()}</div>
+    `;
+  }
+
+  // Список воспоминаний: прежний вид «Записи» до появления под-бара заметок.
+  function renderMemoriesList() {
     const recentMemories = appState.memories || [];
     return renderListTab(mergedArchive("memories", recentMemories), "add-memory", "Записать", "Воспоминание", "Сохраняйте тёплые воспоминания, к которым хочется возвращаться", memoryItem)
       + archiveMoreHtml("memories", recentMemories.length);
+  }
+
+  // ------------------------------------------------------------------
+  // Заметки: личные записи под паролем заметок (PD-NOTES-001).
+  // Пароль живёт в localStorage устройства и задаётся в «Безопасности»;
+  // без пароля заметки не открываются, данные грузятся только после ввода.
+  // ------------------------------------------------------------------
+  function renderNotesBody() {
+    if (!storedNotesPin()) {
+      return `
+        <section class="card lock-card">
+          <p class="eyebrow">Заметки защищены</p>
+          <h3>Нужен пароль заметок</h3>
+          <p>Задайте пароль в настройках «Наша пара» → «Безопасность» — и записывайте личные заметки, которые видите только вы</p>
+          <div style="margin-top:12px;">
+            <button class="secondary full" type="button" data-action="go-tab" data-tab="pair" data-view="profile">Открыть настройки</button>
+          </div>
+        </section>
+      `;
+    }
+    if (!notesUnlocked) return renderNotesLock();
+    if (!notesState && !notesBusy) loadNotes();
+    return renderNotesList();
+  }
+
+  // Экран ввода пароля заметок — та же форма, что у блокировки приложения.
+  function renderNotesLock() {
+    return `
+      <div class="lock-wrap">
+        <section class="card lock-card">
+          <p class="eyebrow">Заметки защищены</p>
+          <h2>Введите пароль заметок</h2>
+          <form id="notes-lock-form" style="margin-top:14px; display:grid; gap:10px;">
+            ${pinField("notes-lock-pin")}
+            <button class="primary full" type="submit">Войти</button>
+          </form>
+          <p class="settings-hint" id="notes-lock-error" style="color:var(--berry);" hidden>Неверный пароль. Попробуйте ещё раз.</p>
+        </section>
+      </div>
+    `;
+  }
+
+  function mountNotesLock() {
+    const form = document.getElementById("notes-lock-form");
+    if (!form || form.dataset.bound === "1") return;
+    form.dataset.bound = "1";
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = document.getElementById("notes-lock-pin");
+      if (input) renderPinCells(input, true);
+      const value = input?.value?.trim() || "";
+      if (value !== storedNotesPin()) {
+        const error = document.getElementById("notes-lock-error");
+        if (error) error.hidden = false;
+        if (input) { input.value = ""; renderPinCells(input); }
+        return;
+      }
+      notesUnlocked = true;
+      render();
+    });
+  }
+
+  async function loadNotes({ force = false } = {}) {
+    if (notesBusy || (notesState && !force)) return;
+    notesBusy = true;
+    try {
+      notesState = await request("/api/notes");
+    } catch (error) {
+      notesState = { failed: true };
+      handleRequestError(error);
+    } finally {
+      notesBusy = false;
+    }
+    render();
+  }
+
+  function renderNotesList() {
+    if (notesState?.failed) {
+      return `
+        <section class="card">
+          <h3>Не удалось загрузить</h3>
+          <p>Проверьте соединение и попробуйте ещё раз</p>
+          <div style="margin-top:12px;">
+            <button class="secondary full" type="button" data-action="notes-retry">Повторить</button>
+          </div>
+        </section>
+      `;
+    }
+    if (!notesState) {
+      return `<section class="card"><h3>Загружаем…</h3></section>`;
+    }
+    return renderListTab(notesState.notes || [], "add-note", "Создать заметку", "Пока пусто", "Здесь живут ваши личные заметки — их видите только вы", noteItem, true);
+  }
+
+  function noteItem(item) {
+    const meta = formatTimestamp(item.updated_at || item.created_at);
+    return `
+      <article class="card memory-card" data-action="open-note" data-id="${item.id}" role="button" tabindex="0" aria-label="Открыть заметку">
+        <div class="item-row">
+          <div class="item-main">
+            <h3 class="item-title">${renderRichText(item.title)}</h3>
+            ${item.body ? `<p class="memory-body">${renderRichText(item.body)}</p>` : ""}
+            ${item.comment ? `<div class="wish-comment">${renderRichText(item.comment)}</div>` : ""}
+            <div class="item-meta">${meta ? `<span>· ${esc(meta)}</span>` : ""}</div>
+          </div>
+          ${itemActions([
+            itemActionButton({ action: "edit-item", type: "notes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+            itemActionButton({ action: "delete-item", type: "notes", id: item.id, label: "Удалить", icon: DELETE_ICON })
+          ].join("\n            "))}
+        </div>
+      </article>
+    `;
   }
 
   // ------------------------------------------------------------------
@@ -8995,32 +9144,35 @@
     const ownDone = allDone.filter((w) => Number(w.owner_id) === Number(myId));
     const partnerOpen = allOpen.filter((w) => Number(w.owner_id) !== Number(myId));
     const partnerDone = allDone.filter((w) => Number(w.owner_id) !== Number(myId));
-    const openWishes = isMine ? ownOpen : partnerOpen;
-    const doneWishes = isMine ? ownDone : partnerDone;
     const partnerLabel = appState.pair?.partner_gender === "female" ? "Её" : "Его";
-    // PD-WISHES-001: личные желания видит только автор; шеринг — явное действие.
-    if (wishView === "private") {
-      const privateAll = mergedArchive("private_wishes", appState.privateWishes || []);
-      const privateOpen = privateAll.filter((w) => Number(w.done) !== 1);
-      const privateDone = privateAll.filter((w) => Number(w.done) === 1);
-      if (wishesView === "done") {
-        return privateDone.length
-          ? privateDone.map((item) => completedWishItem(item, true)).join("")
-          : `<section class="card"><h3>Пока пусто</h3><p>Исполненных личных желаний нет</p></section>`;
-      }
-      let privHtml = `<button class="primary full add-button${wishDisabledClass}" type="button" data-action="add-wish" data-private="1">Добавить личное желание</button>`;
-      privHtml += privateOpen.length
-        ? privateOpen.map((item) => wishItem(item, true, true)).join("")
-        : `<section class="card"><h3>Пока пусто</h3><p>Здесь только ваши желания — партнёр их не видит, пока вы не поделитесь</p></section>`;
-      return privHtml + archiveMoreHtml("private_wishes", (appState.privateWishes || []).length);
-    }
+    // PD-WISHES-001 (уточнение 2026-11-24): личные желания видит только автор
+    // (сервер отдаёт их всегда), но показываются они внутри «Мои» — в
+    // «Загадано» и «Исполнено» — с серой пилюлей «Личное» на карточке.
+    const privateAll = mergedArchive("private_wishes", appState.privateWishes || []);
+    const privateOpen = privateAll.filter((w) => Number(w.done) !== 1);
+    const privateDone = privateAll.filter((w) => Number(w.done) === 1);
+    // Один порядок с сервером: created_at DESC, id DESC — личные и общие
+    // перемешиваются по времени создания, а не блоками.
+    const byFresh = (a, b) => Number(b.created_at) - Number(a.created_at) || Number(b.id) - Number(a.id);
+    const mineOpen = [...ownOpen, ...privateOpen].sort(byFresh);
+    const mineDone = [...ownDone, ...privateDone].sort(byFresh);
+    const openWishes = isMine ? mineOpen : partnerOpen;
+    const doneWishes = isMine ? mineDone : partnerDone;
+    const moreOpenHtml = isMine
+      ? archiveMoreHtml("wishes", (appState.wishes || []).length)
+        + archiveMoreHtml("private_wishes", (appState.privateWishes || []).length, "Показать ещё личные")
+      : "";
+    const moreDoneHtml = isMine
+      ? archiveMoreHtml("done_wishes", (appState.completedWishes || []).length)
+        + archiveMoreHtml("private_wishes", (appState.privateWishes || []).length, "Показать ещё личные")
+      : "";
     // Вид «Исполненно»: только исполненные желания — свои или партнёра.
     if (wishesView === "done") {
       if (!doneWishes.length) {
         return `<section class="card"><h3>Пока пусто</h3><p>${isMine ? "Исполненных желаний пока нет" : `У ${partnerLabel === "Её" ? "неё" : "него"} исполненных желаний пока нет`}</p></section>`;
       }
       return doneWishes.map((item) => completedWishItem(item, isMine)).join("")
-        + archiveMoreHtml("done_wishes", (appState.completedWishes || []).length);
+        + moreDoneHtml;
     }
     let html = "";
     if (isMine) {
@@ -9048,7 +9200,7 @@
         </section>
       `;
     }
-    html += archiveMoreHtml("wishes", (appState.wishes || []).length);
+    html += moreOpenHtml;
     return html;
   }
 
@@ -9124,10 +9276,12 @@
     mountMovieSwitch();
     mountGoalsSwitch();
     mountPlansSwitch();
+    mountDiarySwitch();
     mountFloSwitch();
     mountSavingsSwitch();
     mountWishesViewSwitch();
     mountPinFields();
+    mountNotesLock();
   }
 
   // Анимация начисления XP в «Вашей истории»: карточка ритуала уже сменилась,
@@ -9170,6 +9324,7 @@
   // создаём в конце; переключение вида меняет только тело (#tab-body или
   // #pair-body), и капля доезжает пружиной, как в главном баре.
   let segSwitch = null;      // переключатель вида текущей вкладки
+  let diarySwitch = null;    // внутренний «Воспоминания / Заметки» в «Записи»
   let wishSwitch = null;     // внутренний «Мои / Её» в желаниях
   let wishSwitchPrevView = null;
   let movieSwitch = null;    // внутренний «В планах / Просмотрено» в кино
@@ -9183,6 +9338,7 @@
     if (key === "pair") return pairView;
     if (key === "dates") return datesView;
     if (key === "memories") return memoriesView;
+    if (key === "diary") return diaryView;
     if (key === "tasks") return tasksView;
     if (key === "places") return placesView;
     if (key === "goals") return goalsView;
@@ -9197,6 +9353,7 @@
     if (key === "pair") pairView = value;
     else if (key === "dates") datesView = value;
     else if (key === "memories") memoriesView = value;
+    else if (key === "diary") diaryView = value;
     else if (key === "tasks") tasksView = value;
     else if (key === "places") placesView = value;
     else if (key === "goals") goalsView = value;
@@ -9209,6 +9366,7 @@
 
   function destroySwitches() {
     if (segSwitch) { segSwitch.destroy(); segSwitch = null; }
+    if (diarySwitch) { diarySwitch.destroy(); diarySwitch = null; }
     if (wishSwitch) { wishSwitch.destroy(); wishSwitch = null; }
     if (contactsSwitch) { contactsSwitch.destroy(); contactsSwitch = null; }
     if (movieSwitch) { movieSwitch.destroy(); movieSwitch = null; }
@@ -9533,6 +9691,26 @@
     plansSwitch = instance;
   }
 
+  function mountDiarySwitch() {
+    if (diarySwitch) {
+      diarySwitch.destroy();
+      diarySwitch = null;
+    }
+    const container = document.querySelector('.seg-switch[data-switch="diary"]');
+    if (!container || !window.createLiquidNav) return;
+    const items = Array.from(container.querySelectorAll("[data-tab]"));
+    if (items.length < 2) return;
+    const instance = window.createLiquidNav({
+      nav: container,
+      items,
+      idleVar: "--nav-label",
+      onCommit: (value) => commitSwitch("diary", value, instance)
+    });
+    if (!instance) return;
+    instance.setActive(diaryView, false);
+    diarySwitch = instance;
+  }
+
   // Перерисовка только списка: бар и его капля остаются на месте.
   function refreshMoviesList() {
     const body = document.getElementById("movies-body");
@@ -9635,6 +9813,18 @@
       });
       return;
     }
+    if (key === "diary") {
+      // Внутренний бар «Воспоминания / Заметки»: меняем только содержимое под
+      // баром, капля и сам бар остаются живыми.
+      const body = document.getElementById("diary-body");
+      if (!body) { render(); return; }
+      body.innerHTML = diaryView === "notes" ? renderNotesBody() : renderMemoriesList();
+      instance?.setActive(value, true);
+      document.querySelectorAll('.seg-switch[data-switch="diary"] .seg-switch-btn').forEach((btn) => {
+        btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
+      });
+      return;
+    }
     const body = document.getElementById(key === "pair" ? "pair-body" : "tab-body");
     if (!body) { render(); return; }
     // Внутренний переключатель желаний живёт в перерисовываемом теле — его
@@ -9658,6 +9848,11 @@
     if (key === "tasks" && plansSwitch) {
       plansSwitch.destroy();
       plansSwitch = null;
+    }
+    // Под-бар «Воспоминания / Заметки» живёт в теле «Записи» — так же.
+    if (key === "memories" && diarySwitch) {
+      diarySwitch.destroy();
+      diarySwitch = null;
     }
     // Капля контактов живёт в теле «Дневника» — снимаем до замены разметки.
     if (key === "memories" && contactsSwitch) {
@@ -9699,7 +9894,11 @@
     if (key === "tasks" && tasksView === "movies") mountMovieSwitch();
     if (key === "tasks" && tasksView === "goals") mountGoalsSwitch();
     if (key === "tasks" && tasksView === "plans") mountPlansSwitch();
-    if (key === "memories") mountContactsSwitch();
+    if (key === "memories") {
+      mountContactsSwitch();
+      if (memoriesView === "memories") mountDiarySwitch();
+    }
+    mountNotesLock();
   }
 
   // ------------------------------------------------------------------
@@ -10667,6 +10866,11 @@
           commitSwitch("plans", value, plansSwitch);
           return;
         }
+        // Бар «Воспоминания / Заметки» — свой экземпляр капли, как у «Кино»/«Планов».
+        if (key === "diary") {
+          commitSwitch("diary", value, diarySwitch);
+          return;
+        }
         // Под-вкладки «Фло»: свой экземпляр капли, как у «Кино»/«Целей».
         if (key === "flo") {
           commitFloView(value);
@@ -10861,13 +11065,29 @@
             return request("/api/memories", { method: "POST", body });
           }
         });
+      } else if (action === "add-note") {
+        openDialog({
+          title: "Новая заметка",
+          fields: `
+            <label class="field"><span>Название</span><input name="title" data-fmt="none" maxlength="180" required placeholder="Идеи для отпуска"></label>
+            <label class="field"><span>Описание (необязательно)</span><textarea name="body" rows="4" maxlength="2000" placeholder="Что хочется сохранить только для себя"></textarea></label>
+            <label class="field"><span>Комментарий (необязательно)</span><textarea name="comment" data-fmt="** _ __ ~~" rows="3" maxlength="500" placeholder="Дополнение к заметке"></textarea></label>
+          `,
+          onSubmit: async (fd) => {
+            // Ответ /api/notes — список заметок, не /api/state: сохраняем в
+            // notesState, appState не трогаем.
+            notesState = await request("/api/notes", { method: "POST", body: { title: fd.get("title"), body: fd.get("body"), comment: fd.get("comment") } });
+            showToast("Заметка сохранена");
+            return appState;
+          }
+        });
       } else if (action === "add-wish") {
         openDialog({
           title: "Новое желание",
           fields: `<label class="field"><span>О чём мечтаете?</span><input name="body" data-fmt="none" maxlength="300" required placeholder="Плёночный фотоаппарат"></label>
            <label class="field"><span>Уточнение (необязательно)</span><textarea name="comment" data-fmt="** _ __ ~~" rows="3" maxlength="500" placeholder="Размер, цвет, где купить или чем можно заменить"></textarea></label>
            <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>
-           <label class="field"><span><input type="checkbox" name="is_private"${btn.dataset.private === "1" ? " checked" : ""}> Личное — партнёр не увидит, пока вы не поделитесь</span></label>`,
+           <label class="field"><span><input type="checkbox" name="is_private"> Личное — партнёр не увидит, пока вы не поделитесь</span></label>`,
           onSubmit: (fd) => request("/api/wishes", { method: "POST", body: { body: fd.get("body"), comment: fd.get("comment"), url: wishUrlFromInput(fd.get("url")), is_private: fd.get("is_private") === "on" } })
         });
       } else if (action === "add-quote") {
@@ -11440,6 +11660,27 @@
           dialog.close();
         }
       } else if (action === "delete-item") {
+        // Личные заметки удаляются своим маршрутом (POST /api/notes/delete):
+        // ответ — список заметок, а не /api/state, поэтому общий путь ниже
+        // для них не подходит.
+        if (btn.dataset.type === "notes") {
+          const note = (notesState?.notes || []).find(x => Number(x.id) === Number(btn.dataset.id));
+          if (!note) {
+            showToast("Заметка не найдена");
+            return;
+          }
+          openDialog({
+            title: "Удалить заметку?",
+            fields: `<p style="margin:2px 0 0;">Это действие нельзя отменить.</p>`,
+            submitLabel: "Удалить",
+            onSubmit: async () => {
+              notesState = await request("/api/notes/delete", { method: "POST", body: { id: Number(btn.dataset.id) } });
+              showToast(note.title ? `Удалено: «${note.title}»` : "Заметка удалена");
+              return appState;
+            }
+          });
+          return;
+        }
         const typeNames = { tasks: "план", dates: "дату", memories: "запись", wishes: "желание", quotes: "цитату", places: "место", trips: "поездку", goals: "цель", movies: "фильм", savings: "копилку" };
         const item = findItem(btn.dataset.type, btn.dataset.id);
         if (!item) {
@@ -11509,6 +11750,31 @@
         // showModal() может быть ещё не финальным (clientWidth === 0), поэтому
         // подгоняем размер после двух кадров — двойной rAF надёжнее setTimeout(0).
         requestAnimationFrame(() => requestAnimationFrame(() => fitMemoryAsciiArt()));
+      } else if (action === "open-note") {
+        // Чтение личной заметки: тот же полноэкранный стиль, что у записи
+        // дневника — без кнопки сохранения, закрытие плавающей «×».
+        const item = (notesState?.notes || []).find(x => Number(x.id) === Number(btn.dataset.id));
+        if (!item) {
+          showToast("Заметка не найдена");
+          return;
+        }
+        openDialog({
+          title: "Заметка",
+          fields: `
+            <h3 class="memory-view-title">${renderRichText(item.title)}</h3>
+            ${item.body ? `<div class="memory-view-body">${renderRichText(item.body)}</div>` : ""}
+            ${item.comment ? `<div class="wish-comment" style="margin-top:12px;">${renderRichText(item.comment)}</div>` : ""}
+            <div class="item-meta" style="margin-top:12px;">
+              <span>· ${esc(formatTimestamp(item.updated_at || item.created_at))}</span>
+            </div>
+          `,
+          submitLabel: null,
+          cancelLabel: "Закрыть",
+          onSubmit: async () => appState
+        });
+      } else if (action === "notes-retry") {
+        notesState = null;
+        render();
       } else if (action === "reopen-item") {
         const type = btn.dataset.type;
         const id = btn.dataset.id;
@@ -11639,6 +11905,22 @@
               removeFromArchiveCache("memories", id);
               await revalidateArchiveCache();
               return state;
+            }
+          });
+        } else if (type === "notes") {
+          openDialog({
+            title: "Редактировать заметку",
+            fields: `
+              <label class="field"><span>Название</span><input name="title" data-fmt="none" maxlength="180" required value="${esc(item.title || "")}"></label>
+              <label class="field"><span>Описание (необязательно)</span><textarea name="body" rows="4" maxlength="2000" placeholder="Что хочется сохранить только для себя">${esc(item.body || "")}</textarea></label>
+              <label class="field"><span>Комментарий (необязательно)</span><textarea name="comment" data-fmt="** _ __ ~~" rows="3" maxlength="500">${esc(item.comment || "")}</textarea></label>
+            `,
+            onSubmit: async (fd) => {
+              // POST с id — правка (контакты используют тот же паттерн);
+              // ответ — обновлённый список заметок, appState не трогаем.
+              notesState = await request("/api/notes", { method: "POST", body: { id: Number(id), title: fd.get("title"), body: fd.get("body"), comment: fd.get("comment") } });
+              showToast("Заметка сохранена");
+              return appState;
             }
           });
         } else if (type === "wishes") {
@@ -11911,6 +12193,25 @@
       } else if (action === "clear-pin") {
         try { localStorage.removeItem(PIN_KEY); } catch {}
         showToast("Пароль убран");
+        render();
+      } else if (action === "save-notes-pin") {
+        const pinInput = document.getElementById("notes-pin-input");
+        if (pinInput) renderPinCells(pinInput, true);
+        const value = pinInput?.value?.trim() || "";
+        if (!/^\d{4}$/.test(value)) {
+          showToast("Пароль — ровно 4 цифры");
+          return;
+        }
+        try { localStorage.setItem(NOTES_PIN_KEY, value); } catch {}
+        // Только что заданный пароль не запирает заметки в текущей сессии —
+        // как пароль на вход.
+        notesUnlocked = true;
+        showToast("Пароль заметок установлен");
+        render();
+      } else if (action === "clear-notes-pin") {
+        try { localStorage.removeItem(NOTES_PIN_KEY); } catch {}
+        notesUnlocked = false;
+        showToast("Пароль заметок убран");
         render();
       } else if (action === "export-data") {
         // Диалог выбора разделов: для каждой коллекции — свой состав выгрузки.

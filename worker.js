@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.23.135";
+const APP_VERSION = "2026.11.24.137";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.23.135";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.23.135";
+const DB_SCHEMA_VERSION = "2026.11.24.137";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -2928,6 +2928,41 @@ async function api(request, env, url, ctx = null) {
       return json(await contactsState(env, user.tg_id));
     }
     throw new HttpError(404, "Такого раздела контактов нет", "NOT_FOUND");
+  }
+  // Личные заметки: доступны только автору (tg_id из сессии), партнёр чужой
+  // список не видит ни по списку, ни по id. Пароль на просмотр проверяет
+  // клиент (localStorage устройства, как пароль на вход) — сервер заметки
+  // просто не отдаёт никому, кроме владельца, и не включает в /api/state.
+  if (url.pathname.startsWith("/api/notes")) {
+    const stamp = now();
+    if (request.method === "GET" && url.pathname === "/api/notes") {
+      return json(await notesState(env, user.tg_id));
+    }
+    if (request.method === "POST" && url.pathname === "/api/notes") {
+      const title = clean(body.title).slice(0, 180);
+      if (!title) throw new HttpError(400, "Укажите название", "INVALID_TITLE");
+      const text = body.body ? clean(body.body).slice(0, 2000) : null;
+      const comment = body.comment ? clean(body.comment).slice(0, 1000) : null;
+      const id = body.id ? Number(body.id) : null;
+      if (id) {
+        const changed = await env.DB.prepare("UPDATE notes SET title=?, body=?, comment=?, updated_at=? WHERE id=? AND tg_id=?")
+          .bind(title, text, comment, stamp, id, user.tg_id).run();
+        if (!changed.meta.changes) throw new HttpError(404, "Заметка не найдена", "NOT_FOUND");
+      } else {
+        await env.DB.prepare("INSERT INTO notes(tg_id, title, body, comment, created_at, updated_at) VALUES(?,?,?,?,?,?)")
+          .bind(user.tg_id, title, text, comment, stamp, stamp).run();
+      }
+      return json(await notesState(env, user.tg_id));
+    }
+    if (request.method === "POST" && url.pathname === "/api/notes/delete") {
+      const id = Number(body.id);
+      if (!Number.isInteger(id)) throw new HttpError(400, "Проверьте заметку", "INVALID_ID");
+      const changed = await env.DB.prepare("DELETE FROM notes WHERE id=? AND tg_id=?")
+        .bind(id, user.tg_id).run();
+      if (!changed.meta.changes) throw new HttpError(404, "Заметка не найдена", "NOT_FOUND");
+      return json(await notesState(env, user.tg_id));
+    }
+    throw new HttpError(404, "Такого раздела заметок нет", "NOT_FOUND");
   }
   // Здоровье: личный журнал препаратов каждого партнёра (tg_id из сессии).
   // Данные строго персональные — партнёр чужой список не видит и не редактирует;
@@ -8106,6 +8141,20 @@ async function contactsState(env, tgId) {
   return { mine, partner };
 }
 
+// Список личных заметок автора: свежие сверху (updated_at DESC). Запрос
+// всегда по tg_id сессии — заметки не привязаны к паре и не видны партнёру.
+async function notesState(env, tgId) {
+  const rows = (await env.DB.prepare(
+    "SELECT id, title, body, comment, created_at, updated_at FROM notes WHERE tg_id=? ORDER BY updated_at DESC, id DESC"
+  ).bind(tgId).all()).results || [];
+  return {
+    notes: rows.map(r => ({
+      id: r.id, title: r.title, body: r.body || "", comment: r.comment || "",
+      created_at: r.created_at, updated_at: r.updated_at
+    }))
+  };
+}
+
 async function ensureSchema(env) {
   // Версия, записанная до этой инициализации: нужна, чтобы не повторять
   // одноразовый бэкфилл категорий шеринга на базах, где он уже применялся.
@@ -8220,6 +8269,11 @@ async function ensureSchema(env) {
     `CREATE INDEX IF NOT EXISTS idx_contacts_pair_owner ON contacts(pair_id,owner_id)`,
     `CREATE TABLE IF NOT EXISTS contact_phones (id INTEGER PRIMARY KEY AUTOINCREMENT,contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,phone TEXT NOT NULL,sort INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS idx_contact_phones_contact ON contact_phones(contact_id,sort)`,
+    // Личные заметки (паритет с migrations/0054): персональные записи автора
+    // (tg_id). Пароль на просмотр живёт на устройстве клиента, сервером не
+    // хранится; заметки не входят в /api/state.
+    `CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,title TEXT NOT NULL,body TEXT,comment TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS idx_notes_tg ON notes(tg_id,updated_at)`,
     // Кнопки действий в уведомлениях (паритет с migrations/0046): одноразовые
     // nonce для HTML Widget и реестр сообщений для обновления chat_data.
     `CREATE TABLE IF NOT EXISTS telegram_action_tokens (token TEXT PRIMARY KEY,tg_id INTEGER NOT NULL,action_type TEXT NOT NULL,ref_id INTEGER NOT NULL,action_date TEXT,status TEXT,group_id TEXT,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed_at INTEGER)`,
