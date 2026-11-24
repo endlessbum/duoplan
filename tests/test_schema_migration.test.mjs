@@ -59,6 +59,7 @@ function makeMockDb({ racingColumns = new Set(), failingColumns = new Set(), app
     dates: new Set(["id", "pair_id", "title", "day", "recurs", "created_at"]),
     wishes: new Set(["id", "pair_id", "owner_id", "body", "done", "created_at"]),
     memories: new Set(["id", "pair_id", "author_id", "body", "day", "created_at"]),
+    notes: new Set(["id", "tg_id", "title", "body", "comment", "created_at", "updated_at"]),
     movies: new Set(["id", "pair_id", "created_by", "imdb_id", "title", "year", "kind", "rating", "genres", "runtime", "seasons", "episodes", "url", "watched", "watched_at", "watched_by", "created_at"]),
     cycle_profiles: new Set(["tg_id", "avg_cycle_length", "avg_period_length", "share_enabled", "share_level", "onboarded", "notify_enabled", "notify_period", "notify_ovulation", "notify_fertile", "notify_delay", "notify_period_days", "notify_delay_days", "share_notify", "created_at", "updated_at"]),
     cycle_logs: new Set(["id", "tg_id", "date", "flow", "symptoms", "mood", "note", "sex", "created_at", "updated_at"]),
@@ -128,7 +129,7 @@ test("гонка isolate: duplicate column name обрабатывается п�
     "notify_diary",
     "pain_locations", "pain_score", "partner_custom_name", "photo_url", "place_pick_id",
     "rating_checked_at", "rating_source", "resume_position", "saving_id", "sex_count", "share_bbt", "share_confirmed", "share_mood", "share_sex", "share_sleep", "shared_at", "show_avatar", "show_cycle_calendar", "show_years", "sick", "sleep_hours", "sleep_quality", "stress", "symptoms_clear",
-    "time", "time", "timezone", "timezone", "title", "travel", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
+    "time", "time", "timezone", "timezone", "title", "travel", "url", "url", "weekly_digest_day", "weekly_digest_enabled", "weekly_digest_time", "weight_kg", "yearly"
   ]);
 });
 
@@ -159,7 +160,8 @@ test("чистый проход миграции без гонки записы�
   // + place_pick_id/movie_pick_id (pairs, общий рандом — migrations/0049)
   // + ascii_art (memories, ASCII-вложение дневника — migrations/0050)
   // +1: show_years (PD-DATES-002, migrations/0053), +2: trips.saving_id (поездка → копилка)
-  deepStrictEqual(log.alters.length, 69);
+  // +1: notes.url (ссылка личной заметки, migrations/0055)
+  deepStrictEqual(log.alters.length, 70);
 });
 
 test("остальные ошибки ALTER не глушатся", async () => {

@@ -21,7 +21,7 @@ function dailyAction(pairId, day) {
   return DAILY_ACTIONS[seed % DAILY_ACTIONS.length];
 }
 
-const APP_VERSION = "2026.11.24.137";
+const APP_VERSION = "2026.11.24.139";
 // Версия схемы D1 — дата последнего изменения структуры таблиц, формат YYYY.MM.DD
 // (суффикс .N — вторая и дальнейшие смены схемы за тот же день: строка обязана
 // отличаться от уже записанной в app_meta, иначе ensureSchema пропустит ALTER'ы
@@ -29,7 +29,7 @@ const APP_VERSION = "2026.11.24.137";
 // Она не может опережать текущую дату: записанная «на будущее» версия совпадёт
 // с проверкой в ensureSchema() раньше, чем схема реально изменится, и следующая
 // миграция с той же датой будет молча пропущена. На релизе обе версии совпадают.
-const DB_SCHEMA_VERSION = "2026.11.24.137";
+const DB_SCHEMA_VERSION = "2026.11.24.139";
 // Версия схемы, в которой впервые появился бэкфилл категорий шеринга Фло
 // (migrations/0042). Базы с уже записанной версией не младше неё прогоняли
 // backfill раньше — повторять UPDATE нельзя: он затирает выбор категорий
@@ -2943,14 +2943,17 @@ async function api(request, env, url, ctx = null) {
       if (!title) throw new HttpError(400, "Укажите название", "INVALID_TITLE");
       const text = body.body ? clean(body.body).slice(0, 2000) : null;
       const comment = body.comment ? clean(body.comment).slice(0, 1000) : null;
+      // wishUrl: та же проверка http(s), что у желаний и мест — через
+      // window.open нельзя доставить javascript: и прочие опасные схемы.
+      const noteUrl = wishUrl(body.url) || null;
       const id = body.id ? Number(body.id) : null;
       if (id) {
-        const changed = await env.DB.prepare("UPDATE notes SET title=?, body=?, comment=?, updated_at=? WHERE id=? AND tg_id=?")
-          .bind(title, text, comment, stamp, id, user.tg_id).run();
+        const changed = await env.DB.prepare("UPDATE notes SET title=?, body=?, comment=?, url=?, updated_at=? WHERE id=? AND tg_id=?")
+          .bind(title, text, comment, noteUrl, stamp, id, user.tg_id).run();
         if (!changed.meta.changes) throw new HttpError(404, "Заметка не найдена", "NOT_FOUND");
       } else {
-        await env.DB.prepare("INSERT INTO notes(tg_id, title, body, comment, created_at, updated_at) VALUES(?,?,?,?,?,?)")
-          .bind(user.tg_id, title, text, comment, stamp, stamp).run();
+        await env.DB.prepare("INSERT INTO notes(tg_id, title, body, comment, url, created_at, updated_at) VALUES(?,?,?,?,?,?,?)")
+          .bind(user.tg_id, title, text, comment, noteUrl, stamp, stamp).run();
       }
       return json(await notesState(env, user.tg_id));
     }
@@ -8145,11 +8148,11 @@ async function contactsState(env, tgId) {
 // всегда по tg_id сессии — заметки не привязаны к паре и не видны партнёру.
 async function notesState(env, tgId) {
   const rows = (await env.DB.prepare(
-    "SELECT id, title, body, comment, created_at, updated_at FROM notes WHERE tg_id=? ORDER BY updated_at DESC, id DESC"
+    "SELECT id, title, body, comment, url, created_at, updated_at FROM notes WHERE tg_id=? ORDER BY updated_at DESC, id DESC"
   ).bind(tgId).all()).results || [];
   return {
     notes: rows.map(r => ({
-      id: r.id, title: r.title, body: r.body || "", comment: r.comment || "",
+      id: r.id, title: r.title, body: r.body || "", comment: r.comment || "", url: r.url || "",
       created_at: r.created_at, updated_at: r.updated_at
     }))
   };
@@ -8272,7 +8275,7 @@ async function ensureSchema(env) {
     // Личные заметки (паритет с migrations/0054): персональные записи автора
     // (tg_id). Пароль на просмотр живёт на устройстве клиента, сервером не
     // хранится; заметки не входят в /api/state.
-    `CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,title TEXT NOT NULL,body TEXT,comment TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT,tg_id INTEGER NOT NULL,title TEXT NOT NULL,body TEXT,comment TEXT,url TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS idx_notes_tg ON notes(tg_id,updated_at)`,
     // Кнопки действий в уведомлениях (паритет с migrations/0046): одноразовые
     // nonce для HTML Widget и реестр сообщений для обновления chat_data.
@@ -8379,7 +8382,9 @@ async function ensureSchema(env) {
     ["wishes", "is_private", "INTEGER NOT NULL DEFAULT 0"],
     ["wishes", "shared_at", "INTEGER"],
     // Поездка → общая копилка (migrations/0052).
-    ["trips", "saving_id", "INTEGER REFERENCES savings(id) ON DELETE SET NULL"]
+    ["trips", "saving_id", "INTEGER REFERENCES savings(id) ON DELETE SET NULL"],
+    // Ссылка личной заметки (migrations/0055) — та же валидация, что у желаний.
+    ["notes", "url", "TEXT"]
   ]) {
 
     const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();

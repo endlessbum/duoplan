@@ -6604,6 +6604,17 @@
     const form = document.getElementById("notes-lock-form");
     if (!form || form.dataset.bound === "1") return;
     form.dataset.bound = "1";
+    // .lock-wrap рассчитан на полноэкранную блокировку (min-height: 100dvh от
+    // корня приложения). Внутри вкладки над замком стоят шапка и оба бара —
+    // 100dvh уводило карточку за нижний край экрана. Измеряем фактический
+    // отступ сверху и вычитаем его вместе с зоной нижней навигации
+    // (safe-area + 104px — та же надбавка, что в padding-bottom .main-view).
+    const wrap = form.closest(".lock-wrap");
+    if (wrap) {
+      const top = Math.max(0, wrap.getBoundingClientRect().top);
+      wrap.style.minHeight =
+        `calc(100dvh - ${top}px - (env(safe-area-inset-bottom, 0px) + var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px) + 104px))`;
+    }
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       const input = document.getElementById("notes-lock-pin");
@@ -6654,6 +6665,13 @@
 
   function noteItem(item) {
     const meta = formatTimestamp(item.updated_at || item.created_at);
+    // Ссылка — как в карточках желаний: кнопка на карточке + копирование
+    // в меню ⋮ (open-url открывает внешнюю ссылку через Telegram).
+    const actions = [
+      ...(item.url ? [itemActionButton({ action: "copy-note-link", url: item.url, label: "Скопировать ссылку", icon: LINK_TEXT_ICON })] : []),
+      itemActionButton({ action: "edit-item", type: "notes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
+      itemActionButton({ action: "delete-item", type: "notes", id: item.id, label: "Удалить", icon: DELETE_ICON })
+    ].join("\n            ");
     return `
       <article class="card memory-card" data-action="open-note" data-id="${item.id}" role="button" tabindex="0" aria-label="Открыть заметку">
         <div class="item-row">
@@ -6663,11 +6681,9 @@
             ${item.comment ? `<div class="wish-comment">${renderRichText(item.comment)}</div>` : ""}
             <div class="item-meta">${meta ? `<span>· ${esc(meta)}</span>` : ""}</div>
           </div>
-          ${itemActions([
-            itemActionButton({ action: "edit-item", type: "notes", id: item.id, label: "Редактировать", icon: EDIT_ICON }),
-            itemActionButton({ action: "delete-item", type: "notes", id: item.id, label: "Удалить", icon: DELETE_ICON })
-          ].join("\n            "))}
+          ${itemActions(actions)}
         </div>
+        ${item.url ? `<button class="secondary full card-action" type="button" data-action="open-url" data-url="${esc(item.url)}">Ссылка</button>` : ""}
       </article>
     `;
   }
@@ -9926,6 +9942,10 @@
     dialogTitle.textContent = config.title;
     dialogFields.innerHTML = config.fields ?? "";
     syncShowYearsControl(dialogFields);
+    // PIN-поля в окне (подтверждение удаления пароля) стартуют с точками:
+    // mountPinFields наполняет их только после render(), который для диалога
+    // не наступает до сабмита.
+    dialogFields.querySelectorAll("input.pin-real").forEach(renderPinCells);
     if (dialogSubmit) {
       dialogSubmit.textContent = config.submitLabel ?? "Сохранить";
       // submitLabel === null — режим чтения (просмотр дневника): без кнопки
@@ -10769,6 +10789,32 @@
     if (card && e.target === card && document.activeElement === card) card.click();
   });
 
+  // Свайп по экрану при открытом меню «⋮» закрывает его: тап снаружи закрывает
+  // по click, но прокрутка списка click не порождает — меню оставалось висеть
+  // открытым под палец. Свайп, начавшийся внутри самого меню, не закрывает:
+  // меню может прокручиваться, если не поместилось (PD-MENU-001).
+  let menuSwipeStart = null;
+  document.addEventListener("touchstart", (e) => {
+    if (!document.querySelector(".item-actions.is-open")) {
+      menuSwipeStart = null;
+      return;
+    }
+    const touch = e.touches[0];
+    menuSwipeStart = touch ? { x: touch.clientX, y: touch.clientY, insideMenu: Boolean(e.target.closest?.(".item-menu")) } : null;
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!menuSwipeStart) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    const dx = Math.abs(touch.clientX - menuSwipeStart.x);
+    const dy = Math.abs(touch.clientY - menuSwipeStart.y);
+    if (dx < 10 && dy < 10) return;
+    if (!menuSwipeStart.insideMenu) closeItemMenus();
+    menuSwipeStart = null;
+  }, { passive: true });
+  document.addEventListener("touchend", () => { menuSwipeStart = null; }, { passive: true });
+  document.addEventListener("touchcancel", () => { menuSwipeStart = null; }, { passive: true });
+
   document.addEventListener("click", async (e) => {
     // Тап по фону открытого меню (не по пункту) — закрыть, не проваливаясь
     // в карточку: у карточки свой data-action, closest нашёл бы его.
@@ -11072,11 +11118,12 @@
             <label class="field"><span>Название</span><input name="title" data-fmt="none" maxlength="180" required placeholder="Идеи для отпуска"></label>
             <label class="field"><span>Описание (необязательно)</span><textarea name="body" rows="4" maxlength="2000" placeholder="Что хочется сохранить только для себя"></textarea></label>
             <label class="field"><span>Комментарий (необязательно)</span><textarea name="comment" data-fmt="** _ __ ~~" rows="3" maxlength="500" placeholder="Дополнение к заметке"></textarea></label>
+            <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" placeholder="https://example.com"></label>
           `,
           onSubmit: async (fd) => {
             // Ответ /api/notes — список заметок, не /api/state: сохраняем в
             // notesState, appState не трогаем.
-            notesState = await request("/api/notes", { method: "POST", body: { title: fd.get("title"), body: fd.get("body"), comment: fd.get("comment") } });
+            notesState = await request("/api/notes", { method: "POST", body: { title: fd.get("title"), body: fd.get("body"), comment: fd.get("comment"), url: wishUrlFromInput(fd.get("url")) } });
             showToast("Заметка сохранена");
             return appState;
           }
@@ -11914,11 +11961,12 @@
               <label class="field"><span>Название</span><input name="title" data-fmt="none" maxlength="180" required value="${esc(item.title || "")}"></label>
               <label class="field"><span>Описание (необязательно)</span><textarea name="body" rows="4" maxlength="2000" placeholder="Что хочется сохранить только для себя">${esc(item.body || "")}</textarea></label>
               <label class="field"><span>Комментарий (необязательно)</span><textarea name="comment" data-fmt="** _ __ ~~" rows="3" maxlength="500">${esc(item.comment || "")}</textarea></label>
+              <label class="field"><span>Ссылка (необязательно)</span><input name="url" type="url" value="${esc(item.url || "")}" placeholder="https://example.com"></label>
             `,
             onSubmit: async (fd) => {
               // POST с id — правка (контакты используют тот же паттерн);
               // ответ — обновлённый список заметок, appState не трогаем.
-              notesState = await request("/api/notes", { method: "POST", body: { id: Number(id), title: fd.get("title"), body: fd.get("body"), comment: fd.get("comment") } });
+              notesState = await request("/api/notes", { method: "POST", body: { id: Number(id), title: fd.get("title"), body: fd.get("body"), comment: fd.get("comment"), url: wishUrlFromInput(fd.get("url")) } });
               showToast("Заметка сохранена");
               return appState;
             }
@@ -12114,6 +12162,36 @@
           }
         }
         showToast(copied ? "Скопировано" : "Не удалось скопировать");
+      } else if (action === "copy-note-link") {
+        // Копирование ссылки заметки — тот же механизм, что share-wish.
+        const url = String(btn.dataset.url || "");
+        if (!url) return;
+        let copied = false;
+        if (navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(url);
+            copied = true;
+          } catch (error) {
+            copied = false;
+          }
+        }
+        if (!copied) {
+          const area = document.createElement("textarea");
+          area.value = url;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          try {
+            copied = document.execCommand("copy");
+          } catch (error) {
+            copied = false;
+          } finally {
+            area.remove();
+          }
+        }
+        showToast(copied ? "Скопировано" : "Не удалось скопировать");
       } else if (action === "leave-pair") {
         confirmLeaveSpace();
       } else if (action === "wish-view") {
@@ -12191,9 +12269,27 @@
         showToast("Пароль установлен");
         render();
       } else if (action === "clear-pin") {
-        try { localStorage.removeItem(PIN_KEY); } catch {}
-        showToast("Пароль убран");
-        render();
+        // Удаление подтверждается текущим паролем: снимает защиту кто угодно
+        // иначе нельзя отличить владельца от чужих рук на разблокированном
+        // экране. Новый пароль после удаления задаётся как обычно — «Задать».
+        openDialog({
+          title: "Удалить пароль на вход?",
+          submitLabel: "Удалить",
+          fields: `
+            <p class="settings-hint">Введите текущий пароль на вход, чтобы подтвердить удаление. После удаления можно задать новый пароль кнопкой «Задать»</p>
+            ${pinField("clear-pin-confirm")}
+          `,
+          onSubmit: () => {
+            const input = document.getElementById("clear-pin-confirm");
+            if (input) renderPinCells(input, true);
+            const value = input?.value?.trim() || "";
+            if (value !== storedPin()) throw new Error("Неверный пароль");
+            try { localStorage.removeItem(PIN_KEY); } catch {}
+            appUnlocked = false;
+            showToast("Пароль убран");
+            return appState;
+          }
+        });
       } else if (action === "save-notes-pin") {
         const pinInput = document.getElementById("notes-pin-input");
         if (pinInput) renderPinCells(pinInput, true);
@@ -12209,10 +12305,26 @@
         showToast("Пароль заметок установлен");
         render();
       } else if (action === "clear-notes-pin") {
-        try { localStorage.removeItem(NOTES_PIN_KEY); } catch {}
-        notesUnlocked = false;
-        showToast("Пароль заметок убран");
-        render();
+        // Удаление пароля заметок тоже подтверждается текущим кодом; после
+        // удаления замок снимается сразу, новый пароль — кнопкой «Задать».
+        openDialog({
+          title: "Удалить пароль заметок?",
+          submitLabel: "Удалить",
+          fields: `
+            <p class="settings-hint">Введите текущий пароль заметок, чтобы подтвердить удаление. После удаления можно задать новый пароль кнопкой «Задать»</p>
+            ${pinField("clear-notes-pin-confirm")}
+          `,
+          onSubmit: () => {
+            const input = document.getElementById("clear-notes-pin-confirm");
+            if (input) renderPinCells(input, true);
+            const value = input?.value?.trim() || "";
+            if (value !== storedNotesPin()) throw new Error("Неверный пароль");
+            try { localStorage.removeItem(NOTES_PIN_KEY); } catch {}
+            notesUnlocked = false;
+            showToast("Пароль заметок убран");
+            return appState;
+          }
+        });
       } else if (action === "export-data") {
         // Диалог выбора разделов: для каждой коллекции — свой состав выгрузки.
         openDialog({

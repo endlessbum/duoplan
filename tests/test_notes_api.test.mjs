@@ -40,6 +40,7 @@ const buildApi = new Function(
     extractLine("const now = "),
     extractLine("const clean = "),
     extractBraced("function ownerIds"),
+    extractBraced("function wishUrl"),
     extractBraced("async function notesState"),
     extractBraced("async function api"),
     "return api;"
@@ -93,7 +94,7 @@ function makeApi(db, body, method = "POST") {
       const fresh = db.writes.some(w => w.sql.includes("INSERT INTO notes"))
         ? [{ id: 42, title: "Новая", body: "", comment: "", created_at: 1, updated_at: 1 }]
         : db.storedRows;
-      return { notes: fresh.map(r => ({ id: r.id, title: r.title, body: r.body || "", comment: r.comment || "", created_at: r.created_at, updated_at: r.updated_at })) };
+      return { notes: fresh.map(r => ({ id: r.id, title: r.title, body: r.body || "", comment: r.comment || "", url: r.url || "", created_at: r.created_at, updated_at: r.updated_at })) };
     }
   );
   return { api, request, env: { DB: db }, writes: db.writes };
@@ -202,4 +203,54 @@ test("схема: таблица и индекс создаются в ensureSch
   const migration = readFileSync(join(root, "migrations", "0054_notes.sql"), "utf8");
   ok(migration.includes("CREATE TABLE IF NOT EXISTS notes"), "миграция 0054 существует");
   ok(migration.includes("idx_notes_tg"), "миграция создаёт индекс");
+});
+
+// ---------- ссылка заметки (миграция 0055): та же валидация, что у желаний ----------
+
+test("ссылка сохраняется: INSERT и UPDATE пишут url, пустая — NULL", async () => {
+  const db = createMockDB();
+  const { api, request, env, writes } = makeApi(db, { ...NOTE, url: "https://example.com/ideas" });
+  const response = await api(request, env, new URL("https://duoplan.test/api/notes"));
+  ok(response.status === 200);
+  const insert = writes.find(w => w.sql.includes("INSERT INTO notes("));
+  ok(insert.sql.includes("url"), "INSERT содержит колонку url");
+  equal(insert.args[4], "https://example.com/ideas", "ссылка на пятой позиции INSERT");
+
+  const dbEdit = createMockDB();
+  const { api: apiEdit, request: reqEdit, env: envEdit, writes: wEdit } = makeApi(dbEdit, { ...NOTE, id: 9, url: "https://example.com/new" });
+  await apiEdit(reqEdit, envEdit, new URL("https://duoplan.test/api/notes"));
+  const update = wEdit.find(w => w.sql.includes("UPDATE notes SET"));
+  ok(update.sql.includes("url=?"), "UPDATE переписывает url");
+  equal(update.args[3], "https://example.com/new", "новая ссылка в UPDATE");
+
+  const dbEmpty = createMockDB();
+  const { api: apiEmpty, request: reqEmpty, env: envEmpty, writes: wEmpty } = makeApi(dbEmpty, NOTE);
+  await apiEmpty(reqEmpty, envEmpty, new URL("https://duoplan.test/api/notes"));
+  const insertEmpty = wEmpty.find(w => w.sql.includes("INSERT INTO notes("));
+  equal(insertEmpty.args[4], null, "без ссылки сохраняется NULL");
+});
+
+test("опасная или неполная схема ссылки отклоняется (INVALID_URL)", async () => {
+  for (const bad of ["javascript:alert(1)", "ftp://example.com", "not a url"]) {
+    const db = createMockDB();
+    const { api, request, env } = makeApi(db, { ...NOTE, url: bad });
+    await rejects(
+      api(request, env, new URL("https://duoplan.test/api/notes")),
+      err => isHttpError(err, 400, "INVALID_URL"),
+      `схема «${bad}» не отклонена`
+    );
+  }
+});
+
+test("state() не читает notes и после появления url: заметки остаются личным контуром", () => {
+  const stateBlock = extractBraced("async function state");
+  ok(!stateBlock.includes("FROM notes"), "state() не читает таблицу notes");
+});
+
+test("схема: колонка url добавляется ensureSchema и миграцией 0055", () => {
+  ok(source.includes('["notes", "url", "TEXT"]'), "ALTER-список ensureSchema содержит notes.url");
+  const migration = readFileSync(join(root, "migrations", "0055_notes_url.sql"), "utf8");
+  ok(migration.includes("ALTER TABLE notes"), "миграция 0055 существует");
+  ok(migration.includes("ADD COLUMN url TEXT"), "миграция добавляет url");
+  ok(source.includes("url, created_at, updated_at FROM notes WHERE tg_id=?"), "notesState отдаёт url");
 });

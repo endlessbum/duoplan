@@ -12,7 +12,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
   (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
-- Текущая версия — `2026.11.24.137` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.24.139` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 
@@ -66,7 +66,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 |---|---|
 | `worker.js` | Production backend: API, Telegram webhook, cron-уведомления, `ensureSchema` |
 | `wrangler.jsonc` | Worker, D1 binding, assets, cron, публичные vars |
-| `migrations/` | 54 миграции схемы D1 |
+| `migrations/` | 55 миграций схемы D1 |
 | `public/` | Лендинг, Mini App (`app.html` + `app.js` + `app.css` + `nav.js`), setup, 404 |
 | `duoplan/` | Локальный Python-бот: handlers, services, SQLite-схема, FSM, rich-text |
 | `scripts/` | Бэкап D1, экспорт SQLite → D1, dev-стенд, проверка жеста касаниями, упаковка проекта |
@@ -163,6 +163,7 @@ IF NOT EXISTS` там недопустим (такого синтаксиса н
 | `0052_trip_savings` | `trips.saving_id` — поездка может быть прикреплена к общей активной копилке; новая копилка создаётся вместе с поездкой |
 | `0053_dates_show_years` | `dates.show_years` — явный показ количества лет для дней рождения и ежегодных дат; разовые и ежемесячные даты держат флаг выключенным |
 | `0054_notes` | таблица `notes` — личные заметки автора (tg_id); пароль на просмотр живёт на устройстве клиента, заметки не входят в `/api/state` |
+| `0055_notes_url` | `notes.url` — ссылка личной заметки; валидация та же, что у ссылок желаний (только http/https) |
 
 `ensureSchema()` в `worker.js` создаёт те же таблицы и догоняет недостающие
 колонки по `PRAGMA table_info`; версия записывается в `app_meta.schema_version`.

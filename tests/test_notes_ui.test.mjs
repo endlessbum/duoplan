@@ -25,6 +25,7 @@ const stubs = `
   function renderRichText(v) { return esc(v); }
   function formatTimestamp(ts) { return String(ts ?? ""); }
   const EDIT_ICON = "e", DELETE_ICON = "d";
+  const LINK_TEXT_ICON = "l", LINK_ICON = "k";
   function itemActions(inner) { return '<div class="item-actions">' + inner + "</div>"; }
   function itemActionButton(attrs) {
     return '<button data-action="' + attrs.action + '" data-type="' + (attrs.type || "") + '" data-id="' + (attrs.id ?? "") + '">' + attrs.label + "</button>";
@@ -166,4 +167,76 @@ test("диалог новой заметки: Название, Описание
   ok(addNote.includes("<span>Описание (необязательно)</span>"), "поле «Описание»");
   ok(addNote.includes("<span>Комментарий (необязательно)</span>"), "поле «Комментарий»");
   ok(addNote.includes('name="title"') && addNote.includes('name="body"') && addNote.includes('name="comment"'), "три поля уходят на сервер");
+});
+
+// Уточнение владельца 2026-11-24: удаление пароля подтверждается тем же кодом;
+// новый пароль задаётся после удаления штатной кнопкой «Задать».
+test("удаление пароля требует текущий код — и для входа, и для заметок", () => {
+  const clearPinIdx = source.indexOf('action === "clear-pin"');
+  const clearPin = source.slice(clearPinIdx, source.indexOf("} else if", clearPinIdx));
+  ok(clearPin.includes("openDialog"), "удаление пароля на вход без окна подтверждения");
+  ok(clearPin.includes('pinField("clear-pin-confirm")'), "нет PIN-поля подтверждения");
+  ok(clearPin.includes("value !== storedPin()"), "нет сверки с текущим паролем");
+  ok(clearPin.includes('localStorage.removeItem(PIN_KEY)'), "пароль не удаляется");
+  ok(clearPin.includes("можно задать новый пароль кнопкой «Задать»"), "нет подсказки про установку нового");
+
+  const clearNotesIdx = source.indexOf('action === "clear-notes-pin"');
+  const clearNotes = source.slice(clearNotesIdx, source.indexOf("} else if", clearNotesIdx));
+  ok(clearNotes.includes("openDialog"), "удаление пароля заметок без окна подтверждения");
+  ok(clearNotes.includes('pinField("clear-notes-pin-confirm")'), "нет PIN-поля подтверждения заметок");
+  ok(clearNotes.includes("value !== storedNotesPin()"), "нет сверки с текущим паролем заметок");
+  ok(clearNotes.includes('localStorage.removeItem(NOTES_PIN_KEY)'), "пароль заметок не удаляется");
+  ok(clearNotes.includes("notesUnlocked = false"), "замок заметок не снимается после удаления");
+});
+
+test("замок заметок центрируется в видимой области вкладки", () => {
+  // mountNotesLock измеряет фактический отступ сверху и переопределяет
+  // min-height: базовые 100dvh от корня уводили карточку за нижний край.
+  const mountIdx = source.indexOf("function mountNotesLock");
+  const mount = source.slice(mountIdx, source.indexOf("async function loadNotes", mountIdx));
+  ok(mount.includes('form.closest(".lock-wrap")'), "нет обращения к обёртке замка");
+  ok(mount.includes("getBoundingClientRect().top"), "отступ сверху не измеряется");
+  ok(mount.includes("wrap.style.minHeight"), "min-height не переопределяется");
+  ok(mount.includes("104px"), "зона нижней навигации не учтена");
+});
+
+// Уточнение владельца 2026-11-24: у заметки есть ссылка — карточка с кнопкой
+// «Ссылка» и копированием в меню, как у желаний.
+test("карточка заметки со ссылкой: кнопка на карточке и копирование в меню", () => {
+  const ui = buildDiary({
+    diaryViewValue: "notes",
+    notesPin: "1234",
+    notesUnlockedValue: true,
+    notesStateValue: { notes: [{ id: 1, title: "С ссылкой", body: "", comment: "", url: "https://example.com/x", updated_at: 100 }, { id: 2, title: "Без ссылки", body: "", comment: "", url: "", updated_at: 90 }] }
+  });
+  const html = ui.renderNotesBody();
+  ok(html.includes('data-action="open-url" data-url="https://example.com/x"'), "нет кнопки «Ссылка» на карточке");
+  ok((html.match(/>Ссылка<\/button>/g) || []).length === 1, "кнопка «Ссылка» только у заметки со ссылкой");
+  ok(html.includes('data-action="copy-note-link"'), "нет копирования ссылки в меню ⋮");
+  ok(html.includes('data-action="open-note"'), "карточка остаётся кликабельной для чтения");
+});
+
+test("диалоги заметки принимают ссылку: поле url и нормализация https://", () => {
+  const addNoteIdx = source.indexOf('action === "add-note"');
+  const addNote = source.slice(addNoteIdx, source.indexOf("} else if", addNoteIdx));
+  ok(addNote.includes("<span>Ссылка (необязательно)</span>"), "в форме создания нет поля ссылки");
+  ok(addNote.includes('name="url"'), "поле url не уходит на сервер");
+  ok(addNote.includes('wishUrlFromInput(fd.get("url"))'), "ссылка без схемы не дополняется https://");
+
+  const editItemIdx = source.indexOf('action === "edit-item"');
+  const editIdx = source.indexOf('type === "notes"', editItemIdx);
+  const editNote = source.slice(editIdx, source.indexOf("} else if", editIdx));
+  ok(editNote.includes("<span>Ссылка (необязательно)</span>"), "в форме правки нет поля ссылки");
+  ok(editNote.includes('value="${esc(item.url || "")}"'), "текущая ссылка не подставляется в форму");
+  ok(editNote.includes('wishUrlFromInput(fd.get("url"))'), "правка не нормализует ссылку");
+});
+
+// Свайп по экрану при открытом меню «⋮» закрывает его; свайп внутри
+// прокручиваемого меню — нет (PD-MENU-001).
+test("меню «⋮» закрывается свайпом вне меню", () => {
+  const swipeIdx = source.indexOf('document.addEventListener("touchstart"');
+  const swipe = source.slice(swipeIdx, source.indexOf('document.addEventListener("touchcancel"', swipeIdx));
+  ok(swipe.includes("closeItemMenus()"), "свайп не закрывает меню");
+  ok(swipe.includes('closest?.(".item-menu")'), "свайп внутри меню закрывает его — прокрутка ломана");
+  ok(swipe.includes(".item-actions.is-open"), "обработчик не проверяет открытое меню");
 });
