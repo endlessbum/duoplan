@@ -12,7 +12,7 @@ Telegram Mini App для пар: общие планы, цели, кино на 
 - Бот — [@duoplanbot](https://t.me/duoplanbot)
 - Состояние сервиса — `GET /health` → `{ ok, service: "duoplan", database }`
   (точная версия наружу не отдаётся — упрощает таргетинг известных уязвимостей)
-- Текущая версия — `2026.11.24.139` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
+- Текущая версия — `2026.11.25.140` (`APP_VERSION` и `DB_SCHEMA_VERSION` в `worker.js`)
 
 ## Возможности
 

@@ -9831,7 +9831,9 @@
     }
     if (key === "diary") {
       // Внутренний бар «Воспоминания / Заметки»: меняем только содержимое под
-      // баром, капля и сам бар остаются живыми.
+      // баром, капля и сам бар остаются живыми. Замок заметок живёт в теле —
+      // вешаем его слушатели сразу после замены, иначе форма уходит нативным
+      // сабмитом и перезагружает страницу.
       const body = document.getElementById("diary-body");
       if (!body) { render(); return; }
       body.innerHTML = diaryView === "notes" ? renderNotesBody() : renderMemoriesList();
@@ -9839,6 +9841,7 @@
       document.querySelectorAll('.seg-switch[data-switch="diary"] .seg-switch-btn').forEach((btn) => {
         btn.setAttribute("aria-selected", String(btn.dataset.tab === value));
       });
+      mountNotesLock();
       return;
     }
     const body = document.getElementById(key === "pair" ? "pair-body" : "tab-body");

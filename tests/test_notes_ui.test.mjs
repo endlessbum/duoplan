@@ -200,6 +200,18 @@ test("замок заметок центрируется в видимой об�
   ok(mount.includes("104px"), "зона нижней навигации не учтена");
 });
 
+test("переключение на «Заметки» вешает слушатели замка до возврата", () => {
+  // Репорт 2026-11-25: ветка «diary» в commitSwitch возвращалась раньше
+  // mountNotesLock — форма замка оставалась без preventDefault, сабмит уходил
+  // нативным GET и перезагружал страницу на главную.
+  const commitIdx = source.indexOf("function commitSwitch");
+  const commit = source.slice(commitIdx, source.indexOf("// ------------------------------------------------------------------", commitIdx));
+  const diaryIdx = commit.indexOf('key === "diary"');
+  ok(diaryIdx > -1, "нет ветки под-бара «Воспоминания / Заметки»");
+  const diary = commit.slice(diaryIdx, commit.indexOf("}", commit.indexOf("mountNotesLock", diaryIdx)));
+  ok(diary.includes("mountNotesLock()"), "ветка «diary» не вызывает mountNotesLock");
+});
+
 // Уточнение владельца 2026-11-24: у заметки есть ссылка — карточка с кнопкой
 // «Ссылка» и копированием в меню, как у желаний.
 test("карточка заметки со ссылкой: кнопка на карточке и копирование в меню", () => {

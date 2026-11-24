@@ -121,7 +121,9 @@ test("createPair: batch из трёх операторов, код — 8 hex-с�
   match(code, /^[A-F0-9]{8}$/, "код 8 hex-символов в верхнем регистре");
   equal(name, "Аня");
   equal(ownerId, 42);
-  equal(day, "2026-11-24", "started_at — местный день владельца");
+  // localDay считает по реальным часам — дата в тесте не фиксируется,
+  // иначе проверка ломалась при каждом переходе суток.
+  equal(day, new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()), "started_at — местный день владельца");
   equal(tz, "Europe/Moscow");
   ok(ops[1].sql.includes("pair_members"), "членство в паре");
   ok(ops[2].sql.includes("points=0,streak=0,best_streak=0"), "личная история обнуляется атомарно");

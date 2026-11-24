@@ -199,6 +199,16 @@
         "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c",
         "ascii-converter.js": "6df2f397d9f16e86a3ebefad543d608f52b8f2eeafac3f886bc86a8ca0b7842b"
       }
+    },
+    {
+      "version": "2026.11.25.140",
+      "assets": {
+        "app.js": "0947deea3d403ed5e52989ea99b0170bb95d206e3c2ac8e50025f4f7a38eab44",
+        "app.css": "b02e121920eea0d74d19e32e501f9eeb4ac17e9a5aa64973491f3af8cd870788",
+        "nav.js": "262e73cabbba251433a6c09aa6809b98be428fa3567a4accb9fe976cc0445342",
+        "zoom-guard.js": "fd4dd07febf53499fec04d8923af07aaafac8812da2b23a07728ce926b5d617c",
+        "ascii-converter.js": "6df2f397d9f16e86a3ebefad543d608f52b8f2eeafac3f886bc86a8ca0b7842b"
+      }
     }
   ]
 }
